@@ -10,11 +10,11 @@ def load_geos_subc_data():
     print("Connecting to ArrayLake...")
     client = Client()
     repo = client.get_repo("umd/subc")
-    session = repo.readonly_session(branch="main")
+    session = repo.writable_session(branch="main")
     
     print("Opening Zarr store via Xarray...")
-    # Open the dataset group 'esrl-fimr1p1-forecast'
-    ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-forecast")
+    # Open the dataset group 'esrl-fimr1p1-hindcast'
+    ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-hindcast")
     
     print("Filtering for year 2000 and selecting variables 'pr', 'tas'...")
     # Select variables 'pr' and 'tas'
