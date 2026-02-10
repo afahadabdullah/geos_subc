@@ -45,6 +45,9 @@ source "$CONDA_DIR/bin/activate" "$ENV_NAME"
 # Try to load TACC modules (only works on compute nodes)
 module load gcc cuda 2>/dev/null || echo "Note: 'module load' skipped (likely on login node)"
 
+# Fix for "CXXABI_1.3.15 not found" (Matplotlib error on TACC)
+export LD_LIBRARY_PATH="$CONDA_DIR/envs/$ENV_NAME/lib:$LD_LIBRARY_PATH"
+
 # Aggressively remove gmpy2 and other conflicting libraries
 echo "Cleaning up conflicting dependencies..."
 conda remove --force -y gmpy2 2>/dev/null || true
