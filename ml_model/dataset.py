@@ -145,10 +145,25 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Log-normalization: log1p(x) / 4.0 (approximate normalization for precip)
+            # Load/Define Normalization Stats
+            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+            if os.path.exists(stats_path):
+                import json
+                with open(stats_path, 'r') as f:
+                    stats = json.load(f)
+                # We use standard scaling: (x - mean) / std ? 
+                # Or just a simple max scaling. User liked the log-normalized approach.
+                # Let's use the mean/std if available, or stay with / 4.0 as a robust default.
+                mean = stats.get("log1p_mean", 0.0)
+                std = stats.get("log1p_std", 4.0)
+            else:
+                mean = 0.0
+                std = 4.0
+            
+            # Log-normalization: (log1p(x) - mean) / std
             # Clip to 0.0 to handle potential negative fill values/artifacts
-            x_forecast = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) / 4.0
-            y_truth = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) / 4.0
+            x_forecast = (np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - mean) / std
+            y_truth = (np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - mean) / std
             
             return {
                 "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
@@ -157,7 +172,8 @@ class GeosSubCDataset(Dataset):
                 "month": torch.tensor(month, dtype=torch.long),
                 "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),
                 "S": str(s_date),
-                "M": m_idx
+                "M": m_idx,
+                "norm_stats": {"mean": mean, "std": std}
             }
         except Exception as e:
             # Better to show the error and fail than recurse infinitely
