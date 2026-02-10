@@ -33,7 +33,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 8, # Further reduced from 16 to ensure it fits with any lingering processes
+        "batch_size": 32, # Increased back to 32 (4x the previous limit) for H200
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
@@ -189,8 +189,8 @@ def train_model():
             
         progress_bar.close()
                
-        # Validation Logic
-        if epoch % 5 == 0:
+        # Validation Logic (Every Epoch)
+        if epoch % 1 == 0:
             model.eval()
             val_loss = 0.0
             if accelerator.is_main_process:
