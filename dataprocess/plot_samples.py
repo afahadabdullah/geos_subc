@@ -71,8 +71,12 @@ def plot_random_sample(data_dir="dataprocess", output_file="sample_comparison.pn
         ax_geos.set_title(f"GEOS Fcst (Week {lead_weeks[i]})")
         
         # GPCP
+        # Detect coords
+        gpcp_lat = gpcp_sample.coords['latitude'] if 'latitude' in gpcp_sample.coords else gpcp_sample.coords['lat'] if 'lat' in gpcp_sample.coords else gpcp_sample.coords['Y']
+        gpcp_lon = gpcp_sample.coords['longitude'] if 'longitude' in gpcp_sample.coords else gpcp_sample.coords['lon'] if 'lon' in gpcp_sample.coords else gpcp_sample.coords['X']
+
         ax_gpcp = axes[i, 1]
-        im_gpcp = ax_gpcp.pcolormesh(gpcp_sample.coords['longitude'], gpcp_sample.coords['latitude'], 
+        im_gpcp = ax_gpcp.pcolormesh(gpcp_lon, gpcp_lat, 
                                      gpcp_sample.isel(L=i), 
                                      transform=ccrs.PlateCarree(), 
                                      cmap='YlGnBu', vmin=vmin, vmax=vmax)
