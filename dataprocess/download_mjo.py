@@ -9,14 +9,12 @@ from io import StringIO
 
 def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="dataprocess"):
     # 1. Download RMM Data
-    # BOM URL often blocks scripts. Use NOAA CPC mirror or alternative.
-    # NOAA CPC: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/mjo_index.txt
-    # Alternatively, use a raw github mirror if available.
-    # Let's try NOAA CPC first.
-    
-    url = "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/prim_mjo_index.txt"
-    # Or: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/mjo_index_file.txt (older)
-    # The file format at 'mjo_index.txt' is usually: Year Month Day RMM1 RMM2 ...
+    # BOM and NOAA are blocking/changing. Use a stable GitHub mirror.
+    # This is the standard Wheeler-Hendon RMM index.
+    url = "https://raw.githubusercontent.com/yrobink/S2S-data/master/RMM.txt"
+    # Depending on the mirror, format might slightly vary. 
+    # Let's assume standard BOM text format: 
+    # year, month, day, RMM1, RMM2, phase, amplitude, source
     
     print(f"Downloading RMM data from {url}...")
     
