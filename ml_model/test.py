@@ -80,55 +80,73 @@ def find_best_checkpoint(output_dir="ml_output_cmde"):
 
 
 @torch.no_grad()
-def ddpm_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, image_size=(181, 360)):
+def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, image_size=(181, 360), eta=0.0):
     """
-    Full DDPM reverse diffusion sampling (accelerated with step skipping).
-    Returns a single denoised prediction: (4, H, W)
+    DDIM (Denoising Diffusion Implicit Models) Sampler.
+    Correctly handles strided/accelerated sampling (e.g., 50 steps).
+    eta=0.0 -> Deterministic DDIM
+    eta=1.0 -> DDPM-like stochasticity (but requires correct variance scaling, so keep 0 for consistency)
     """
     device = forecast.device
     bs = forecast.shape[0]
     
-    # Start from pure noise
-    x_t = torch.randn(bs, 4, image_size[0], image_size[1], device=device)
-    
-    # Evenly spaced timesteps for acceleration
+    # Evenly spaced timesteps (reversed: 999 -> ... -> 0)
+    # Using 'linspace' to get the exact query points
     timestep_indices = np.linspace(diffusion.timesteps - 1, 0, n_steps, dtype=int)
     
-    for i, t_val in enumerate(timestep_indices):
-        t = torch.tensor([t_val], device=device).expand(bs)
+    # 1. Start from pure noise x_T
+    x = torch.randn(bs, 4, image_size[0], image_size[1], device=device)
+    
+    for i, t_curr in enumerate(timestep_indices):
+        t_tensor = torch.tensor([t_curr], device=device).expand(bs)
         
-        # Build model input
-        sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t].view(-1, 1, 1, 1)
+        # 2. Predict Noise epsilon_theta
+        # Re-noise the condition at t_curr (matching training dist)
+        sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
         cond_noise = torch.randn_like(forecast)
         noisy_forecast = forecast + (0.1 * sqrt_one_minus_alpha * cond_noise)
         
-        model_input = torch.cat([x_t, noisy_forecast, mjo_map], dim=1)
-        pred_noise = model(model_input, t, month_onehot)
+        model_input = torch.cat([x, noisy_forecast, mjo_map], dim=1)
+        pred_noise = model(model_input, t_tensor, month_onehot)
         
-        # DDPM update step
-        alpha_t = diffusion.alphas[t_val]
-        alpha_hat_t = diffusion.alpha_hats[t_val]
-        beta_t = diffusion.betas[t_val]
+        # 3. Get alpha_bar for t_curr and t_prev
+        alpha_bar_t = diffusion.alpha_hats[t_curr]
         
-        # Predicted x_0
-        sqrt_alpha_hat = diffusion.sqrt_alpha_hats[t_val]
-        sqrt_one_minus_alpha_hat = diffusion.sqrt_one_minus_alpha_hats[t_val]
-        x0_pred = (x_t - sqrt_one_minus_alpha_hat * pred_noise) / (sqrt_alpha_hat + 1e-8)
-        
-        # Compute x_{t-1}
+        # Determine t_prev
         if i < len(timestep_indices) - 1:
-            # Not the last step: add noise
-            noise = torch.randn_like(x_t)
-            sigma = torch.sqrt(beta_t)
-            # Simplified DDPM step
-            x_t = (1.0 / torch.sqrt(alpha_t)) * (
-                x_t - (beta_t / sqrt_one_minus_alpha_hat) * pred_noise
-            ) + sigma * noise
+            t_prev = timestep_indices[i+1]
+            alpha_bar_t_prev = diffusion.alpha_hats[t_prev]
         else:
-            # Last step: deterministic
-            x_t = x0_pred
-    
-    return x_t
+            t_prev = -1
+            alpha_bar_t_prev = torch.tensor(1.0, device=device) # alpha_bar_0 is close to 1, but technically definition at t=-1 is 1
+            
+        # 4. Compute predicted x_0 (formula: (x_t - sqrt(1-a_bar)*eps) / sqrt(a_bar))
+        sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
+        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
+        
+        pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
+        
+        # Clip x0 for stability (optional but recommended for image data range)
+        # Assuming normalized data is roughly within [-10, 10] or similar, but let's stick to raw formula first.
+        
+        # 5. Compute direction pointing to x_t
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_bar_t_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_t_prev)
+        )
+        
+        # DDIM variance (usually 0 for deterministic)
+        # If eta > 0, we add noise.
+        
+        term_1 = torch.sqrt(alpha_bar_t_prev) * pred_x0
+        term_2 = torch.sqrt(1 - alpha_bar_t_prev - sigma_t**2) * pred_noise
+        
+        x = term_1 + term_2
+        
+        if eta > 0:
+            noise = torch.randn_like(x)
+            x += sigma_t * noise
+            
+    return x
 
 
 def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
@@ -366,7 +384,7 @@ def run_test(args):
         ensemble_preds = []
         for m in range(args.n_ensemble):
             print(f"  Ensemble member {m+1}/{args.n_ensemble}...", end=" ", flush=True)
-            pred = ddpm_sample(model, diffusion, forecast, mjo_map, month_oh,
+            pred = ddim_sample(model, diffusion, forecast, mjo_map, month_oh,
                               n_steps=args.ddpm_steps, image_size=image_size)
             pred_denorm = denormalize(pred[0]).detach().cpu().numpy()
             ensemble_preds.append(pred_denorm)
