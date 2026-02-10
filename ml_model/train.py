@@ -111,6 +111,48 @@ def train_loop(config):
             accelerator.log(logs, step=global_step)
             global_step += 1
 
+        # Validation Loop
+        if (epoch + 1) % config.save_model_epochs == 0: # Verify at save frequency
+            model.eval()
+            val_loss = 0.0
+            val_crps = 0.0
+            num_val_batches = 0
+            
+            # Use train_dataloader for now as placeholder for validation split
+            # Ideally we split dataset into train/val
+            print("Running validation...")
+            with torch.no_grad():
+                for batch in train_dataloader: 
+                    clean_images = batch["pixel_values"]
+                    bs = clean_images.shape[0]
+                    
+                    # Generate samples for CRPS (Ensemble)
+                    # For diffusion, we generate from noise
+                    n_members = 5 # Small ensemble for validation
+                    ensemble_preds = []
+                    
+                    for _ in range(n_members):
+                         # Standard sampling loop (simplified)
+                         # Real implementation needs full pipeline or manual scheduler loop
+                         # For speed, we might just denoising one step or use few-step scheduler
+                         noise = torch.randn_like(clean_images)
+                         # This is just a placeholder for actual generation logic
+                         # actual generation requires iterating scheduler.step()
+                         # We will implement proper generation when model structure is finalized
+                         ensemble_preds.append(noise) # Placeholder
+                    
+                    # Stack: (B, M, C, H, W)
+                    ensemble_tensor = torch.stack(ensemble_preds, dim=1)
+                    
+                    # Compute CRPS (Placeholder)
+                    # target: clean_images (B, C, H, W)
+                    # crps = crps_ensemble(clean_images, ensemble_tensor)
+                    # val_crps += crps.item()
+                    num_val_batches += 1
+                    if num_val_batches > 5: break # validation on small subset
+            
+            model.train()
+
         # Save model checkpoint
         if accelerator.is_main_process and (epoch + 1) % config.save_model_epochs == 0:
              pipeline = DDPMPipeline(unet=accelerator.unwrap_model(model), scheduler=noise_scheduler)
