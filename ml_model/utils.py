@@ -101,7 +101,7 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
                 im = ax.imshow(data, cmap='Blues', vmin=0, vmax=vmax_precip, origin='upper')
             else:
                 # Difference panels (diverging colormap)
-                norm = TwoSlopeNorm(vmin=-diff_abs_max, vcenter=0, vmax=diff_abs_max)
+                norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.imshow(data, cmap='RdBu', norm=norm, origin='upper')
             
             # Stats annotation
@@ -131,7 +131,7 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
     
     # Difference colorbar (spans columns 4-5)
     cbar_ax2 = fig.add_axes([0.68, 0.04, 0.25, 0.015])
-    sm2 = plt.cm.ScalarMappable(cmap='RdBu', norm=TwoSlopeNorm(-diff_abs_max, 0, diff_abs_max))
+    sm2 = plt.cm.ScalarMappable(cmap='RdBu', norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     
