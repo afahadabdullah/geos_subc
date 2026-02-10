@@ -127,6 +127,8 @@ def train_model():
         print(f"Starting training with CMDE architecture. Samples: {len(train_dataset)}")
     
     global_step = 0
+    best_val_loss = float('inf')
+    best_checkpoints = [] # List to track paths of best models
     
     for epoch in range(config["num_epochs"]):
         model.train()
@@ -139,27 +141,19 @@ def train_model():
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 # 1. Unpack & Normalize
-                # Scale Factor (50mm -> 1.0) approx for raw mm/day
-                scale = 0.02
-                
                 target_truth = batch["target_truth"]  # (B, 4, Y, X) - Already log-normalized
                 forecast = batch["input_forecast"]    # (B, 4, Y, X)
                 mjo = batch["mjo_conditioning"]       # (B, 2)
                 month_onehot = batch["month_onehot"]  # (B, 12)
                 
-                # 2. Add Noise to Target (Raw Truth, NOT Residual)
-                # User requested raw target instead of residual.
+                # 2. Add Noise to Target
                 target = target_truth
-                
                 bs = target.shape[0]
                 timesteps = diffusion.sample_timesteps(bs)
                 noisy_target, noise = diffusion.add_noise(target, timesteps)
                 
-                # 4. CMDE Logic: Add Reduced Noise to Forecast Condition
-                # Get sqrt(1-alpha_bar) for current t
+                # 4. CMDE Logic
                 sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[timesteps].view(-1, 1, 1, 1)
-                
-                # Noise for condition (scaled by cmde_ratio)
                 cond_noise = torch.randn_like(forecast)
                 noisy_forecast = forecast + (config["cmde_ratio"] * sqrt_one_minus_alpha * cond_noise)
                 
@@ -167,7 +161,6 @@ def train_model():
                 mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
                 
                 # 6. Cat Inputs
-                # [NoisyTarget (4), NoisyForecast (4), MJO (2)]
                 model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
                 
                 # 7. Predict Noise
@@ -187,7 +180,7 @@ def train_model():
             
         progress_bar.close()
                
-        # Validation Logic (Simple MSE on noise for now)
+        # Validation Logic
         if epoch % 5 == 0:
             model.eval()
             val_loss = 0.0
@@ -217,15 +210,11 @@ def train_model():
 
                     # Plot first batch comparison
                     if idx == 0 and accelerator.is_main_process:
-                        # 1-step reconstruction for visualization
                         pred_recon = (noisy_target - sqrt_one_minus_alpha * noise_pred) / (diffusion.sqrt_alpha_hats[timesteps].view(-1, 1, 1, 1) + 1e-8)
-                        
-                        # Denormalize for plotting
                         input_raw = denormalize(forecast[0]).cpu().numpy()
                         target_raw = denormalize(target_truth[0]).cpu().numpy()
                         pred_raw = denormalize(pred_recon[0]).cpu().numpy()
                         
-                        # Simple ensemble mean (proxy with 1 sample for speed during training epoch)
                         plot_comparison(
                             input_raw, target_raw, pred_raw, pred_raw, 
                             f"{config['output_dir']}/plots/epoch_{epoch}.png",
@@ -235,10 +224,25 @@ def train_model():
             avg_val_loss = val_loss / len(val_dataloader)
             if accelerator.is_main_process:
                 print(f"Epoch {epoch} Val Loss (MSE): {avg_val_loss:.4f}")
+                
+                # Check for Best Model
+                if avg_val_loss < best_val_loss:
+                    print(f"New best model found at epoch {epoch} (Loss: {avg_val_loss:.4f})")
+                    best_val_loss = avg_val_loss
+                    checkpoint_path = f"{config['output_dir']}/best_model_epoch_{epoch}"
+                    accelerator.save_state(checkpoint_path)
+                    
+                    best_checkpoints.append(checkpoint_path)
+                    if len(best_checkpoints) > 4:
+                        old_checkpoint = best_checkpoints.pop(0)
+                        import shutil
+                        if os.path.exists(old_checkpoint):
+                            shutil.rmtree(old_checkpoint, ignore_errors=True)
         
-        # Save Model
-        if epoch % 10 == 0:
-            accelerator.save_state(f"{config['output_dir']}/checkpoint-{epoch}")
+        # Periodic Save for Resuming (Always keep latest)
+        if epoch % 5 == 0:
+            latest_path = f"{config['output_dir']}/latest_checkpoint"
+            accelerator.save_state(latest_path)
 
     if accelerator.is_main_process:
         print("Training finished.")
