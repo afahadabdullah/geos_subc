@@ -146,9 +146,9 @@ class GeosSubCDataset(Dataset):
             month_onehot[month - 1] = 1.0
             
             # Log-normalization: log1p(x) / 4.0 (approximate normalization for precip)
-            # This handles non-negativity and scale.
-            x_forecast = np.log1p(np.nan_to_num(x_forecast, nan=0.0)) / 4.0
-            y_truth = np.log1p(np.nan_to_num(y_truth, nan=0.0)) / 4.0
+            # Clip to 0.0 to handle potential negative fill values/artifacts
+            x_forecast = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) / 4.0
+            y_truth = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) / 4.0
             
             return {
                 "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
