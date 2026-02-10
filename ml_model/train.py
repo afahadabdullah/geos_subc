@@ -137,13 +137,13 @@ def train_model():
                 dates = pd.to_datetime(s_date_str)
                 months = torch.tensor(dates.month, device=accelerator.device).long()
                 
-                # 2. Compute Residual
-                residual = target_truth - forecast
+                # 2. Add Noise to Target (Raw Truth, NOT Residual)
+                # User requested raw target instead of residual.
+                target = target_truth
                 
-                # 3. Add Noise to Residual
-                bs = residual.shape[0]
+                bs = target.shape[0]
                 timesteps = diffusion.sample_timesteps(bs)
-                noisy_resid, noise = diffusion.add_noise(residual, timesteps)
+                noisy_target, noise = diffusion.add_noise(target, timesteps)
                 
                 # 4. CMDE Logic: Add Reduced Noise to Forecast Condition
                 # Get sqrt(1-alpha_bar) for current t
@@ -157,8 +157,8 @@ def train_model():
                 mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
                 
                 # 6. Cat Inputs
-                # [NoisyResid (4), NoisyForecast (4), MJO (2)]
-                model_input = torch.cat([noisy_resid, noisy_forecast, mjo_map], dim=1)
+                # [NoisyTarget (4), NoisyForecast (4), MJO (2)]
+                model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
                 
                 # 7. Predict Noise
                 noise_pred = model(model_input, timesteps, months)
@@ -182,23 +182,32 @@ def train_model():
             val_loss = 0.0
             with torch.no_grad():
                 for batch in val_dataloader:
-                    forecast = batch["input_forecast"] * 0.02
-                    mjo = batch["mjo_conditioning"]
-                    bs = clean_images.shape[0]
+                    # Scale Factor (50mm -> 1.0) approx for raw mm/day
+                    scale = 0.02
+
+                    target_truth = batch["target_truth"] * scale  # (B, 4, Y, X)
+                    forecast = batch["input_forecast"] * scale    # (B, 4, Y, X)
+                    mjo = batch["mjo_conditioning"]               # (B, 2)
+                    s_date_str = batch["S"] # List of strings
                     
                     # Generate Sample (Reverse Diffusion)
-                    # We start from random noise and denoise conditioned on Forecast+MJO
-                    # This is just one sample (Member 1).
-                    # To calculate proper CRPS, we need multiple members.
-                    # For quick validation, let's just do MSE on noise (Validation Loss).
+                    # Derive Month
+                    dates = pd.to_datetime(s_date_str)
+                    months = torch.tensor(dates.month, device=accelerator.device).long()
                     
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device).long()
-                    noise = torch.randn_like(clean_images)
-                    noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
+                    # Validation on Raw Target
+                    target = target_truth
+                    bs = target.shape[0]
+                    timesteps = diffusion.sample_timesteps(bs)
+                    noisy_target, noise = diffusion.add_noise(target, timesteps)
+                    
+                    sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[timesteps].view(-1, 1, 1, 1)
+                    cond_noise = torch.randn_like(forecast)
+                    noisy_forecast = forecast + (config["cmde_ratio"] * sqrt_one_minus_alpha * cond_noise)
                     mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
-                    net_input = torch.cat([noisy_images, forecast, mjo_map], dim=1)
+                    model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
                     
-                    noise_pred = model(net_input, timesteps).sample
+                    noise_pred = model(model_input, timesteps, months)
                     loss = F.mse_loss(noise_pred, noise)
                     val_loss += loss.item()
 
