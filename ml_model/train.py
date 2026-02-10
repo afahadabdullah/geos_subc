@@ -8,12 +8,21 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+import sys
+from pathlib import Path
+
+# Add project root to sys.path
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
+
 try:
     from ml_model.dataset import GeosSubCDataset
     from ml_model.model import ConditionalUNet, GaussianDiffusion
     from ml_model.utils import crps_ensemble, denormalize, plot_comparison
 except ImportError:
-    from dataset import GeosSubCDataset
+    import dataset as GeosSubCDataset
+    import model as model_module
     from model import ConditionalUNet, GaussianDiffusion
     from utils import crps_ensemble, denormalize, plot_comparison
 
