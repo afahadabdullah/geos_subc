@@ -23,3 +23,4 @@ dependencies:
       - icechunk
       - diffusers
       - accelerate
+      - requests
