@@ -58,8 +58,8 @@ def parse_args():
                         help="Root directory for data")
     parser.add_argument("--val_years", type=int, nargs=2, default=[2015, 2016],
                         help="Validation year range")
-    parser.add_argument("--ddpm_steps", type=int, default=50,
-                        help="Number of DDPM reverse steps (50 is fast, 200 is high quality)")
+    parser.add_argument("--ddpm_steps", type=int, default=1000,
+                        help="Number of reverse steps (1000 = Full DDPM, <1000 = Accelerated DDIM)")
     return parser.parse_args()
 
 
@@ -80,18 +80,59 @@ def find_best_checkpoint(output_dir="ml_output_cmde"):
 
 
 @torch.no_grad()
+def ddpm_sample_full(model, diffusion, forecast, mjo_map, month_onehot, image_size=(181, 360)):
+    """
+    Standard DDPM sampling (Full 1000 steps).
+    Mathematically exact reconstruction of the training process.
+    """
+    device = forecast.device
+    bs = forecast.shape[0]
+    
+    # Start from pure noise
+    x = torch.randn(bs, 4, image_size[0], image_size[1], device=device)
+    
+    # Iterate from T-1 down to 0
+    for t in tqdm(reversed(range(diffusion.timesteps)), desc="DDPM Sampling", total=diffusion.timesteps, leave=False):
+        t_tensor = torch.tensor([t], device=device).expand(bs)
+        
+        # 1. Condition setup
+        sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
+        cond_noise = torch.randn_like(forecast)
+        noisy_forecast = forecast + (0.1 * sqrt_one_minus_alpha * cond_noise)
+        
+        # 2. Predict Noise
+        model_input = torch.cat([x, noisy_forecast, mjo_map], dim=1)
+        pred_noise = model(model_input, t_tensor, month_onehot)
+        
+        # 3. Denosing Step (Standard DDPM)
+        # x_{t-1} = 1/sqrt(alpha_t) * (x_t - (beta_t / sqrt(1-alpha_hat_t)) * eps) + sigma * z
+        
+        alpha_t = diffusion.alphas[t]
+        alpha_hat_t = diffusion.alpha_hats[t]
+        beta_t = diffusion.betas[t]
+        sqrt_one_minus_alpha_hat_t = diffusion.sqrt_one_minus_alpha_hats[t]
+        
+        if t > 0:
+            noise = torch.randn_like(x)
+        else:
+            noise = torch.zeros_like(x)
+            
+        x = (1 / torch.sqrt(alpha_t)) * (
+            x - (beta_t / sqrt_one_minus_alpha_hat_t) * pred_noise
+        ) + torch.sqrt(beta_t) * noise
+        
+    return x
+
+@torch.no_grad()
 def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, image_size=(181, 360), eta=0.0):
     """
     DDIM (Denoising Diffusion Implicit Models) Sampler.
     Correctly handles strided/accelerated sampling (e.g., 50 steps).
-    eta=0.0 -> Deterministic DDIM
-    eta=1.0 -> DDPM-like stochasticity (but requires correct variance scaling, so keep 0 for consistency)
     """
     device = forecast.device
     bs = forecast.shape[0]
     
     # Evenly spaced timesteps (reversed: 999 -> ... -> 0)
-    # Using 'linspace' to get the exact query points
     timestep_indices = np.linspace(diffusion.timesteps - 1, 0, n_steps, dtype=int)
     
     # 1. Start from pure noise x_T
@@ -100,8 +141,7 @@ def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, i
     for i, t_curr in enumerate(timestep_indices):
         t_tensor = torch.tensor([t_curr], device=device).expand(bs)
         
-        # 2. Predict Noise epsilon_theta
-        # Re-noise the condition at t_curr (matching training dist)
+        # 2. Predict Noise
         sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
         cond_noise = torch.randn_like(forecast)
         noisy_forecast = forecast + (0.1 * sqrt_one_minus_alpha * cond_noise)
@@ -109,33 +149,24 @@ def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, i
         model_input = torch.cat([x, noisy_forecast, mjo_map], dim=1)
         pred_noise = model(model_input, t_tensor, month_onehot)
         
-        # 3. Get alpha_bar for t_curr and t_prev
+        # 3. DDIM Update
         alpha_bar_t = diffusion.alpha_hats[t_curr]
         
-        # Determine t_prev
         if i < len(timestep_indices) - 1:
             t_prev = timestep_indices[i+1]
             alpha_bar_t_prev = diffusion.alpha_hats[t_prev]
         else:
             t_prev = -1
-            alpha_bar_t_prev = torch.tensor(1.0, device=device) # alpha_bar_0 is close to 1, but technically definition at t=-1 is 1
+            alpha_bar_t_prev = torch.tensor(1.0, device=device)
             
-        # 4. Compute predicted x_0 (formula: (x_t - sqrt(1-a_bar)*eps) / sqrt(a_bar))
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
         
         pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
         
-        # Clip x0 for stability (optional but recommended for image data range)
-        # Assuming normalized data is roughly within [-10, 10] or similar, but let's stick to raw formula first.
-        
-        # 5. Compute direction pointing to x_t
         sigma_t = eta * torch.sqrt(
             (1 - alpha_bar_t_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_t_prev)
         )
-        
-        # DDIM variance (usually 0 for deterministic)
-        # If eta > 0, we add noise.
         
         term_1 = torch.sqrt(alpha_bar_t_prev) * pred_x0
         term_2 = torch.sqrt(1 - alpha_bar_t_prev - sigma_t**2) * pred_noise
@@ -384,8 +415,13 @@ def run_test(args):
         ensemble_preds = []
         for m in range(args.n_ensemble):
             print(f"  Ensemble member {m+1}/{args.n_ensemble}...", end=" ", flush=True)
-            pred = ddim_sample(model, diffusion, forecast, mjo_map, month_oh,
-                              n_steps=args.ddpm_steps, image_size=image_size)
+            
+            if args.ddpm_steps >= 1000:
+                pred = ddpm_sample_full(model, diffusion, forecast, mjo_map, month_oh, image_size=image_size)
+            else:
+                pred = ddim_sample(model, diffusion, forecast, mjo_map, month_oh,
+                                   n_steps=args.ddpm_steps, image_size=image_size)
+            
             pred_denorm = denormalize(pred[0]).detach().cpu().numpy()
             ensemble_preds.append(pred_denorm)
             print(f"Done (mean={pred_denorm.mean():.2f})")
