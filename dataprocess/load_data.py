@@ -53,4 +53,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nError: {e}")
         print("\nNote: Make sure you are logged in to ArrayLake.")
-        print("Run: arraylake login --native (if working via SSH/Terminal)")
+        print("Run: arraylake auth login (if working via SSH/Terminal)")
