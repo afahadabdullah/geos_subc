@@ -43,12 +43,15 @@ echo "This will download ~2GB of data, please wait..."
 source "$CONDA_DIR/bin/activate" "$ENV_NAME"
 
 # Uninstall existing (potentially CPU-only) torch to ensure clean install
-echo "Cleaning up old torch versions..."
-pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+echo "Cleaning up conflicting dependencies..."
+conda remove --force -y gmpy2 2>/dev/null || true
+pip uninstall -y torch torchvision torchaudio sympy gmpy2 2>/dev/null || true
 
 # Install from PyTorch HTML index (Using cu121 which is stable for Grace Hopper)
 echo "Downloading and installing ARM64 CUDA wheels (cu121)..."
-pip install --progress-bar on torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# We keep gmpy2 out of pip if it's causing issues, or install a known good version.
+# Let's try to install them via pip to ensure compatibility with torch.
+pip install --progress-bar on torch torchvision torchaudio sympy --index-url https://download.pytorch.org/whl/cu121
 
 echo "Environment setup complete."
 echo "To activate, run: source $CONDA_DIR/bin/activate $ENV_NAME"
