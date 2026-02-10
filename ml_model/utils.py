@@ -44,49 +44,99 @@ def crps_ensemble(observations, forecasts):
 
 def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, title="Validation Comparison"):
     """
-    Plots Lead Week 4 comparison.
-    input_geos: (4, H, W) Lead Week 4 is index 3
-    target_gpcp: (4, H, W)
-    prediction: (4, H, W)
-    ens_mean: (4, H, W)
+    Comprehensive validation visualization suite.
+    Shows all 4 lead weeks with GEOS Input, GPCP Truth, Model Prediction,
+    Ensemble Mean, GEOS Bias (GPCP−GEOS), and Model Residual (GPCP−Pred).
+    
+    All inputs are denormalized numpy arrays: (4, H, W)
     """
-    # Use Lead Week 4 (Index 3) for visualization
-    # If the input has only 1 lead week or a different shape, handle it gracefully
-    idx = min(3, input_geos.shape[0] - 1)
+    import matplotlib.gridspec as gridspec
+    from matplotlib.colors import TwoSlopeNorm
     
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    n_weeks = input_geos.shape[0]
+    week_labels = [f"LW{i+1}" for i in range(n_weeks)]
     
-    # Handle NaNs and outliers for visualization robustness
+    # Clean NaNs
     def clean(arr):
         return np.nan_to_num(arr, nan=0.0)
-
-    p0 = clean(input_geos[idx])
-    p1 = clean(target_gpcp[idx])
-    p2 = clean(prediction[idx])
-    p3 = clean(ens_mean[idx])
     
-    # Dynamic vmax but capped to avoid washing out due to extreme predictions
-    # 99th percentile of truth/input is a good "natural" cap for the colormap
-    natural_max = np.percentile(np.concatenate([p0.flatten(), p1.flatten()]), 99.9) + 1.0
-    vmax = min(max(p0.max(), p1.max(), p2.max(), p3.max()), natural_max * 2.0)
-    if vmax <= 0: vmax = 10.0 # Safety
+    geos = clean(input_geos)
+    gpcp = clean(target_gpcp)
+    pred = clean(prediction)
+    ens  = clean(ens_mean)
     
-    vmin = 0
+    # Difference maps
+    bias     = gpcp - geos  # GPCP − GEOS (positive = GEOS underestimates)
+    residual = gpcp - ens   # GPCP − Ensemble Mean (positive = model underestimates)
     
-    im0 = axes[0].imshow(p0, cmap='Blues', vmin=vmin, vmax=vmax, origin='upper')
-    axes[0].set_title("GEOS Input (LW4)")
+    # --- Layout: 4 rows (weeks) × 6 columns ---
+    fig = plt.figure(figsize=(30, 20))
+    gs = gridspec.GridSpec(n_weeks, 6, wspace=0.15, hspace=0.3)
     
-    im1 = axes[1].imshow(p1, cmap='Blues', vmin=vmin, vmax=vmax, origin='upper')
-    axes[1].set_title("GPCP Ground Truth")
+    col_titles = ["GEOS Input", "GPCP Truth", "Prediction (1 sample)", 
+                   "Ensemble Mean (3)", "Bias (GPCP−GEOS)", "Residual (GPCP−EnsMean)"]
     
-    im2 = axes[2].imshow(p2, cmap='Blues', vmin=vmin, vmax=vmax, origin='upper')
-    axes[2].set_title("Model Prediction (1 sample)")
+    # Precip colormap limits (99.9th percentile of truth/input for natural scaling)
+    all_precip = np.concatenate([geos.flatten(), gpcp.flatten()])
+    vmax_precip = float(np.percentile(all_precip, 99.9)) + 1.0
+    if vmax_precip <= 0:
+        vmax_precip = 10.0
     
-    im3 = axes[3].imshow(p3, cmap='Blues', vmin=vmin, vmax=vmax, origin='upper')
-    axes[3].set_title("Ensemble Mean (3 samples)")
+    # Difference colormap limits (symmetric)
+    diff_abs_max = max(
+        float(np.percentile(np.abs(bias), 99)),
+        float(np.percentile(np.abs(residual), 99)),
+        0.5
+    )
     
-    plt.colorbar(im3, ax=axes, orientation='horizontal', label='Precipitation (mm/day)', shrink=0.6)
-    fig.suptitle(f"{title} (vmax={vmax:.1f})")
+    for row in range(n_weeks):
+        panels = [geos[row], gpcp[row], pred[row], ens[row], bias[row], residual[row]]
+        
+        for col in range(6):
+            ax = fig.add_subplot(gs[row, col])
+            data = panels[col]
+            
+            if col < 4:
+                # Precipitation panels (sequential colormap)
+                im = ax.imshow(data, cmap='Blues', vmin=0, vmax=vmax_precip, origin='upper')
+            else:
+                # Difference panels (diverging colormap)
+                norm = TwoSlopeNorm(vmin=-diff_abs_max, vcenter=0, vmax=diff_abs_max)
+                im = ax.imshow(data, cmap='RdBu', norm=norm, origin='upper')
+            
+            # Stats annotation
+            rmse_val = np.sqrt(np.mean(data**2)) if col >= 4 else np.mean(data)
+            stat_label = f"RMSE={rmse_val:.2f}" if col >= 4 else f"Mean={rmse_val:.2f}"
+            ax.text(0.02, 0.98, stat_label, transform=ax.transAxes,
+                    fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+            
+            # Row labels (left side)
+            if col == 0:
+                ax.set_ylabel(week_labels[row], fontsize=12, fontweight='bold')
+            
+            # Column titles (top row only)
+            if row == 0:
+                ax.set_title(col_titles[col], fontsize=11, fontweight='bold')
+            
+            ax.set_xticks([])
+            ax.set_yticks([])
+    
+    # Colorbars
+    # Precipitation colorbar (spans columns 0-3)
+    cbar_ax1 = fig.add_axes([0.08, 0.04, 0.55, 0.015])
+    sm1 = plt.cm.ScalarMappable(cmap='Blues', norm=plt.Normalize(0, vmax_precip))
+    sm1.set_array([])
+    fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
+    
+    # Difference colorbar (spans columns 4-5)
+    cbar_ax2 = fig.add_axes([0.68, 0.04, 0.25, 0.015])
+    sm2 = plt.cm.ScalarMappable(cmap='RdBu', norm=TwoSlopeNorm(-diff_abs_max, 0, diff_abs_max))
+    sm2.set_array([])
+    fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
+    
+    fig.suptitle(f"{title}  |  Precip vmax={vmax_precip:.1f}  |  Diff range=±{diff_abs_max:.1f}",
+                 fontsize=14, fontweight='bold', y=0.98)
     
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, bbox_inches='tight', dpi=150)
