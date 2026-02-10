@@ -45,6 +45,11 @@ def plot_random_sample(data_dir="dataprocess", output_file="sample_comparison.pn
     if 'M' in geos_sample.dims:
         geos_sample = geos_sample.mean(dim='M')
         
+    # Load into memory (convert to numpy) to avoid dask/matplotlib issues
+    print("Loading samples into memory...")
+    geos_sample = geos_sample.compute()
+    gpcp_sample = gpcp_sample.compute()
+    
     # 4. Plot
     fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(12, 16), 
                              subplot_kw={'projection': ccrs.PlateCarree()})
