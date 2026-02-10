@@ -6,6 +6,7 @@ import socket
 print(f"Hostname: {socket.gethostname()}")
 print(f"Python: {sys.version}")
 print(f"Torch version: {torch.__version__}")
+print(f"SYMPY_GROUND_TYPES: {os.environ.get('SYMPY_GROUND_TYPES', 'Not Set')}")
 print(f"CUDA available: {torch.cuda.is_available()}")
 
 if torch.cuda.is_available():
