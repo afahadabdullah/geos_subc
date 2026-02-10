@@ -22,9 +22,11 @@ def load_geos_subc_data():
     ds_subset = ds[['pr', 'tas']]
     
     # Filter for the year 2000. 
-    # Note: We assume the dimension is named 'time' or 'init_time'. 
-    # Looking at standard Earthmover patterns for this repo.
-    if 'time' in ds_subset.dims:
+    # The dimension 'S' is the initialization time dimension.
+    if 'S' in ds_subset.dims:
+        print("Using dimension 'S' for filtering.")
+        ds_2000 = ds_subset.sel(S=slice('2000-01-01', '2000-12-31'))
+    elif 'time' in ds_subset.dims:
         ds_2000 = ds_subset.sel(time=slice('2000-01-01', '2000-12-31'))
     elif 'init_time' in ds_subset.dims:
         ds_2000 = ds_subset.sel(init_time=slice('2000-01-01', '2000-12-31'))
