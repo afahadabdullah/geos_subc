@@ -55,10 +55,27 @@ def plot_random_sample(data_dir="dataprocess", output_file="sample_comparison.pn
     gpcp_lon = gpcp_sample.coords['longitude'] if 'longitude' in gpcp_sample.coords else gpcp_sample.coords['lon'] if 'lon' in gpcp_sample.coords else gpcp_sample.coords['X']
     
     # Debug Stats
-    print(f"GEOS Stats: Min={geos_sample.min().item():.4f}, Max={geos_sample.max().item():.4f}, Mean={geos_sample.mean().item():.4f}")
+    print(f"GEOS Stats: Min={geos_sample.min().item():.4e}, Max={geos_sample.max().item():.4e}, Mean={geos_sample.mean().item():.4e}")
     print(f"GPCP Stats: Min={gpcp_sample.min().item():.4f}, Max={gpcp_sample.max().item():.4f}, Mean={gpcp_sample.mean().item():.4f}")
-    print(f"GEOS Lon range: {geos_sample.coords['X'].min().item()} to {geos_sample.coords['X'].max().item()}")
-    print(f"GPCP Lon range: {gpcp_lon.min().item()} to {gpcp_lon.max().item()}")
+    
+    # Unit Conversion Check
+    # GEOS is often kg/m2/s, GPCP is mm/day
+    # 1 kg/m2/s = 86400 mm/day
+    # If GEOS mean is very small (< 1e-4), assume kg/m2/s and convert
+    if geos_sample.mean().item() < 1e-3:
+        print("Detected GEOS in kg/m2/s. Converting to mm/day (* 86400)...")
+        geos_sample = geos_sample * 86400
+        
+    # Recalculate stats for plot scaling
+    vmin = min(geos_sample.min().item(), gpcp_sample.min().item())
+    vmax = max(geos_sample.max().item(), gpcp_sample.max().item())
+    
+    # Cap vmax for visualization if there are extreme outliers
+    if vmax > 50: 
+        print(f"Capping vmax at 50 mm/day (was {vmax:.2f}) for better contrast")
+        vmax = 50
+    
+    print(f"Plotting with vmin={vmin}, vmax={vmax}")
     fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(12, 16), 
                              subplot_kw={'projection': ccrs.PlateCarree()})
     
