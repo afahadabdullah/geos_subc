@@ -236,20 +236,21 @@ def train_model():
                     
                     samples_list = []
                     # Generate 3 ensemble members for visualization
-                    for _ in range(3):
-                        t_plot = torch.tensor([500], device=accelerator.device).expand(1)
-                        noisy_t, _ = diffusion.add_noise(target_s, t_plot)
-                        pred_noise = model(torch.cat([noisy_t, forecast_s, mjo_s], dim=1), t_plot, month_s)
-                        
-                        sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                        sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                        recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
-                        samples_list.append(denormalize(recon[0]))
+                    with torch.no_grad():
+                        for _ in range(3):
+                            t_plot = torch.tensor([500], device=accelerator.device).expand(1)
+                            noisy_t, _ = diffusion.add_noise(target_s, t_plot)
+                            pred_noise = model(torch.cat([noisy_t, forecast_s, mjo_s], dim=1), t_plot, month_s)
+                            
+                            sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                            sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                            recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
+                            samples_list.append(denormalize(recon[0]))
                     
-                    ens_mean_recon = torch.stack(samples_list).mean(dim=0).cpu().numpy()
-                    input_raw = denormalize(forecast_s[0]).cpu().numpy()
-                    target_raw = denormalize(target_s[0]).cpu().numpy()
-                    pred_raw = samples_list[0].cpu().numpy()
+                    ens_mean_recon = torch.stack(samples_list).mean(dim=0).detach().cpu().numpy()
+                    input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
+                    target_raw = denormalize(target_s[0]).detach().cpu().numpy()
+                    pred_raw = samples_list[0].detach().cpu().numpy()
                     
                     suffix = "_best" if is_best else ""
                     plot_comparison(
