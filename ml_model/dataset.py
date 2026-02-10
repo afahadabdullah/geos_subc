@@ -72,13 +72,15 @@ class GeosSubCDataset(Dataset):
                 
                 for s_idx, s_date in enumerate(init_dates):
                     # Cache GPCP truth (same for all members M)
+                    s_key = str(s_date)
                     if self.preload:
-                        self.preloaded_gpcp[s_date] = gpcp_vals.sel(S=s_date).values.astype(np.float32)
+                        self.preloaded_gpcp[s_key] = gpcp_vals.sel(S=s_date).values.astype(np.float32)
                     
                     for m_idx in members:
                         self.samples.append({
                             'year': year,
-                            'S': s_date,
+                            'S': s_date, # Keep original object for MJO lookup or selection
+                            'S_key': s_key,
                             'M': m_idx,
                             'geos_path': geos_path,
                             'gpcp_path': gpcp_path
@@ -89,7 +91,7 @@ class GeosSubCDataset(Dataset):
                             f_val = geos_vals.sel(S=s_date)
                             if 'M' in f_val.dims:
                                 f_val = f_val.sel(M=m_idx)
-                            self.preloaded_geos[(s_date, m_idx)] = f_val.values.astype(np.float32)
+                            self.preloaded_geos[(s_key, m_idx)] = f_val.values.astype(np.float32)
                 
                 ds_geos.close()
                 ds_gpcp.close()
@@ -105,23 +107,21 @@ class GeosSubCDataset(Dataset):
     def __getitem__(self, idx):
         meta = self.samples[idx]
         s_date = meta['S']
+        s_key = meta['S_key']
         m_idx = meta['M']
         
         try:
             if self.preload:
-                x_forecast = self.preloaded_geos[(s_date, m_idx)]
-                y_truth = self.preloaded_gpcp[s_date]
+                x_forecast = self.preloaded_geos[(s_key, m_idx)]
+                y_truth = self.preloaded_gpcp[s_key]
             else:
                 ds_geos = xr.open_zarr(meta['geos_path'], consolidated=False)
                 ds_gpcp = xr.open_zarr(meta['gpcp_path'], consolidated=False)
                 
-                # Forecast (Input)
-                # Select specific member M
                 f_data = ds_geos['pr'].sel(S=s_date)
                 if 'M' in f_data.dims:
                     f_data = f_data.sel(M=m_idx)
                 
-                # Ground Truth (Target) - GPCP only has one truth per S
                 t_data = ds_gpcp['precip'].sel(S=s_date)
                 
                 x_forecast = f_data.values.astype(np.float32)
@@ -130,6 +130,7 @@ class GeosSubCDataset(Dataset):
                 ds_geos.close()
                 ds_gpcp.close()
             
+            # MJO Features (Conditioning)
             if self.df_mjo is not None and s_date in self.df_mjo.index:
                 mjo = self.df_mjo.loc[s_date]
                 rmm_vals = np.array([mjo['RMM1_lagged'], mjo['RMM2_lagged']], dtype=np.float32)
@@ -147,13 +148,9 @@ class GeosSubCDataset(Dataset):
                 "M": m_idx
             }
         except Exception as e:
+            # Better to show the error and fail than recurse infinitely
             print(f"Error loading sample {idx} (Date {s_date}, Member {m_idx}): {e}")
-            return self.__getitem__((idx + 1) % len(self))
-            
-        except Exception as e:
-            print(f"Error loading sample {idx} (Date {s_date}): {e}")
-            # Return dummy or fail
-            return self.__getitem__((idx + 1) % len(self))
+            raise e
 
 if __name__ == "__main__":
     # verification
