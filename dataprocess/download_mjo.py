@@ -9,7 +9,15 @@ from io import StringIO
 
 def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="dataprocess"):
     # 1. Download RMM Data
-    url = "http://www.bom.gov.au/climate/mjo/graphics/rmm.74toRealtime.txt"
+    # BOM URL often blocks scripts. Use NOAA CPC mirror or alternative.
+    # NOAA CPC: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/mjo_index.txt
+    # Alternatively, use a raw github mirror if available.
+    # Let's try NOAA CPC first.
+    
+    url = "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/prim_mjo_index.txt"
+    # Or: https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/mjo_index_file.txt (older)
+    # The file format at 'mjo_index.txt' is usually: Year Month Day RMM1 RMM2 ...
+    
     print(f"Downloading RMM data from {url}...")
     
     try:
@@ -17,22 +25,28 @@ def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="datapro
         response.raise_for_status()
         data_str = response.text
     except Exception as e:
-        print(f"Failed to download MJO data: {e}")
+        print(f"Failed to download MJO data from NOAA: {e}")
+        # Fallback to another source if needed
         return
 
     # 2. Parse Data
-    # The file has a header (lines usually start with comments or are just space separated)
-    # Format: year month day RMM1 RMM2 phase amplitude source
-    # Skip first 2 lines typically
+    # NOAA Format typically: 
+    # YYYY MM DD RMM1 RMM2 PHASE AMPLITUDE Source
+    # Sometimes it has a header, sometimes not.
+    # Let's inspect first line logic or just skip predictable rows.
     
-    # We can use pd.read_csv with delim_whitespace
-    # Inspect first few lines?
-    
-    # Let's try skipping header rows. Usually row 0 and 1 are header info.
     cols = ["year", "month", "day", "RMM1", "RMM2", "phase", "amplitude", "source"]
     
     try:
-        df = pd.read_csv(StringIO(data_str), skiprows=2, delim_whitespace=True, names=cols, on_bad_lines='skip')
+        # NOAA file often has no header or simple one. 
+        # We'll use 'comment=None' to check.
+        # It's space separated.
+        df = pd.read_csv(StringIO(data_str), sep=r'\s+', names=cols, on_bad_lines='skip', comment='#')
+        
+        # Filter out non-numeric rows if header exists
+        df = df[pd.to_numeric(df['year'], errors='coerce').notnull()]
+        df = df.astype({"year": int, "month": int, "day": int, "RMM1": float, "RMM2": float})
+        
     except Exception as e:
         print(f"Error parsing MJO data: {e}")
         return
