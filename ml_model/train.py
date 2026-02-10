@@ -126,6 +126,7 @@ def train_model():
     # We should update its device.
     diffusion.device = accelerator.device
     diffusion.betas = diffusion.betas.to(accelerator.device)
+    diffusion.alphas = diffusion.alphas.to(accelerator.device)
     diffusion.alpha_hats = diffusion.alpha_hats.to(accelerator.device)
     diffusion.sqrt_alpha_hats = diffusion.sqrt_alpha_hats.to(accelerator.device)
     diffusion.sqrt_one_minus_alpha_hats = diffusion.sqrt_one_minus_alpha_hats.to(accelerator.device)
