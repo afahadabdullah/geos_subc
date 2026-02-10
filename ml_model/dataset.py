@@ -74,12 +74,13 @@ class GeosSubCDataset(Dataset):
                     # Cache GPCP truth (same for all members M)
                     s_key = str(s_date)
                     if self.preload:
-                        self.preloaded_gpcp[s_key] = gpcp_vals.sel(S=s_date).values.astype(np.float32)
+                        self.preloaded_gpcp[s_key] = gpcp_vals.isel(S=s_idx).values.astype(np.float32)
                     
                     for m_idx in members:
                         self.samples.append({
                             'year': year,
-                            'S': s_date, # Keep original object for MJO lookup or selection
+                            'S': s_date, # Keep original object for MJO lookup
+                            'S_idx': s_idx,
                             'S_key': s_key,
                             'M': m_idx,
                             'geos_path': geos_path,
@@ -88,9 +89,9 @@ class GeosSubCDataset(Dataset):
                         
                         if self.preload:
                             # Cache GEOS forecast for this specific member
-                            f_val = geos_vals.sel(S=s_date)
+                            f_val = geos_vals.isel(S=s_idx)
                             if 'M' in f_val.dims:
-                                f_val = f_val.sel(M=m_idx)
+                                f_val = f_val.isel(M=m_idx)
                             self.preloaded_geos[(s_key, m_idx)] = f_val.values.astype(np.float32)
                 
                 ds_geos.close()
@@ -118,11 +119,13 @@ class GeosSubCDataset(Dataset):
                 ds_geos = xr.open_zarr(meta['geos_path'], consolidated=False)
                 ds_gpcp = xr.open_zarr(meta['gpcp_path'], consolidated=False)
                 
-                f_data = ds_geos['pr'].sel(S=s_date)
+                # Forecast (Input)
+                f_data = ds_geos['pr'].isel(S=meta['S_idx'])
                 if 'M' in f_data.dims:
-                    f_data = f_data.sel(M=m_idx)
+                    f_data = f_data.isel(M=m_idx)
                 
-                t_data = ds_gpcp['precip'].sel(S=s_date)
+                # Ground Truth (Target)
+                t_data = ds_gpcp['precip'].isel(S=meta['S_idx'])
                 
                 x_forecast = f_data.values.astype(np.float32)
                 y_truth = t_data.values.astype(np.float32)
