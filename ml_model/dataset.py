@@ -6,32 +6,37 @@ import pandas as pd
 from arraylake import Client
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, forecast_store_path, obs_group_name=None, mjo_data_path=None, transform=None):
+    def __init__(self, forecast_store_path, obs_root_path=None, mjo_data_path=None, transform=None):
         """
         Args:
             forecast_store_path (str): Path to local Zarr file (e.g., 'dataprocess/geos_subc_2000.zarr')
-            obs_group_name (str): ArrayLake group name for observations (e.g., 'era5'). 
-                                  If None, will use a placeholder or skip obs loading.
-            mjo_data_path (str): Path to MJO indices file (e.g., CSV/NetCDF).
+            obs_root_path (str): Path to root directory of downloaded GPCP data (e.g., 'dataprocess/gpcp_data'). 
+                                 If None, will skip obs loading.
+            mjo_data_path (str): Path to MJO indices file.
             transform (callable, optional): Optional transform to be applied on a sample.
         """
         self.forecast_store_path = forecast_store_path
-        self.obs_group_name = obs_group_name
+        self.obs_root_path = obs_root_path
         self.mjo_data_path = mjo_data_path
         self.transform = transform
         
-        # Load Forecast Data (Lazy)
-        # We assume the file is local for now, but could be remote arraylake session
+        # Load Forecast Data
         print(f"Loading forecast data from {forecast_store_path}...")
         self.ds_forecast = xr.open_zarr(forecast_store_path, consolidated=False)
         
-        # Connect to ArrayLake for Observations (if provided)
-        if self.obs_group_name:
-            print(f"Connecting to ArrayLake group: {obs_group_name}...")
-            client = Client()
-            repo = client.get_repo("umd/subc")
-            self.obs_session = repo.readonly_session(branch="main")
-            self.ds_obs = xr.open_zarr(self.obs_session.store, group=obs_group_name)
+        # Load GPCP Observations (Lazy via MFDataset)
+        if self.obs_root_path:
+            print(f"Loading GPCP observations from {obs_root_path}...")
+            # Pattern: obs_root_path/YYYY/gpcp_*.nc
+            # We can use open_mfdataset to aggregate them?
+            # Or creating a virtual Zarr? 
+            # MFDataset might be slow for random access in Dataset.
+            # Best practice: Re-save GPCP as Zarr chunked by time.
+            # For now, let's try open_mfdataset or just load on-the-fly if needed.
+            # Given we have yearly structure, we can open yearly datasets.
+             
+            # Ideally we process GPCP into a Zarr during the download/prep phase.
+            pass 
         else:
             self.ds_obs = None
             print("Warning: No observation group provided. Dataset will only yield forecasts.")
