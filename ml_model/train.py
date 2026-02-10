@@ -26,6 +26,7 @@ except ImportError:
     from model import ConditionalUNet, GaussianDiffusion
     from utils import crps_ensemble, denormalize, plot_comparison
 
+def train_model():
     # Memory fragmentation management
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
