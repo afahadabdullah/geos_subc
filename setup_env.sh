@@ -39,14 +39,16 @@ conda env update -n "$ENV_NAME" -f "$PROJECT_DIR/environment.yml" --prune
 
 # 5. Install CUDA-enabled PyTorch for ARM64 (TACC Vista Specific)
 echo "Installing/Verifying CUDA-enabled PyTorch for ARM64..."
+echo "This will download ~2GB of data, please wait..."
 source "$CONDA_DIR/bin/activate" "$ENV_NAME"
 
 # Uninstall existing (potentially CPU-only) torch to ensure clean install
+echo "Cleaning up old torch versions..."
 pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
 
 # Install from PyTorch HTML index (Using cu121 which is stable for Grace Hopper)
-echo "Downloading and installing ARM64 CUDA wheels..."
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+echo "Downloading and installing ARM64 CUDA wheels (cu121)..."
+pip install --progress-bar on torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 echo "Environment setup complete."
 echo "To activate, run: source $CONDA_DIR/bin/activate $ENV_NAME"
