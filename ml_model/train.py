@@ -6,7 +6,7 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 import os
 import numpy as np
 import pandas as pd
-import tqdm
+from tqdm import tqdm
 
 try:
     from ml_model.dataset import GeosSubCDataset
@@ -47,6 +47,9 @@ def train_model():
     # --------------------------------------------------------------------------
     # Dataset
     # --------------------------------------------------------------------------
+    if accelerator.is_main_process:
+        print(f"Loading datasets from {config['data_root']}...")
+
     train_dataset = GeosSubCDataset(
         data_root=config["data_root"],
         start_year=config["train_years"][0], 
@@ -113,7 +116,7 @@ def train_model():
     # Training Loop
     # --------------------------------------------------------------------------
     if accelerator.is_main_process:
-        print("Starting training with CMDE architecture...")
+        print(f"Starting training with CMDE architecture. Samples: {len(train_dataset)}")
     
     global_step = 0
     
@@ -121,6 +124,10 @@ def train_model():
         model.train()
         train_loss = 0.0
         
+        # Use tqdm for progress bar
+        progress_bar = tqdm(total=len(train_dataloader), disable=not accelerator.is_local_main_process)
+        progress_bar.set_description(f"Epoch {epoch}")
+
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 # 1. Unpack & Normalize
@@ -171,15 +178,19 @@ def train_model():
                 optimizer.zero_grad()
                 
             train_loss += loss.item()
+            progress_bar.update(1)
+            progress_bar.set_postfix({"loss": loss.item()})
             global_step += 1
             
-            if step % 50 == 0 and accelerator.is_main_process:
-               print(f"Epoch {epoch} Step {step} Loss: {loss.item():.4f}")
+        progress_bar.close()
                
         # Validation Logic (Simple MSE on noise for now)
         if epoch % 5 == 0:
             model.eval()
             val_loss = 0.0
+            if accelerator.is_main_process:
+                print("Validating...")
+            
             with torch.no_grad():
                 for batch in val_dataloader:
                     # Scale Factor (50mm -> 1.0) approx for raw mm/day
