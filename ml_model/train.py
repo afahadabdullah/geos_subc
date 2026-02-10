@@ -24,7 +24,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 8, # Increased for GH200 + Preloading
+        "batch_size": 32, # Massive increase for H200
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
@@ -43,6 +43,12 @@ def train_model():
         log_with="tensorboard",
         project_dir=config["output_dir"]
     )
+
+    if accelerator.is_main_process:
+        print(f"Device: {accelerator.device}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"GPU: {torch.cuda.get_device_name(0)}")
     
     # --------------------------------------------------------------------------
     # Dataset
@@ -66,9 +72,9 @@ def train_model():
         preload=True
     )
     
-    # With preloaded data, num_workers=0 is stable and fast.
-    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
-    val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
+    # pin_memory=True helps with CPU->GPU transfer
+    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0, pin_memory=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
     
     # --------------------------------------------------------------------------
     # Model Setup (CMDE Architecture)
@@ -140,12 +146,7 @@ def train_model():
                 target_truth = batch["target_truth"] * scale  # (B, 4, Y, X)
                 forecast = batch["input_forecast"] * scale    # (B, 4, Y, X)
                 mjo = batch["mjo_conditioning"]               # (B, 2)
-                s_date_str = batch["S"] # List of strings
-                
-                # Derive Month
-                # Pandify
-                dates = pd.to_datetime(s_date_str)
-                months = torch.tensor(dates.month, device=accelerator.device).long()
+                months = batch["month"]                       # (B,)
                 
                 # 2. Add Noise to Target (Raw Truth, NOT Residual)
                 # User requested raw target instead of residual.
@@ -202,12 +203,7 @@ def train_model():
                     target_truth = batch["target_truth"] * scale  # (B, 4, Y, X)
                     forecast = batch["input_forecast"] * scale    # (B, 4, Y, X)
                     mjo = batch["mjo_conditioning"]               # (B, 2)
-                    s_date_str = batch["S"] # List of strings
-                    
-                    # Generate Sample (Reverse Diffusion)
-                    # Derive Month
-                    dates = pd.to_datetime(s_date_str)
-                    months = torch.tensor(dates.month, device=accelerator.device).long()
+                    months = batch["month"]
                     
                     # Validation on Raw Target
                     target = target_truth

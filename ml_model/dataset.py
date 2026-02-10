@@ -140,6 +140,9 @@ class GeosSubCDataset(Dataset):
             else:
                 rmm_vals = np.zeros(2, dtype=np.float32)
             
+            # Month (1-12)
+            month = s_date.month
+            
             x_forecast = np.nan_to_num(x_forecast, nan=0.0)
             y_truth = np.nan_to_num(y_truth, nan=0.0)
             
@@ -147,6 +150,7 @@ class GeosSubCDataset(Dataset):
                 "input_forecast": torch.tensor(x_forecast), 
                 "target_truth": torch.tensor(y_truth),      
                 "mjo_conditioning": torch.tensor(rmm_vals), 
+                "month": torch.tensor(month, dtype=torch.long),
                 "S": str(s_date),
                 "M": m_idx
             }
