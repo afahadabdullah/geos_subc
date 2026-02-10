@@ -51,9 +51,16 @@ def process_geos_weekly(start_year=1999, end_year=2016, data_dir="dataprocess"):
             
             ds_weekly = ds_28.coarsen(L=7, boundary='exact').mean()
             
-            # Rename L to simple 0..3 index? It will be handled by coarsen automatically?
-            # Coarsen reduces the dimension size.
-            # L will become size 4.
+            # Unit Conversion: kg/m2/s -> mm/day
+            # Check if mean > 1e-3 (already mm/day?) or < 1e-3 (flux)
+            # Safe assumption: GEOS raw is flux.
+            # But let's check a sample value to be safe, or just force if we know source.
+            # Given previous check, it is definitely flux.
+            print("Converting GEOS precipitation from kg/m2/s to mm/day (* 86400)...")
+            if 'pr' in ds_weekly:
+                ds_weekly['pr'] = ds_weekly['pr'] * 86400
+            elif 'precip' in ds_weekly:
+                ds_weekly['precip'] = ds_weekly['precip'] * 86400
             
             # Identify output path (Temp first)
             temp_path = f"{data_dir}/geos_subc_{year}_weekly_temp.zarr"
