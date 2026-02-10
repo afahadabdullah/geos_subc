@@ -24,7 +24,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 4, # Reduced from 16 due to OOM
+        "batch_size": 8, # Increased for GH200 + Preloading
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
@@ -54,16 +54,19 @@ def train_model():
         data_root=config["data_root"],
         start_year=config["train_years"][0], 
         end_year=config["train_years"][1],
-        mjo_file="mjo_processed.csv"
+        mjo_file="mjo_processed.csv",
+        preload=True  # Preload to RAM for faster I/O
     )
     
     val_dataset = GeosSubCDataset(
         data_root=config["data_root"],
         start_year=config["val_years"][0], 
         end_year=config["val_years"][1],
-        mjo_file="mjo_processed.csv"
+        mjo_file="mjo_processed.csv",
+        preload=True
     )
     
+    # With preloaded data, num_workers=0 is stable and fast.
     train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
     
