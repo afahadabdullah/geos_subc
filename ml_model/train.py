@@ -33,7 +33,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 16, # Reduced from 32 to handle shared GPUs/zombies
+        "batch_size": 8, # Further reduced from 16 to ensure it fits with any lingering processes
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
