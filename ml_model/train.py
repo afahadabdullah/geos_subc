@@ -24,7 +24,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 16, # Increased batch size since custom model might be lighter? Or kept small.
+        "batch_size": 4, # Reduced from 16 due to OOM
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
