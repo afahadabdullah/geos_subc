@@ -129,6 +129,13 @@ def train_model():
     diffusion.sqrt_alpha_hats = diffusion.sqrt_alpha_hats.to(accelerator.device)
     diffusion.sqrt_one_minus_alpha_hats = diffusion.sqrt_one_minus_alpha_hats.to(accelerator.device)
 
+    # Auto-resume Logic
+    latest_path = os.path.join(config["output_dir"], "latest_checkpoint")
+    if os.path.exists(latest_path):
+        if accelerator.is_main_process:
+            print(f"Loading checkpoint from: {latest_path}")
+        accelerator.load_state(latest_path)
+
     # --------------------------------------------------------------------------
     # Training Loop
     # --------------------------------------------------------------------------
@@ -253,11 +260,14 @@ def train_model():
                     pred_raw = samples_list[0].detach().cpu().numpy()
                     
                     suffix = "_best" if is_best else ""
+                    plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}{suffix}.png"
                     plot_comparison(
                         input_raw, target_raw, pred_raw, ens_mean_recon, 
-                        f"{config['output_dir']}/plots/epoch_{epoch}{suffix}.png",
+                        plot_save_path,
                         title=f"Epoch {epoch} - LW4 Ensembled Visualization {'(Best)' if is_best else ''}"
                     )
+                    if accelerator.is_main_process:
+                        print(f"Ensembled validation plot saved to: {plot_save_path}")
                 
                 # Check for Best Model
                 if is_best:
