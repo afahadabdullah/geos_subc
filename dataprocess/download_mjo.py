@@ -34,7 +34,8 @@ def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="datapro
     
     try:
         # BOM text format: space separated. skiprows=2 for header.
-        df = pd.read_csv(StringIO(data_str), skiprows=2, delim_whitespace=True, names=cols, on_bad_lines='skip')
+        # delim_whitespace=True is deprecated in newer pandas -> use sep='\s+'
+        df = pd.read_csv(StringIO(data_str), skiprows=2, sep=r'\s+', names=cols, on_bad_lines='skip')
         
         # Filter out problematic rows
         df = df[pd.to_numeric(df['year'], errors='coerce').notnull()]
