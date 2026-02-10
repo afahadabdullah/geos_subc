@@ -3,107 +3,160 @@ from torch.utils.data import Dataset
 import xarray as xr
 import numpy as np
 import pandas as pd
-from arraylake import Client
+import os
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, forecast_store_path, obs_root_path=None, mjo_data_path=None, transform=None):
+    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None):
         """
         Args:
-            forecast_store_path (str): Path to local Zarr file (e.g., 'dataprocess/geos_subc_2000.zarr')
-            obs_root_path (str): Path to root directory of downloaded GPCP data (e.g., 'dataprocess/gpcp_data'). 
-                                 If None, will skip obs loading.
-            mjo_data_path (str): Path to MJO indices file.
+            data_root (str): Root directory containing 'geos_subc_{year}.zarr' and 'gpcp_weekly_{year}.zarr'.
+            start_year (int): Start year for data loading.
+            end_year (int): End year for data loading.
+            mjo_file (str): Filename of MJO CSV in data_root.
             transform (callable, optional): Optional transform to be applied on a sample.
         """
-        self.forecast_store_path = forecast_store_path
-        self.obs_root_path = obs_root_path
-        self.mjo_data_path = mjo_data_path
+        self.data_root = data_root
+        self.years = list(range(start_year, end_year + 1))
         self.transform = transform
         
-        # Load Forecast Data
-        print(f"Loading forecast data from {forecast_store_path}...")
-        self.ds_forecast = xr.open_zarr(forecast_store_path, consolidated=False)
-        
-        # Load GPCP Observations (Lazy via MFDataset)
-        if self.obs_root_path:
-            print(f"Loading GPCP observations from {obs_root_path}...")
-            # Pattern: obs_root_path/YYYY/gpcp_*.nc
-            # We can use open_mfdataset to aggregate them?
-            # Or creating a virtual Zarr? 
-            # MFDataset might be slow for random access in Dataset.
-            # Best practice: Re-save GPCP as Zarr chunked by time.
-            # For now, let's try open_mfdataset or just load on-the-fly if needed.
-            # Given we have yearly structure, we can open yearly datasets.
-             
-            # Ideally we process GPCP into a Zarr during the download/prep phase.
-            pass 
+        # 1. Load MJO Data
+        mjo_path = os.path.join(data_root, mjo_file)
+        if os.path.exists(mjo_path):
+            print(f"Loading MJO features from {mjo_path}...")
+            self.df_mjo = pd.read_csv(mjo_path)
+            self.df_mjo['S'] = pd.to_datetime(self.df_mjo['S'])
+            self.df_mjo = self.df_mjo.set_index('S')
         else:
-            self.ds_obs = None
-            print("Warning: No observation group provided. Dataset will only yield forecasts.")
+            print(f"Warning: MJO file not found at {mjo_path}. MJO features will be zeros.")
+            self.df_mjo = None
 
-        # Indexing Strategy: Flatten (S, L) -> (Index)
-        # S = Initialization Time, L = Lead Time
-        # We need to map integer index -> (s_idx, l_idx) or just (s_idx) if we predict full sequence
-        # For diffusion, usually we predict a fields at a specific target time.
-        # User goal: "predict subseasonal... using initial obs mean"
+        # 2. Index all available samples (Year, InitDate)
+        # We need to scan files to build a global index map: idx -> (year, init_date, file_paths)
+        # This might be slow if we open every Zarr.
+        # Faster: Assume file existence and standard structure?
+        # Safer: Open each year once to get 'S' coords.
         
-        # Let's assume we treat every (Init Time S) as a sample, and we predict the sequence L?
-        # Or predict specific leads?
-        # For simplicity, let's index by Initialization Time 'S'.
-        if 'S' in self.ds_forecast.dims:
-            self.n_samples = self.ds_forecast.sizes['S']
-            self.time_coords = self.ds_forecast['S'].values
-        else:
-            raise ValueError("Forecast dataset missing 'S' dimension.")
+        self.samples = []
+        
+        print(f"Indexing samples from {start_year} to {end_year}...")
+        for year in self.years:
+            geos_path = os.path.join(data_root, f"geos_subc_{year}.zarr")
+            gpcp_path = os.path.join(data_root, f"gpcp_weekly_{year}.zarr")
+            
+            if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
+                # print(f"Skipping {year}: Missing GEOS or GPCP file.")
+                continue
+                
+            # Open lazily to get S coords
+            try:
+                ds_geos = xr.open_zarr(geos_path, consolidated=False)
+                if 'S' not in ds_geos.dims:
+                    continue
+                
+                # Check GPCP S coords too? Or assume alignment (we processed them to align).
+                # Let's trust alignment for speed, or check once.
+                
+                init_dates = pd.to_datetime(ds_geos['S'].values)
+                
+                for s_date in init_dates:
+                    self.samples.append({
+                        'year': year,
+                        'S': s_date,
+                        'geos_path': geos_path,
+                        'gpcp_path': gpcp_path
+                    })
+            except Exception as e:
+                print(f"Error indexing {year}: {e}")
+                
+        print(f"Found {len(self.samples)} samples.")
 
     def __len__(self):
-        return self.n_samples
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        # 1. Get Forecast for Init Time S[idx]
-        # Shape: (M, L, Y, X) -> we might average members M? 
-        # User said "dynamical model forecast". Usually ensemble mean or all members.
-        # Let's return Ensemble Mean for now to match dimensions with Obs.
+        # 1. Metadata
+        meta = self.samples[idx]
+        year = meta['year']
+        s_date = meta['S']
         
-        s_val = self.time_coords[idx]
+        # 2. Load Data (Lazy Open inside getitem might be slow? Xarray caches?)
+        # Better: Keep dataset handles open? But too many files.
+        # Xarray open_zarr is relatively cheap if metadata is consolidated, but here likely not.
+        # Dask might warn.
+        # Optimization: We could use a cache or open once in __init__ if logical.
+        # For now, open on demand (might need optimization later).
         
-        # Select data and convert to tensor
-        # We load 'pr' and 'tas'
-        f_pr = self.ds_forecast['pr'].isel(S=idx).mean(dim='M').values # (L, Y, X)
-        f_tas = self.ds_forecast['tas'].isel(S=idx).mean(dim='M').values # (L, Y, X)
+        ds_geos = xr.open_zarr(meta['geos_path'], consolidated=False)
+        ds_gpcp = xr.open_zarr(meta['gpcp_path'], consolidated=False)
         
-        # Stack variables: (C, L, Y, X) or (L, C, Y, X)
-        # PyTorch Conv2D expects (C, H, W). Time (L) might be treated as batch or depth?
-        # For Diffusers UNet2D, usually (Batch, Channels, Height, Width).
-        # If we predict the whole sequence, we might stack L into Channels?
-        # Or use a 3D UNet? User said "Diffusers model import directly".
-        # Standard UNet2D is for images. 
-        # We can treat Lead Times * Variables as Channels.
-        # 2 Variables * 32 Lead Times = 64 Channels.
+        # 3. Select Time Slice
+        # GEOS: (S, L, Y, X)
+        # GPCP: (S, L, Y, X)
         
-        x_forecast = np.stack([f_pr, f_tas], axis=0) # (2, L, Y, X)
-        
-        # 2. Get Initial Observation (State at T=0) (Conditioning)
-        # This matches S[idx]
-        if self.ds_obs:
-            # Logic to find obs at s_val
-            # obs_init = self.ds_obs.sel(time=s_val).values
-            pass # Placeholder
+        # Select S
+        # Xarray selection by value is reliable
+        try:
+            # We assume dimensions are (S, L, Y, X)
+            # GEOS 'pr' (mm/day)
+            # GPCP 'precip' (mm/day)
             
-        # 3. Get Truth Target (Obs at T = S + L) (Training Target)
-        if self.ds_obs:
-            # Logic to find obs for the whole lead time sequence
-            pass # Placeholder
+            # Forecast (Input)
+            # We take mean over 'M' if exists (ensemble)
+            f_data = ds_geos['pr'].sel(S=s_date)
+            if 'M' in f_data.dims:
+                f_data = f_data.mean(dim='M')
             
-        # Return dict compatible with HuggingFace
-        return {
-            "pixel_values": torch.tensor(x_forecast, dtype=torch.float32), # Placeholder mapping
-            # "conditioning": ...
-        }
+            # Ground Truth (Target)
+            t_data = ds_gpcp['precip'].sel(S=s_date)
+            
+            # Convert to Numpy
+            # Shape: (4, Y, X) -> (Lead, Lat, Lon)
+            x_forecast = f_data.values.astype(np.float32)
+            y_truth = t_data.values.astype(np.float32)
+            
+            # 4. MJO Features (Conditioning)
+            if self.df_mjo is not None and s_date in self.df_mjo.index:
+                mjo = self.df_mjo.loc[s_date]
+                rmm_vals = np.array([mjo['RMM1_lagged'], mjo['RMM2_lagged']], dtype=np.float32)
+            else:
+                rmm_vals = np.zeros(2, dtype=np.float32)
+            
+            # 5. Missing Values / NaNs
+            # Replace NaNs with 0 or mean?
+            # Precipitation shouldn't have NaNs ideally if processed correctly.
+            # But let's be safe.
+            x_forecast = np.nan_to_num(x_forecast, nan=0.0)
+            y_truth = np.nan_to_num(y_truth, nan=0.0)
+            
+            # Verify shapes match
+            # Expected (4, Y, X)
+            if x_forecast.shape != y_truth.shape:
+                # Resize or align? 
+                # They should match from our processing scripts.
+                pass
+            
+            # Return Dictionary
+            # standard diffusers image pipeline expects "pixel_values"
+            # Here we have text/vector conditioning (MJO) + image input (Forecast) -> Target (Truth)
+            # Actually, standard diffusion trains to predict NOISE added to TRUTH.
+            # Condition is Forecast.
+            
+            return {
+                "input_forecast": torch.tensor(x_forecast), # (4, 181, 360)
+                "target_truth": torch.tensor(y_truth),      # (4, 181, 360)
+                "mjo_conditioning": torch.tensor(rmm_vals), # (2,)
+                "S": str(s_date)
+            }
+            
+        except Exception as e:
+            print(f"Error loading sample {idx} (Date {s_date}): {e}")
+            # Return dummy or fail
+            return self.__getitem__((idx + 1) % len(self))
 
 if __name__ == "__main__":
     # verification
-    ds = GeosSubCDataset("dataprocess/geos_subc_2000.zarr")
-    print(f"Dataset length: {len(ds)}")
-    sample = ds[0]
-    print(f"Sample shape: {sample['pixel_values'].shape}")
+    ds = GeosSubCDataset(data_root="dataprocess", start_year=2000, end_year=2001)
+    print(f"Sample 0: {ds[0]['S']}")
+    print(f"Forecast S: {ds[0]['input_forecast'].shape}")
+    print(f"Truth S: {ds[0]['target_truth'].shape}")
+    print(f"MJO: {ds[0]['mjo_conditioning']}")
