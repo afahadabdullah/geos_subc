@@ -26,14 +26,13 @@ except ImportError:
     from model import ConditionalUNet, GaussianDiffusion
     from utils import crps_ensemble, denormalize, plot_comparison
 
-def train_model():
-    # --------------------------------------------------------------------------
-    # Configuration
-    # --------------------------------------------------------------------------
+    # Memory fragmentation management
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 32, # Massive increase for H200
+        "batch_size": 16, # Reduced from 32 to handle shared GPUs/zombies
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
