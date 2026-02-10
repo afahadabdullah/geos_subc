@@ -129,7 +129,9 @@ def process_year(year, output_dir="dataprocess"):
     # Save
     out_path = f"{output_dir}/gpcp_weekly_{year}.zarr"
     print(f"Saving to {out_path}...")
-    ds_out.to_dataset(name='precip').to_zarr(out_path, mode='w', zarr_format=3)
+    import dask
+    with dask.config.set(scheduler='synchronous'):
+        ds_out.to_dataset(name='precip').to_zarr(out_path, mode='w', zarr_format=3)
     print(f"Finished {year}.")
 
 if __name__ == "__main__":
