@@ -196,6 +196,8 @@ def train_model():
             if accelerator.is_main_process:
                 print("Validating...")
             
+            first_batch_data = None # Storage for plotting
+            
             with torch.no_grad():
                 for idx, batch in enumerate(val_dataloader):
                     target_truth = batch["target_truth"]
@@ -217,47 +219,47 @@ def train_model():
                     loss = F.mse_loss(noise_pred, noise)
                     val_loss += loss.item()
 
-                    # Plot first batch comparison
+                    # Cache first batch for plotting
                     if idx == 0 and accelerator.is_main_process:
-                        samples_list = []
-                        # Generate 3 ensemble members for visualization
-                        for _ in range(3):
-                            # Use a fixed mid-range timestep for visualization consistency
-                            t_plot = torch.tensor([500], device=accelerator.device).expand(1)
-                            # Start with different noise for each ensemble member
-                            noisy_t, noise_t = diffusion.add_noise(target_truth[0:1], t_plot)
-                            
-                            mjo_s = mjo_map[0:1]
-                            month_s = month_onehot[0:1]
-                            
-                            # Predict noise
-                            pred_noise = model(torch.cat([noisy_t, forecast[0:1], mjo_s], dim=1), t_plot, month_s)
-                            
-                            # 1-step recon
-                            sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                            sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                            recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
-                            samples_list.append(denormalize(recon[0]))
-                        
-                        ens_mean_recon = torch.stack(samples_list).mean(dim=0).cpu().numpy()
-                        
-                        # Denormalize for plotting
-                        input_raw = denormalize(forecast[0]).cpu().numpy()
-                        target_raw = denormalize(target_truth[0]).cpu().numpy()
-                        pred_raw = samples_list[0].cpu().numpy() # First sample
-                        
-                        plot_comparison(
-                            input_raw, target_raw, pred_raw, ens_mean_recon, 
-                            f"{config['output_dir']}/plots/epoch_{epoch}.png",
-                            title=f"Epoch {epoch} - LW4 Ensembled Visualization"
-                        )
+                        first_batch_data = (target_truth[0:1], forecast[0:1], mjo_map[0:1], month_onehot[0:1])
 
             avg_val_loss = val_loss / len(val_dataloader)
+            
             if accelerator.is_main_process:
                 print(f"Epoch {epoch} Val Loss (MSE): {avg_val_loss:.4f}")
                 
+                is_best = avg_val_loss < best_val_loss
+                
+                # Plotting logic (Periodic OR Best)
+                if (epoch % 5 == 0 or is_best) and first_batch_data is not None:
+                    target_s, forecast_s, mjo_s, month_s = first_batch_data
+                    
+                    samples_list = []
+                    # Generate 3 ensemble members for visualization
+                    for _ in range(3):
+                        t_plot = torch.tensor([500], device=accelerator.device).expand(1)
+                        noisy_t, _ = diffusion.add_noise(target_s, t_plot)
+                        pred_noise = model(torch.cat([noisy_t, forecast_s, mjo_s], dim=1), t_plot, month_s)
+                        
+                        sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                        sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                        recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
+                        samples_list.append(denormalize(recon[0]))
+                    
+                    ens_mean_recon = torch.stack(samples_list).mean(dim=0).cpu().numpy()
+                    input_raw = denormalize(forecast_s[0]).cpu().numpy()
+                    target_raw = denormalize(target_s[0]).cpu().numpy()
+                    pred_raw = samples_list[0].cpu().numpy()
+                    
+                    suffix = "_best" if is_best else ""
+                    plot_comparison(
+                        input_raw, target_raw, pred_raw, ens_mean_recon, 
+                        f"{config['output_dir']}/plots/epoch_{epoch}{suffix}.png",
+                        title=f"Epoch {epoch} - LW4 Ensembled Visualization {'(Best)' if is_best else ''}"
+                    )
+                
                 # Check for Best Model
-                if avg_val_loss < best_val_loss:
+                if is_best:
                     print(f"New best model found at epoch {epoch} (Loss: {avg_val_loss:.4f})")
                     best_val_loss = avg_val_loss
                     checkpoint_path = f"{config['output_dir']}/best_model_epoch_{epoch}"
@@ -271,7 +273,7 @@ def train_model():
                             shutil.rmtree(old_checkpoint, ignore_errors=True)
         
         # Periodic Save for Resuming (Always keep latest)
-        if epoch % 5 == 0:
+        if (epoch + 1) % 5 == 0:
             latest_path = f"{config['output_dir']}/latest_checkpoint"
             accelerator.save_state(latest_path)
 
