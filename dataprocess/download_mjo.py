@@ -8,24 +8,21 @@ from tqdm import tqdm
 from io import StringIO
 
 def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="dataprocess"):
-    # 1. Download RMM Data
-    # BOM and NOAA are blocking/changing. Use a stable GitHub mirror.
-    # This is the standard Wheeler-Hendon RMM index.
-    url = "https://raw.githubusercontent.com/yrobink/S2S-data/master/RMM.txt"
-    # Depending on the mirror, format might slightly vary. 
-    # Let's assume standard BOM text format: 
-    # year, month, day, RMM1, RMM2, phase, amplitude, source
+    # 1. Check for Local RMM Data
+    # Automatic download is unreliable due to bot protection.
+    local_path = f"{output_dir}/rmm.74toRealtime.txt"
     
-    print(f"Downloading RMM data from {url}...")
-    
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data_str = response.text
-    except Exception as e:
-        print(f"Failed to download MJO data from NOAA: {e}")
-        # Fallback to another source if needed
+    if os.path.exists(local_path):
+        print(f"Found local RMM file: {local_path}")
+        data_str = open(local_path, 'r').read()
+    else:
+        print(f"RMM file not found at {local_path}")
+        print("Please download the file manually from:")
+        print("http://www.bom.gov.au/climate/mjo/graphics/rmm.74toRealtime.txt")
+        print(f"And save it to: {os.path.abspath(local_path)}")
         return
+
+    # 2. Parse Data
 
     # 2. Parse Data
     # NOAA Format typically: 
@@ -36,12 +33,10 @@ def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="datapro
     cols = ["year", "month", "day", "RMM1", "RMM2", "phase", "amplitude", "source"]
     
     try:
-        # NOAA file often has no header or simple one. 
-        # We'll use 'comment=None' to check.
-        # It's space separated.
-        df = pd.read_csv(StringIO(data_str), sep=r'\s+', names=cols, on_bad_lines='skip', comment='#')
+        # BOM text format: space separated. skiprows=2 for header.
+        df = pd.read_csv(StringIO(data_str), skiprows=2, delim_whitespace=True, names=cols, on_bad_lines='skip')
         
-        # Filter out non-numeric rows if header exists
+        # Filter out problematic rows
         df = df[pd.to_numeric(df['year'], errors='coerce').notnull()]
         df = df.astype({"year": int, "month": int, "day": int, "RMM1": float, "RMM2": float})
         
