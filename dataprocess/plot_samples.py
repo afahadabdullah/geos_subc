@@ -50,7 +50,15 @@ def plot_random_sample(data_dir="dataprocess", output_file="sample_comparison.pn
     geos_sample = geos_sample.compute()
     gpcp_sample = gpcp_sample.compute()
     
-    # 4. Plot
+    # Detect coords
+    gpcp_lat = gpcp_sample.coords['latitude'] if 'latitude' in gpcp_sample.coords else gpcp_sample.coords['lat'] if 'lat' in gpcp_sample.coords else gpcp_sample.coords['Y']
+    gpcp_lon = gpcp_sample.coords['longitude'] if 'longitude' in gpcp_sample.coords else gpcp_sample.coords['lon'] if 'lon' in gpcp_sample.coords else gpcp_sample.coords['X']
+    
+    # Debug Stats
+    print(f"GEOS Stats: Min={geos_sample.min().item():.4f}, Max={geos_sample.max().item():.4f}, Mean={geos_sample.mean().item():.4f}")
+    print(f"GPCP Stats: Min={gpcp_sample.min().item():.4f}, Max={gpcp_sample.max().item():.4f}, Mean={gpcp_sample.mean().item():.4f}")
+    print(f"GEOS Lon range: {geos_sample.coords['X'].min().item()} to {geos_sample.coords['X'].max().item()}")
+    print(f"GPCP Lon range: {gpcp_lon.min().item()} to {gpcp_lon.max().item()}")
     fig, axes = plt.subplots(nrows=4, ncols=2, figsize=(12, 16), 
                              subplot_kw={'projection': ccrs.PlateCarree()})
     
