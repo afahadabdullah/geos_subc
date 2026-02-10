@@ -1,25 +1,32 @@
 #!/bin/bash
 
-# Configuration
-PROJECT_DIR="/home1/11353/afahad/afahad/geossub"
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$SCRIPT_DIR"
 CONDA_DIR="$PROJECT_DIR/miniconda"
 ENV_NAME="geossub_env"
 
 echo "Setting up Miniconda environment in $PROJECT_DIR"
+echo "Architecture: aarch64 (for TACC Vista / ARM64)"
 
 # 1. Download and Install Miniconda if not present
 if [ ! -d "$CONDA_DIR" ]; then
-    echo "Downloading Miniconda..."
-    curl -O https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    echo "Downloading Miniconda (aarch64)..."
+    curl -O https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh
     echo "Installing Miniconda to $CONDA_DIR..."
-    bash Miniconda3-latest-Linux-x86_64.sh -b -p "$CONDA_DIR"
-    rm Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-aarch64.sh -b -p "$CONDA_DIR"
+    rm Miniconda3-latest-Linux-aarch64.sh
 else
     echo "Miniconda already installed at $CONDA_DIR"
 fi
 
 # 2. Initialize Conda for this script session
-source "$CONDA_DIR/bin/activate"
+if [ -f "$CONDA_DIR/bin/activate" ]; then
+    source "$CONDA_DIR/bin/activate"
+else
+    echo "Error: Miniconda activation script not found at $CONDA_DIR/bin/activate"
+    exit 1
+fi
 
 # 3. Configure Mamba solver
 echo "Configuring Mamba solver..."
@@ -32,6 +39,8 @@ if [ -f "$PROJECT_DIR/environment.yml" ]; then
     conda env update -n "$ENV_NAME" -f "$PROJECT_DIR/environment.yml" --prune
 else
     echo "Error: environment.yml not found in $PROJECT_DIR"
+    echo "Files in $PROJECT_DIR:"
+    ls -F "$PROJECT_DIR"
     exit 1
 fi
 
