@@ -137,60 +137,73 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     Publication-quality cartopy plot for a single test sample.
     
     Layout: 4 rows (LW1-LW4) × 5 columns:
-       GEOS Input | GPCP Truth | Ensemble Mean | Bias (GPCP-GEOS) | Residual (GPCP-EnsMean)
+       GEOS Input | GPCP Target | Ensemble Mean | Diff (GPCP−EnsMean) | Ensemble Spread (Std)
     
-    All inputs are denormalized numpy arrays: (4, H, W)
+    geos_input, gpcp_truth, ens_mean: denormalized numpy (4, H, W)
+    ensemble_preds: list of denormalized numpy (4, H, W)
     """
     n_weeks = geos_input.shape[0]
+    n_ens = len(ensemble_preds)
     week_labels = [f"Lead Week {i+1}" for i in range(n_weeks)]
     
-    # Clean NaNs
+    # Clean
     geos = np.nan_to_num(geos_input, nan=0.0)
     gpcp = np.nan_to_num(gpcp_truth, nan=0.0)
     ens  = np.nan_to_num(ens_mean, nan=0.0)
     
-    bias = gpcp - geos      # GPCP - GEOS
-    residual = gpcp - ens   # GPCP - Ensemble Mean
+    # Difference & Spread
+    diff = gpcp - ens  # GPCP - EnsMean
+    ens_stack = np.stack([np.nan_to_num(e, nan=0.0) for e in ensemble_preds], axis=0)  # (M, 4, H, W)
+    spread = np.std(ens_stack, axis=0)  # (4, H, W)
     
-    # Colormap limits
+    # Precip color limits
     all_precip = np.concatenate([geos.flatten(), gpcp.flatten()])
     vmax_precip = float(np.percentile(all_precip, 99.5)) + 0.5
     if vmax_precip <= 0:
         vmax_precip = 10.0
     
-    diff_abs_max = max(
-        float(np.percentile(np.abs(bias), 99)),
-        float(np.percentile(np.abs(residual), 99)),
-        0.5
-    )
+    # Diff limits (symmetric)
+    diff_abs_max = max(float(np.percentile(np.abs(diff), 99)), 0.5)
     
-    # Map projection
+    # Spread limits
+    vmax_spread = max(float(np.percentile(spread, 99.5)), 0.1)
+    
     proj = ccrs.PlateCarree()
     
-    fig = plt.figure(figsize=(28, 22))
-    gs = gridspec.GridSpec(n_weeks, 5, wspace=0.08, hspace=0.12,
+    fig = plt.figure(figsize=(30, 22))
+    gs = gridspec.GridSpec(n_weeks, 5, wspace=0.06, hspace=0.10,
                            left=0.05, right=0.95, top=0.93, bottom=0.08)
     
-    col_titles = ["GEOS Input", "GPCP Truth", "Ensemble Mean",
-                  "Bias (GPCP−GEOS)", "Residual (GPCP−EnsMean)"]
+    col_titles = [
+        "GEOS Input",
+        "GPCP Target",
+        f"Ensemble Mean ({n_ens} members)",
+        "Diff (GPCP − EnsMean)",
+        f"Ensemble Spread (Std, {n_ens} members)"
+    ]
     
     for row in range(n_weeks):
-        panels = [geos[row], gpcp[row], ens[row], bias[row], residual[row]]
+        panels = [geos[row], gpcp[row], ens[row], diff[row], spread[row]]
         
         for col in range(5):
             ax = fig.add_subplot(gs[row, col], projection=proj)
             data = panels[col]
             
             if col < 3:
-                # Precipitation (sequential)
+                # Precipitation (sequential Blues)
                 im = ax.pcolormesh(lons, lats, data, cmap='Blues',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
-            else:
-                # Difference (diverging)
+            elif col == 3:
+                # Difference (diverging RdBu)
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='RdBu',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
+            else:
+                # Spread (sequential hot)
+                im = ax.pcolormesh(lons, lats, data, cmap='YlOrRd',
+                                   vmin=0, vmax=vmax_spread,
+                                   transform=ccrs.PlateCarree(), shading='auto')
             
             # Map features
             ax.coastlines(linewidth=0.5, color='black')
@@ -209,11 +222,13 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
             gl.xlabel_style = {'fontsize': 7}
             gl.ylabel_style = {'fontsize': 7}
             
-            # Per-panel stats
+            # Stats
             if col < 3:
                 stat_text = f"Mean={np.mean(data):.2f}"
-            else:
+            elif col == 3:
                 stat_text = f"RMSE={np.sqrt(np.mean(data**2)):.2f}"
+            else:
+                stat_text = f"Avg Std={np.mean(data):.3f}"
             ax.text(0.02, 0.97, stat_text, transform=ax.transAxes, fontsize=7,
                     va='top', bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.8))
             
@@ -224,23 +239,31 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
             
             # Column titles
             if row == 0:
-                ax.set_title(col_titles[col], fontsize=11, fontweight='bold', pad=8)
+                ax.set_title(col_titles[col], fontsize=10, fontweight='bold', pad=8)
     
-    # Colorbars
-    cbar_ax1 = fig.add_axes([0.05, 0.04, 0.52, 0.015])
+    # --- Colorbars ---
+    # Precipitation (cols 0-2)
+    cbar_ax1 = fig.add_axes([0.05, 0.04, 0.35, 0.012])
     sm1 = plt.cm.ScalarMappable(cmap='Blues', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
-    cbar_ax2 = fig.add_axes([0.62, 0.04, 0.33, 0.015])
+    # Difference (col 3)
+    cbar_ax2 = fig.add_axes([0.43, 0.04, 0.25, 0.012])
     sm2 = plt.cm.ScalarMappable(cmap='RdBu',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     
+    # Spread (col 4)
+    cbar_ax3 = fig.add_axes([0.72, 0.04, 0.23, 0.012])
+    sm3 = plt.cm.ScalarMappable(cmap='YlOrRd', norm=plt.Normalize(0, vmax_spread))
+    sm3.set_array([])
+    fig.colorbar(sm3, cax=cbar_ax3, orientation='horizontal', label='Ensemble Spread (Std, mm/day)')
+    
     fig.suptitle(
         f"CMDE Test | Sample {sample_idx} | Init: {init_date} | "
-        f"{len(ensemble_preds)}-Member Ensemble | Precip vmax={vmax_precip:.1f}",
+        f"{n_ens}-Member Ensemble",
         fontsize=14, fontweight='bold', y=0.97
     )
     
@@ -250,6 +273,7 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     plt.close()
     print(f"  Saved: {save_path}")
     return save_path
+
 
 
 def run_test(args):
