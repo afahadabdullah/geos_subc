@@ -36,20 +36,25 @@ def process_geos_weekly(start_year=1999, end_year=2016, data_dir="dataprocess"):
                 continue
                 
             n_leads = ds.sizes['L']
-            if n_leads < 28:
-                print(f"Error: Not enough lead times ({n_leads}) for 4 weeks processing.")
-                continue
+            
+            # CASE 1: Already processed (L=4)
+            if n_leads == 4:
+                print("File seems to be already processed to weekly means (L=4). Checking units...")
+                ds_weekly = ds
+                # Proceed to unit conversion block
                 
-            # Select first 28 days (Lead 0 to 27)
-            # Assuming L=0 is Day 1, L=1 is Day 2, etc. (or Day 0..27)
-            ds_28 = ds.isel(L=slice(0, 28))
+            # CASE 2: Raw Daily Data (L >= 28)
+            elif n_leads >= 28:
+                # Select first 28 days (Lead 0 to 27)
+                ds_28 = ds.isel(L=slice(0, 28))
+                
+                # Compute Weekly Means
+                ds_weekly = ds_28.coarsen(L=7, boundary='exact').mean()
+            else:
+                 print(f"Error: Unexpected lead dimension size ({n_leads}). Skipping.")
+                 continue
             
-            # Compute Weekly Means
-            # We want to group L into 4 chunks of 7
-            # Coarsen / Resample
-            # ds.coarsen(L=7).mean() is perfect for this
-            
-            ds_weekly = ds_28.coarsen(L=7, boundary='exact').mean()
+            # Unit Conversion: kg/m2/s -> mm/day
             
             # Unit Conversion: kg/m2/s -> mm/day
             # Check if mean > 1e-3 (already mm/day?) or < 1e-3 (flux)
