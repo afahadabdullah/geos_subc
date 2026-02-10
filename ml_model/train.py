@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from diffusers.optimization import get_cosine_schedule_with_warmup
 import os
+import json
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -131,10 +132,21 @@ def train_model():
 
     # Auto-resume Logic
     latest_path = os.path.join(config["output_dir"], "latest_checkpoint")
+    start_epoch = 0
     if os.path.exists(latest_path):
         if accelerator.is_main_process:
             print(f"Loading checkpoint from: {latest_path}")
         accelerator.load_state(latest_path)
+        
+        # Load epoch metadata
+        epoch_file = os.path.join(latest_path, "epoch.json")
+        if os.path.exists(epoch_file):
+            with open(epoch_file, 'r') as f:
+                meta = json.load(f)
+                start_epoch = meta.get("epoch", 0) + 1
+                best_val_loss = meta.get("best_val_loss", float('inf'))
+                if accelerator.is_main_process:
+                    print(f"Resuming from epoch {start_epoch} (Best Val Loss: {best_val_loss:.4f})")
 
     # --------------------------------------------------------------------------
     # Training Loop
@@ -142,11 +154,11 @@ def train_model():
     if accelerator.is_main_process:
         print(f"Starting training with CMDE architecture. Samples: {len(train_dataset)}")
     
-    global_step = 0
+    global_step = start_epoch * len(train_dataloader)
     best_val_loss = float('inf')
     best_checkpoints = [] # List to track paths of best models
     
-    for epoch in range(config["num_epochs"]):
+    for epoch in range(start_epoch, config["num_epochs"]):
         model.train()
         train_loss = 0.0
         
@@ -284,9 +296,12 @@ def train_model():
                             shutil.rmtree(old_checkpoint, ignore_errors=True)
         
         # Periodic Save for Resuming (Always keep latest)
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 1 == 0:
             latest_path = f"{config['output_dir']}/latest_checkpoint"
             accelerator.save_state(latest_path)
+            if accelerator.is_main_process:
+                with open(os.path.join(latest_path, "epoch.json"), "w") as f:
+                    json.dump({"epoch": epoch, "best_val_loss": best_val_loss}, f)
 
     if accelerator.is_main_process:
         print("Training finished.")
