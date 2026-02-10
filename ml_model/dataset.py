@@ -6,16 +6,18 @@ import pandas as pd
 from arraylake import Client
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, forecast_store_path, obs_group_name=None, transform=None):
+    def __init__(self, forecast_store_path, obs_group_name=None, mjo_data_path=None, transform=None):
         """
         Args:
             forecast_store_path (str): Path to local Zarr file (e.g., 'dataprocess/geos_subc_2000.zarr')
             obs_group_name (str): ArrayLake group name for observations (e.g., 'era5'). 
                                   If None, will use a placeholder or skip obs loading.
+            mjo_data_path (str): Path to MJO indices file (e.g., CSV/NetCDF).
             transform (callable, optional): Optional transform to be applied on a sample.
         """
         self.forecast_store_path = forecast_store_path
         self.obs_group_name = obs_group_name
+        self.mjo_data_path = mjo_data_path
         self.transform = transform
         
         # Load Forecast Data (Lazy)
