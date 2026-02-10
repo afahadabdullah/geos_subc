@@ -219,15 +219,37 @@ def train_model():
 
                     # Plot first batch comparison
                     if idx == 0 and accelerator.is_main_process:
-                        pred_recon = (noisy_target - sqrt_one_minus_alpha * noise_pred) / (diffusion.sqrt_alpha_hats[timesteps].view(-1, 1, 1, 1) + 1e-8)
+                        samples_list = []
+                        # Generate 3 ensemble members for visualization
+                        for _ in range(3):
+                            # Use a fixed mid-range timestep for visualization consistency
+                            t_plot = torch.tensor([500], device=accelerator.device).expand(1)
+                            # Start with different noise for each ensemble member
+                            noisy_t, noise_t = diffusion.add_noise(target_truth[0:1], t_plot)
+                            
+                            mjo_s = mjo_map[0:1]
+                            month_s = month_onehot[0:1]
+                            
+                            # Predict noise
+                            pred_noise = model(torch.cat([noisy_t, forecast[0:1], mjo_s], dim=1), t_plot, month_s)
+                            
+                            # 1-step recon
+                            sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                            sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
+                            recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
+                            samples_list.append(denormalize(recon[0]))
+                        
+                        ens_mean_recon = torch.stack(samples_list).mean(dim=0).cpu().numpy()
+                        
+                        # Denormalize for plotting
                         input_raw = denormalize(forecast[0]).cpu().numpy()
                         target_raw = denormalize(target_truth[0]).cpu().numpy()
-                        pred_raw = denormalize(pred_recon[0]).cpu().numpy()
+                        pred_raw = samples_list[0].cpu().numpy() # First sample
                         
                         plot_comparison(
-                            input_raw, target_raw, pred_raw, pred_raw, 
+                            input_raw, target_raw, pred_raw, ens_mean_recon, 
                             f"{config['output_dir']}/plots/epoch_{epoch}.png",
-                            title=f"Epoch {epoch} - LW4 Reconstruction"
+                            title=f"Epoch {epoch} - LW4 Ensembled Visualization"
                         )
 
             avg_val_loss = val_loss / len(val_dataloader)
