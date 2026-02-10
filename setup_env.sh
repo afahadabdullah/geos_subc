@@ -33,16 +33,22 @@ echo "Configuring Mamba solver..."
 conda install -n base conda-libmamba-solver -y
 conda config --set solver libmamba
 
-# 4. Create environment from environment.yml
-echo "Creating/Updating environment $ENV_NAME from environment.yml..."
-if [ -f "$PROJECT_DIR/environment.yml" ]; then
-    conda env update -n "$ENV_NAME" -f "$PROJECT_DIR/environment.yml" --prune
-else
-    echo "Error: environment.yml not found in $PROJECT_DIR"
-    echo "Files in $PROJECT_DIR:"
-    ls -F "$PROJECT_DIR"
-    exit 1
-fi
+# 4. Create/Update environment (excluding PyTorch)
+echo "Updating environment core from environment.yml..."
+conda env update -n "$ENV_NAME" -f "$PROJECT_DIR/environment.yml" --prune
+
+# 5. Install CUDA-enabled PyTorch for ARM64 (TACC Vista Specific)
+echo "Installing/Verifying CUDA-enabled PyTorch for ARM64..."
+source "$CONDA_DIR/bin/activate" "$ENV_NAME"
+
+# Uninstall existing (potentially CPU-only) torch to ensure clean install
+pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
+
+# Install from PyTorch HTML index (Using cu121 which is stable for Grace Hopper)
+echo "Downloading and installing ARM64 CUDA wheels..."
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 echo "Environment setup complete."
 echo "To activate, run: source $CONDA_DIR/bin/activate $ENV_NAME"
+# Verify
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Torch version: {torch.__version__}')"

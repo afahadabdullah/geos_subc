@@ -6,10 +6,6 @@ channels:
 dependencies:
   - python=3.11
   - mamba
-  - pytorch
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1
   - xarray
   - zarr
   - pandas
