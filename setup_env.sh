@@ -42,18 +42,24 @@ echo "Installing/Verifying CUDA-enabled PyTorch for ARM64..."
 echo "This will download ~2GB of data, please wait..."
 source "$CONDA_DIR/bin/activate" "$ENV_NAME"
 
-# Uninstall existing (potentially CPU-only) torch to ensure clean install
+# Aggressively remove gmpy2 and other conflicting libraries
 echo "Cleaning up conflicting dependencies..."
 conda remove --force -y gmpy2 2>/dev/null || true
 pip uninstall -y torch torchvision torchaudio sympy gmpy2 2>/dev/null || true
 
+# Physically delete gmpy2 folders if they persist (Sympy bug workaround)
+SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+echo "Site packages at: $SITE_PACKAGES"
+rm -rf "$SITE_PACKAGES/gmpy2"* "$SITE_PACKAGES/sympy"*
+
 # Install from PyTorch HTML index (Using cu121 which is stable for Grace Hopper)
 echo "Downloading and installing ARM64 CUDA wheels (cu121)..."
-# We keep gmpy2 out of pip if it's causing issues, or install a known good version.
-# Let's try to install them via pip to ensure compatibility with torch.
 pip install --progress-bar on torch torchvision torchaudio sympy --index-url https://download.pytorch.org/whl/cu121
 
+# Force Sympy to ignore gmpy2 even if it sneaks back in
+export SYMPY_GROUND_TYPES=python
+
 echo "Environment setup complete."
-echo "To activate, run: source $CONDA_DIR/bin/activate $ENV_NAME"
+echo "To activate, run: source $CONDA_DIR/bin/activate $ENV_NAME && export SYMPY_GROUND_TYPES=python"
 # Verify
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Torch version: {torch.__version__}')"
