@@ -61,8 +61,8 @@ def train_model():
         mjo_file="mjo_processed.csv"
     )
     
-    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=4)
+    train_dataloader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True, num_workers=0)
+    val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0)
     
     # --------------------------------------------------------------------------
     # Model Setup (CMDE Architecture)
