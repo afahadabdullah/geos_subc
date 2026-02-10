@@ -1,6 +1,7 @@
 from arraylake import Client
 import xarray as xr
 import pandas as pd
+from dask.diagnostics import ProgressBar
 
 def load_geos_subc_data():
     """
@@ -44,10 +45,11 @@ if __name__ == "__main__":
         print("\nDataset Summary:")
         print(data)
         
-        # Save to Zarr
+        # Save to Zarr with progress bar
         output_path = "dataprocess/geos_subc_2000.zarr"
         print(f"\nSaving yearly data to {output_path}...")
-        data.to_zarr(output_path, mode='w', zarr_format=3)
+        with ProgressBar():
+            data.to_zarr(output_path, mode='w', zarr_format=3)
         print("Successfully saved data.")
         
     except Exception as e:

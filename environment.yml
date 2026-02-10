@@ -16,6 +16,7 @@ dependencies:
   - matplotlib
   - cartopy
   - seaborn
+  - tqdm
   - pip
   - pip:
       - arraylake
