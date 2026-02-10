@@ -42,6 +42,9 @@ echo "Installing/Verifying CUDA-enabled PyTorch for ARM64..."
 echo "This will download ~2GB of data, please wait..."
 source "$CONDA_DIR/bin/activate" "$ENV_NAME"
 
+# Try to load TACC modules (only works on compute nodes)
+module load gcc cuda 2>/dev/null || echo "Note: 'module load' skipped (likely on login node)"
+
 # Aggressively remove gmpy2 and other conflicting libraries
 echo "Cleaning up conflicting dependencies..."
 conda remove --force -y gmpy2 2>/dev/null || true
@@ -52,9 +55,9 @@ SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
 echo "Site packages at: $SITE_PACKAGES"
 rm -rf "$SITE_PACKAGES/gmpy2"* "$SITE_PACKAGES/sympy"*
 
-# Install from PyTorch HTML index (Using cu121 which is stable for Grace Hopper)
-echo "Downloading and installing ARM64 CUDA wheels (cu121)..."
-pip install --progress-bar on torch torchvision torchaudio sympy --index-url https://download.pytorch.org/whl/cu121
+# Install from PyTorch HTML index (Using cu124 which is much newer for Grace Hopper)
+echo "Downloading and installing ARM64 CUDA wheels (cu124)..."
+pip install --progress-bar on torch torchvision torchaudio sympy --index-url https://download.pytorch.org/whl/cu124
 
 # Force Sympy to ignore gmpy2 even if it sneaks back in
 export SYMPY_GROUND_TYPES=python
