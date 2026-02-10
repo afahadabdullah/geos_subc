@@ -11,11 +11,11 @@ from tqdm import tqdm
 try:
     from ml_model.dataset import GeosSubCDataset
     from ml_model.model import ConditionalUNet, GaussianDiffusion
-    from ml_model.utils import crps_ensemble
+    from ml_model.utils import crps_ensemble, denormalize, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
     from model import ConditionalUNet, GaussianDiffusion
-    from utils import crps_ensemble
+    from utils import crps_ensemble, denormalize, plot_comparison
 
 def train_model():
     # --------------------------------------------------------------------------
@@ -92,8 +92,7 @@ def train_model():
     model = ConditionalUNet(
         in_channels=in_channels, 
         out_channels=out_channels, 
-        base_filters=64,
-        num_months=12
+        base_filters=64
     )
     
     # Custom Gaussian Diffusion
@@ -143,10 +142,10 @@ def train_model():
                 # Scale Factor (50mm -> 1.0) approx for raw mm/day
                 scale = 0.02
                 
-                target_truth = batch["target_truth"] * scale  # (B, 4, Y, X)
-                forecast = batch["input_forecast"] * scale    # (B, 4, Y, X)
-                mjo = batch["mjo_conditioning"]               # (B, 2)
-                months = batch["month"]                       # (B,)
+                target_truth = batch["target_truth"]  # (B, 4, Y, X) - Already log-normalized
+                forecast = batch["input_forecast"]    # (B, 4, Y, X)
+                mjo = batch["mjo_conditioning"]       # (B, 2)
+                month_onehot = batch["month_onehot"]  # (B, 12)
                 
                 # 2. Add Noise to Target (Raw Truth, NOT Residual)
                 # User requested raw target instead of residual.
@@ -172,7 +171,7 @@ def train_model():
                 model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
                 
                 # 7. Predict Noise
-                noise_pred = model(model_input, timesteps, months)
+                noise_pred = model(model_input, timesteps, month_onehot)
                 
                 loss = F.mse_loss(noise_pred, noise)
                 
@@ -196,20 +195,15 @@ def train_model():
                 print("Validating...")
             
             with torch.no_grad():
-                for batch in val_dataloader:
-                    # Scale Factor (50mm -> 1.0) approx for raw mm/day
-                    scale = 0.02
-
-                    target_truth = batch["target_truth"] * scale  # (B, 4, Y, X)
-                    forecast = batch["input_forecast"] * scale    # (B, 4, Y, X)
-                    mjo = batch["mjo_conditioning"]               # (B, 2)
-                    months = batch["month"]
+                for idx, batch in enumerate(val_dataloader):
+                    target_truth = batch["target_truth"]
+                    forecast = batch["input_forecast"]
+                    mjo = batch["mjo_conditioning"]
+                    month_onehot = batch["month_onehot"]
                     
-                    # Validation on Raw Target
-                    target = target_truth
-                    bs = target.shape[0]
+                    bs = target_truth.shape[0]
                     timesteps = diffusion.sample_timesteps(bs)
-                    noisy_target, noise = diffusion.add_noise(target, timesteps)
+                    noisy_target, noise = diffusion.add_noise(target_truth, timesteps)
                     
                     sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[timesteps].view(-1, 1, 1, 1)
                     cond_noise = torch.randn_like(forecast)
@@ -217,9 +211,26 @@ def train_model():
                     mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
                     model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
                     
-                    noise_pred = model(model_input, timesteps, months)
+                    noise_pred = model(model_input, timesteps, month_onehot)
                     loss = F.mse_loss(noise_pred, noise)
                     val_loss += loss.item()
+
+                    # Plot first batch comparison
+                    if idx == 0 and accelerator.is_main_process:
+                        # 1-step reconstruction for visualization
+                        pred_recon = (noisy_target - sqrt_one_minus_alpha * noise_pred) / (diffusion.sqrt_alpha_hats[timesteps].view(-1, 1, 1, 1) + 1e-8)
+                        
+                        # Denormalize for plotting
+                        input_raw = denormalize(forecast[0]).cpu().numpy()
+                        target_raw = denormalize(target_truth[0]).cpu().numpy()
+                        pred_raw = denormalize(pred_recon[0]).cpu().numpy()
+                        
+                        # Simple ensemble mean (proxy with 1 sample for speed during training epoch)
+                        plot_comparison(
+                            input_raw, target_raw, pred_raw, pred_raw, 
+                            f"{config['output_dir']}/plots/epoch_{epoch}.png",
+                            title=f"Epoch {epoch} - LW4 Reconstruction"
+                        )
 
             avg_val_loss = val_loss / len(val_dataloader)
             if accelerator.is_main_process:

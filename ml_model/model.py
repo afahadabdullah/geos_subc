@@ -52,13 +52,11 @@ class ConditionalUNet(nn.Module):
     """
     V8/V9 UNet Architecture from user's trainv9.py.
     """
-    def __init__(self, in_channels, out_channels, base_filters=64, num_months=12, emb_dim=256):
+    def __init__(self, in_channels, out_channels, base_filters=64, emb_dim=256):
         super().__init__()
         self.time_emb = SinusoidalEmbedding(dim=128)
-        # Assuming we might not have 'month' in every dataset, but keeping arch strict.
-        # If month is not available, we can pass zeros or remove. 
-        # User dataset `GeosSubCDataset` has dates, so we can derive month.
-        self.month_emb = nn.Embedding(num_months + 1, 128) # +1 for safely handling 1-12
+        # One-hot month projection (12 months -> 128 dim)
+        self.month_proj = nn.Linear(12, 128)
         self.cond_mlp = nn.Sequential(nn.Linear(256, emb_dim), nn.LeakyReLU())
         
         # In trainv9, input to conv_in is cat([noisy_target, condition])
@@ -84,11 +82,11 @@ class ConditionalUNet(nn.Module):
         
         self.conv_out = nn.Conv2d(base_filters, out_channels, 1)
     
-    def forward(self, x_input, timesteps, month):
+    def forward(self, x_input, timesteps, month_onehot):
         # x_input is already cat([noisy_target, condition])
         
         t_emb = self.time_emb(timesteps)
-        m_emb = self.month_emb(month)
+        m_emb = self.month_proj(month_onehot)
         cond_emb = self.cond_mlp(torch.cat([t_emb, m_emb], dim=1))
         
         x = self.conv_in(x_input)

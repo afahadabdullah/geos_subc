@@ -142,15 +142,20 @@ class GeosSubCDataset(Dataset):
             
             # Month (1-12)
             month = s_date.month
+            month_onehot = np.zeros(12, dtype=np.float32)
+            month_onehot[month - 1] = 1.0
             
-            x_forecast = np.nan_to_num(x_forecast, nan=0.0)
-            y_truth = np.nan_to_num(y_truth, nan=0.0)
+            # Log-normalization: log1p(x) / 4.0 (approximate normalization for precip)
+            # This handles non-negativity and scale.
+            x_forecast = np.log1p(np.nan_to_num(x_forecast, nan=0.0)) / 4.0
+            y_truth = np.log1p(np.nan_to_num(y_truth, nan=0.0)) / 4.0
             
             return {
-                "input_forecast": torch.tensor(x_forecast), 
-                "target_truth": torch.tensor(y_truth),      
-                "mjo_conditioning": torch.tensor(rmm_vals), 
+                "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
+                "target_truth": torch.tensor(y_truth, dtype=torch.float32),      
+                "mjo_conditioning": torch.tensor(rmm_vals, dtype=torch.float32), 
                 "month": torch.tensor(month, dtype=torch.long),
+                "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),
                 "S": str(s_date),
                 "M": m_idx
             }

@@ -1,49 +1,64 @@
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+def denormalize(x):
+    """Inverse of log1p(x) / 4.0"""
+    return torch.expm1(x * 4.0)
 
 def crps_ensemble(observations, forecasts):
     """
     Compute Continuous Ranked Probability Score (CRPS) for an ensemble forecast.
-    
-    Args:
-        observations (torch.Tensor): Shape (Batch, ...) - The ground truth.
-        forecasts (torch.Tensor): Shape (Batch, Members, ...) - The ensemble predictions.
-    
-    Returns:
-        torch.Tensor: Scalar CRPS value (averaged over batch).
+    observations: (B, ...) denormalized
+    forecasts: (B, M, ...) denormalized
     """
-    # CRPS_ensemble = E_x|y| - 0.5 * E_x,x'|x - x'|
-    # Where x, x' are independent draws from the forecast distribution (members)
-    # y is the observation
-    
-    # forecasts: (B, M, ...)
-    # observations: (B, ...) -> unsqueeze to (B, 1, ...)
     obs = observations.unsqueeze(1)
-    
-    # Term 1: Mean absolute error of members wrt observation
-    # Shape: (B, M, ...) -> Mean over M -> (B, ...)
     term_1 = torch.abs(forecasts - obs).mean(dim=1)
-    
-    # Term 2: Mean absolute difference between ensemble members
-    # This is O(M^2) which is fine for small ensembles (e.g. M=10-50)
-    # Expand to (B, M, 1, ...) and (B, 1, M, ...)
     f1 = forecasts.unsqueeze(2)
     f2 = forecasts.unsqueeze(1)
-    
-    # Shape: (B, M, M, ...) -> Mean over M, M -> (B, ...)
     term_2 = torch.abs(f1 - f2).mean(dim=(1, 2))
-    
-    # CRPS = Term 1 - 0.5 * Term 2
     crps = term_1 - 0.5 * term_2
-    
     return crps.mean()
 
+def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, title="Validation Comparison"):
+    """
+    Plots Lead Week 4 comparison.
+    input_geos: (4, H, W) Lead Week 4 is index 3
+    target_gpcp: (4, H, W)
+    prediction: (4, H, W)
+    ens_mean: (4, H, W)
+    """
+    # Use Lead Week 4 (Index 3) for visualization
+    idx = 3
+    
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    
+    # Common colorbar limits for comparison
+    vmax = max(input_geos[idx].max(), target_gpcp[idx].max(), prediction[idx].max(), ens_mean[idx].max())
+    vmin = 0
+    
+    im0 = axes[0].imshow(input_geos[idx], cmap='Blues', vmin=vmin, vmax=vmax)
+    axes[0].set_title("GEOS Input (LW4)")
+    
+    im1 = axes[1].imshow(target_gpcp[idx], cmap='Blues', vmin=vmin, vmax=vmax)
+    axes[1].set_title("GPCP Ground Truth")
+    
+    im2 = axes[2].imshow(prediction[idx], cmap='Blues', vmin=vmin, vmax=vmax)
+    axes[2].set_title("Model Prediction (1 sample)")
+    
+    im3 = axes[3].imshow(ens_mean[idx], cmap='Blues', vmin=vmin, vmax=vmax)
+    axes[3].set_title("Ensemble Mean (3 samples)")
+    
+    plt.colorbar(im3, ax=axes, orientation='horizontal', label='Precipitation (mm/day)', shrink=0.6)
+    fig.suptitle(title)
+    
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close()
+
 def compute_mse(pred, target):
-    """
-    Standard MSE for validation.
-    """
     return torch.nn.functional.mse_loss(pred, target)
 
-# Placeholder for MJO metric
 def compute_mjo_rmse(pred_rmm, target_rmm):
     return torch.sqrt(torch.mean((pred_rmm - target_rmm)**2))
