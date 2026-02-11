@@ -262,26 +262,28 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     col_titles = [
         "GEOS Input",
         "GPCP Target",
+        "Single Member (Random)",
         f"Ensemble Mean ({n_ens})",
-        "GEOS Bias (GPCP−GEOS)",
         "Model Bias (GPCP−EnsMean)",
         "Ensemble Spread (Std)",
         "Improvement (|GeosErr|−|ModelErr|)"
     ]
     
     for row in range(n_weeks):
-        panels = [geos[row], gpcp[row], ens[row], geos_bias[row], model_bias[row], spread[row], improvement[row]]
+        # Use first ensemble member for visualization
+        single_member = np.nan_to_num(ensemble_preds[0][row], nan=0.0)
+        panels = [geos[row], gpcp[row], single_member, ens[row], model_bias[row], spread[row], improvement[row]]
         
         for col in range(7):
             ax = fig.add_subplot(gs[row, col], projection=proj)
             data = panels[col]
             
-            if col < 3:
+            if col < 4:
                 # Precipitation (sequential)
                 im = ax.pcolormesh(lons, lats, data, cmap='YlGnBu',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
-            elif col < 5:
+            elif col == 4:
                 # Bias/Diff (diverging BrBG: Brown=Dry, Green=Wet)
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='BrBG',
@@ -315,9 +317,9 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
             gl.ylabel_style = {'fontsize': 7}
             
             # Stats
-            if col < 3:
+            if col < 4:
                 stat_text = f"Mean={np.mean(data):.2f}"
-            elif col < 5:
+            elif col == 4:
                 stat_text = f"RMSE={np.sqrt(np.mean(data**2)):.2f}"
             elif col == 5:
                 stat_text = f"Avg Std={np.mean(data):.3f}"
@@ -338,27 +340,27 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
                 ax.set_title(col_titles[col], fontsize=10, fontweight='bold', pad=8)
     
     # --- Colorbars ---
-    # Precipitation (cols 0-2)
-    cbar_ax1 = fig.add_axes([0.04, 0.04, 0.25, 0.012])
+    # Precipitation (cols 0-3) - Covers ~0.04 to 0.52
+    cbar_ax1 = fig.add_axes([0.04, 0.04, 0.45, 0.012])
     sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
-    # Bias/Diff (cols 3-4)
-    cbar_ax2 = fig.add_axes([0.31, 0.04, 0.25, 0.012])
+    # Bias/Diff (col 4) - Starts ~0.56
+    cbar_ax2 = fig.add_axes([0.55, 0.04, 0.10, 0.012])
     sm2 = plt.cm.ScalarMappable(cmap='BrBG',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     
-    # Spread (col 5)
-    cbar_ax3 = fig.add_axes([0.58, 0.04, 0.12, 0.012])
+    # Spread (col 5) - Starts ~0.69
+    cbar_ax3 = fig.add_axes([0.69, 0.04, 0.10, 0.012])
     sm3 = plt.cm.ScalarMappable(cmap='YlOrRd', norm=plt.Normalize(0, vmax_spread))
     sm3.set_array([])
     fig.colorbar(sm3, cax=cbar_ax3, orientation='horizontal', label='Ensemble Spread (Std)')
     
-    # Improvement (col 6)
-    cbar_ax4 = fig.add_axes([0.72, 0.04, 0.22, 0.012])
+    # Improvement (col 6) - Starts ~0.82
+    cbar_ax4 = fig.add_axes([0.82, 0.04, 0.14, 0.012])
     sm4 = plt.cm.ScalarMappable(cmap='RdBu',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-imp_abs_max, vmax=imp_abs_max))
     sm4.set_array([])

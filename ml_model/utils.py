@@ -97,16 +97,20 @@ def denormalize_residual(residual_norm, forecast_norm):
     prediction_log = forecast_log + residual_log
     
     # 4. Undo log1p
+    # Clamp to avoid overflow issues with expm1
+    # Max value for log1p is ~10 (precip ~22000 mm/day)
+    # Max value for float32 exp is ~88
+    # Clamp to 10.0, which is ~22000 mm/day (physically extreme but safe)
     if isinstance(prediction_log, torch.Tensor):
-        prediction_log = torch.clamp(prediction_log, max=15.0)
-        prediction = torch.expm1(prediction_log)
-        prediction = torch.clamp(prediction, min=0.0)
+        prediction_log = torch.clamp(prediction_log, max=10.0) 
+        predicted_physical = torch.expm1(prediction_log)
+        predicted_physical = torch.clamp(predicted_physical, min=0.0) # Ensure non-negative precip
     else:
-        prediction_log = np.clip(prediction_log, a_min=None, a_max=15.0)
-        prediction = np.expm1(prediction_log)
-        prediction = np.maximum(prediction, 0.0)
+        prediction_log = np.clip(prediction_log, a_min=None, a_max=10.0) 
+        predicted_physical = np.expm1(prediction_log)
+        predicted_physical = np.maximum(predicted_physical, 0.0) # Ensure non-negative precip
     
-    return prediction
+    return predicted_physical
 
 def crps_ensemble(observations, forecasts):
     """
