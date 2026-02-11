@@ -1,4 +1,17 @@
 import torch
+"""
+GEOS S2S3 Dataset Loader
+
+Handles loading of:
+1. GEOS Subseasonal Forecasts (Input) - Format: Zarr
+2. GPCP Precipitation (Target/Truth) - Format: Zarr
+3. MJO Indices (Conditioning) - Format: CSV
+
+Features:
+- Zarr-based lazy loading or RAM preloading.
+- Log-transform normalization (log1p) using pre-calculated stats.
+- Sequential or Random sampling.
+"""
 from torch.utils.data import Dataset
 import xarray as xr
 import numpy as np

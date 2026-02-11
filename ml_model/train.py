@@ -12,6 +12,26 @@ try:
 except Exception:
     pass
 # ------------------------------------------------
+"""
+GEOS S2S3 Bias Correction & Downscaling Training Script (Residual Learning)
+
+This script trains a Conditional UNet with Gaussian Diffusion (DDPM/DDIM) to predict 
+the precipitation residual (Truth - GEOS Forecast).
+
+Key Features:
+- Residual Learning: Targets (GPCP - GEOS) instead of raw values for better stability.
+- Conditioning: 
+    1. GEOS Forecast (Input)
+    2. Observed State (Previous Week GPCP)
+    3. MJO Features (RMM1, RMM2, Amplitude, Phase)
+    4. Month One-Hot Encoding
+- Noise Scheduler: Cosine Schedule (via huggingface diffusers).
+- Multi-GPU Support: via HuggingFace Accelerate.
+- Validation: Periodically generates sample plots and computes CRPS.
+
+Usage:
+    python ml_model/train.py --batch_size 16 --epochs 50 --lr 1e-4 ...
+"""
 
 import torch
 import torch.nn.functional as F

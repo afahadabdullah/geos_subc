@@ -28,6 +28,23 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import json
 import argparse
+"""
+GEOS S2S3 Test & Visualization Script
+
+This script generates publication-quality comparisons between:
+1. Ground Truth (GPCP)
+2. GEOS S2S3 Forecast (Ensemble Mean)
+3. Model Prediction (Ensemble Mean of Diffusion Samples)
+
+Key Features:
+- Seasonal Sampling: Can automatically select Jan, Mar, May, Jul, Sep, Nov (if --n_samples 6).
+- Bias Visualization: Explicit 'GEOS Bias' vs 'Model Bias' columns.
+- Ensemble Stats: Computes spread and improvement metrics.
+- PDF/PNG Output: Saves high-res plots.
+
+Usage:
+    python ml_model/test.py --n_samples 6 --n_ensemble 10 ...
+"""
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
