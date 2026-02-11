@@ -146,6 +146,66 @@ def train_model():
     val_dataloader = DataLoader(val_dataset, batch_size=config["batch_size"], shuffle=False, num_workers=0, pin_memory=True)
     
     # --------------------------------------------------------------------------
+    # DIAGNOSTIC: Pre-training Data Check
+    # --------------------------------------------------------------------------
+    if accelerator.is_main_process:
+        print("\n--- DIAGNOSTIC: Checking Data Distribution Before Training ---")
+        try:
+            # Grab one batch/sample
+            sample = train_dataset[0]
+            f_norm = sample["input_forecast"].numpy()
+            t_norm = sample["target_truth"].numpy()
+            
+            # Reconstruct "Raw" (Approximate, since we don't have raw in __getitem__ anymore)
+            # Formula: x = 2 * ((log1p(raw) - min) / denom) - 1
+            # Inverse: raw = expm1( ((x + 1)/2 * denom) + min )
+            
+            vmin, vmax = train_dataset.norm_min, train_dataset.norm_max
+            denom = vmax - vmin if vmax != vmin else 1.0
+            
+            def inv_func(x):
+                val = (x + 1.0) / 2.0
+                val = val * denom + vmin
+                return np.expm1(val)
+            
+            f_raw = inv_func(f_norm)
+            t_raw = inv_func(t_norm)
+            
+            print(f"Norm Stats (Min/Max/Mean/Std):")
+            print(f"  Forecast: {f_norm.min():.2f} / {f_norm.max():.2f} / {f_norm.mean():.2f} / {f_norm.std():.2f}")
+            print(f"  Target  : {t_norm.min():.2f} / {t_norm.max():.2f} / {t_norm.mean():.2f} / {t_norm.std():.2f}")
+            
+            print(f"Reconstructed Raw Stats (Min/Max/Mean/Std) [mm/day]:")
+            print(f"  Forecast: {f_raw.min():.2f} / {f_raw.max():.2f} / {f_raw.mean():.2f} / {f_raw.std():.2f}")
+            print(f"  Target  : {t_raw.min():.2f} / {t_raw.max():.2f} / {t_raw.mean():.2f} / {t_raw.std():.2f}")
+            
+            # Plot
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(2, 2, figsize=(12, 10))
+            
+            ax[0,0].hist(f_norm.flatten(), bins=50, color='blue', alpha=0.7)
+            ax[0,0].set_title("Normalized Forecast [-1, 1]")
+            ax[0,1].hist(t_norm.flatten(), bins=50, color='green', alpha=0.7)
+            ax[0,1].set_title("Normalized Target [-1, 1]")
+            
+            ax[1,0].hist(f_raw.flatten(), bins=50, color='blue', alpha=0.7)
+            ax[1,0].set_title("Raw Forecast (mm/day)")
+            ax[1,0].set_yscale('log')
+            ax[1,1].hist(t_raw.flatten(), bins=50, color='green', alpha=0.7)
+            ax[1,1].set_title("Raw Target (mm/day)")
+            ax[1,1].set_yscale('log')
+            
+            plt.tight_layout()
+            os.makedirs(f"{config['output_dir']}/plots", exist_ok=True)
+            plt.savefig(f"{config['output_dir']}/plots/diagnostic_pretrain.png")
+            plt.close()
+            print(f"Diagnostic plot saved to {config['output_dir']}/plots/diagnostic_pretrain.png")
+            print("----------------------------------------------------------\n")
+            
+        except Exception as e:
+            print(f"Diagnostic check failed: {e}")
+            
+    # --------------------------------------------------------------------------
     # Model Setup (CMDE Architecture)
     # --------------------------------------------------------------------------
     # Inputs:
@@ -237,6 +297,12 @@ def train_model():
                 mjo = batch["mjo_conditioning"]       # (B, 2)
                 month_onehot = batch["month_onehot"]  # (B, 12)
                 
+                # DIAGNOSTIC: Check range once per epoch or every N steps
+                if global_step % 500 == 0 and accelerator.is_main_process:
+                    print(f"\n[Step {global_step}] Input Stats (should be in [-1, 1]):")
+                    print(f"  Target: min={target_truth.min():.2f}, max={target_truth.max():.2f}, mean={target_truth.mean():.2f}")
+                    print(f"  Forecast: min={forecast.min():.2f}, max={forecast.max():.2f}, mean={forecast.mean():.2f}")
+                
                 # 2. Add Noise to Target
                 target = target_truth
                 bs = target.shape[0]
@@ -266,8 +332,18 @@ def train_model():
                 optimizer.zero_grad()
                 
             train_loss += loss.item()
+            
+            # Logging stats to detect collapse/explosion
+            noise_mean = noise_pred.mean().item()
+            noise_std = noise_pred.std().item()
+            
             progress_bar.update(1)
-            progress_bar.set_postfix({"loss": loss.item()})
+            progress_bar.set_postfix({"loss": loss.item(), "n_mu": f"{noise_mean:.2f}", "n_std": f"{noise_std:.2f}"})
+            
+            # Log to accelerator tracking
+            if global_step % 100 == 0:
+                accelerator.log({"train_loss": loss.item(), "noise_mean": noise_mean, "noise_std": noise_std}, step=global_step)
+            
             global_step += 1
             
         progress_bar.close()
@@ -306,6 +382,18 @@ def train_model():
                     # Cache first batch for plotting
                     if idx == 0 and accelerator.is_main_process:
                         first_batch_data = (target_truth[0:1], forecast[0:1], observed[0:1], mjo_map[0:1], month_onehot[0:1])
+                        
+                        # DIAGNOSTIC: Plot normalization stats for this batch
+                        try:
+                            from ml_model.utils import plot_normalization_diagnostic
+                            plot_normalization_diagnostic(
+                                forecast.cpu().numpy(), 
+                                target_truth.cpu().numpy(), 
+                                observed.cpu().numpy(),
+                                f"{config['output_dir']}/plots/diag_norm_epoch_{epoch}.png"
+                            )
+                        except Exception as e:
+                            print(f"Failed to plot normalization diagnostic: {e}")
 
             avg_val_loss = val_loss / len(val_dataloader)
             
@@ -327,6 +415,9 @@ def train_model():
                                 n_steps=50, image_size=config["image_size"],
                                 cmde_ratio=config["cmde_ratio"]
                             )
+                            # Log sample stats
+                            if accelerator.is_main_process:
+                                print(f"    Sampled x0 stats: mean={pred.mean().item():.3f}, std={pred.std().item():.3f}, min={pred.min().item():.3f}, max={pred.max().item():.3f}")
                             samples_list.append(denormalize(pred[0]))
                     
                     ens_mean_recon = torch.stack(samples_list).mean(dim=0).detach().cpu().numpy()

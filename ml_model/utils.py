@@ -175,3 +175,30 @@ def compute_mse(pred, target):
 
 def compute_mjo_rmse(pred_rmm, target_rmm):
     return torch.sqrt(torch.mean((pred_rmm - target_rmm)**2))
+
+
+def plot_normalization_diagnostic(forecast, target, observed, save_path):
+    """
+    Plot histograms and stats of normalized inputs to verify they are in [-1, 1].
+    """
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    data_list = [
+        ("Forecast", forecast.flatten()),
+        ("Target", target.flatten()),
+        ("Observed", observed.flatten())
+    ]
+    
+    for ax, (name, data) in zip(axes, data_list):
+        ax.hist(data, bins=50, alpha=0.7, color='blue', density=True)
+        ax.set_title(f"{name}\nMin:{data.min():.2f} Max:{data.max():.2f}\nMean:{data.mean():.2f} Std:{data.std():.2f}")
+        ax.axvline(-1, color='r', linestyle='--')
+        ax.axvline(1, color='r', linestyle='--')
+        ax.set_xlim(-1.5, 1.5)
+    
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    plt.close()
