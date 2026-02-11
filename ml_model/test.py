@@ -40,11 +40,11 @@ if str(root_dir) not in sys.path:
 try:
     from ml_model.dataset import GeosSubCDataset
     from ml_model.model import ConditionalUNet, GaussianDiffusion
-    from ml_model.utils import denormalize
+    from ml_model.utils import denormalize, denormalize_residual
 except ImportError:
     from dataset import GeosSubCDataset
     from model import ConditionalUNet, GaussianDiffusion
-    from utils import denormalize
+    from utils import denormalize, denormalize_residual
 
 # Matplotlib backend for headless servers
 import matplotlib
@@ -447,7 +447,7 @@ def run_test(args):
                 pred = ddim_sample(model, diffusion, forecast, observed, mjo_map, month_oh,
                                    n_steps=args.ddpm_steps, image_size=image_size)
             
-            pred_denorm = denormalize(pred[0]).detach().cpu().numpy()
+            pred_denorm = denormalize_residual(pred[0], forecast[0]).detach().cpu().numpy()
             ensemble_preds.append(pred_denorm)
             print(f"Done (mean={pred_denorm.mean():.2f})")
         
