@@ -166,8 +166,10 @@ class GaussianDiffusion:
             x = torch.linspace(0, timesteps, steps, device=device)
             alphas_cumprod = torch.cos(((x / timesteps) + 0.008) / (1 + 0.008) * torch.pi * 0.5) ** 2
             alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            # Clip to prevent alpha_cumprod[-1] == 0 which causes singularity
+            alphas_cumprod = torch.clamp(alphas_cumprod, min=0.001)
             betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-            self.betas = torch.clamp(betas, 0.0001, 0.9999)
+            self.betas = torch.clamp(betas, 0.0001, 0.999) # Clip upper bound to avoid alpha_hat=0
             
         self.alphas = 1.0 - self.betas
         self.alpha_hats = torch.cumprod(self.alphas, dim=0)
