@@ -70,6 +70,42 @@ def get_geos_ens_mean(data_root, init_date_str):
         print(f"Warning: Could not load GEOS ensemble for {init_date_str}: {e}")
         return None, 0
 
+def select_seasonal_samples(dataset, n_samples=6):
+    """
+    Select 6 samples spaced throughout the year (Jan, Mar, May, Jul, Sep, Nov).
+    """
+    # Target months: Jan(1), Mar(3), May(5), Jul(7), Sep(9), Nov(11)
+    target_months = [1, 3, 5, 7, 9, 11]
+    
+    indices = []
+    found_months = set()
+    
+    # Iterate through dataset to find first match for each month (prefer m_idx=0)
+    for idx in range(len(dataset)):
+        sample = dataset.samples[idx]
+        s_date = sample['S']
+        month = s_date.month
+        m_idx = sample['M']
+        
+        if month in target_months and month not in found_months and m_idx == 0:
+            indices.append(idx)
+            found_months.add(month)
+            if len(found_months) == len(target_months):
+                break
+    
+    # Check if we found all
+    if len(indices) < 6:
+        print(f"  Warning: Only found {len(indices)} seasonal samples. Filling randomized remaining.")
+        remaining = n_samples - len(indices)
+        pool = [i for i in range(len(dataset)) if i not in indices]
+        if pool:
+            # fill with random
+            fill = np.random.choice(pool, size=min(remaining, len(pool)), replace=False)
+            indices.extend(list(fill))
+            
+    indices.sort()
+    return np.array(indices)
+
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
@@ -477,10 +513,17 @@ def run_test(args):
     lons = np.linspace(0, 359, image_size[1])
     
     # --- Random Sample Selection ---
-    np.random.seed(42)
-    n_total = len(val_dataset)
-    sample_indices = np.random.choice(n_total, size=min(args.n_samples, n_total), replace=False)
-    sample_indices.sort()
+    
+    # Select samples
+    if args.n_samples == 6:
+        print("Selecting seasonal samples (Jan, Mar, May, Jul, Sep, Nov)...")
+        sample_indices = select_seasonal_samples(val_dataset)
+    else:
+        # Default random (seeded)
+        np.random.seed(42)
+        n_total = len(val_dataset)
+        sample_indices = np.random.choice(n_total, size=min(args.n_samples, n_total), replace=False)
+        sample_indices.sort()
     
     print(f"\nGenerating {args.n_ensemble}-member ensemble predictions for {len(sample_indices)} samples...")
     print(f"DDPM reverse steps: {args.ddpm_steps}")
