@@ -33,7 +33,10 @@ class GeosSubCDataset(Dataset):
             stats = json.load(f)
         self.norm_min = stats["log1p_min"]
         self.norm_max = stats["log1p_max"]
+        self.res_min = stats.get("residual_min", -5.0)
+        self.res_max = stats.get("residual_max", 5.0)
         print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
+        print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
         
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
@@ -221,18 +224,33 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Min-max normalization: (log1p(x) - min) / (max - min) -> [0, 1]
+            # Log1p transform
             vmin = self.norm_min
             vmax = self.norm_max
             denom = vmax - vmin if vmax != vmin else 1.0
-            x_forecast = 2 * ((np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - vmin) / denom) - 1.0
-            y_truth = 2 * ((np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - vmin) / denom) - 1.0
-            obs_state = 2 * ((np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - vmin) / denom) - 1.0
+            
+            x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
+            y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
+            obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
+            
+            # Residual in log space: log1p(GPCP) - log1p(GEOS)
+            residual_log = y_truth_log - x_forecast_log
+            
+            # Normalize inputs to [-1, 1] using global min/max
+            x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
+            y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
+            obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
+            
+            # Normalize residual to [-1, 1] using residual min/max
+            res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
+            residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
+            residual_norm = np.clip(residual_norm, -1.0, 1.0)
             
             return {
-                "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
-                "target_truth": torch.tensor(y_truth, dtype=torch.float32),
-                "observed_state": torch.tensor(obs_state, dtype=torch.float32),
+                "input_forecast": torch.tensor(x_forecast_norm, dtype=torch.float32), 
+                "target_truth": torch.tensor(y_truth_norm, dtype=torch.float32),
+                "target_residual": torch.tensor(residual_norm, dtype=torch.float32),
+                "observed_state": torch.tensor(obs_state_norm, dtype=torch.float32),
                 "mjo_conditioning": torch.tensor(rmm_vals, dtype=torch.float32), 
                 "month": torch.tensor(month, dtype=torch.long),
                 "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),

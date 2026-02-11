@@ -58,6 +58,56 @@ def denormalize(x):
         x = np.maximum(x, 0.0)
     return x
 
+
+def denormalize_residual(residual_norm, forecast_norm):
+    """
+    Convert a normalized residual back to physical precipitation (mm/day).
+    
+    Steps:
+    1. Undo [-1, 1] scaling on residual using residual_min/max
+    2. Undo [-1, 1] scaling on forecast using global min/max  
+    3. Combine: log1p(prediction) = residual_log + forecast_log
+    4. expm1 to get mm/day
+    
+    Args:
+        residual_norm: Normalized residual in [-1, 1] (from DDIM output)
+        forecast_norm: Normalized forecast in [-1, 1] (input condition)
+    Returns:
+        Physical precipitation in mm/day
+    """
+    import json
+    stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+    with open(stats_path, 'r') as f:
+        stats = json.load(f)
+    
+    vmin = stats["log1p_min"]
+    vmax = stats["log1p_max"]
+    res_min = stats.get("residual_min", -5.0)
+    res_max = stats.get("residual_max", 5.0)
+    
+    # 1. Undo [-1, 1] on residual -> log-space residual
+    res_denom = res_max - res_min if res_max != res_min else 1.0
+    residual_log = (residual_norm + 1.0) / 2.0 * res_denom + res_min
+    
+    # 2. Undo [-1, 1] on forecast -> log-space forecast
+    denom = vmax - vmin if vmax != vmin else 1.0
+    forecast_log = (forecast_norm + 1.0) / 2.0 * denom + vmin
+    
+    # 3. Combine: prediction_log = forecast_log + residual_log
+    prediction_log = forecast_log + residual_log
+    
+    # 4. Undo log1p
+    if isinstance(prediction_log, torch.Tensor):
+        prediction_log = torch.clamp(prediction_log, max=15.0)
+        prediction = torch.expm1(prediction_log)
+        prediction = torch.clamp(prediction, min=0.0)
+    else:
+        prediction_log = np.clip(prediction_log, a_min=None, a_max=15.0)
+        prediction = np.expm1(prediction_log)
+        prediction = np.maximum(prediction, 0.0)
+    
+    return prediction
+
 def crps_ensemble(observations, forecasts):
     """
     Compute Continuous Ranked Probability Score (CRPS) for an ensemble forecast.

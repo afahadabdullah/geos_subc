@@ -36,7 +36,7 @@ if str(root_dir) not in sys.path:
 try:
     from ml_model.dataset import GeosSubCDataset
     from ml_model.model import ConditionalUNet, GaussianDiffusion
-    from ml_model.utils import crps_ensemble, denormalize, plot_comparison
+    from ml_model.utils import crps_ensemble, denormalize, denormalize_residual, plot_comparison
 except ImportError:
     import dataset as GeosSubCDataset
     import model as model_module
@@ -93,7 +93,7 @@ def train_model():
     config = {
         "train_years": (1999, 2014),
         "val_years": (2015, 2016),
-        "batch_size": 32, # Increased back to 32 (4x the previous limit) for H200
+        "batch_size": 16, # Reduced to 16 to prevent OOM
         "num_epochs": 100,
         "lr": 1e-4,
         "image_size": (181, 360),
@@ -155,11 +155,9 @@ def train_model():
             sample = train_dataset[0]
             f_norm = sample["input_forecast"].numpy()
             t_norm = sample["target_truth"].numpy()
+            r_norm = sample["target_residual"].numpy()
             
-            # Reconstruct "Raw" (Approximate, since we don't have raw in __getitem__ anymore)
-            # Formula: x = 2 * ((log1p(raw) - min) / denom) - 1
-            # Inverse: raw = expm1( ((x + 1)/2 * denom) + min )
-            
+            # Reconstruct "Raw"
             vmin, vmax = train_dataset.norm_min, train_dataset.norm_max
             denom = vmax - vmin if vmax != vmin else 1.0
             
@@ -172,8 +170,9 @@ def train_model():
             t_raw = inv_func(t_norm)
             
             print(f"Norm Stats (Min/Max/Mean/Std):")
-            print(f"  Forecast: {f_norm.min():.2f} / {f_norm.max():.2f} / {f_norm.mean():.2f} / {f_norm.std():.2f}")
-            print(f"  Target  : {t_norm.min():.2f} / {t_norm.max():.2f} / {t_norm.mean():.2f} / {t_norm.std():.2f}")
+            print(f"  Forecast : {f_norm.min():.2f} / {f_norm.max():.2f} / {f_norm.mean():.2f} / {f_norm.std():.2f}")
+            print(f"  Target   : {t_norm.min():.2f} / {t_norm.max():.2f} / {t_norm.mean():.2f} / {t_norm.std():.2f}")
+            print(f"  Residual : {r_norm.min():.2f} / {r_norm.max():.2f} / {r_norm.mean():.2f} / {r_norm.std():.2f}")
             
             print(f"Reconstructed Raw Stats (Min/Max/Mean/Std) [mm/day]:")
             print(f"  Forecast: {f_raw.min():.2f} / {f_raw.max():.2f} / {f_raw.mean():.2f} / {f_raw.std():.2f}")
@@ -181,12 +180,15 @@ def train_model():
             
             # Plot
             import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(2, 2, figsize=(12, 10))
+            fig, ax = plt.subplots(2, 3, figsize=(18, 10))
             
             ax[0,0].hist(f_norm.flatten(), bins=50, color='blue', alpha=0.7)
             ax[0,0].set_title("Normalized Forecast [-1, 1]")
             ax[0,1].hist(t_norm.flatten(), bins=50, color='green', alpha=0.7)
             ax[0,1].set_title("Normalized Target [-1, 1]")
+            ax[0,2].hist(r_norm.flatten(), bins=50, color='red', alpha=0.7)
+            ax[0,2].set_title("Normalized Residual [-1, 1]")
+            ax[0,2].axvline(0, color='k', linestyle='--')
             
             ax[1,0].hist(f_raw.flatten(), bins=50, color='blue', alpha=0.7)
             ax[1,0].set_title("Raw Forecast (mm/day)")
@@ -194,6 +196,9 @@ def train_model():
             ax[1,1].hist(t_raw.flatten(), bins=50, color='green', alpha=0.7)
             ax[1,1].set_title("Raw Target (mm/day)")
             ax[1,1].set_yscale('log')
+            ax[1,2].text(0.5, 0.5, f"Residual\nShould be centered near 0\nMean: {r_norm.mean():.3f}", 
+                        ha='center', va='center', fontsize=14, transform=ax[1,2].transAxes)
+            ax[1,2].set_title("Residual Info")
             
             plt.tight_layout()
             os.makedirs(f"{config['output_dir']}/plots", exist_ok=True)
@@ -260,6 +265,12 @@ def train_model():
     if os.path.exists(latest_path):
         if accelerator.is_main_process:
             print(f"Loading checkpoint from: {latest_path}")
+        
+        # OOM Fix: Clean up before loading huge optimizer states
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         accelerator.load_state(latest_path)
         
         # Load epoch metadata
@@ -291,7 +302,7 @@ def train_model():
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 # 1. Unpack & Normalize
-                target_truth = batch["target_truth"]  # (B, 4, Y, X) - Already log-normalized
+                target_residual = batch["target_residual"]  # (B, 4, Y, X) - Residual in [-1, 1]
                 forecast = batch["input_forecast"]    # (B, 4, Y, X)
                 observed = batch["observed_state"]    # (B, 4, Y, X) - GPCP pre-init
                 mjo = batch["mjo_conditioning"]       # (B, 2)
@@ -300,11 +311,11 @@ def train_model():
                 # DIAGNOSTIC: Check range once per epoch or every N steps
                 if global_step % 500 == 0 and accelerator.is_main_process:
                     print(f"\n[Step {global_step}] Input Stats (should be in [-1, 1]):")
-                    print(f"  Target: min={target_truth.min():.2f}, max={target_truth.max():.2f}, mean={target_truth.mean():.2f}")
+                    print(f"  Residual: min={target_residual.min():.2f}, max={target_residual.max():.2f}, mean={target_residual.mean():.2f}")
                     print(f"  Forecast: min={forecast.min():.2f}, max={forecast.max():.2f}, mean={forecast.mean():.2f}")
                 
-                # 2. Add Noise to Target
-                target = target_truth
+                # 2. Add Noise to RESIDUAL (the diffusion target)
+                target = target_residual
                 bs = target.shape[0]
                 timesteps = diffusion.sample_timesteps(bs)
                 noisy_target, noise = diffusion.add_noise(target, timesteps)
@@ -359,15 +370,16 @@ def train_model():
             
             with torch.no_grad():
                 for idx, batch in enumerate(val_dataloader):
+                    target_residual = batch["target_residual"]
                     target_truth = batch["target_truth"]
                     forecast = batch["input_forecast"]
                     observed = batch["observed_state"]
                     mjo = batch["mjo_conditioning"]
                     month_onehot = batch["month_onehot"]
                     
-                    bs = target_truth.shape[0]
+                    bs = target_residual.shape[0]
                     timesteps = diffusion.sample_timesteps(bs)
-                    noisy_target, noise = diffusion.add_noise(target_truth, timesteps)
+                    noisy_target, noise = diffusion.add_noise(target_residual, timesteps)
                     
                     sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[timesteps].view(-1, 1, 1, 1)
                     cond_noise = torch.randn_like(forecast)
@@ -382,18 +394,6 @@ def train_model():
                     # Cache first batch for plotting
                     if idx == 0 and accelerator.is_main_process:
                         first_batch_data = (target_truth[0:1], forecast[0:1], observed[0:1], mjo_map[0:1], month_onehot[0:1])
-                        
-                        # DIAGNOSTIC: Plot normalization stats for this batch
-                        try:
-                            from ml_model.utils import plot_normalization_diagnostic
-                            plot_normalization_diagnostic(
-                                forecast.cpu().numpy(), 
-                                target_truth.cpu().numpy(), 
-                                observed.cpu().numpy(),
-                                f"{config['output_dir']}/plots/diag_norm_epoch_{epoch}.png"
-                            )
-                        except Exception as e:
-                            print(f"Failed to plot normalization diagnostic: {e}")
 
             avg_val_loss = val_loss / len(val_dataloader)
             
@@ -410,15 +410,17 @@ def train_model():
                     # Generate 3 ensemble members via real 50-step DDIM
                     with torch.no_grad():
                         for _ in range(3):
-                            pred = _ddim_sample_val(
+                            pred_residual = _ddim_sample_val(
                                 model, diffusion, forecast_s, observed_s, mjo_s, month_s,
                                 n_steps=50, image_size=config["image_size"],
                                 cmde_ratio=config["cmde_ratio"]
                             )
                             # Log sample stats
                             if accelerator.is_main_process:
-                                print(f"    Sampled x0 stats: mean={pred.mean().item():.3f}, std={pred.std().item():.3f}, min={pred.min().item():.3f}, max={pred.max().item():.3f}")
-                            samples_list.append(denormalize(pred[0]))
+                                print(f"    Sampled residual stats: mean={pred_residual.mean().item():.3f}, std={pred_residual.std().item():.3f}, min={pred_residual.min().item():.3f}, max={pred_residual.max().item():.3f}")
+                            # Reconstruct: denormalize residual + forecast -> mm/day
+                            pred_physical = denormalize_residual(pred_residual[0], forecast_s[0])
+                            samples_list.append(pred_physical)
                     
                     ens_mean_recon = torch.stack(samples_list).mean(dim=0).detach().cpu().numpy()
                     input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
@@ -429,7 +431,7 @@ def train_model():
                     plot_comparison(
                         input_raw, target_raw, ens_mean_recon, 
                         plot_save_path,
-                        title=f"Epoch {epoch} - DDIM50 Ensemble {'(Best)' if is_best else ''}"
+                        title=f"Epoch {epoch} - DDIM50 Residual Ensemble {'(Best)' if is_best else ''}"
                     )
                     if accelerator.is_main_process:
                         print(f"Ensembled validation plot saved to: {plot_save_path}")
