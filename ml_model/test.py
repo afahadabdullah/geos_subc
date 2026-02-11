@@ -26,8 +26,6 @@ except Exception:
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import os
-import sys
 import json
 import argparse
 import numpy as np
@@ -96,7 +94,7 @@ def find_best_checkpoint(output_dir="ml_output_cmde"):
 
 
 @torch.no_grad()
-def ddpm_sample_full(model, diffusion, forecast, mjo_map, month_onehot, image_size=(181, 360)):
+def ddpm_sample_full(model, diffusion, forecast, observed, mjo_map, month_onehot, image_size=(181, 360), cmde_ratio=0.1):
     """
     Standard DDPM sampling (Full 1000 steps).
     Mathematically exact reconstruction of the training process.
@@ -114,10 +112,10 @@ def ddpm_sample_full(model, diffusion, forecast, mjo_map, month_onehot, image_si
         # 1. Condition setup
         sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
         cond_noise = torch.randn_like(forecast)
-        noisy_forecast = forecast + (0.1 * sqrt_one_minus_alpha * cond_noise)
+        noisy_forecast = forecast + (cmde_ratio * sqrt_one_minus_alpha * cond_noise)
         
         # 2. Predict Noise
-        model_input = torch.cat([x, noisy_forecast, mjo_map], dim=1)
+        model_input = torch.cat([x, noisy_forecast, observed, mjo_map], dim=1)
         pred_noise = model(model_input, t_tensor, month_onehot)
         
         # 3. Denosing Step (Standard DDPM)
@@ -140,7 +138,7 @@ def ddpm_sample_full(model, diffusion, forecast, mjo_map, month_onehot, image_si
     return x
 
 @torch.no_grad()
-def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, image_size=(181, 360), eta=0.0):
+def ddim_sample(model, diffusion, forecast, observed, mjo_map, month_onehot, n_steps=50, image_size=(181, 360), eta=0.0, cmde_ratio=0.1):
     """
     DDIM (Denoising Diffusion Implicit Models) Sampler.
     Correctly handles strided/accelerated sampling (e.g., 50 steps).
@@ -160,9 +158,9 @@ def ddim_sample(model, diffusion, forecast, mjo_map, month_onehot, n_steps=50, i
         # 2. Predict Noise
         sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
         cond_noise = torch.randn_like(forecast)
-        noisy_forecast = forecast + (0.1 * sqrt_one_minus_alpha * cond_noise)
+        noisy_forecast = forecast + (cmde_ratio * sqrt_one_minus_alpha * cond_noise)
         
-        model_input = torch.cat([x, noisy_forecast, mjo_map], dim=1)
+        model_input = torch.cat([x, noisy_forecast, observed, mjo_map], dim=1)
         pred_noise = model(model_input, t_tensor, month_onehot)
         
         # 3. DDIM Update
@@ -377,10 +375,11 @@ def run_test(args):
     
     # --- Model ---
     image_size = (181, 360)
-    in_channels = 10
+    in_channels = 14
     out_channels = 4
     
-    model = ConditionalUNet(in_channels=in_channels, out_channels=out_channels, base_filters=64)
+    model = ConditionalUNet(in_channels=in_channels, out_channels=out_channels, base_filters=128)
+    # Defaults to cosine schedule in model.py now
     diffusion = GaussianDiffusion(timesteps=1000, device=device)
     
     # Load checkpoint via accelerate state
@@ -431,6 +430,7 @@ def run_test(args):
         # Move to device
         forecast = batch["input_forecast"].unsqueeze(0).to(accelerator.device)
         target = batch["target_truth"].unsqueeze(0).to(accelerator.device)
+        observed = batch["observed_state"].unsqueeze(0).to(accelerator.device)
         mjo = batch["mjo_conditioning"].unsqueeze(0).to(accelerator.device)
         month_oh = batch["month_onehot"].unsqueeze(0).to(accelerator.device)
         
@@ -442,9 +442,9 @@ def run_test(args):
             print(f"  Ensemble member {m+1}/{args.n_ensemble}...", end=" ", flush=True)
             
             if args.ddpm_steps >= 1000:
-                pred = ddpm_sample_full(model, diffusion, forecast, mjo_map, month_oh, image_size=image_size)
+                pred = ddpm_sample_full(model, diffusion, forecast, observed, mjo_map, month_oh, image_size=image_size)
             else:
-                pred = ddim_sample(model, diffusion, forecast, mjo_map, month_oh,
+                pred = ddim_sample(model, diffusion, forecast, observed, mjo_map, month_oh,
                                    n_steps=args.ddpm_steps, image_size=image_size)
             
             pred_denorm = denormalize(pred[0]).detach().cpu().numpy()

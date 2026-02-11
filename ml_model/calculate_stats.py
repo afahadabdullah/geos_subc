@@ -18,6 +18,7 @@ def calculate_stats(data_root="dataprocess", start_year=1999, end_year=2014, out
         gpcp_path = os.path.join(data_root, f"gpcp_weekly_{year}.zarr")
         
         if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
+            print(f"  WARNING: Skipping {year} — missing GEOS or GPCP zarr file")
             continue
             
         print(f"  Processing {year}...")

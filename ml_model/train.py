@@ -43,6 +43,48 @@ except ImportError:
     from model import ConditionalUNet, GaussianDiffusion
     from utils import crps_ensemble, denormalize, plot_comparison
 
+def _ddim_sample_val(model, diffusion, forecast, observed, mjo_map, month_onehot,
+                     n_steps=50, image_size=(181, 360), cmde_ratio=0.1):
+    """
+    Real DDIM sampling for validation plots.
+    Starts from pure noise (not ground truth) for honest evaluation.
+    """
+    device = forecast.device
+    bs = forecast.shape[0]
+    
+    timestep_indices = np.linspace(diffusion.timesteps - 1, 0, n_steps, dtype=int)
+    x = torch.randn(bs, 4, image_size[0], image_size[1], device=device)
+    
+    for i, t_curr in enumerate(timestep_indices):
+        t_tensor = torch.tensor([t_curr], device=device).expand(bs)
+        
+        sqrt_one_minus_alpha = diffusion.sqrt_one_minus_alpha_hats[t_tensor].view(-1, 1, 1, 1)
+        cond_noise = torch.randn_like(forecast)
+        noisy_forecast = forecast + (cmde_ratio * sqrt_one_minus_alpha * cond_noise)
+        
+        model_input = torch.cat([x, noisy_forecast, observed, mjo_map], dim=1)
+        pred_noise = model(model_input, t_tensor, month_onehot)
+        
+        alpha_bar_t = diffusion.alpha_hats[t_curr]
+        
+        if i < len(timestep_indices) - 1:
+            t_prev = timestep_indices[i + 1]
+            alpha_bar_t_prev = diffusion.alpha_hats[t_prev]
+        else:
+            alpha_bar_t_prev = torch.tensor(1.0, device=device)
+        
+        sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
+        sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
+        
+        pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
+        
+        term_1 = torch.sqrt(alpha_bar_t_prev) * pred_x0
+        term_2 = torch.sqrt(1 - alpha_bar_t_prev) * pred_noise
+        x = term_1 + term_2
+    
+    return x
+
+
 def train_model():
     # Memory fragmentation management
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -109,26 +151,27 @@ def train_model():
     # 1. Noisy Residual (4 Channels for 4 weeks)
     # 2. Condition:
     #    - Noisy Forecast (4 Channels)
+    #    - GPCP Observed State (4 Channels — weeks before init)
     #    - MJO Features (Broadcasted -> 2 Channels)
-    # Total Input Channels to UNet = 4 + 4 + 2 = 10
+    # Total Input Channels to UNet = 4 + 4 + 4 + 2 = 14
     
-    in_channels = 10 
+    in_channels = 14 
     out_channels = 4 # Predicted Noise for Residual
     
     model = ConditionalUNet(
         in_channels=in_channels, 
         out_channels=out_channels, 
-        base_filters=64
+        base_filters=128
     )
     
-    # Custom Gaussian Diffusion
+    # Custom Gaussian Diffusion (defaults to cosine schedule now)
     diffusion = GaussianDiffusion(timesteps=1000, device=accelerator.device) # Will update device in loop
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
     
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer, 
-        num_warmup_steps=500, 
+        num_warmup_steps=1000, 
         num_training_steps=len(train_dataloader) * config["num_epochs"]
     )
     
@@ -150,6 +193,9 @@ def train_model():
     # Auto-resume Logic
     latest_path = os.path.join(config["output_dir"], "latest_checkpoint")
     start_epoch = 0
+    best_val_loss = float('inf')  # Default for fresh start
+    best_checkpoints = []
+    
     if os.path.exists(latest_path):
         if accelerator.is_main_process:
             print(f"Loading checkpoint from: {latest_path}")
@@ -172,8 +218,6 @@ def train_model():
         print(f"Starting training with CMDE architecture. Samples: {len(train_dataset)}")
     
     global_step = start_epoch * len(train_dataloader)
-    best_val_loss = float('inf')
-    best_checkpoints = [] # List to track paths of best models
     
     for epoch in range(start_epoch, config["num_epochs"]):
         model.train()
@@ -188,6 +232,7 @@ def train_model():
                 # 1. Unpack & Normalize
                 target_truth = batch["target_truth"]  # (B, 4, Y, X) - Already log-normalized
                 forecast = batch["input_forecast"]    # (B, 4, Y, X)
+                observed = batch["observed_state"]    # (B, 4, Y, X) - GPCP pre-init
                 mjo = batch["mjo_conditioning"]       # (B, 2)
                 month_onehot = batch["month_onehot"]  # (B, 12)
                 
@@ -205,8 +250,8 @@ def train_model():
                 # 5. Broadcast MJO
                 mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
                 
-                # 6. Cat Inputs
-                model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
+                # 6. Cat Inputs: [noisy_target, noisy_forecast, observed_state, mjo_map]
+                model_input = torch.cat([noisy_target, noisy_forecast, observed, mjo_map], dim=1)
                 
                 # 7. Predict Noise
                 noise_pred = model(model_input, timesteps, month_onehot)
@@ -214,6 +259,7 @@ def train_model():
                 loss = F.mse_loss(noise_pred, noise)
                 
                 accelerator.backward(loss)
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -238,6 +284,7 @@ def train_model():
                 for idx, batch in enumerate(val_dataloader):
                     target_truth = batch["target_truth"]
                     forecast = batch["input_forecast"]
+                    observed = batch["observed_state"]
                     mjo = batch["mjo_conditioning"]
                     month_onehot = batch["month_onehot"]
                     
@@ -249,7 +296,7 @@ def train_model():
                     cond_noise = torch.randn_like(forecast)
                     noisy_forecast = forecast + (config["cmde_ratio"] * sqrt_one_minus_alpha * cond_noise)
                     mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
-                    model_input = torch.cat([noisy_target, noisy_forecast, mjo_map], dim=1)
+                    model_input = torch.cat([noisy_target, noisy_forecast, observed, mjo_map], dim=1)
                     
                     noise_pred = model(model_input, timesteps, month_onehot)
                     loss = F.mse_loss(noise_pred, noise)
@@ -257,7 +304,7 @@ def train_model():
 
                     # Cache first batch for plotting
                     if idx == 0 and accelerator.is_main_process:
-                        first_batch_data = (target_truth[0:1], forecast[0:1], mjo_map[0:1], month_onehot[0:1])
+                        first_batch_data = (target_truth[0:1], forecast[0:1], observed[0:1], mjo_map[0:1], month_onehot[0:1])
 
             avg_val_loss = val_loss / len(val_dataloader)
             
@@ -266,22 +313,20 @@ def train_model():
                 
                 is_best = avg_val_loss < best_val_loss
                 
-                # Plotting logic (Periodic OR Best)
+                # Plotting logic (Periodic OR Best) - Real DDIM sampling
                 if (epoch % 5 == 0 or is_best) and first_batch_data is not None:
-                    target_s, forecast_s, mjo_s, month_s = first_batch_data
+                    target_s, forecast_s, observed_s, mjo_s, month_s = first_batch_data
                     
                     samples_list = []
-                    # Generate 3 ensemble members for visualization
+                    # Generate 3 ensemble members via real 50-step DDIM
                     with torch.no_grad():
                         for _ in range(3):
-                            t_plot = torch.tensor([500], device=accelerator.device).expand(1)
-                            noisy_t, _ = diffusion.add_noise(target_s, t_plot)
-                            pred_noise = model(torch.cat([noisy_t, forecast_s, mjo_s], dim=1), t_plot, month_s)
-                            
-                            sqrt_alpha = diffusion.sqrt_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                            sqrt_one_minus_alpha_t = diffusion.sqrt_one_minus_alpha_hats[t_plot].view(-1, 1, 1, 1)
-                            recon = (noisy_t - sqrt_one_minus_alpha_t * pred_noise) / (sqrt_alpha + 1e-8)
-                            samples_list.append(denormalize(recon[0]))
+                            pred = _ddim_sample_val(
+                                model, diffusion, forecast_s, observed_s, mjo_s, month_s,
+                                n_steps=50, image_size=config["image_size"],
+                                cmde_ratio=config["cmde_ratio"]
+                            )
+                            samples_list.append(denormalize(pred[0]))
                     
                     ens_mean_recon = torch.stack(samples_list).mean(dim=0).detach().cpu().numpy()
                     input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
@@ -293,7 +338,7 @@ def train_model():
                     plot_comparison(
                         input_raw, target_raw, pred_raw, ens_mean_recon, 
                         plot_save_path,
-                        title=f"Epoch {epoch} - LW4 Ensembled Visualization {'(Best)' if is_best else ''}"
+                        title=f"Epoch {epoch} - DDIM50 Ensemble {'(Best)' if is_best else ''}"
                     )
                     if accelerator.is_main_process:
                         print(f"Ensembled validation plot saved to: {plot_save_path}")

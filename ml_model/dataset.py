@@ -21,6 +21,20 @@ class GeosSubCDataset(Dataset):
         self.transform = transform
         self.preload = preload
         
+        # 0. Load Normalization Stats (MUST exist — run calculate_stats.py first)
+        stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+        if not os.path.exists(stats_path):
+            raise FileNotFoundError(
+                f"norm_stats.json not found at {stats_path}. "
+                f"Run `python ml_model/calculate_stats.py` first to generate it."
+            )
+        import json
+        with open(stats_path, 'r') as f:
+            stats = json.load(f)
+        self.norm_mean = stats["log1p_mean"]
+        self.norm_std = stats["log1p_std"]
+        print(f"Norm stats loaded: mean={self.norm_mean:.4f}, std={self.norm_std:.4f}")
+        
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
         if os.path.exists(mjo_path):
@@ -41,6 +55,10 @@ class GeosSubCDataset(Dataset):
         self.samples = []
         self.preloaded_geos = {} # (S, M) -> ndarray
         self.preloaded_gpcp = {} # S -> ndarray
+        self.preloaded_gpcp_obs = {} # S -> ndarray (observed state from prev init)
+        
+        # Collect ALL init dates across years for prev-init lookup
+        all_init_dates = []
         
         print(f"Indexing samples from {start_year} to {end_year}...")
         for year in self.years:
@@ -66,20 +84,20 @@ class GeosSubCDataset(Dataset):
                 
                 if self.preload:
                     print(f"  Preloading year {year} into RAM...")
-                    # Load the whole year's variables to avoid repeated sel
                     geos_vals = ds_geos['pr'].compute()
                     gpcp_vals = ds_gpcp['precip'].compute()
                 
                 for s_idx, s_date in enumerate(init_dates):
-                    # Cache GPCP truth (same for all members M)
                     s_key = str(s_date)
+                    all_init_dates.append(s_date)
+                    
                     if self.preload:
                         self.preloaded_gpcp[s_key] = gpcp_vals.isel(S=s_idx).values.astype(np.float32)
                     
                     for m_idx in members:
                         self.samples.append({
                             'year': year,
-                            'S': s_date, # Keep original object for MJO lookup
+                            'S': s_date,
                             'S_idx': s_idx,
                             'S_key': s_key,
                             'M': m_idx,
@@ -88,7 +106,6 @@ class GeosSubCDataset(Dataset):
                         })
                         
                         if self.preload:
-                            # Cache GEOS forecast for this specific member
                             f_val = geos_vals.isel(S=s_idx)
                             if 'M' in f_val.dims:
                                 f_val = f_val.isel(M=m_idx)
@@ -99,6 +116,41 @@ class GeosSubCDataset(Dataset):
                 
             except Exception as e:
                 print(f"Error indexing/preloading {year}: {e}")
+        
+        # 3. Build prev-init lookup: for each init S, find the init ~28 days earlier
+        all_init_dates_sorted = sorted(set(all_init_dates))
+        self.prev_init_map = {}  # s_key -> prev_s_key (or None)
+        
+        for i, s_date in enumerate(all_init_dates_sorted):
+            s_key = str(s_date)
+            # Find the closest init date ~28 days before
+            target = s_date - pd.Timedelta(days=28)
+            best_prev = None
+            best_diff = pd.Timedelta(days=999)
+            for j in range(i - 1, max(i - 8, -1), -1):  # Check up to 8 prior inits
+                if j < 0:
+                    break
+                diff = abs(all_init_dates_sorted[j] - target)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_prev = all_init_dates_sorted[j]
+            
+            # Accept if within 14-day tolerance
+            if best_prev is not None and best_diff <= pd.Timedelta(days=14):
+                self.prev_init_map[s_key] = str(best_prev)
+            else:
+                self.prev_init_map[s_key] = None
+        
+        # 4. Cache observed state for preloaded mode
+        if self.preload:
+            n_obs_found = 0
+            for s_key, prev_key in self.prev_init_map.items():
+                if prev_key is not None and prev_key in self.preloaded_gpcp:
+                    self.preloaded_gpcp_obs[s_key] = self.preloaded_gpcp[prev_key]
+                    n_obs_found += 1
+                else:
+                    self.preloaded_gpcp_obs[s_key] = None  # Will use zeros
+            print(f"  Observed state: {n_obs_found}/{len(self.prev_init_map)} samples have prev-init GPCP")
                 
         print(f"Found {len(self.samples)} samples (including ensemble members).")
 
@@ -115,6 +167,10 @@ class GeosSubCDataset(Dataset):
             if self.preload:
                 x_forecast = self.preloaded_geos[(s_key, m_idx)]
                 y_truth = self.preloaded_gpcp[s_key]
+                # Observed state (GPCP from prev init, or zeros)
+                obs_state = self.preloaded_gpcp_obs.get(s_key)
+                if obs_state is None:
+                    obs_state = np.zeros_like(y_truth)
             else:
                 ds_geos = xr.open_zarr(meta['geos_path'], consolidated=False)
                 ds_gpcp = xr.open_zarr(meta['gpcp_path'], consolidated=False)
@@ -129,6 +185,26 @@ class GeosSubCDataset(Dataset):
                 
                 x_forecast = f_data.values.astype(np.float32)
                 y_truth = t_data.values.astype(np.float32)
+                
+                # Observed state: load prev init's GPCP
+                prev_key = self.prev_init_map.get(s_key)
+                if prev_key is not None:
+                    # Find which zarr file contains the prev init
+                    prev_date = pd.Timestamp(prev_key)
+                    prev_gpcp_path = os.path.join(self.data_root, f"gpcp_weekly_{prev_date.year}.zarr")
+                    if os.path.exists(prev_gpcp_path):
+                        ds_prev = xr.open_zarr(prev_gpcp_path, consolidated=False)
+                        prev_dates = pd.to_datetime(ds_prev['S'].values)
+                        if prev_date in prev_dates:
+                            prev_idx = list(prev_dates).index(prev_date)
+                            obs_state = ds_prev['precip'].isel(S=prev_idx).values.astype(np.float32)
+                        else:
+                            obs_state = np.zeros_like(y_truth)
+                        ds_prev.close()
+                    else:
+                        obs_state = np.zeros_like(y_truth)
+                else:
+                    obs_state = np.zeros_like(y_truth)
                 
                 ds_geos.close()
                 ds_gpcp.close()
@@ -145,29 +221,17 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Load/Define Normalization Stats
-            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
-            if os.path.exists(stats_path):
-                import json
-                with open(stats_path, 'r') as f:
-                    stats = json.load(f)
-                # We use standard scaling: (x - mean) / std ? 
-                # Or just a simple max scaling. User liked the log-normalized approach.
-                # Let's use the mean/std if available, or stay with / 4.0 as a robust default.
-                mean = stats.get("log1p_mean", 0.0)
-                std = stats.get("log1p_std", 4.0)
-            else:
-                mean = 0.0
-                std = 4.0
-            
-            # Log-normalization: (log1p(x) - mean) / std
-            # Clip to 0.0 to handle potential negative fill values/artifacts
+            # Log-normalization using cached stats: (log1p(x) - mean) / std
+            mean = self.norm_mean
+            std = self.norm_std
             x_forecast = (np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - mean) / std
             y_truth = (np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - mean) / std
+            obs_state = (np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - mean) / std
             
             return {
                 "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
-                "target_truth": torch.tensor(y_truth, dtype=torch.float32),      
+                "target_truth": torch.tensor(y_truth, dtype=torch.float32),
+                "observed_state": torch.tensor(obs_state, dtype=torch.float32),
                 "mjo_conditioning": torch.tensor(rmm_vals, dtype=torch.float32), 
                 "month": torch.tensor(month, dtype=torch.long),
                 "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),

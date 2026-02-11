@@ -24,17 +24,18 @@ def denormalize(x):
     Inverse of (log1p(x) - mean) / std.
     Automatically loads stats from norm_stats.json if available.
     """
-    # Load stats just like dataset.py
+    # Load stats (MUST exist — run calculate_stats.py first)
     import json
     stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
-    if os.path.exists(stats_path):
-        with open(stats_path, 'r') as f:
-            stats = json.load(f)
-        mean = stats.get("log1p_mean", 0.0)
-        std = stats.get("log1p_std", 4.0)
-    else:
-        mean = 0.0
-        std = 4.0
+    if not os.path.exists(stats_path):
+        raise FileNotFoundError(
+            f"norm_stats.json not found at {stats_path}. "
+            f"Run `python ml_model/calculate_stats.py` first to generate it."
+        )
+    with open(stats_path, 'r') as f:
+        stats = json.load(f)
+    mean = stats["log1p_mean"]
+    std = stats["log1p_std"]
     
     # x is (..., H, W)
     # Undo scaling
@@ -114,11 +115,11 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
             
             if col < 4:
                 # Precipitation panels (sequential colormap)
-                im = ax.imshow(data, cmap='Blues', vmin=0, vmax=vmax_precip, origin='upper')
+                im = ax.imshow(data, cmap='YlGnBu', vmin=0, vmax=vmax_precip, origin='upper')
             else:
                 # Difference panels (diverging colormap)
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
-                im = ax.imshow(data, cmap='RdBu', norm=norm, origin='upper')
+                im = ax.imshow(data, cmap='BrBG', norm=norm, origin='upper')
             
             # Stats annotation
             rmse_val = np.sqrt(np.mean(data**2)) if col >= 4 else np.mean(data)
@@ -141,13 +142,13 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
     # Colorbars
     # Precipitation colorbar (spans columns 0-3)
     cbar_ax1 = fig.add_axes([0.08, 0.04, 0.55, 0.015])
-    sm1 = plt.cm.ScalarMappable(cmap='Blues', norm=plt.Normalize(0, vmax_precip))
+    sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
     # Difference colorbar (spans columns 4-5)
     cbar_ax2 = fig.add_axes([0.68, 0.04, 0.25, 0.015])
-    sm2 = plt.cm.ScalarMappable(cmap='RdBu', norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
+    sm2 = plt.cm.ScalarMappable(cmap='BrBG', norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     

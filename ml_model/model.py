@@ -25,10 +25,10 @@ class SinusoidalEmbedding(nn.Module):
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels, emb_dim):
         super().__init__()
-        self.norm1 = nn.GroupNorm(8, in_channels)
+        self.norm1 = nn.GroupNorm(32, in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.emb_proj = nn.Linear(emb_dim, out_channels)
-        self.norm2 = nn.GroupNorm(8, out_channels)
+        self.norm2 = nn.GroupNorm(32, out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         if in_channels != out_channels:
             self.shortcut = nn.Conv2d(in_channels, out_channels, 1)
@@ -48,11 +48,37 @@ class ResBlock(nn.Module):
         return h + self.shortcut(x)
 
 
+class SelfAttention(nn.Module):
+    """Multi-head self-attention for spatial feature maps at bottleneck resolution."""
+    def __init__(self, channels, num_heads=8):
+        super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+        self.norm = nn.GroupNorm(32, channels)
+        self.qkv = nn.Conv2d(channels, channels * 3, 1)
+        self.proj_out = nn.Conv2d(channels, channels, 1)
+    
+    def forward(self, x):
+        B, C, H, W = x.shape
+        h = self.norm(x)
+        qkv = self.qkv(h)
+        q, k, v = qkv.reshape(B, 3, self.num_heads, C // self.num_heads, H * W).unbind(1)
+        # q, k, v: (B, heads, head_dim, H*W)
+        
+        scale = (C // self.num_heads) ** -0.5
+        attn = torch.einsum('bhdn,bhdm->bhnm', q, k) * scale
+        attn = attn.softmax(dim=-1)
+        
+        out = torch.einsum('bhnm,bhdm->bhdn', attn, v)
+        out = out.reshape(B, C, H, W)
+        return x + self.proj_out(out)
+
+
 class ConditionalUNet(nn.Module):
     """
     V8/V9 UNet Architecture from user's trainv9.py.
     """
-    def __init__(self, in_channels, out_channels, base_filters=64, emb_dim=256):
+    def __init__(self, in_channels, out_channels, base_filters=128, emb_dim=256):
         super().__init__()
         self.time_emb = SinusoidalEmbedding(dim=128)
         # One-hot month projection (12 months -> 128 dim)
@@ -71,6 +97,7 @@ class ConditionalUNet(nn.Module):
         self.pool3 = nn.MaxPool2d(2)
         
         self.bottleneck1 = ResBlock(base_filters * 4, base_filters * 8, emb_dim)
+        self.bottleneck_attn = SelfAttention(base_filters * 8, num_heads=8)
         self.bottleneck2 = ResBlock(base_filters * 8, base_filters * 8, emb_dim)
         
         self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
@@ -96,6 +123,7 @@ class ConditionalUNet(nn.Module):
         s3 = self.down3(x, cond_emb); x = self.pool3(s3)
         
         x = self.bottleneck1(x, cond_emb)
+        x = self.bottleneck_attn(x)
         x = self.bottleneck2(x, cond_emb)
         
         x = self.up3(x)
@@ -126,11 +154,21 @@ class ConditionalUNet(nn.Module):
 class GaussianDiffusion:
     """Manages the noise schedule for the diffusion process."""
     
-    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=0.02, device='cuda'):
+    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=0.02, schedule="cosine", device='cuda'):
         self.timesteps = timesteps
         self.device = device
         
-        self.betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
+        if schedule == "linear":
+            self.betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
+        elif schedule == "cosine":
+            # Cosine schedule (Nichol & Dhariwal 2021) - Better for high res
+            steps = timesteps + 1
+            x = torch.linspace(0, timesteps, steps, device=device)
+            alphas_cumprod = torch.cos(((x / timesteps) + 0.008) / (1 + 0.008) * torch.pi * 0.5) ** 2
+            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+            self.betas = torch.clamp(betas, 0.0001, 0.9999)
+            
         self.alphas = 1.0 - self.betas
         self.alpha_hats = torch.cumprod(self.alphas, dim=0)
         
