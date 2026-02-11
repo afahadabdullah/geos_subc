@@ -85,10 +85,8 @@ def _ddim_sample_val(model, diffusion, forecast, observed, mjo_map, month_onehot
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
         
         pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
-        # For Z-Score, range is roughly [-5, 5]. Clamping to [-1, 1] is invalid.
-        # Maybe clamp to [-5, 5]?
-        # pred_x0 = torch.clamp(pred_x0, -5.0, 5.0) 
-        # Let's trust the model for now, or use loose clamping.
+        # With ZSCORE_SCALE=3.0, data is in ~[-1, 1]. Clamp for stability.
+        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
         
         term_1 = torch.sqrt(alpha_bar_t_prev) * pred_x0
         term_2 = torch.sqrt(1 - alpha_bar_t_prev) * pred_noise

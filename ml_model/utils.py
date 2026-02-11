@@ -196,6 +196,8 @@ def denormalize_residual_zscore(residual_norm, forecast_norm,
         phy = np.maximum(phy, 0.0)
         
     return phy
+
+def crps_ensemble(observations, forecasts):
     """
     Compute Continuous Ranked Probability Score (CRPS) for an ensemble forecast.
     observations: (B, ...) denormalized
