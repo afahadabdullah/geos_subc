@@ -23,13 +23,24 @@ class SinusoidalEmbedding(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, emb_dim):
+    def __init__(self, in_channels, out_channels, emb_dim, circular_padding=False):
         super().__init__()
+        self.circular_padding = circular_padding
         self.norm1 = nn.GroupNorm(32, in_channels)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        
+        if circular_padding:
+            self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=0)
+        else:
+            self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+            
         self.emb_proj = nn.Linear(emb_dim, out_channels)
         self.norm2 = nn.GroupNorm(32, out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        
+        if circular_padding:
+            self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=0)
+        else:
+            self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+            
         if in_channels != out_channels:
             self.shortcut = nn.Conv2d(in_channels, out_channels, 1)
         else:
@@ -38,12 +49,23 @@ class ResBlock(nn.Module):
     def forward(self, x, emb):
         h = self.norm1(x)
         h = F.leaky_relu(h)
+        
+        if self.circular_padding:
+            # Pad W (circular), H (constant)
+            h = F.pad(h, (1, 1, 0, 0), mode='circular')
+            h = F.pad(h, (0, 0, 1, 1), mode='constant', value=0)
+            
         h = self.conv1(h)
         # Broadcast embedding (B, C) -> (B, C, 1, 1)
         emb_out = self.emb_proj(emb)[:, :, None, None]
         h = h + emb_out
         h = self.norm2(h)
         h = F.leaky_relu(h)
+        
+        if self.circular_padding:
+             h = F.pad(h, (1, 1, 0, 0), mode='circular')
+             h = F.pad(h, (0, 0, 1, 1), mode='constant', value=0)
+             
         h = self.conv2(h)
         return h + self.shortcut(x)
 
@@ -77,9 +99,11 @@ class SelfAttention(nn.Module):
 class ConditionalUNet(nn.Module):
     """
     V8/V9 UNet Architecture from user's trainv9.py.
+    Now supports asymmetric circular padding (lat-lon aware).
     """
-    def __init__(self, in_channels, out_channels, base_filters=128, emb_dim=256):
+    def __init__(self, in_channels, out_channels, base_filters=128, emb_dim=256, circular_padding=False):
         super().__init__()
+        self.circular_padding = circular_padding
         self.time_emb = SinusoidalEmbedding(dim=128)
         # One-hot month projection (12 months -> 128 dim)
         self.month_proj = nn.Linear(12, 128)
@@ -87,25 +111,28 @@ class ConditionalUNet(nn.Module):
         
         # In trainv9, input to conv_in is cat([noisy_target, condition])
         # So in_channels should be sum of both.
-        self.conv_in = nn.Conv2d(in_channels, base_filters, 3, padding=1)
+        if circular_padding:
+            self.conv_in = nn.Conv2d(in_channels, base_filters, 3, padding=0)
+        else:
+            self.conv_in = nn.Conv2d(in_channels, base_filters, 3, padding=1)
         
-        self.down1 = ResBlock(base_filters, base_filters, emb_dim)
+        self.down1 = ResBlock(base_filters, base_filters, emb_dim, circular_padding)
         self.pool1 = nn.MaxPool2d(2)
-        self.down2 = ResBlock(base_filters, base_filters * 2, emb_dim)
+        self.down2 = ResBlock(base_filters, base_filters * 2, emb_dim, circular_padding)
         self.pool2 = nn.MaxPool2d(2)
-        self.down3 = ResBlock(base_filters * 2, base_filters * 4, emb_dim)
+        self.down3 = ResBlock(base_filters * 2, base_filters * 4, emb_dim, circular_padding)
         self.pool3 = nn.MaxPool2d(2)
         
-        self.bottleneck1 = ResBlock(base_filters * 4, base_filters * 8, emb_dim)
+        self.bottleneck1 = ResBlock(base_filters * 4, base_filters * 8, emb_dim, circular_padding)
         self.bottleneck_attn = SelfAttention(base_filters * 8, num_heads=8)
-        self.bottleneck2 = ResBlock(base_filters * 8, base_filters * 8, emb_dim)
+        self.bottleneck2 = ResBlock(base_filters * 8, base_filters * 8, emb_dim, circular_padding)
         
         self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec3 = ResBlock(base_filters * 8 + base_filters * 4, base_filters * 4, emb_dim)
+        self.dec3 = ResBlock(base_filters * 8 + base_filters * 4, base_filters * 4, emb_dim, circular_padding)
         self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec2 = ResBlock(base_filters * 4 + base_filters * 2, base_filters * 2, emb_dim)
+        self.dec2 = ResBlock(base_filters * 4 + base_filters * 2, base_filters * 2, emb_dim, circular_padding)
         self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec1 = ResBlock(base_filters * 2 + base_filters, base_filters, emb_dim)
+        self.dec1 = ResBlock(base_filters * 2 + base_filters, base_filters, emb_dim, circular_padding)
         
         self.conv_out = nn.Conv2d(base_filters, out_channels, 1)
     
@@ -116,6 +143,11 @@ class ConditionalUNet(nn.Module):
         m_emb = self.month_proj(month_onehot)
         cond_emb = self.cond_mlp(torch.cat([t_emb, m_emb], dim=1))
         
+        if self.circular_padding:
+            # Pad input for conv_in: W circular, H constant
+            x_input = F.pad(x_input, (1, 1, 0, 0), mode='circular')
+            x_input = F.pad(x_input, (0, 0, 1, 1), mode='constant', value=0)
+            
         x = self.conv_in(x_input)
         
         s1 = self.down1(x, cond_emb); x = self.pool1(s1)
