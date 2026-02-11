@@ -331,12 +331,11 @@ def train_model():
                     ens_mean_recon = torch.stack(samples_list).mean(dim=0).detach().cpu().numpy()
                     input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
                     target_raw = denormalize(target_s[0]).detach().cpu().numpy()
-                    pred_raw = samples_list[0].detach().cpu().numpy()
                     
                     suffix = "_best" if is_best else ""
                     plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}{suffix}.png"
                     plot_comparison(
-                        input_raw, target_raw, pred_raw, ens_mean_recon, 
+                        input_raw, target_raw, ens_mean_recon, 
                         plot_save_path,
                         title=f"Epoch {epoch} - DDIM50 Ensemble {'(Best)' if is_best else ''}"
                     )

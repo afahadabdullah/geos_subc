@@ -66,11 +66,11 @@ def crps_ensemble(observations, forecasts):
     crps = term_1 - 0.5 * term_2
     return crps.mean()
 
-def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, title="Validation Comparison"):
+def plot_comparison(input_geos, target_gpcp, ens_mean, save_path, title="Validation Comparison"):
     """
     Comprehensive validation visualization suite.
-    Shows all 4 lead weeks with GEOS Input, GPCP Truth, Model Prediction,
-    Ensemble Mean, GEOS Bias (GPCP−GEOS), and Model Residual (GPCP−Pred).
+    Shows all 4 lead weeks with GEOS Input, GPCP Truth,
+    Ensemble Mean, GEOS Bias (GPCP−GEOS), and Model Residual (GPCP−EnsMean).
     
     All inputs are denormalized numpy arrays: (4, H, W)
     """
@@ -86,19 +86,18 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
     
     geos = clean(input_geos)
     gpcp = clean(target_gpcp)
-    pred = clean(prediction)
     ens  = clean(ens_mean)
     
     # Difference maps
     bias     = gpcp - geos  # GPCP − GEOS (positive = GEOS underestimates)
     residual = gpcp - ens   # GPCP − Ensemble Mean (positive = model underestimates)
     
-    # --- Layout: 4 rows (weeks) × 6 columns ---
-    fig = plt.figure(figsize=(30, 20))
-    gs = gridspec.GridSpec(n_weeks, 6, wspace=0.15, hspace=0.3)
+    # --- Layout: 4 rows (weeks) × 5 columns ---
+    fig = plt.figure(figsize=(25, 20))
+    gs = gridspec.GridSpec(n_weeks, 5, wspace=0.15, hspace=0.3)
     
-    col_titles = ["GEOS Input", "GPCP Truth", "Prediction (1 sample)", 
-                   "Ensemble Mean (3)", "Bias (GPCP−GEOS)", "Residual (GPCP−EnsMean)"]
+    col_titles = ["GEOS Input", "GPCP Truth",
+                   "Ensemble Mean", "Bias (GPCP−GEOS)", "Residual (GPCP−EnsMean)"]
     
     # Precip colormap limits (99.9th percentile of truth/input for natural scaling)
     all_precip = np.concatenate([geos.flatten(), gpcp.flatten()])
@@ -114,13 +113,13 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
     )
     
     for row in range(n_weeks):
-        panels = [geos[row], gpcp[row], pred[row], ens[row], bias[row], residual[row]]
+        panels = [geos[row], gpcp[row], ens[row], bias[row], residual[row]]
         
-        for col in range(6):
+        for col in range(5):
             ax = fig.add_subplot(gs[row, col])
             data = panels[col]
             
-            if col < 4:
+            if col < 3:
                 # Precipitation panels (sequential colormap)
                 im = ax.imshow(data, cmap='YlGnBu', vmin=0, vmax=vmax_precip, origin='upper')
             else:
@@ -129,8 +128,8 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
                 im = ax.imshow(data, cmap='BrBG', norm=norm, origin='upper')
             
             # Stats annotation
-            rmse_val = np.sqrt(np.mean(data**2)) if col >= 4 else np.mean(data)
-            stat_label = f"RMSE={rmse_val:.2f}" if col >= 4 else f"Mean={rmse_val:.2f}"
+            rmse_val = np.sqrt(np.mean(data**2)) if col >= 3 else np.mean(data)
+            stat_label = f"RMSE={rmse_val:.2f}" if col >= 3 else f"Mean={rmse_val:.2f}"
             ax.text(0.02, 0.98, stat_label, transform=ax.transAxes,
                     fontsize=8, verticalalignment='top',
                     bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
@@ -147,14 +146,13 @@ def plot_comparison(input_geos, target_gpcp, prediction, ens_mean, save_path, ti
             ax.set_yticks([])
     
     # Colorbars
-    # Precipitation colorbar (spans columns 0-3)
-    cbar_ax1 = fig.add_axes([0.08, 0.04, 0.55, 0.015])
+    cbar_ax1 = fig.add_axes([0.08, 0.04, 0.50, 0.015])
     sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
-    # Difference colorbar (spans columns 4-5)
-    cbar_ax2 = fig.add_axes([0.68, 0.04, 0.25, 0.015])
+    # Difference colorbar
+    cbar_ax2 = fig.add_axes([0.63, 0.04, 0.30, 0.015])
     sm2 = plt.cm.ScalarMappable(cmap='BrBG', norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
