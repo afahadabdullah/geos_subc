@@ -1,5 +1,3 @@
-import torch
-import numpy as np
 import os
 import sys
 import ctypes
@@ -14,6 +12,10 @@ try:
 except Exception:
     pass
 # ------------------------------------------------
+
+import torch
+import numpy as np
+
 
 import matplotlib.pyplot as plt
 

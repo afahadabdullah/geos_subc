@@ -1,9 +1,3 @@
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from accelerate import Accelerator
-from diffusers.optimization import get_cosine_schedule_with_warmup
-from diffusers.optimization import get_cosine_schedule_with_warmup
 import os
 import sys
 import ctypes
@@ -18,6 +12,13 @@ try:
 except Exception:
     pass
 # ------------------------------------------------
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from accelerate import Accelerator
+from diffusers.optimization import get_cosine_schedule_with_warmup
+
 
 import json
 import numpy as np
