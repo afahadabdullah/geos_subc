@@ -1,7 +1,21 @@
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 import os
+import sys
+import ctypes
+
+# --- TACC/Remote Fix: Preload Conda libstdc++ ---
+try:
+    conda_prefix = os.environ.get('CONDA_PREFIX')
+    if conda_prefix:
+        libstd = os.path.join(conda_prefix, 'lib', 'libstdc++.so.6')
+        if os.path.exists(libstd):
+            ctypes.CDLL(libstd)
+except Exception:
+    pass
+# ------------------------------------------------
+
+import matplotlib.pyplot as plt
 
 def denormalize(x):
     """

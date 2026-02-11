@@ -7,6 +7,22 @@ Uses cartopy for publication-quality map visualizations with coastlines, borders
 Usage:
     python ml_model/test.py --checkpoint ml_output_cmde/best_model_epoch_10 --n_samples 5 --n_ensemble 5
 """
+import os
+import sys
+import ctypes
+
+# --- TACC/Remote Fix: Preload Conda libstdc++ ---
+# This fixes "version `CXXABI_1.3.15' not found" errors on older systems
+try:
+    conda_prefix = os.environ.get('CONDA_PREFIX')
+    if conda_prefix:
+        libstd = os.path.join(conda_prefix, 'lib', 'libstdc++.so.6')
+        if os.path.exists(libstd):
+            ctypes.CDLL(libstd)
+except Exception:
+    pass
+# ------------------------------------------------
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
