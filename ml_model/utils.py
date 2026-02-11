@@ -112,7 +112,84 @@ def denormalize_residual(residual_norm, forecast_norm):
     
     return predicted_physical
 
-def crps_ensemble(observations, forecasts):
+def denormalize_zscore(x, mean_map, std_map):
+    """
+    Inverse Z-Score normalization.
+    x: Normalized input (C, H, W) or (B, C, H, W)
+    mean_map: (H, W)
+    std_map: (H, W)
+    """
+    # Inverse: x * std + mean
+    # Ensure maps are broadcastable
+    # If x is Tensor, maps should be Tensor.
+    if isinstance(x, torch.Tensor):
+        if not isinstance(mean_map, torch.Tensor):
+             mean_map = torch.tensor(mean_map, device=x.device, dtype=x.dtype)
+             std_map = torch.tensor(std_map, device=x.device, dtype=x.dtype)
+        # Reshape maps to (1, 1, H, W) or (1, H, W) depending on x
+        if x.ndim == 4: # (B, C, H, W)
+            mu = mean_map.view(1, 1, *x.shape[-2:])
+            sigma = std_map.view(1, 1, *x.shape[-2:])
+        else: # (C, H, W)
+            mu = mean_map.view(1, *x.shape[-2:])
+            sigma = std_map.view(1, *x.shape[-2:])
+        
+        x = x * sigma + mu
+        x = torch.clamp(x, max=15.0) # Safety
+        x = torch.expm1(x)
+        x = torch.clamp(x, min=0.0)
+    else:
+        # Numpy
+        mu = mean_map
+        sigma = std_map
+        x = x * sigma + mu
+        x = np.clip(x, a_min=None, a_max=15.0)
+        x = np.expm1(x)
+        x = np.maximum(x, 0.0)
+    return x
+
+def denormalize_residual_zscore(residual_norm, forecast_norm, 
+                                resid_mean, resid_std, 
+                                geos_mean, geos_std):
+    """
+    Inverse Z-Score for residual.
+    """
+    # 1. Residual log
+    if isinstance(residual_norm, torch.Tensor):
+        if not isinstance(resid_mean, torch.Tensor):
+             resid_mean = torch.tensor(resid_mean, device=residual_norm.device, dtype=residual_norm.dtype)
+             resid_std = torch.tensor(resid_std, device=residual_norm.device, dtype=residual_norm.dtype)
+             geos_mean = torch.tensor(geos_mean, device=forecast_norm.device, dtype=forecast_norm.dtype)
+             geos_std = torch.tensor(geos_std, device=forecast_norm.device, dtype=forecast_norm.dtype)
+             
+        if residual_norm.ndim == 4:
+            r_mu = resid_mean.view(1, 1, *residual_norm.shape[-2:])
+            r_sigma = resid_std.view(1, 1, *residual_norm.shape[-2:])
+            f_mu = geos_mean.view(1, 1, *forecast_norm.shape[-2:])
+            f_sigma = geos_std.view(1, 1, *forecast_norm.shape[-2:])
+        else:
+            r_mu = resid_mean.view(1, *residual_norm.shape[-2:])
+            r_sigma = resid_std.view(1, *residual_norm.shape[-2:])
+            f_mu = geos_mean.view(1, *forecast_norm.shape[-2:])
+            f_sigma = geos_std.view(1, *forecast_norm.shape[-2:])
+            
+        res_log = residual_norm * r_sigma + r_mu
+        fore_log = forecast_norm * f_sigma + f_mu
+        
+        pred_log = fore_log + res_log
+        pred_log = torch.clamp(pred_log, max=10.0)
+        phy = torch.expm1(pred_log)
+        phy = torch.clamp(phy, min=0.0)
+    else:
+        # Numpy
+        res_log = residual_norm * resid_std + resid_mean
+        fore_log = forecast_norm * geos_std + geos_mean
+        pred_log = fore_log + res_log
+        pred_log = np.clip(pred_log, a_min=None, a_max=10.0)
+        phy = np.expm1(pred_log)
+        phy = np.maximum(phy, 0.0)
+        
+    return phy
     """
     Compute Continuous Ranked Probability Score (CRPS) for an ensemble forecast.
     observations: (B, ...) denormalized

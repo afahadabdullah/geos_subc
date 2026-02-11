@@ -19,37 +19,59 @@ import pandas as pd
 import os
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True):
+    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, normalization="minmax"):
         """
         Args:
-            data_root (str): Root directory containing 'geos_subc_{year}.zarr' and 'gpcp_weekly_{year}.zarr'.
-            start_year (int): Start year for data loading.
-            end_year (int): End year for data loading.
-            mjo_file (str): Filename of MJO CSV in data_root.
-            transform (callable, optional): Optional transform to be applied on a sample.
-            preload (bool): If True, load all data into RAM (recommended for speed).
+            data_root (str): Root directory.
+            start_year (int): Start year.
+            end_year (int): End year.
+            mjo_file (str): MJO CSV.
+            transform (callable): Optional transform.
+            preload (bool): Load to RAM.
+            normalization (str): "minmax" (global [-1,1]) or "zscore" (per-grid standard).
         """
         self.data_root = data_root
         self.years = list(range(start_year, end_year + 1))
         self.transform = transform
         self.preload = preload
+        self.normalization = normalization
         
         # 0. Load Normalization Stats (MUST exist — run calculate_stats.py first)
-        stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
-        if not os.path.exists(stats_path):
-            raise FileNotFoundError(
-                f"norm_stats.json not found at {stats_path}. "
-                f"Run `python ml_model/calculate_stats.py` first to generate it."
-            )
-        import json
-        with open(stats_path, 'r') as f:
-            stats = json.load(f)
-        self.norm_min = stats["log1p_min"]
-        self.norm_max = stats["log1p_max"]
-        self.res_min = stats.get("residual_min", -5.0)
-        self.res_max = stats.get("residual_max", 5.0)
-        print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
-        print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
+        if self.normalization == "minmax":
+            # Load Min-Max Stats
+            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+            if not os.path.exists(stats_path):
+                raise FileNotFoundError(
+                    f"norm_stats.json not found. Run `python ml_model/calculate_stats.py`."
+                )
+            import json
+            with open(stats_path, 'r') as f:
+                stats = json.load(f)
+            self.norm_min = stats["log1p_min"]
+            self.norm_max = stats["log1p_max"]
+            self.res_min = stats.get("residual_min", -5.0)
+            self.res_max = stats.get("residual_max", 5.0)
+            print(f"MinMax stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
+        
+        elif self.normalization == "zscore":
+            # Load Z-Score Maps (stats_z.nc)
+            stats_path = os.path.join(os.path.dirname(__file__), "stats_z.nc")
+            if not os.path.exists(stats_path):
+                 raise FileNotFoundError(
+                    f"stats_z.nc not found. Run `python ml_model/calculate_stats_z.py`."
+                )
+            ds_stats = xr.open_dataset(stats_path)
+            # Load maps into RAM as float32
+            self.maps = {
+                "geos_mean": ds_stats["geos_mean"].values.astype(np.float32),
+                "geos_std": ds_stats["geos_std"].values.astype(np.float32),
+                "gpcp_mean": ds_stats["gpcp_mean"].values.astype(np.float32),
+                "gpcp_std": ds_stats["gpcp_std"].values.astype(np.float32),
+                "resid_mean": ds_stats["resid_mean"].values.astype(np.float32),
+                "resid_std": ds_stats["resid_std"].values.astype(np.float32),
+            }
+            ds_stats.close()
+            print("Z-Score stats maps loaded from stats_z.nc")
         
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
@@ -237,27 +259,38 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Log1p transform
-            vmin = self.norm_min
-            vmax = self.norm_max
-            denom = vmax - vmin if vmax != vmin else 1.0
-            
-            x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
-            y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
-            obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
-            
-            # Residual in log space: log1p(GPCP) - log1p(GEOS)
-            residual_log = y_truth_log - x_forecast_log
-            
-            # Normalize inputs to [-1, 1] using global min/max
-            x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
-            y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
-            obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
-            
-            # Normalize residual to [-1, 1] using residual min/max
-            res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
-            residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
-            residual_norm = np.clip(residual_norm, -1.0, 1.0)
+            if self.normalization == "minmax":
+                # Min-Max Normalization to [-1, 1]
+                vmin, vmax = self.norm_min, self.norm_max
+                denom = vmax - vmin if vmax != vmin else 1.0
+                
+                x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
+                y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
+                obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
+                
+                res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
+                residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
+                residual_norm = np.clip(residual_norm, -1.0, 1.0)
+                
+                stats_out = {"mode": "minmax", "min": vmin, "max": vmax, "res_min": self.res_min, "res_max": self.res_max}
+                
+            elif self.normalization == "zscore":
+                # Z-Score Normalization: (x - mu) / sigma
+                # Maps are (H, W). Input is (C, H, W). Broadcasting works.
+                
+                x_forecast_norm = (x_forecast_log - self.maps["geos_mean"]) / self.maps["geos_std"]
+                # For truth/obs, use GPCP stats
+                y_truth_norm = (y_truth_log - self.maps["gpcp_mean"]) / self.maps["gpcp_std"]
+                obs_state_norm = (obs_state_log - self.maps["gpcp_mean"]) / self.maps["gpcp_std"]
+                
+                residual_norm = (residual_log - self.maps["resid_mean"]) / self.maps["resid_std"]
+                # Clip extreme outliers? Maybe [-5, 5]
+                # Standard practice for diff models is often [-1, 1] if minmax, or approx N(0,1) if Gaussian.
+                # Let's clip to [-5, 5] to avoid instability? Or check trainv2 logic.
+                # Let's not clip here, trainv2 might handle it, or robust model.
+                
+                stats_out = {"mode": "zscore"} # Maps are in dataset, can't pass them per sample easily (too big)
+
             
             return {
                 "input_forecast": torch.tensor(x_forecast_norm, dtype=torch.float32), 
@@ -269,7 +302,7 @@ class GeosSubCDataset(Dataset):
                 "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),
                 "S": str(s_date),
                 "M": m_idx,
-                "norm_stats": {"min": vmin, "max": vmax}
+                "norm_stats": stats_out
             }
         except Exception as e:
             # Better to show the error and fail than recurse infinitely
