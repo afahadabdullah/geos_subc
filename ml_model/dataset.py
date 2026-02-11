@@ -259,6 +259,14 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
+            # Log1p transform (applied BEFORE any normalization)
+            x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
+            y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
+            obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
+            
+            # Residual in log space: log1p(GPCP) - log1p(GEOS)
+            residual_log = y_truth_log - x_forecast_log
+            
             if self.normalization == "minmax":
                 # Min-Max Normalization to [-1, 1]
                 vmin, vmax = self.norm_min, self.norm_max
