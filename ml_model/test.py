@@ -246,14 +246,14 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
             data = panels[col]
             
             if col < 3:
-                # Precipitation (sequential Blues)
-                im = ax.pcolormesh(lons, lats, data, cmap='Blues',
+                # Precipitation (sequential YlGnBu is better for precip than Blues)
+                im = ax.pcolormesh(lons, lats, data, cmap='YlGnBu',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
             elif col < 5:
-                # Bias/Diff (diverging RdBu)
+                # Bias/Diff (diverging BrBG: Brown=Dry, Green=Wet)
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
-                im = ax.pcolormesh(lons, lats, data, cmap='RdBu',
+                im = ax.pcolormesh(lons, lats, data, cmap='BrBG',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
             else:
                 # Spread (sequential hot)
@@ -301,13 +301,13 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     # --- Colorbars ---
     # Precipitation (cols 0-2)
     cbar_ax1 = fig.add_axes([0.04, 0.04, 0.30, 0.012])
-    sm1 = plt.cm.ScalarMappable(cmap='Blues', norm=plt.Normalize(0, vmax_precip))
+    sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
     # Bias/Diff (cols 3-4)
     cbar_ax2 = fig.add_axes([0.36, 0.04, 0.30, 0.012])
-    sm2 = plt.cm.ScalarMappable(cmap='RdBu',
+    sm2 = plt.cm.ScalarMappable(cmap='BrBG',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
