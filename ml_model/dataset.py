@@ -19,6 +19,7 @@ import pandas as pd
 import os
 
 class GeosSubCDataset(Dataset):
+    ZSCORE_SCALE = 3.0  # Compress N(0,1) z-scores into ~[-1, 1] for diffusion
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, normalization="minmax"):
         """
         Args:
@@ -292,12 +293,14 @@ class GeosSubCDataset(Dataset):
                 obs_state_norm = (obs_state_log - self.maps["gpcp_mean"]) / self.maps["gpcp_std"]
                 
                 residual_norm = (residual_log - self.maps["resid_mean"]) / self.maps["resid_std"]
-                # Clip extreme outliers? Maybe [-5, 5]
-                # Standard practice for diff models is often [-1, 1] if minmax, or approx N(0,1) if Gaussian.
-                # Let's clip to [-5, 5] to avoid instability? Or check trainv2 logic.
-                # Let's not clip here, trainv2 might handle it, or robust model.
                 
-                stats_out = {"mode": "zscore"} # Maps are in dataset, can't pass them per sample easily (too big)
+                # Scale into ~[-1, 1] for diffusion compatibility
+                x_forecast_norm = x_forecast_norm / self.ZSCORE_SCALE
+                y_truth_norm = y_truth_norm / self.ZSCORE_SCALE
+                obs_state_norm = obs_state_norm / self.ZSCORE_SCALE
+                residual_norm = residual_norm / self.ZSCORE_SCALE
+                
+                stats_out = {"mode": "zscore", "scale": self.ZSCORE_SCALE}
 
             
             return {

@@ -112,17 +112,18 @@ def denormalize_residual(residual_norm, forecast_norm):
     
     return predicted_physical
 
-def denormalize_zscore(x, mean_map, std_map):
+def denormalize_zscore(x, mean_map, std_map, scale=3.0):
     """
     Inverse Z-Score normalization.
-    x: Normalized input (C, H, W) or (B, C, H, W)
+    x: Normalized input (C, H, W) or (B, C, H, W), scaled by 1/scale
     mean_map: (H, W)
     std_map: (H, W)
+    scale: Scaling constant used during normalization (default 3.0)
     """
-    # Inverse: x * std + mean
+    # Inverse: undo scale, then x * std + mean
     # Ensure maps are broadcastable
-    # If x is Tensor, maps should be Tensor.
     if isinstance(x, torch.Tensor):
+        x = x * scale  # Undo the 1/scale compression
         if not isinstance(mean_map, torch.Tensor):
              mean_map = torch.tensor(mean_map, device=x.device, dtype=x.dtype)
              std_map = torch.tensor(std_map, device=x.device, dtype=x.dtype)
@@ -140,6 +141,7 @@ def denormalize_zscore(x, mean_map, std_map):
         x = torch.clamp(x, min=0.0)
     else:
         # Numpy
+        x = x * scale  # Undo the 1/scale compression
         mu = mean_map
         sigma = std_map
         x = x * sigma + mu
@@ -150,12 +152,14 @@ def denormalize_zscore(x, mean_map, std_map):
 
 def denormalize_residual_zscore(residual_norm, forecast_norm, 
                                 resid_mean, resid_std, 
-                                geos_mean, geos_std):
+                                geos_mean, geos_std, scale=3.0):
     """
-    Inverse Z-Score for residual.
+    Inverse Z-Score for residual. Undoes 1/scale compression first.
     """
     # 1. Residual log
     if isinstance(residual_norm, torch.Tensor):
+        residual_norm = residual_norm * scale  # Undo compression
+        forecast_norm = forecast_norm * scale
         if not isinstance(resid_mean, torch.Tensor):
              resid_mean = torch.tensor(resid_mean, device=residual_norm.device, dtype=residual_norm.dtype)
              resid_std = torch.tensor(resid_std, device=residual_norm.device, dtype=residual_norm.dtype)
@@ -182,6 +186,8 @@ def denormalize_residual_zscore(residual_norm, forecast_norm,
         phy = torch.clamp(phy, min=0.0)
     else:
         # Numpy
+        residual_norm = residual_norm * scale
+        forecast_norm = forecast_norm * scale
         res_log = residual_norm * resid_std + resid_mean
         fore_log = forecast_norm * geos_std + geos_mean
         pred_log = fore_log + res_log
