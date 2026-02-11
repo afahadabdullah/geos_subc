@@ -294,7 +294,7 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
     col_titles = [
         "GPCP Target (Truth)",
         "GEOS Ens Mean (Input)",
-        "Model Single Member",
+        "GEOS Bias (GPCP−GeosMean)",
         f"Model Ens Mean ({n_ens})",
         "Model Bias (GPCP−ModMean)",
         "Ensemble Spread (Std)",
@@ -302,20 +302,20 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
     ]
     
     for row in range(n_weeks):
-        # Order: GPCP, GEOS Mean, Single, Mod Mean, Bias, Spread, Imp
-        panels = [gpcp[row], geos[row], single_member[row], ens[row], model_bias[row], spread[row], improvement[row]]
+        # Order: GPCP, GEOS Mean, GEOS Bias, Mod Mean, Mod Bias, Spread, Imp
+        panels = [gpcp[row], geos[row], geos_bias[row], ens[row], model_bias[row], spread[row], improvement[row]]
         
         for col in range(7):
             ax = fig.add_subplot(gs[row, col], projection=proj)
             data = panels[col]
             
-            if col < 4:
+            if col in [0, 1, 3]:
                 # Precip
                 im = ax.pcolormesh(lons, lats, data, cmap='YlGnBu',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
-            elif col == 4:
-                # Bias
+            elif col in [2, 4]:
+                # Bias/Diff
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='BrBG',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
@@ -348,9 +348,9 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
             gl.ylabel_style = {'fontsize': 7}
             
             # Stats
-            if col < 4:
+            if col in [0, 1, 3]:
                 stat_text = f"Mean={np.mean(data):.2f}"
-            elif col == 4:
+            elif col in [2, 4]:
                 stat_text = f"RMSE={np.sqrt(np.mean(data**2)):.2f}"
             elif col == 5:
                 stat_text = f"Avg Std={np.mean(data):.3f}"
@@ -371,13 +371,14 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
                 ax.set_title(col_titles[col], fontsize=10, fontweight='bold', pad=8)
     
     # --- Colorbars ---
-    # Precipitation (cols 0-3)
+    # Precipitation (cols 0,1,3)
+    # We position it generally on the left side, although columns are interleaved
     cbar_ax1 = fig.add_axes([0.04, 0.04, 0.45, 0.012])
     sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
-    # Bias (col 4)
+    # Bias (col 2,4)
     cbar_ax2 = fig.add_axes([0.55, 0.04, 0.10, 0.012])
     sm2 = plt.cm.ScalarMappable(cmap='BrBG',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
