@@ -126,13 +126,20 @@ def ddpm_sample_full(model, diffusion, forecast, observed, mjo_map, month_onehot
         beta_t = diffusion.betas[t]
         sqrt_one_minus_alpha_hat_t = diffusion.sqrt_one_minus_alpha_hats[t]
         
+        # Predict x0 and clamp to valid range (critical for residual prediction)
+        pred_x0 = (x - sqrt_one_minus_alpha_hat_t * pred_noise) / (torch.sqrt(alpha_hat_t) + 1e-8)
+        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+        
+        # Re-derive noise from clamped pred_x0 so the clamp takes effect
+        pred_noise_clamped = (x - torch.sqrt(alpha_hat_t) * pred_x0) / (sqrt_one_minus_alpha_hat_t + 1e-8)
+        
         if t > 0:
             noise = torch.randn_like(x)
         else:
             noise = torch.zeros_like(x)
             
         x = (1 / torch.sqrt(alpha_t)) * (
-            x - (beta_t / sqrt_one_minus_alpha_hat_t) * pred_noise
+            x - (beta_t / sqrt_one_minus_alpha_hat_t) * pred_noise_clamped
         ) + torch.sqrt(beta_t) * noise
         
     return x
@@ -177,6 +184,7 @@ def ddim_sample(model, diffusion, forecast, observed, mjo_map, month_onehot, n_s
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
         
         pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
+        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)  # Clamp to valid range (critical for residual prediction)
         
         sigma_t = eta * torch.sqrt(
             (1 - alpha_bar_t_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_t_prev)
