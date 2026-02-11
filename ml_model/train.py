@@ -77,6 +77,7 @@ def _ddim_sample_val(model, diffusion, forecast, observed, mjo_map, month_onehot
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
         
         pred_x0 = (x - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-8)
+        pred_x0 = torch.clamp(pred_x0, -1.0, 1.0) # Clip to valid range for stability
         
         term_1 = torch.sqrt(alpha_bar_t_prev) * pred_x0
         term_2 = torch.sqrt(1 - alpha_bar_t_prev) * pred_noise

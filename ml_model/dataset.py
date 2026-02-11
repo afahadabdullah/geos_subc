@@ -225,9 +225,9 @@ class GeosSubCDataset(Dataset):
             vmin = self.norm_min
             vmax = self.norm_max
             denom = vmax - vmin if vmax != vmin else 1.0
-            x_forecast = (np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - vmin) / denom
-            y_truth = (np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - vmin) / denom
-            obs_state = (np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - vmin) / denom
+            x_forecast = 2 * ((np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - vmin) / denom) - 1.0
+            y_truth = 2 * ((np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - vmin) / denom) - 1.0
+            obs_state = 2 * ((np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - vmin) / denom) - 1.0
             
             return {
                 "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 

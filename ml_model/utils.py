@@ -39,6 +39,9 @@ def denormalize(x):
     vmax = stats["log1p_max"]
     
     # x is (..., H, W)
+    # Undo [-1, 1] scaling -> [0, 1]
+    x = (x + 1.0) / 2.0
+    
     # Undo min-max scaling: x * (max - min) + min
     denom = vmax - vmin if vmax != vmin else 1.0
     x = x * denom + vmin
@@ -109,10 +112,9 @@ def plot_comparison(input_geos, target_gpcp, ens_mean, save_path, title="Validat
     if vmax_precip <= 0:
         vmax_precip = 10.0
     
-    # Difference colormap limits (symmetric)
+    # Difference colormap limits (symmetric) - Determined by GEOS bias only
     diff_abs_max = max(
         float(np.percentile(np.abs(bias), 99)),
-        float(np.percentile(np.abs(residual), 99)),
         0.5
     )
     
