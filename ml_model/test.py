@@ -31,6 +31,42 @@ import argparse
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import xarray as xr
+import pandas as pd
+
+def get_geos_ens_mean(data_root, init_date_str):
+    """
+    Load full GEOS ensemble for the given date and compute the mean.
+    Returns physical precipitation (mm/day).
+    """
+    # Parse date
+    date = pd.to_datetime(init_date_str)
+    year = date.year
+    
+    # Path to Zarr
+    zarr_path = os.path.join(data_root, f"geos_subc_{year}.zarr")
+    
+    # Open and select
+    try:
+        ds = xr.open_zarr(zarr_path, consolidated=False)
+        # Select specific date
+        # Note: Zarr S index might be datetime64[ns]
+        # We need to ensure we select correctly
+        # Using .sel(S=date, method=None) requires exact match
+        precip = ds['pr'].sel(S=date).values # (M, lead, lat, lon)
+        
+        # Compute mean over ensemble members (M)
+        # Handle if M dimension is missing (should be 4)
+        if precip.ndim == 4:
+            ens_mean = np.mean(precip, axis=0)
+        else:
+            # If (lead, lat, lon), just return it
+            ens_mean = precip
+            
+        return ens_mean
+    except Exception as e:
+        print(f"Warning: Could not load GEOS ensemble for {init_date_str}: {e}")
+        return None
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
@@ -202,36 +238,32 @@ def ddim_sample(model, diffusion, forecast, observed, mjo_map, month_onehot, n_s
     return x
 
 
-def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
+def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
                      sample_idx, init_date, save_dir, lats, lons):
     """
     Publication-quality cartopy plot for a single test sample.
     
     Layout: 4 rows (LW1-LW4) × 7 columns:
-       GEOS Input | GPCP Target | Ensemble Mean | GEOS Bias | Model Bias | Ensemble Spread | Improvement
-    
-    geos_input, gpcp_truth, ens_mean: denormalized numpy (4, H, W)
-    ensemble_preds: list of denormalized numpy (4, H, W)
+       GPCP Target | GEOS Ens Mean | Single Member | Model Mean | Model Bias | Spread | Improvement
     """
-    n_weeks = geos_input.shape[0]
+    n_weeks = geos_ens_mean.shape[0]
     n_ens = len(ensemble_preds)
     week_labels = [f"Lead Week {i+1}" for i in range(n_weeks)]
     
     # Clean
-    geos = np.nan_to_num(geos_input, nan=0.0)
+    geos = np.nan_to_num(geos_ens_mean, nan=0.0)
     gpcp = np.nan_to_num(gpcp_truth, nan=0.0)
     ens  = np.nan_to_num(ens_mean, nan=0.0)
+    single_member = np.nan_to_num(ensemble_preds[0], nan=0.0)
     
-    # Difference & Spread
-    geos_bias = gpcp - geos       # GPCP - GEOS (Input Bias)
-    model_bias = gpcp - ens       # GPCP - EnsMean (Model Bias)
+    # Difference & Spread: Compare Means
+    geos_bias = gpcp - geos       # GPCP - GEOS_Mean
+    model_bias = gpcp - ens       # GPCP - Mod_Mean
     
     ens_stack = np.stack([np.nan_to_num(e, nan=0.0) for e in ensemble_preds], axis=0)
     spread = np.std(ens_stack, axis=0)
     
-    # Improvement: |GPCP - GEOS| - |GPCP - Model|
-    # Positive = Model closer to truth (improvement)
-    # Negative = GEOS closer to truth (degradation)
+    # Improvement: |GPCP - GEOS_Mean| - |GPCP - Mod_Mean|
     improvement = np.abs(geos_bias) - np.abs(model_bias)
     
     # Precip color limits
@@ -240,7 +272,7 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     if vmax_precip <= 0:
         vmax_precip = 10.0
     
-    # Diff limits (symmetric, shared for both biases)
+    # Diff limits
     diff_abs_max = max(
         float(np.percentile(np.abs(geos_bias), 99)),
         float(np.percentile(np.abs(model_bias), 99)),
@@ -250,51 +282,50 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     # Spread limits
     vmax_spread = max(float(np.percentile(spread, 99.5)), 0.1)
     
-    # Improvement limits (symmetric)
+    # Improvement limits
     imp_abs_max = max(float(np.percentile(np.abs(improvement), 99)), 0.5)
     
     proj = ccrs.PlateCarree()
     
-    fig = plt.figure(figsize=(42, 22))  # Wider for 7 columns
+    fig = plt.figure(figsize=(42, 22))
     gs = gridspec.GridSpec(n_weeks, 7, wspace=0.06, hspace=0.10,
                            left=0.04, right=0.96, top=0.93, bottom=0.08)
     
     col_titles = [
-        "GEOS Input",
-        "GPCP Target",
-        "Single Member (Random)",
-        f"Ensemble Mean ({n_ens})",
-        "Model Bias (GPCP−EnsMean)",
+        "GPCP Target (Truth)",
+        "GEOS Ens Mean (Input)",
+        "Model Single Member",
+        f"Model Ens Mean ({n_ens})",
+        "Model Bias (GPCP−ModMean)",
         "Ensemble Spread (Std)",
-        "Improvement (|GeosErr|−|ModelErr|)"
+        "Improvement (vs GEOS Mean)"
     ]
     
     for row in range(n_weeks):
-        # Use first ensemble member for visualization
-        single_member = np.nan_to_num(ensemble_preds[0][row], nan=0.0)
-        panels = [geos[row], gpcp[row], single_member, ens[row], model_bias[row], spread[row], improvement[row]]
+        # Order: GPCP, GEOS Mean, Single, Mod Mean, Bias, Spread, Imp
+        panels = [gpcp[row], geos[row], single_member[row], ens[row], model_bias[row], spread[row], improvement[row]]
         
         for col in range(7):
             ax = fig.add_subplot(gs[row, col], projection=proj)
             data = panels[col]
             
             if col < 4:
-                # Precipitation (sequential)
+                # Precip
                 im = ax.pcolormesh(lons, lats, data, cmap='YlGnBu',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
             elif col == 4:
-                # Bias/Diff (diverging BrBG: Brown=Dry, Green=Wet)
+                # Bias
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='BrBG',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
             elif col == 5:
-                # Spread (sequential hot)
+                # Spread
                 im = ax.pcolormesh(lons, lats, data, cmap='YlOrRd',
                                    vmin=0, vmax=vmax_spread,
                                    transform=ccrs.PlateCarree(), shading='auto')
             else:
-                # Improvement (diverging: Blue=Model Better, Red=GEOS Better)
+                # Improvement
                 norm = TwoSlopeNorm(vcenter=0, vmin=-imp_abs_max, vmax=imp_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='RdBu',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
@@ -340,26 +371,26 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
                 ax.set_title(col_titles[col], fontsize=10, fontweight='bold', pad=8)
     
     # --- Colorbars ---
-    # Precipitation (cols 0-3) - Covers ~0.04 to 0.52
+    # Precipitation (cols 0-3)
     cbar_ax1 = fig.add_axes([0.04, 0.04, 0.45, 0.012])
     sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
-    # Bias/Diff (col 4) - Starts ~0.56
+    # Bias (col 4)
     cbar_ax2 = fig.add_axes([0.55, 0.04, 0.10, 0.012])
     sm2 = plt.cm.ScalarMappable(cmap='BrBG',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     
-    # Spread (col 5) - Starts ~0.69
+    # Spread (col 5)
     cbar_ax3 = fig.add_axes([0.69, 0.04, 0.10, 0.012])
     sm3 = plt.cm.ScalarMappable(cmap='YlOrRd', norm=plt.Normalize(0, vmax_spread))
     sm3.set_array([])
     fig.colorbar(sm3, cax=cbar_ax3, orientation='horizontal', label='Ensemble Spread (Std)')
     
-    # Improvement (col 6) - Starts ~0.82
+    # Improvement (col 6)
     cbar_ax4 = fig.add_axes([0.82, 0.04, 0.14, 0.012])
     sm4 = plt.cm.ScalarMappable(cmap='RdBu',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-imp_abs_max, vmax=imp_abs_max))
@@ -488,12 +519,21 @@ def run_test(args):
         ens_mean = np.mean(ensemble_preds, axis=0)
         
         # Denormalize inputs
-        geos_raw = denormalize(forecast[0]).detach().cpu().numpy()
+        geos_raw_single = denormalize(forecast[0]).detach().cpu().numpy()
         gpcp_raw = denormalize(target[0]).detach().cpu().numpy()
+        
+        # Fetch full GEOS ensemble mean for plotting
+        geos_ens_mean_full = get_geos_ens_mean(args.data_root, init_date)
+        
+        if geos_ens_mean_full is None:
+             print("  Warning: Using single member GEOS as mean (fallback).")
+             geos_final = geos_raw_single
+        else:
+             geos_final = geos_ens_mean_full
         
         # Plot
         plot_test_sample(
-            geos_input=geos_raw,
+            geos_ens_mean=geos_final,
             gpcp_truth=gpcp_raw,
             ensemble_preds=ensemble_preds,
             ens_mean=ens_mean,
