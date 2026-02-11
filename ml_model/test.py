@@ -207,8 +207,8 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     """
     Publication-quality cartopy plot for a single test sample.
     
-    Layout: 4 rows (LW1-LW4) × 6 columns:
-       GEOS Input | GPCP Target | Ensemble Mean | GEOS Bias | Model Bias | Ensemble Spread
+    Layout: 4 rows (LW1-LW4) × 7 columns:
+       GEOS Input | GPCP Target | Ensemble Mean | GEOS Bias | Model Bias | Ensemble Spread | Improvement
     
     geos_input, gpcp_truth, ens_mean: denormalized numpy (4, H, W)
     ensemble_preds: list of denormalized numpy (4, H, W)
@@ -229,6 +229,11 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     ens_stack = np.stack([np.nan_to_num(e, nan=0.0) for e in ensemble_preds], axis=0)
     spread = np.std(ens_stack, axis=0)
     
+    # Improvement: |GPCP - GEOS| - |GPCP - Model|
+    # Positive = Model closer to truth (improvement)
+    # Negative = GEOS closer to truth (degradation)
+    improvement = np.abs(geos_bias) - np.abs(model_bias)
+    
     # Precip color limits
     all_precip = np.concatenate([geos.flatten(), gpcp.flatten()])
     vmax_precip = float(np.percentile(all_precip, 99.5)) + 0.5
@@ -245,10 +250,13 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     # Spread limits
     vmax_spread = max(float(np.percentile(spread, 99.5)), 0.1)
     
+    # Improvement limits (symmetric)
+    imp_abs_max = max(float(np.percentile(np.abs(improvement), 99)), 0.5)
+    
     proj = ccrs.PlateCarree()
     
-    fig = plt.figure(figsize=(36, 22))  # Wider for 6 columns
-    gs = gridspec.GridSpec(n_weeks, 6, wspace=0.06, hspace=0.10,
+    fig = plt.figure(figsize=(42, 22))  # Wider for 7 columns
+    gs = gridspec.GridSpec(n_weeks, 7, wspace=0.06, hspace=0.10,
                            left=0.04, right=0.96, top=0.93, bottom=0.08)
     
     col_titles = [
@@ -257,18 +265,19 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
         f"Ensemble Mean ({n_ens})",
         "GEOS Bias (GPCP−GEOS)",
         "Model Bias (GPCP−EnsMean)",
-        "Ensemble Spread (Std)"
+        "Ensemble Spread (Std)",
+        "Improvement (|GeosErr|−|ModelErr|)"
     ]
     
     for row in range(n_weeks):
-        panels = [geos[row], gpcp[row], ens[row], geos_bias[row], model_bias[row], spread[row]]
+        panels = [geos[row], gpcp[row], ens[row], geos_bias[row], model_bias[row], spread[row], improvement[row]]
         
-        for col in range(6):
+        for col in range(7):
             ax = fig.add_subplot(gs[row, col], projection=proj)
             data = panels[col]
             
             if col < 3:
-                # Precipitation (sequential YlGnBu is better for precip than Blues)
+                # Precipitation (sequential)
                 im = ax.pcolormesh(lons, lats, data, cmap='YlGnBu',
                                    vmin=0, vmax=vmax_precip,
                                    transform=ccrs.PlateCarree(), shading='auto')
@@ -277,11 +286,16 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
                 norm = TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max)
                 im = ax.pcolormesh(lons, lats, data, cmap='BrBG',
                                    norm=norm, transform=ccrs.PlateCarree(), shading='auto')
-            else:
+            elif col == 5:
                 # Spread (sequential hot)
                 im = ax.pcolormesh(lons, lats, data, cmap='YlOrRd',
                                    vmin=0, vmax=vmax_spread,
                                    transform=ccrs.PlateCarree(), shading='auto')
+            else:
+                # Improvement (diverging: Blue=Model Better, Red=GEOS Better)
+                norm = TwoSlopeNorm(vcenter=0, vmin=-imp_abs_max, vmax=imp_abs_max)
+                im = ax.pcolormesh(lons, lats, data, cmap='RdBu',
+                                   norm=norm, transform=ccrs.PlateCarree(), shading='auto')
             
             # Map features
             ax.coastlines(linewidth=0.5, color='black')
@@ -305,8 +319,11 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
                 stat_text = f"Mean={np.mean(data):.2f}"
             elif col < 5:
                 stat_text = f"RMSE={np.sqrt(np.mean(data**2)):.2f}"
-            else:
+            elif col == 5:
                 stat_text = f"Avg Std={np.mean(data):.3f}"
+            else:
+                pct_improved = float(np.sum(data > 0)) / data.size * 100
+                stat_text = f"Improved={pct_improved:.0f}%"
             
             ax.text(0.02, 0.97, stat_text, transform=ax.transAxes, fontsize=7,
                     va='top', bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.8))
@@ -322,23 +339,30 @@ def plot_test_sample(geos_input, gpcp_truth, ensemble_preds, ens_mean,
     
     # --- Colorbars ---
     # Precipitation (cols 0-2)
-    cbar_ax1 = fig.add_axes([0.04, 0.04, 0.30, 0.012])
+    cbar_ax1 = fig.add_axes([0.04, 0.04, 0.25, 0.012])
     sm1 = plt.cm.ScalarMappable(cmap='YlGnBu', norm=plt.Normalize(0, vmax_precip))
     sm1.set_array([])
     fig.colorbar(sm1, cax=cbar_ax1, orientation='horizontal', label='Precipitation (mm/day)')
     
     # Bias/Diff (cols 3-4)
-    cbar_ax2 = fig.add_axes([0.36, 0.04, 0.30, 0.012])
+    cbar_ax2 = fig.add_axes([0.31, 0.04, 0.25, 0.012])
     sm2 = plt.cm.ScalarMappable(cmap='BrBG',
                                 norm=TwoSlopeNorm(vcenter=0, vmin=-diff_abs_max, vmax=diff_abs_max))
     sm2.set_array([])
     fig.colorbar(sm2, cax=cbar_ax2, orientation='horizontal', label='Difference (mm/day)')
     
     # Spread (col 5)
-    cbar_ax3 = fig.add_axes([0.69, 0.04, 0.15, 0.012])
+    cbar_ax3 = fig.add_axes([0.58, 0.04, 0.12, 0.012])
     sm3 = plt.cm.ScalarMappable(cmap='YlOrRd', norm=plt.Normalize(0, vmax_spread))
     sm3.set_array([])
     fig.colorbar(sm3, cax=cbar_ax3, orientation='horizontal', label='Ensemble Spread (Std)')
+    
+    # Improvement (col 6)
+    cbar_ax4 = fig.add_axes([0.72, 0.04, 0.22, 0.012])
+    sm4 = plt.cm.ScalarMappable(cmap='RdBu',
+                                norm=TwoSlopeNorm(vcenter=0, vmin=-imp_abs_max, vmax=imp_abs_max))
+    sm4.set_array([])
+    fig.colorbar(sm4, cax=cbar_ax4, orientation='horizontal', label='Improvement (Blue=Model Better, Red=GEOS Better)')
     
     fig.suptitle(
         f"CMDE Test | Sample {sample_idx} | Init: {init_date} | "
