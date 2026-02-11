@@ -451,6 +451,8 @@ def run_test(args):
         n_total = len(val_dataset)
         sample_indices = np.random.choice(n_total, size=min(args.n_samples, n_total), replace=False)
         sample_indices.sort()
+        # Override: use sample 42 instead of 32 for second sample
+        sample_indices = np.array([s if s != 32 else 42 for s in sample_indices])
     
     print(f"\nGenerating {args.n_ensemble}-member ensemble for {len(sample_indices)} samples...")
     print(f"DDPM reverse steps: {args.ddpm_steps}")
