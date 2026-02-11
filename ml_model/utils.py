@@ -42,11 +42,15 @@ def denormalize(x):
     # Undo min-max scaling: x * (max - min) + min
     denom = vmax - vmin if vmax != vmin else 1.0
     x = x * denom + vmin
-    # Undo log1p
+    
+    # Undo log1p with safety clamp to prevent overflow (inf)
+    # log1p(22000) ~ 10.0. Max float32 exp is ~88.
     if isinstance(x, torch.Tensor):
+        x = torch.clamp(x, max=15.0)  # Safety clamp
         x = torch.expm1(x)
         x = torch.clamp(x, min=0.0)
     else:
+        x = np.clip(x, a_min=None, a_max=15.0) # Safety clamp
         x = np.expm1(x)
         x = np.maximum(x, 0.0)
     return x
