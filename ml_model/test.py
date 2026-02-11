@@ -64,7 +64,7 @@ def parse_args():
                         help="Path to checkpoint directory. If None, auto-detects best model.")
     parser.add_argument("--n_samples", type=int, default=5,
                         help="Number of random validation samples to visualize")
-    parser.add_argument("--n_ensemble", type=int, default=15,
+    parser.add_argument("--n_ensemble", type=int, default=5,
                         help="Number of ensemble members per sample")
     parser.add_argument("--output_dir", type=str, default="ml_output_cmde/test_plots",
                         help="Directory to save test plots")
