@@ -3,7 +3,22 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from diffusers.optimization import get_cosine_schedule_with_warmup
+from diffusers.optimization import get_cosine_schedule_with_warmup
 import os
+import sys
+import ctypes
+
+# --- TACC/Remote Fix: Preload Conda libstdc++ ---
+try:
+    conda_prefix = os.environ.get('CONDA_PREFIX')
+    if conda_prefix:
+        libstd = os.path.join(conda_prefix, 'lib', 'libstdc++.so.6')
+        if os.path.exists(libstd):
+            ctypes.CDLL(libstd, mode=ctypes.RTLD_GLOBAL)
+except Exception:
+    pass
+# ------------------------------------------------
+
 import json
 import numpy as np
 import pandas as pd

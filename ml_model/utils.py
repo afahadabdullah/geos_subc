@@ -10,7 +10,7 @@ try:
     if conda_prefix:
         libstd = os.path.join(conda_prefix, 'lib', 'libstdc++.so.6')
         if os.path.exists(libstd):
-            ctypes.CDLL(libstd)
+            ctypes.CDLL(libstd, mode=ctypes.RTLD_GLOBAL)
 except Exception:
     pass
 # ------------------------------------------------
