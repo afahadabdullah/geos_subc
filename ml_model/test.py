@@ -58,15 +58,17 @@ def get_geos_ens_mean(data_root, init_date_str):
         # Compute mean over ensemble members (M)
         # Handle if M dimension is missing (should be 4)
         if precip.ndim == 4:
+            n_members = precip.shape[0]
             ens_mean = np.mean(precip, axis=0)
         else:
             # If (lead, lat, lon), just return it
+            n_members = 1
             ens_mean = precip
             
-        return ens_mean
+        return ens_mean, n_members
     except Exception as e:
         print(f"Warning: Could not load GEOS ensemble for {init_date_str}: {e}")
-        return None
+        return None, 0
 
 # Add project root to sys.path
 root_dir = Path(__file__).resolve().parent.parent
@@ -239,12 +241,12 @@ def ddim_sample(model, diffusion, forecast, observed, mjo_map, month_onehot, n_s
 
 
 def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
-                     sample_idx, init_date, save_dir, lats, lons):
+                     sample_idx, init_date, save_dir, lats, lons, n_geos_ens=4):
     """
     Publication-quality cartopy plot for a single test sample.
     
     Layout: 4 rows (LW1-LW4) × 7 columns:
-       GPCP Target | GEOS Ens Mean | Single Member | Model Mean | Model Bias | Spread | Improvement
+       GPCP Target | GEOS Ens Mean | GEOS Bias | Model Mean | Model Bias | Spread | Improvement
     """
     n_weeks = geos_ens_mean.shape[0]
     n_ens = len(ensemble_preds)
@@ -254,7 +256,6 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
     geos = np.nan_to_num(geos_ens_mean, nan=0.0)
     gpcp = np.nan_to_num(gpcp_truth, nan=0.0)
     ens  = np.nan_to_num(ens_mean, nan=0.0)
-    single_member = np.nan_to_num(ensemble_preds[0], nan=0.0)
     
     # Difference & Spread: Compare Means
     geos_bias = gpcp - geos       # GPCP - GEOS_Mean
@@ -293,7 +294,7 @@ def plot_test_sample(geos_ens_mean, gpcp_truth, ensemble_preds, ens_mean,
     
     col_titles = [
         "GPCP Target (Truth)",
-        "GEOS Ens Mean (Input)",
+        f"GEOS Ens Mean ({n_geos_ens})",
         "GEOS Bias (GPCP−GeosMean)",
         f"Model Ens Mean ({n_ens})",
         "Model Bias (GPCP−ModMean)",
@@ -524,13 +525,15 @@ def run_test(args):
         gpcp_raw = denormalize(target[0]).detach().cpu().numpy()
         
         # Fetch full GEOS ensemble mean for plotting
-        geos_ens_mean_full = get_geos_ens_mean(args.data_root, init_date)
+        geos_ens_mean_full, n_geos = get_geos_ens_mean(args.data_root, init_date)
         
         if geos_ens_mean_full is None:
              print("  Warning: Using single member GEOS as mean (fallback).")
              geos_final = geos_raw_single
+             n_geos_final = 1
         else:
              geos_final = geos_ens_mean_full
+             n_geos_final = n_geos
         
         # Plot
         plot_test_sample(
@@ -542,7 +545,8 @@ def run_test(args):
             init_date=init_date,
             save_dir=args.output_dir,
             lats=lats,
-            lons=lons
+            lons=lons,
+            n_geos_ens=n_geos_final
         )
     
     print(f"\n{'=' * 60}")
