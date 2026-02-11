@@ -1,0 +1,48 @@
+# Model weights & checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+checkpoint-*/
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+
+# Data files
+*.zarr/
+*.nc
+*.h5
+*.hdf5
+*.csv
+*.npy
+*.npz
+norm_stats.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+*.o[0-9]*
+*.e[0-9]*
+
+# Misc
+*.zip
+*.tar.gz
