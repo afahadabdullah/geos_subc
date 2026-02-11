@@ -31,9 +31,9 @@ class GeosSubCDataset(Dataset):
         import json
         with open(stats_path, 'r') as f:
             stats = json.load(f)
-        self.norm_mean = stats["log1p_mean"]
-        self.norm_std = stats["log1p_std"]
-        print(f"Norm stats loaded: mean={self.norm_mean:.4f}, std={self.norm_std:.4f}")
+        self.norm_min = stats["log1p_min"]
+        self.norm_max = stats["log1p_max"]
+        print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
         
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
@@ -221,12 +221,13 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Log-normalization using cached stats: (log1p(x) - mean) / std
-            mean = self.norm_mean
-            std = self.norm_std
-            x_forecast = (np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - mean) / std
-            y_truth = (np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - mean) / std
-            obs_state = (np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - mean) / std
+            # Min-max normalization: (log1p(x) - min) / (max - min) -> [0, 1]
+            vmin = self.norm_min
+            vmax = self.norm_max
+            denom = vmax - vmin if vmax != vmin else 1.0
+            x_forecast = (np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0)) - vmin) / denom
+            y_truth = (np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0)) - vmin) / denom
+            obs_state = (np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0)) - vmin) / denom
             
             return {
                 "input_forecast": torch.tensor(x_forecast, dtype=torch.float32), 
@@ -237,7 +238,7 @@ class GeosSubCDataset(Dataset):
                 "month_onehot": torch.tensor(month_onehot, dtype=torch.float32),
                 "S": str(s_date),
                 "M": m_idx,
-                "norm_stats": {"mean": mean, "std": std}
+                "norm_stats": {"min": vmin, "max": vmax}
             }
         except Exception as e:
             # Better to show the error and fail than recurse infinitely

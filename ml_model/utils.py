@@ -21,8 +21,9 @@ import matplotlib.pyplot as plt
 
 def denormalize(x):
     """
-    Inverse of (log1p(x) - mean) / std.
-    Automatically loads stats from norm_stats.json if available.
+    Inverse min-max normalization for log1p-transformed precipitation.
+    Inverse of (log1p(x) - min) / (max - min).
+    Automatically loads stats from norm_stats.json.
     """
     # Load stats (MUST exist — run calculate_stats.py first)
     import json
@@ -34,15 +35,21 @@ def denormalize(x):
         )
     with open(stats_path, 'r') as f:
         stats = json.load(f)
-    mean = stats["log1p_mean"]
-    std = stats["log1p_std"]
+    vmin = stats["log1p_min"]
+    vmax = stats["log1p_max"]
     
     # x is (..., H, W)
-    # Undo scaling
-    val = x * std + mean
-    # expm1 and clip to 0 for physical consistency
-    res = torch.expm1(val)
-    return torch.clamp(res, min=0.0)
+    # Undo min-max scaling: x * (max - min) + min
+    denom = vmax - vmin if vmax != vmin else 1.0
+    x = x * denom + vmin
+    # Undo log1p
+    if isinstance(x, torch.Tensor):
+        x = torch.expm1(x)
+        x = torch.clamp(x, min=0.0)
+    else:
+        x = np.expm1(x)
+        x = np.maximum(x, 0.0)
+    return x
 
 def crps_ensemble(observations, forecasts):
     """
