@@ -324,7 +324,22 @@ class GeosSubCDataset(Dataset):
                 sst_data = self.preloaded_sst.get(s_key)
                 if sst_data is None:
                     sst_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                
+                # Squeeze any singleton dimensions (like depth=1) to ensure (4, Y, X)
                 sst_clean = np.nan_to_num(sst_data, nan=0.0).astype(np.float32)
+                if sst_clean.ndim > 3:
+                    sst_clean = np.squeeze(sst_clean)
+                
+                # Check for (Y, X, 4) case if squeeze made it 3D but in wrong order
+                # (Though unlikely given preloaded_sst logic, being robust)
+                if sst_clean.ndim == 3 and sst_clean.shape[0] != 4 and sst_clean.shape[2] == 4:
+                    sst_clean = np.transpose(sst_clean, (2, 0, 1))
+                
+                # Force strictly 3D shape if squeeze removed too much or if shape is weird
+                if sst_clean.ndim != 3 or sst_clean.shape[0] != 4:
+                    # Fallback resize if somehow it's still wrong
+                    sst_clean = sst_clean.reshape(4, x_forecast.shape[1], x_forecast.shape[2])
+
                 sst_denom = self.sst_max - self.sst_min if self.sst_max != self.sst_min else 1.0
                 sst_norm = 2 * ((sst_clean - self.sst_min) / sst_denom) - 1.0
                 sst_norm = np.clip(sst_norm, -1.0, 1.0)
@@ -334,7 +349,18 @@ class GeosSubCDataset(Dataset):
                 sss_data = self.preloaded_sss.get(s_key)
                 if sss_data is None:
                     sss_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                
+                # Squeeze and align SSS
                 sss_clean = np.nan_to_num(sss_data, nan=0.0).astype(np.float32)
+                if sss_clean.ndim > 3:
+                    sss_clean = np.squeeze(sss_clean)
+                
+                if sss_clean.ndim == 3 and sss_clean.shape[0] != 4 and sss_clean.shape[2] == 4:
+                    sss_clean = np.transpose(sss_clean, (2, 0, 1))
+                
+                if sss_clean.ndim != 3 or sss_clean.shape[0] != 4:
+                    sss_clean = sss_clean.reshape(4, x_forecast.shape[1], x_forecast.shape[2])
+
                 sss_denom = self.sss_max - self.sss_min if self.sss_max != self.sss_min else 1.0
                 sss_norm = 2 * ((sss_clean - self.sss_min) / sss_denom) - 1.0
                 sss_norm = np.clip(sss_norm, -1.0, 1.0)

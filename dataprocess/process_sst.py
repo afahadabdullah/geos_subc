@@ -178,7 +178,7 @@ def process_year(year, sst_dir=SST_DIR, output_dir=OUTPUT_DIR):
                 if len(chunk.time) == 0:
                     valid = False
                     break
-                w_mean = chunk.mean(dim='time').compute()
+                w_mean = chunk.mean(dim='time').squeeze().compute()
                 weeks.append(w_mean)
             except Exception:
                 valid = False
