@@ -29,7 +29,7 @@ import argparse
 
 
 # --- Configuration ---
-SST_DIR = "dataprocess/SST"
+SST_DIR = "dataprocess/SST/noaa_sst_v2"
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
 
