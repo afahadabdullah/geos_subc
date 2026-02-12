@@ -19,7 +19,7 @@ import pandas as pd
 import os
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True):
+    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, ocean_vars=False):
         """
         Args:
             data_root (str): Root directory containing 'geos_subc_{year}.zarr' and 'gpcp_weekly_{year}.zarr'.
@@ -28,26 +28,44 @@ class GeosSubCDataset(Dataset):
             mjo_file (str): Filename of MJO CSV in data_root.
             transform (callable, optional): Optional transform to be applied on a sample.
             preload (bool): If True, load all data into RAM (recommended for speed).
+            ocean_vars (bool): If True, also load SST/SSS from sst_weekly_*.zarr and sss_weekly_*.zarr.
         """
         self.data_root = data_root
         self.years = list(range(start_year, end_year + 1))
         self.transform = transform
         self.preload = preload
+        self.ocean_vars = ocean_vars
         
-        # 0. Load Normalization Stats (MUST exist — run calculate_stats.py first)
-        stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
-        if not os.path.exists(stats_path):
-            raise FileNotFoundError(
-                f"norm_stats.json not found at {stats_path}. "
-                f"Run `python ml_model/calculate_stats.py` first to generate it."
-            )
+        # 0. Load Normalization Stats
         import json
+        if ocean_vars:
+            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+            if not os.path.exists(stats_path):
+                raise FileNotFoundError(
+                    f"norm_stats_ocean.json not found at {stats_path}. "
+                    f"Run `python ml_model/calculate_stats_ocean.py` first."
+                )
+        else:
+            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+            if not os.path.exists(stats_path):
+                raise FileNotFoundError(
+                    f"norm_stats.json not found at {stats_path}. "
+                    f"Run `python ml_model/calculate_stats.py` first to generate it."
+                )
         with open(stats_path, 'r') as f:
             stats = json.load(f)
         self.norm_min = stats["log1p_min"]
         self.norm_max = stats["log1p_max"]
         self.res_min = stats.get("residual_min", -5.0)
         self.res_max = stats.get("residual_max", 5.0)
+        
+        # Ocean variable stats (only loaded if ocean_vars=True)
+        if ocean_vars:
+            self.sst_min = stats.get("sst_min", 0.0)
+            self.sst_max = stats.get("sst_max", 1.0)
+            self.sss_min = stats.get("sss_min", 0.0)
+            self.sss_max = stats.get("sss_max", 1.0)
+            print(f"Ocean stats loaded: SST=[{self.sst_min:.2f}, {self.sst_max:.2f}], SSS=[{self.sss_min:.2f}, {self.sss_max:.2f}]")
         print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
         print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
         
@@ -72,6 +90,8 @@ class GeosSubCDataset(Dataset):
         self.preloaded_geos = {} # (S, M) -> ndarray
         self.preloaded_gpcp = {} # S -> ndarray
         self.preloaded_gpcp_obs = {} # S -> ndarray (observed state from prev init)
+        self.preloaded_sst = {} # S -> ndarray (4 weeks of SST)
+        self.preloaded_sss = {} # S -> ndarray (4 weeks of SSS)
         
         # Collect ALL init dates across years for prev-init lookup
         all_init_dates = []
@@ -103,12 +123,38 @@ class GeosSubCDataset(Dataset):
                     geos_vals = ds_geos['pr'].compute()
                     gpcp_vals = ds_gpcp['precip'].compute()
                 
+                # Ocean vars: load SST/SSS for this year
+                sst_vals = None
+                sss_vals = None
+                if self.ocean_vars and self.preload:
+                    sst_path = os.path.join(data_root, f"sst_weekly_{year}.zarr")
+                    sss_path = os.path.join(data_root, f"sss_weekly_{year}.zarr")
+                    if os.path.exists(sst_path):
+                        ds_sst = xr.open_zarr(sst_path, consolidated=False)
+                        sst_vals = ds_sst['sst'].compute()
+                        ds_sst.close()
+                    else:
+                        print(f"  WARNING: SST zarr not found for {year}")
+                    if os.path.exists(sss_path):
+                        ds_sss = xr.open_zarr(sss_path, consolidated=False)
+                        sss_vals = ds_sss['sss'].compute()
+                        ds_sss.close()
+                    else:
+                        print(f"  WARNING: SSS zarr not found for {year}")
+                
                 for s_idx, s_date in enumerate(init_dates):
                     s_key = str(s_date)
                     all_init_dates.append(s_date)
                     
                     if self.preload:
                         self.preloaded_gpcp[s_key] = gpcp_vals.isel(S=s_idx).values.astype(np.float32)
+                        
+                        # Preload ocean vars
+                        if self.ocean_vars:
+                            if sst_vals is not None:
+                                self.preloaded_sst[s_key] = sst_vals.isel(S=s_idx).values.astype(np.float32)
+                            if sss_vals is not None:
+                                self.preloaded_sss[s_key] = sss_vals.isel(S=s_idx).values.astype(np.float32)
                     
                     for m_idx in members:
                         self.samples.append({
@@ -259,7 +305,7 @@ class GeosSubCDataset(Dataset):
             residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
             residual_norm = np.clip(residual_norm, -1.0, 1.0)
             
-            return {
+            result = {
                 "input_forecast": torch.tensor(x_forecast_norm, dtype=torch.float32), 
                 "target_truth": torch.tensor(y_truth_norm, dtype=torch.float32),
                 "target_residual": torch.tensor(residual_norm, dtype=torch.float32),
@@ -271,8 +317,31 @@ class GeosSubCDataset(Dataset):
                 "M": m_idx,
                 "norm_stats": {"min": vmin, "max": vmax}
             }
+            
+            # Ocean variables (SST, SSS) — normalized to [-1, 1]
+            if self.ocean_vars:
+                # Load SST
+                sst_data = self.preloaded_sst.get(s_key)
+                if sst_data is None:
+                    sst_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                sst_clean = np.nan_to_num(sst_data, nan=0.0).astype(np.float32)
+                sst_denom = self.sst_max - self.sst_min if self.sst_max != self.sst_min else 1.0
+                sst_norm = 2 * ((sst_clean - self.sst_min) / sst_denom) - 1.0
+                sst_norm = np.clip(sst_norm, -1.0, 1.0)
+                result["ocean_sst"] = torch.tensor(sst_norm, dtype=torch.float32)
+                
+                # Load SSS
+                sss_data = self.preloaded_sss.get(s_key)
+                if sss_data is None:
+                    sss_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                sss_clean = np.nan_to_num(sss_data, nan=0.0).astype(np.float32)
+                sss_denom = self.sss_max - self.sss_min if self.sss_max != self.sss_min else 1.0
+                sss_norm = 2 * ((sss_clean - self.sss_min) / sss_denom) - 1.0
+                sss_norm = np.clip(sss_norm, -1.0, 1.0)
+                result["ocean_sss"] = torch.tensor(sss_norm, dtype=torch.float32)
+            
+            return result
         except Exception as e:
-            # Better to show the error and fail than recurse infinitely
             print(f"Error loading sample {idx} (Date {s_date}, Member {m_idx}): {e}")
             raise e
 
