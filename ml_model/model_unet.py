@@ -267,32 +267,28 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class PhysicalL1ACCLoss(nn.Module):
+class ConservationMSELoss(nn.Module):
     """
-    Physical Space L1 + ACC Loss.
+    Conservation + Pixel MSE Loss.
     
     Combines:
-    1. Weighted L1 Loss (MAE) on physical mm/day:
-       - Robust to outliers (no squared error double-penalty).
-       - Weights: Area (cos lat) * Intensity (1 + w * precip).
-    2. ACC Loss (1 - Anomaly Correlation Coefficient):
-       - Maximizes spatial pattern correlation.
-       - Prevents "mean collapse" (predicting flat fields).
-       - Computed on anomalies relative to batch spatial mean.
+    1. Pixel-wise MSE (Area + Intensity Weighted).
+    2. Mass Conservation Loss (Squared difference of Global Means).
     
-    Total = L1_Loss + acc_weight * (1 - ACC)
+    Total = 0.5 * Pixel_MSE + 0.5 * Mass_MSE
+    
+    This forces the model to predict the correct TOTAL volume of rain globally
+    (correcting the dry bias) even if valid local placement is difficult.
     
     Args:
         norm_stats: Dict with keys {'min', 'max', 'res_min', 'res_max'}
         n_lat, n_lon, lat_range: Grid details
-        intensity_scale: Weight scaling for L1 loss (default 0.1)
-        acc_weight: Weight for ACC term (default 0.1)
+        intensity_scale: Weight scaling for Pixel MSE (default 0.1)
     """
     def __init__(self, norm_stats, n_lat=181, n_lon=360, lat_range=(90, -90),
-                 intensity_scale=0.1, acc_weight=0.1):
+                 intensity_scale=0.1):
         super().__init__()
         self.intensity_scale = intensity_scale
-        self.acc_weight = acc_weight
         
         # Norm stats for denormalization
         self.vmin = norm_stats['min']
@@ -307,17 +303,14 @@ class PhysicalL1ACCLoss(nn.Module):
         lats = np.linspace(lat_range[0], lat_range[1], n_lat)
         cos_weights = np.cos(np.deg2rad(lats)).astype(np.float32)
         cos_weights = np.maximum(cos_weights, 0.0)
-        cos_weights = cos_weights * (n_lat / cos_weights.sum()) # Normalize sum
+        # For global mean, we need sum of weights to be the normalization factor
+        # But for pixel loss, we usually normalize so mean() matches scale.
+        # We'll normalize weights so mean(weights) = 1 (approx)
+        cos_weights = cos_weights * (n_lat / cos_weights.sum()) 
         
         weights = torch.from_numpy(cos_weights).reshape(1, 1, n_lat, 1)
         self.register_buffer('area_weights', weights)
     
-    def denormalize_precip(self, x_norm):
-        """Unscale [-1, 1] log1p-norm to mm/day."""
-        x_log = (x_norm + 1.0) / 2.0 * self.denom + self.vmin
-        x_mm = torch.expm1(x_log)
-        return torch.clamp(x_mm, min=0.0)
-        
     def denormalize_prediction(self, res_norm, forecast_norm):
         """Reconstruct prediction in mm/day from residual and forecast."""
         res_log = (res_norm + 1.0) / 2.0 * self.res_denom + self.rmin
@@ -326,61 +319,42 @@ class PhysicalL1ACCLoss(nn.Module):
         pred_mm = torch.expm1(pred_log)
         return torch.clamp(pred_mm, min=0.0)
 
-    def acc_loss(self, pred, target):
-        """
-        Compute (1 - ACC) averaged over batch and channels.
-        Input: (B, C, H, W)
-        """
-        # 1. Compute anomalies (subtract spatial mean)
-        # dims 2,3 are H,W
-        pred_mean = pred.mean(dim=(2, 3), keepdim=True)
-        target_mean = target.mean(dim=(2, 3), keepdim=True)
+    def global_mean(self, x):
+        """Compute area-weighted global mean."""
+        # x: (B, C, H, W)
+        # area_weights: (1, 1, H, 1)
+        # We broadcast weights to (B, C, H, W) implicitly
+        weighted_sum = (x * self.area_weights).sum(dim=(2, 3))
+        # Total weight sum for the batch/channel
+        total_weight = self.area_weights.expand_as(x).sum(dim=(2, 3))
         
-        p_anom = pred - pred_mean
-        t_anom = target - target_mean
-        
-        # 2. Weighted Covariance and Variances (using area_weights)
-        # area_weights is (1, 1, H, 1) - broadcasts to W
-        # We invoke sum over H,W
-        
-        # Standard ACC usually doesn't area-weight, but for global grids it SHOULD.
-        # Let's use our area_weights buffer.
-        w = self.area_weights
-        
-        cov = (p_anom * t_anom * w).sum(dim=(2, 3))
-        p_var = (p_anom * p_anom * w).sum(dim=(2, 3))
-        t_var = (t_anom * t_anom * w).sum(dim=(2, 3))
-        
-        # 3. Correlation
-        # Clip to avoid division by zero
-        corr = cov / torch.sqrt(p_var * t_var + 1e-6)
-        
-        # 4. Loss = 1 - mean(ACC)
-        return 1.0 - corr.mean()
+        return weighted_sum / (total_weight + 1e-6)
 
     def forward(self, pred_res, target_res, forecast):
         """
-        pred_res: Predicted residual (normalized [-1, 1])
-        target_res: True residual (normalized [-1, 1])
-        forecast: GEOS forecast (normalized [-1, 1])
+        pred_res, target_res: Normalized residuals [-1, 1]
+        forecast: Normalized forecast input [-1, 1]
         """
         # 1. Reconstruct Physical Values (mm/day)
         pred_mm = self.denormalize_prediction(pred_res, forecast)
         target_mm = self.denormalize_prediction(target_res, forecast)
         
-        # 2. Weighted L1 Loss
+        # 2. Pixel-wise MSE Loss
         # Weight = Area * (1 + scale * target_mm)
-        w_int = 1.0 + (self.intensity_scale * target_mm)
-        final_weights = self.area_weights * w_int
+        w_pixel = self.area_weights * (1.0 + self.intensity_scale * target_mm)
+        sq_diff = (pred_mm - target_mm) ** 2
+        pixel_loss = (sq_diff * w_pixel).mean()
         
-        abs_err = torch.abs(pred_mm - target_mm)
-        l1_loss = (abs_err * final_weights).mean()
+        # 3. Mass Conservation Loss (Global Mean Squared Error)
+        # Calculate area-weighted means scalar per sample/channel
+        mean_pred = self.global_mean(pred_mm)
+        mean_target = self.global_mean(target_mm)
         
-        # 3. ACC Loss (Pattern matching)
-        acc_loss_val = self.acc_loss(pred_mm, target_mm)
+        # MSE of the means
+        mass_loss = ((mean_pred - mean_target) ** 2).mean()
         
-        # Total Loss
-        return l1_loss + (self.acc_weight * acc_loss_val)
+        # 4. Total Loss (50/50 split)
+        return 0.5 * pixel_loss + 0.5 * mass_loss
 
 
 # ==============================================================================

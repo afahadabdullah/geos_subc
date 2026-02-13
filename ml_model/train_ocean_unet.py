@@ -60,11 +60,11 @@ if str(root_dir) not in sys.path:
 
 try:
     from ml_model.dataset import GeosSubCDataset
-    from ml_model.model_unet import TemporalAttentionUNet, PhysicalL1ACCLoss
+    from ml_model.model_unet import TemporalAttentionUNet, ConservationMSELoss
     from ml_model.utils import denormalize, denormalize_residual, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
-    from model_unet import TemporalAttentionUNet, PhysicalL1ACCLoss
+    from model_unet import TemporalAttentionUNet, ConservationMSELoss
     from utils import denormalize, denormalize_residual, plot_comparison
 
 
@@ -82,10 +82,8 @@ def train_model():
         "data_root": "dataprocess",
         "output_dir": "ml_output_ocean_unet",
         "gradient_accumulation_steps": 1,
-        # Loss config
-        # Loss config (Physical L1 + ACC)
-        "intensity_scale": 0.2,   # Weight scaling for mm/day
-        "acc_weight": 2.0,        # Weight for (1 - ACC) term
+        # Loss config (Conservation + MSE)
+        "intensity_scale": 0.1,   # Weight scaling for mm/day
     }
     
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -235,13 +233,12 @@ def train_model():
         "res_max": train_dataset.res_max
     }
     
-    criterion = PhysicalL1ACCLoss(
+    criterion = ConservationMSELoss(
         norm_stats=norm_stats,
         n_lat=config["image_size"][0],
         n_lon=config["image_size"][1],
         lat_range=(90, -90),
-        intensity_scale=config["intensity_scale"],
-        acc_weight=config["acc_weight"]
+        intensity_scale=config["intensity_scale"]
     ).to(accelerator.device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
