@@ -267,69 +267,108 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class IntensityWeightedLoss(nn.Module):
+class PhysicalIntensityLoss(nn.Module):
     """
-    Area + Intensity Weighted Loss.
+    Physical Space Loss (Area + Intensity Weighted).
     
-    Weights pixel loss by:
-    1. Area: cos(lat) to account for grid cell size.
-    2. Intensity: (1 + w * intensity) to penalize errors in high-precip regions.
+    Computes loss on DENORMALIZED precipitation (mm/day) instead of log-residuals.
+    This forces the model to minimize absolute error in physical units,
+    heavily penalizing underprediction of extreme events which are compressed in log-space.
     
-    Total Weight = AreaWeight * (1 + intensity_scale * normalized_precip)
+    pipeline:
+    1. Denormalize forecast & predicted_residual -> predicted_precip_mm
+    2. Denormalize target_truth -> target_precip_mm
+    3. Compute Weighted MSE/Huber on deviation in mm/day.
+    
+    Weights:
+    - Area: cos(lat)
+    - Intensity: (1 + w * precip_mm)
     
     Args:
+        norm_stats: Dict with keys {'min', 'max', 'res_min', 'res_max'}
         n_lat: Number of latitude points
         n_lon: Number of longitude points
         lat_range: Latitude range
         alpha: MSE vs Huber weight (default 0.5)
-        huber_delta: Huber delta
-        intensity_scale: How much to weight high precip (default 5.0)
-                        If 5.0, max precip pixels (cloud top) are weighted ~6x more than zero precip.
+        huber_delta: Huber delta (in mm/day, e.g. 1.0 mm)
+        intensity_scale: Weight scaling for high precip (default 0.5)
+                         Note: physical precip can be 0-100+ mm. 
+                         Weight = 1 + scale * precip. 
+                         If scale=0.1, 50mm precip gets weight 6x.
     """
-    def __init__(self, n_lat=181, n_lon=360, lat_range=(90, -90),
-                 alpha=0.5, huber_delta=1.0, intensity_scale=5.0):
+    def __init__(self, norm_stats, n_lat=181, n_lon=360, lat_range=(90, -90),
+                 alpha=0.5, huber_delta=2.0, intensity_scale=0.1):
         super().__init__()
         self.alpha = alpha
         self.huber_delta = huber_delta
         self.intensity_scale = intensity_scale
         
-        # Compute cos(lat) weights: shape (1, 1, n_lat, 1)
+        # Norm stats for denormalization
+        self.vmin = norm_stats['min']
+        self.vmax = norm_stats['max']
+        self.rmin = norm_stats['res_min']
+        self.rmax = norm_stats['res_max']
+        self.denom = self.vmax - self.vmin if self.vmax != self.vmin else 1.0
+        self.res_denom = self.rmax - self.rmin if self.rmax != self.rmin else 1.0
+        
+        # Compute cos(lat) weights
         import numpy as np
         lats = np.linspace(lat_range[0], lat_range[1], n_lat)
         cos_weights = np.cos(np.deg2rad(lats)).astype(np.float32)
         cos_weights = np.maximum(cos_weights, 0.0)
-        
-        # Normalize so weights sum to n_lat
-        cos_weights = cos_weights * (n_lat / cos_weights.sum())
+        cos_weights = cos_weights * (n_lat / cos_weights.sum()) # Normalize sum
         
         weights = torch.from_numpy(cos_weights).reshape(1, 1, n_lat, 1)
         self.register_buffer('area_weights', weights)
     
-    def forward(self, pred, target, intensity):
-        """
-        pred, target: (B, C, H, W) - Residuals in [-1, 1]
-        intensity: (B, C, H, W) - Normalized GPCP Truth in [-1, 1]
-                                  -1 ≈ 0mm, +1 ≈ Max mm
-        """
-        # Map intensity from [-1, 1] to roughly [0, 1] for weighting
-        # We use a soft relu-like mapping to ensure positive weights
-        # (normalized data might be slightly < -1 due to artifacts, clamp it)
-        int_map = torch.clamp((intensity + 1.0) / 2.0, 0.0, 1.0)
+    def denormalize_precip(self, x_norm):
+        """Unscale [-1, 1] log1p-norm to mm/day."""
+        # x_norm in [-1, 1] -> [vmin, vmax] log-space
+        x_log = (x_norm + 1.0) / 2.0 * self.denom + self.vmin
+        # expm1 to linear space
+        x_mm = torch.expm1(x_log)
+        return torch.clamp(x_mm, min=0.0)
         
-        # Intensity weight: 1.0 (base) + scale * intensity
-        # e.g., if scale=5, max precip (1.0) gets weight 6.0, zero precip gets 1.0
-        w_int = 1.0 + (self.intensity_scale * int_map)
+    def denormalize_prediction(self, res_norm, forecast_norm):
+        """Reconstruct prediction in mm/day from residual and forecast."""
+        # 1. Unscale residual to log-diff
+        res_log = (res_norm + 1.0) / 2.0 * self.res_denom + self.rmin
         
-        # Combine area and intensity weights
-        # area_weights is (1, 1, H, 1), w_int is (B, C, H, W)
+        # 2. Unscale forecast to log-space
+        forc_log = (forecast_norm + 1.0) / 2.0 * self.denom + self.vmin
+        
+        # 3. Add: log(pred) = log(forecast) + log(residual)
+        pred_log = forc_log + res_log
+        
+        # 4. Expm1
+        pred_mm = torch.expm1(pred_log)
+        return torch.clamp(pred_mm, min=0.0)
+
+    def forward(self, pred_res, target_res, forecast):
+        """
+        pred_res: Predicted residual (normalized [-1, 1])
+        target_res: True residual (normalized [-1, 1])
+        forecast: GEOS forecast (normalized [-1, 1])
+        """
+        # 1. Reconstruct Physical Values (mm/day)
+        pred_mm = self.denormalize_prediction(pred_res, forecast)
+        
+        # Target: we can denormalize target_res OR just use the ground truth if passed.
+        # But target_res + forecast implies the truth relation. 
+        # Consistency: reconstruct target also from residual to match the graph.
+        target_mm = self.denormalize_prediction(target_res, forecast)
+        
+        # 2. Compute Physical Weights
+        # Weight = Area * (1 + scale * target_mm)
+        # e.g. if scale=0.1, 100mm event gets weight 11x compared to 0mm.
+        w_int = 1.0 + (self.intensity_scale * target_mm)
         final_weights = self.area_weights * w_int
         
-        # Weighted MSE
-        sq_err = (pred - target) ** 2
+        # 3. Compute Loss in Physical Space
+        sq_err = (pred_mm - target_mm) ** 2
         weighted_mse = (sq_err * final_weights).mean()
         
-        # Weighted Huber
-        abs_err = torch.abs(pred - target)
+        abs_err = torch.abs(pred_mm - target_mm)
         huber = torch.where(
             abs_err < self.huber_delta,
             0.5 * sq_err / self.huber_delta,
