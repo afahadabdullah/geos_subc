@@ -12,7 +12,7 @@ Key Features:
 - ResBlock with FiLM conditioning (month embedding)
 - Spatial Self-Attention at bottleneck
 - Temporal Self-Attention across 4 lead weeks at bottleneck
-- Huber + MSE combined loss helper
+- Mass Conservation + Spatial Gradient Loss
 """
 
 import torch
@@ -129,26 +129,6 @@ class TemporalAttention(nn.Module):
 class TemporalAttentionUNet(nn.Module):
     """
     Deterministic Conv2D UNet with Temporal Attention at the bottleneck.
-    
-    Architecture:
-        - Conv2D encoder (3 downsampling levels)
-        - Bottleneck with spatial attention + temporal attention across 4 weeks
-        - Conv2D decoder (3 upsampling levels with skip connections)
-    
-    Conditioning:
-        - Month one-hot (12-dim) → projected to embedding → FiLM in every ResBlock
-    
-    The 4 lead weeks flow through the encoder as channels. At the bottleneck,
-    channels are split into 4 temporal slots, temporal attention is applied,
-    then they are merged back for the decoder.
-    
-    Args:
-        in_channels: Number of input channels (18 for ocean: 4F + 4O + 4SST + 4SSS + 2MJO)
-        out_channels: Number of output channels (4 for 4 lead weeks of residual)
-        base_filters: Base number of filters (default 128)
-        emb_dim: Dimension of the conditioning embedding (default 256)
-        n_weeks: Number of lead-time weeks (default 4)
-        temporal_heads: Number of attention heads for temporal attention (default 4)
     """
     def __init__(self, in_channels, out_channels, base_filters=128, emb_dim=256,
                  n_weeks=4, temporal_heads=4):
@@ -178,9 +158,6 @@ class TemporalAttentionUNet(nn.Module):
         self.spatial_attn = SpatialSelfAttention(base_filters * 8, num_heads=8)
         
         # Temporal Attention at bottleneck
-        # base_filters * 8 channels split into n_weeks slots → each slot has (base_filters * 8 / n_weeks) dims
-        # But that requires base_filters * 8 % n_weeks == 0
-        # With base_filters=128, bottleneck= 1024 channels, 1024 / 4 = 256 per week ✓
         self.temporal_dim = (base_filters * 8) // n_weeks
         self.temporal_attn = TemporalAttention(
             dim=self.temporal_dim,  # Feature dim per week
@@ -201,20 +178,11 @@ class TemporalAttentionUNet(nn.Module):
         self.conv_out = nn.Conv2d(base_filters, out_channels, 1)
 
     def forward(self, x_input, month_onehot):
-        """
-        Args:
-            x_input: (B, C_in, H, W) — concatenated conditioning inputs
-            month_onehot: (B, 12) — one-hot month encoding
-        
-        Returns:
-            (B, 4, H, W) — predicted residual for each lead week
-        """
-        # Conditioning embedding (month only — no timestep)
+        # Conditioning embedding
         cond_emb = self.month_proj(month_onehot)
         
         # Encoder
         x = self.conv_in(x_input)
-        
         s1 = self.down1(x, cond_emb);  x = self.pool1(s1)
         s2 = self.down2(x, cond_emb);  x = self.pool2(s2)
         s3 = self.down3(x, cond_emb);  x = self.pool3(s3)
@@ -224,24 +192,17 @@ class TemporalAttentionUNet(nn.Module):
         x = self.spatial_attn(x)
         
         # ---- Temporal Attention ----
-        # x shape: (B, C_bottleneck, H', W') where C_bottleneck = base_filters * 8
         B, C, H_b, W_b = x.shape
-        
-        # Reshape: (B, n_weeks, temporal_dim, H', W') → flatten spatial → (B * H' * W', n_weeks, temporal_dim)
         x = x.reshape(B, self.n_weeks, self.temporal_dim, H_b, W_b)
         x = x.permute(0, 3, 4, 1, 2).reshape(B * H_b * W_b, self.n_weeks, self.temporal_dim)
-        
-        # Apply temporal attention across weeks
         x = self.temporal_attn(x)
-        
-        # Reshape back: (B, C_bottleneck, H', W')
         x = x.reshape(B, H_b, W_b, self.n_weeks, self.temporal_dim)
         x = x.permute(0, 3, 4, 1, 2).reshape(B, C, H_b, W_b)
         # ---- End Temporal Attention ----
         
         x = self.bottleneck2(x, cond_emb)
         
-        # Decoder with skip connections
+        # Decoder
         x = self.up3(x)
         if x.shape[2:] != s3.shape[2:]:
             x = F.interpolate(x, size=s3.shape[2:], mode='bilinear', align_corners=False)
@@ -267,28 +228,22 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class ConservationMSELoss(nn.Module):
+class ConservationGradientLoss(nn.Module):
     """
-    Conservation + Pixel MSE Loss for DIRECT PREDICTION.
+    Conservation + Spatial Gradient Loss for DIRECT PREDICTION.
     
     Combines:
-    1. Pixel-wise MSE (Area + Intensity Weighted).
-    2. Mass Conservation Loss (Squared difference of Global Means).
+    1. Mass Conservation Loss (Area-weighted Global Mean Squared Error).
+    2. Spatial Gradient Loss (Charbonnier on dx/dy).
     
-    Total = 0.5 * Pixel_MSE + 0.5 * Mass_MSE
-    
-    Note: Denormalizes inputs (which are log-normalized precip) directly to mm/day.
-          Does NOT expect residuals. Use for training model to predict GPCP directly.
+    Total = 0.5 * Mass_Loss + 0.5 * Gradient_Loss
     
     Args:
         norm_stats: Dict with keys {'min', 'max'}
         n_lat, n_lon, lat_range: Grid details
-        intensity_scale: Weight scaling for Pixel MSE (default 0.1)
     """
-    def __init__(self, norm_stats, n_lat=181, n_lon=360, lat_range=(90, -90),
-                 intensity_scale=0.1):
+    def __init__(self, norm_stats, n_lat=181, n_lon=360, lat_range=(90, -90)):
         super().__init__()
-        self.intensity_scale = intensity_scale
         
         # Norm stats for denormalization
         self.vmin = norm_stats['min']
@@ -306,15 +261,8 @@ class ConservationMSELoss(nn.Module):
         self.register_buffer('area_weights', weights)
     
     def denormalize_precip(self, x_norm, forecast=None):
-        """
-        Unscale [-1, 1] log1p-norm to mm/day.
-        Args:
-            x_norm: (B, C, H, W) normalized log-precip
-            forecast: Unused (kept for API compatibility)
-        """
-        # x_norm in [-1, 1] -> [vmin, vmax] log-space
+        """Unscale [-1, 1] log1p-norm to mm/day."""
         x_log = (x_norm + 1.0) / 2.0 * self.denom + self.vmin
-        # expm1 to linear space
         x_mm = torch.expm1(x_log)
         return torch.clamp(x_mm, min=0.0)
 
@@ -324,61 +272,46 @@ class ConservationMSELoss(nn.Module):
         total_weight = self.area_weights.expand_as(x).sum(dim=(2, 3))
         return weighted_sum / (total_weight + 1e-6)
 
+    def gradient_loss(self, pred, target):
+        """Compute spatial gradient loss (Charbonnier)."""
+        # Horizontal gradient (dx)
+        p_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+        t_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+        
+        # Vertical gradient (dy)
+        p_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+        t_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+        
+        eps = 1e-6
+        loss_dx = torch.sqrt((p_dx - t_dx)**2 + eps**2).mean()
+        loss_dy = torch.sqrt((p_dy - t_dy)**2 + eps**2).mean()
+        
+        return loss_dx + loss_dy
+
     def forward(self, pred_norm, target_norm, forecast=None):
         """
         pred_norm: Predicted Precip (normalized [-1, 1])
         target_norm: True Precip (normalized [-1, 1])
-        forecast: Unused
         """
         # 1. Denormalize to Physical Values (mm/day)
         pred_mm = self.denormalize_precip(pred_norm)
         target_mm = self.denormalize_precip(target_norm)
         
-        # 2. Pixel-wise MSE Loss
-        w_pixel = self.area_weights * (1.0 + self.intensity_scale * target_mm)
-        sq_diff = (pred_mm - target_mm) ** 2
-        pixel_loss = (sq_diff * w_pixel).mean()
-        
-        # 3. Mass Conservation Loss (Global Mean Squared Error)
+        # 2. Mass Conservation Loss (Global Mean Squared Error)
         mean_pred = self.global_mean(pred_mm)
         mean_target = self.global_mean(target_mm)
-        mass_loss = ((mean_pred - mean_target) ** 2).mean()
+        loss_mass = ((mean_pred - mean_target) ** 2).mean()
         
-        # 4. Total Loss (50/50)
-        return 0.5 * pixel_loss + 0.5 * mass_loss
+        # 3. Spatial Gradient Loss
+        loss_grad = self.gradient_loss(pred_mm, target_mm)
+        
+        # 4. Total Loss
+        return 0.5 * loss_mass + 0.5 * loss_grad
 
-
-# ==============================================================================
-# QUICK TEST
-# ==============================================================================
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Testing TemporalAttentionUNet on {device}...")
-    
-    # Ocean config: 4F + 4O + 4SST + 4SSS + 2MJO = 18 input channels
-    model = TemporalAttentionUNet(
-        in_channels=18,
-        out_channels=4,
-        base_filters=128,
-        emb_dim=256,
-        n_weeks=4,
-        temporal_heads=4
-    ).to(device)
-    
-    # Count parameters
+    model = TemporalAttentionUNet(18, 4).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {n_params:,}")
-    
-    # Test forward pass
-    x = torch.randn(2, 18, 181, 360, device=device)
-    month = torch.zeros(2, 12, device=device)
-    month[:, 0] = 1.0  # January
-    
-    with torch.no_grad():
-        out = model(x, month)
-    
-    print(f"Input shape:  {x.shape}")
-    print(f"Output shape: {out.shape}")
-    print(f"Output stats: mean={out.mean():.4f}, std={out.std():.4f}")
-    print("✓ Forward pass successful!")

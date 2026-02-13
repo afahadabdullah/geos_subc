@@ -21,11 +21,9 @@ in a SINGLE forward pass.
 Architecture: Conv2D UNet with temporal self-attention at the bottleneck.
 The model learns cross-week dependencies between the 4 lead weeks.
 
-Key Differences vs previous versions:
-    - Direct Prediction: Output is GPCP, not Residual (GPCP - GEOS).
-    - Loss: Conservation + MSE on direct values.
-    - Single forward pass at inference (fast evaluation)
-    - Input: 18 channels (no noisy target needed)
+Loss Function:
+    - Mass Conservation (Area-weighted Global Mean Squared Error)
+    - Spatial Gradient Loss (Charbonnier on dx/dy)
 
 Conditioning:
     1. GEOS Forecast (4 channels)
@@ -60,11 +58,11 @@ if str(root_dir) not in sys.path:
 
 try:
     from ml_model.dataset import GeosSubCDataset
-    from ml_model.model_unet import TemporalAttentionUNet, ConservationMSELoss
+    from ml_model.model_unet import TemporalAttentionUNet, ConservationGradientLoss
     from ml_model.utils import denormalize, denormalize_residual, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
-    from model_unet import TemporalAttentionUNet, ConservationMSELoss
+    from model_unet import TemporalAttentionUNet, ConservationGradientLoss
     from utils import denormalize, denormalize_residual, plot_comparison
 
 
@@ -82,8 +80,7 @@ def train_model():
         "data_root": "dataprocess",
         "output_dir": "ml_output_ocean_unet",
         "gradient_accumulation_steps": 1,
-        # Loss config (Conservation + MSE)
-        "intensity_scale": 0.1,   # Weight scaling for mm/day
+        # Loss config: No params needed for Gradient Loss
     }
     
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -216,19 +213,18 @@ def train_model():
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model: TemporalAttentionUNet | Params: {n_params:,}")
     
-    # Loss: Conservation + MSE
+    # Loss: Conservation + Gradient Loss
     # Collect norm stats from dataset
     norm_stats = {
         "min": train_dataset.norm_min,
         "max": train_dataset.norm_max
     }
     
-    criterion = ConservationMSELoss(
+    criterion = ConservationGradientLoss(
         norm_stats=norm_stats,
         n_lat=config["image_size"][0],
         n_lon=config["image_size"][1],
-        lat_range=(90, -90),
-        intensity_scale=config["intensity_scale"]
+        lat_range=(90, -90)
     ).to(accelerator.device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
@@ -306,7 +302,7 @@ def train_model():
                 # 4. Forward pass — predict precip directly
                 pred_precip = model(model_input, month_onehot)
                 
-                # 5. Loss (Direct Precip)
+                # 5. Loss (Mass + Gradient)
                 loss = criterion(pred_precip, target_truth)
                 
                 accelerator.backward(loss)
@@ -408,25 +404,20 @@ def train_model():
                 target_s, forecast_s, pred_precip_s = first_batch_data
                 
                 # Reconstruct physical precip from predicted precip directly
-                # Use denormalize() from utils (inv log1p)
                 pred_raw = denormalize(pred_precip_s[0]).detach().cpu().numpy()
                 input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
                 target_raw = denormalize(target_s[0]).detach().cpu().numpy()
                 
                 if accelerator.is_main_process:
                     print(f"  Pred precip stats: mean={pred_precip_s.mean().item():.3f}, "
-                          f"std={pred_precip_s.std().item():.3f}, "
-                          f"min={pred_precip_s.min().item():.3f}, "
                           f"max={pred_precip_s.max().item():.3f}")
-                    print(f"  Pred physical stats: mean={pred_raw.mean():.2f}, "
-                          f"max={pred_raw.max():.2f} mm/day")
                 
                 suffix = "_best" if is_best else ""
                 plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}{suffix}.png"
                 plot_comparison(
                     input_raw, target_raw, pred_raw, 
                     plot_save_path,
-                    title=f"Epoch {epoch} — UNet Direct Prediction {'(Best)' if is_best else ''}"
+                    title=f"Epoch {epoch} — UNet Mass+Grad {'(Best)' if is_best else ''}"
                 )
                 if accelerator.is_main_process:
                     print(f"  Validation plot saved to: {plot_save_path}")
