@@ -359,17 +359,13 @@ class GeosSubCDataset(Dataset):
                 # This explicitly subtracts. If shapes mismatch, numpy broadcasts.
                 if x_forecast_norm.shape != y_truth_norm.shape:
                     # e.g. (4, H, W) - (H, W) -> (4, H, W).
-                    # But residual usually implies correction for specific lead?
-                    # The simple model predicts "corrected forecast".
-                    # If x is 4-channel, model outputs 4-channel?
-                    # User's model: In=4, Out=4. 
-                    # Target: GPCP is usually 1 channel (weekly avg).
-                    # SimpleCNN input=4 (4 weeks of forecast?).
-                    # Target=1 week of precip?
-                    # Let's stick to simple subtraction for residual metric container
                     pass
                 
                 residual_norm = y_truth_norm - x_forecast_norm
+                
+                # Metrics for return
+                vmin = 0.0
+                vmax = 1.0
                 
             else:
                 # Log1p transform
