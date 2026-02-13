@@ -52,14 +52,18 @@ def calculate_stats():
         gpcp_sum += np.sum(gpcp_data, axis=0)
         gpcp_sq_sum += np.sum(gpcp_data**2, axis=0)
         
+        if year == years[0]:
+            print(f"  Sample shape (GPCP): {gpcp_data.shape}")
+            if gpcp_data.ndim == 4:
+                print(f"    (S, L, Y, X) -> Per-Lead Z-Score")
+            else:
+                print(f"    (S, Y, X) -> Per-Grid (All Weeks Same) Z-Score")
+                
         # GEOS
         geos_val = ds_geos['pr'].values 
         
-        # We need to maintain (L, Y, X) structure if it exists. 
-        # Only collapse S and M.
-        # Check dims
-        # if (S, M, L, Y, X) -> sum over S, M -> (L, Y, X)
-        # if (S, L, Y, X) -> sum over S -> (L, Y, X)
+        if year == years[0]:
+             print(f"  Sample shape (GEOS): {geos_val.shape}")
         
         if geos_sum is None:
             # Do a trial sum to get shape
