@@ -82,6 +82,28 @@ class SimpleCNN(nn.Module):
         return x + correction
 
 # ==============================================================================
+# LOSS FUNCTIONS
+# ==============================================================================
+class GradientLoss(nn.Module):
+    """
+    Penalizes difference in spatial gradients (sharpness/texture).
+    """
+    def __init__(self):
+        super().__init__()
+        self.l1 = nn.L1Loss()
+
+    def forward(self, pred, target):
+        # Gradient X
+        pred_dx = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])
+        target_dx = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
+        
+        # Gradient Y
+        pred_dy = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])
+        target_dy = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
+        
+        return self.l1(pred_dx, target_dx) + self.l1(pred_dy, target_dy)
+
+# ==============================================================================
 # TRAINING SCRIPT
 # ==============================================================================
 def train_model():
@@ -164,6 +186,7 @@ def train_model():
     # Model Setup
     # --------------------------------------------------------------------------
     model = SimpleCNN()
+    gradient_loss_fn = GradientLoss()
     
     if accelerator.is_main_process:
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -185,7 +208,7 @@ def train_model():
     # Training Loop
     # --------------------------------------------------------------------------
     if accelerator.is_main_process:
-        print(f"Starting training. Optimization Target: PHYSICAL MSE (mm/day)")
+        print(f"Starting training. Optimization Target: PHYSICAL L1 + 0.5*GRADIENT")
     
     global_step = 0
     best_val_loss = float('inf')
@@ -210,7 +233,11 @@ def train_model():
                 pred_mm = denormalize_batch(pred_norm)
                 target_mm = denormalize_batch(target_truth_norm)
                 
-                loss = F.mse_loss(pred_mm, target_mm)
+                # Loss Calculation
+                loss_l1 = F.l1_loss(pred_mm, target_mm)
+                loss_grad = gradient_loss_fn(pred_mm, target_mm)
+                
+                loss = loss_l1 + 0.5 * loss_grad
                 
                 accelerator.backward(loss)
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
@@ -248,7 +275,11 @@ def train_model():
                 pred_mm = denormalize_batch(pred_norm)
                 target_mm = denormalize_batch(target_truth_norm)
                 
-                loss = F.mse_loss(pred_mm, target_mm)
+                # Loss Calculation
+                loss_l1 = F.l1_loss(pred_mm, target_mm)
+                loss_grad = gradient_loss_fn(pred_mm, target_mm)
+                
+                loss = loss_l1 + 0.5 * loss_grad
                 val_loss += loss.item()
 
                 # Capture first batch for plotting (on main process)
