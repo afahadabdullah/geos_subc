@@ -262,12 +262,13 @@ def train_model():
         avg_val_loss = val_loss / len(val_dataloader)
         
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f}")
+            print(f"Epoch {epoch} | Val Loss: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
             accelerator.log({"val_loss": avg_val_loss}, step=global_step)
             
             is_best = avg_val_loss < best_val_loss
             
-            if (epoch % 5 == 0 or is_best) and first_batch_data is not None:
+            # Plot EVERY epoch for debugging
+            if first_batch_data is not None:
                 try:
                     target_s, forecast_s, pred_precip_s = first_batch_data
                     
