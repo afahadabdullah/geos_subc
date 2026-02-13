@@ -12,7 +12,7 @@ Key Features:
 - ResBlock with FiLM conditioning (month embedding)
 - Spatial Self-Attention at bottleneck
 - Temporal Self-Attention across 4 lead weeks at bottleneck
-- Mass Conservation + Spatial Gradient Loss
+- Mass Conservation Loss ONLY
 """
 
 import torch
@@ -228,15 +228,14 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class ConservationGradientLoss(nn.Module):
+class MassConservationLoss(nn.Module):
     """
-    Conservation + Spatial Gradient Loss for DIRECT PREDICTION.
+    Mass Conservation Loss ONLY for DIRECT PREDICTION.
     
     Combines:
     1. Mass Conservation Loss (Area-weighted Global Mean Squared Error).
-    2. Spatial Gradient Loss (Charbonnier on dx/dy).
     
-    Total = 0.5 * Mass_Loss + 0.5 * Gradient_Loss
+    Total = Mass_Loss
     
     Args:
         norm_stats: Dict with keys {'min', 'max'}
@@ -272,22 +271,6 @@ class ConservationGradientLoss(nn.Module):
         total_weight = self.area_weights.expand_as(x).sum(dim=(2, 3))
         return weighted_sum / (total_weight + 1e-6)
 
-    def gradient_loss(self, pred, target):
-        """Compute spatial gradient loss (Charbonnier)."""
-        # Horizontal gradient (dx)
-        p_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-        t_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
-        
-        # Vertical gradient (dy)
-        p_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-        t_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
-        
-        eps = 1e-6
-        loss_dx = torch.sqrt((p_dx - t_dx)**2 + eps**2).mean()
-        loss_dy = torch.sqrt((p_dy - t_dy)**2 + eps**2).mean()
-        
-        return loss_dx + loss_dy
-
     def forward(self, pred_norm, target_norm, forecast=None):
         """
         pred_norm: Predicted Precip (normalized [-1, 1])
@@ -302,11 +285,7 @@ class ConservationGradientLoss(nn.Module):
         mean_target = self.global_mean(target_mm)
         loss_mass = ((mean_pred - mean_target) ** 2).mean()
         
-        # 3. Spatial Gradient Loss
-        loss_grad = self.gradient_loss(pred_mm, target_mm)
-        
-        # 4. Total Loss
-        return 0.5 * loss_mass + 0.5 * loss_grad
+        return loss_mass
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ Architecture: Conv2D UNet with temporal self-attention at the bottleneck.
 The model learns cross-week dependencies between the 4 lead weeks.
 
 Loss Function:
-    - Mass Conservation (Area-weighted Global Mean Squared Error)
-    - Spatial Gradient Loss (Charbonnier on dx/dy)
+    - Mass Conservation ONLY (Area-weighted Global Mean Squared Error)
+    - GOAL: Debug severe underestimation by forcing global mean match.
 
 Conditioning:
     1. GEOS Forecast (4 channels)
@@ -58,11 +58,11 @@ if str(root_dir) not in sys.path:
 
 try:
     from ml_model.dataset import GeosSubCDataset
-    from ml_model.model_unet import TemporalAttentionUNet, ConservationGradientLoss
+    from ml_model.model_unet import TemporalAttentionUNet, MassConservationLoss
     from ml_model.utils import denormalize, denormalize_residual, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
-    from model_unet import TemporalAttentionUNet, ConservationGradientLoss
+    from model_unet import TemporalAttentionUNet, MassConservationLoss
     from utils import denormalize, denormalize_residual, plot_comparison
 
 
@@ -80,7 +80,7 @@ def train_model():
         "data_root": "dataprocess",
         "output_dir": "ml_output_ocean_unet",
         "gradient_accumulation_steps": 1,
-        # Loss config: No params needed for Gradient Loss
+        # Loss config: No params needed for Mass-Only Loss
     }
     
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -213,14 +213,14 @@ def train_model():
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model: TemporalAttentionUNet | Params: {n_params:,}")
     
-    # Loss: Conservation + Gradient Loss
+    # Loss: Mass Conservation ONLY
     # Collect norm stats from dataset
     norm_stats = {
         "min": train_dataset.norm_min,
         "max": train_dataset.norm_max
     }
     
-    criterion = ConservationGradientLoss(
+    criterion = MassConservationLoss(
         norm_stats=norm_stats,
         n_lat=config["image_size"][0],
         n_lon=config["image_size"][1],
@@ -302,7 +302,7 @@ def train_model():
                 # 4. Forward pass — predict precip directly
                 pred_precip = model(model_input, month_onehot)
                 
-                # 5. Loss (Mass + Gradient)
+                # 5. Loss (Mass Conservation ONLY)
                 loss = criterion(pred_precip, target_truth)
                 
                 accelerator.backward(loss)
@@ -417,7 +417,7 @@ def train_model():
                 plot_comparison(
                     input_raw, target_raw, pred_raw, 
                     plot_save_path,
-                    title=f"Epoch {epoch} — UNet Mass+Grad {'(Best)' if is_best else ''}"
+                    title=f"Epoch {epoch} — UNet Mass-Only {'(Best)' if is_best else ''}"
                 )
                 if accelerator.is_main_process:
                     print(f"  Validation plot saved to: {plot_save_path}")
