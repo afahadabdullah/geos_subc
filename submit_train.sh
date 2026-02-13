@@ -46,7 +46,7 @@ echo ""
 cd "$PROJ_DIR"
 
 echo "Starting accelerate launch..."
-accelerate launch ml_model/train.py
+accelerate launch ml_model/train_unet_simple.py
 
 echo ""
 echo "============================================"
