@@ -232,7 +232,7 @@ def train_model():
         lat_range=(90, -90),
         alpha=config["loss_alpha"],
         huber_delta=config["huber_delta"]
-    )
+    ).to(accelerator.device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
     
