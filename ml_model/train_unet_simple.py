@@ -298,8 +298,8 @@ def train_model():
             
             is_best = avg_val_loss < best_val_loss
             
-            # Plot EVERY epoch for debugging
-            if first_batch_data is not None:
+            # Plot ONLY if new best model found
+            if is_best and first_batch_data is not None:
                 try:
                     target_s, forecast_s, pred_precip_s = first_batch_data
                     
