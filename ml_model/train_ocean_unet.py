@@ -60,11 +60,11 @@ if str(root_dir) not in sys.path:
 
 try:
     from ml_model.dataset import GeosSubCDataset
-    from ml_model.model_unet import TemporalAttentionUNet, AreaWeightedLoss
+    from ml_model.model_unet import TemporalAttentionUNet, IntensityWeightedLoss
     from ml_model.utils import denormalize, denormalize_residual, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
-    from model_unet import TemporalAttentionUNet, AreaWeightedLoss
+    from model_unet import TemporalAttentionUNet, IntensityWeightedLoss
     from utils import denormalize, denormalize_residual, plot_comparison
 
 
@@ -85,6 +85,7 @@ def train_model():
         # Loss config
         "loss_alpha": 0.5,        # MSE weight (1-alpha = Huber weight)
         "huber_delta": 1.0,       # Huber loss delta
+        "intensity_scale": 10.0,  # Weight high precip regions 10x more than dry
     }
     
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -225,13 +226,14 @@ def train_model():
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model: TemporalAttentionUNet | Params: {n_params:,}")
     
-    # Loss: Combined MSE + Huber
-    criterion = AreaWeightedLoss(
+    # Loss: Intensity Weighted (Area + Precip Intensity)
+    criterion = IntensityWeightedLoss(
         n_lat=config["image_size"][0],
         n_lon=config["image_size"][1],
         lat_range=(90, -90),
         alpha=config["loss_alpha"],
-        huber_delta=config["huber_delta"]
+        huber_delta=config["huber_delta"],
+        intensity_scale=config["intensity_scale"]
     ).to(accelerator.device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
@@ -317,8 +319,9 @@ def train_model():
                 # 4. Forward pass — predict residual directly
                 pred_residual = model(model_input, month_onehot)
                 
-                # 5. Loss on residual
-                loss = criterion(pred_residual, target_residual)
+                # 5. Loss on residual (weighted by area AND intensity of truth)
+                # Pass normalized target_truth as intensity guide
+                loss = criterion(pred_residual, target_residual, batch["target_truth"])
                 
                 accelerator.backward(loss)
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
@@ -382,7 +385,7 @@ def train_model():
                 # Single forward pass — no DDIM sampling!
                 pred_residual = model(model_input, month_onehot)
                 
-                loss = criterion(pred_residual, target_residual)
+                loss = criterion(pred_residual, target_residual, target_truth)
                 val_loss += loss.item()
                 
                 # Per-week MSE

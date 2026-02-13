@@ -267,58 +267,75 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class AreaWeightedLoss(nn.Module):
+class IntensityWeightedLoss(nn.Module):
     """
-    Area-weighted MSE + Huber loss for global lat/lon grids.
+    Area + Intensity Weighted Loss.
     
-    On a regular lat/lon grid, grid cell area ∝ cos(latitude).
-    This loss weights each pixel by cos(lat) so that tropical regions
-    (larger physical area) contribute more than polar regions.
+    Weights pixel loss by:
+    1. Area: cos(lat) to account for grid cell size.
+    2. Intensity: (1 + w * intensity) to penalize errors in high-precip regions.
     
-    Total = alpha * weighted_MSE + (1 - alpha) * weighted_Huber
+    Total Weight = AreaWeight * (1 + intensity_scale * normalized_precip)
     
     Args:
-        n_lat: Number of latitude points (default 181 for 1° grid, 90N to 90S)
-        n_lon: Number of longitude points (default 360)
-        lat_range: Tuple of (lat_start, lat_end) in degrees (default (90, -90))
-        alpha: Weight for MSE vs Huber (default 0.5)
-        huber_delta: Delta parameter for Huber/SmoothL1 loss (default 1.0)
+        n_lat: Number of latitude points
+        n_lon: Number of longitude points
+        lat_range: Latitude range
+        alpha: MSE vs Huber weight (default 0.5)
+        huber_delta: Huber delta
+        intensity_scale: How much to weight high precip (default 5.0)
+                        If 5.0, max precip pixels (cloud top) are weighted ~6x more than zero precip.
     """
     def __init__(self, n_lat=181, n_lon=360, lat_range=(90, -90),
-                 alpha=0.5, huber_delta=1.0):
+                 alpha=0.5, huber_delta=1.0, intensity_scale=5.0):
         super().__init__()
         self.alpha = alpha
         self.huber_delta = huber_delta
+        self.intensity_scale = intensity_scale
         
-        # Compute cos(lat) weights: shape (1, 1, n_lat, 1) for broadcasting
+        # Compute cos(lat) weights: shape (1, 1, n_lat, 1)
         import numpy as np
-        lats = np.linspace(lat_range[0], lat_range[1], n_lat)  # degrees
+        lats = np.linspace(lat_range[0], lat_range[1], n_lat)
         cos_weights = np.cos(np.deg2rad(lats)).astype(np.float32)
-        cos_weights = np.maximum(cos_weights, 0.0)  # Clamp negative (shouldn't happen for ±90°)
+        cos_weights = np.maximum(cos_weights, 0.0)
         
-        # Normalize so weights sum to n_lat (preserves loss magnitude scale)
+        # Normalize so weights sum to n_lat
         cos_weights = cos_weights * (n_lat / cos_weights.sum())
         
-        # Register as buffer (moves to GPU with model, not a parameter)
         weights = torch.from_numpy(cos_weights).reshape(1, 1, n_lat, 1)
-        self.register_buffer('weights', weights)
+        self.register_buffer('area_weights', weights)
     
-    def forward(self, pred, target):
+    def forward(self, pred, target, intensity):
         """
-        pred, target: (B, C, H, W) where H=n_lat, W=n_lon
+        pred, target: (B, C, H, W) - Residuals in [-1, 1]
+        intensity: (B, C, H, W) - Normalized GPCP Truth in [-1, 1]
+                                  -1 ≈ 0mm, +1 ≈ Max mm
         """
-        # Weighted MSE
-        sq_err = (pred - target) ** 2  # (B, C, H, W)
-        weighted_mse = (sq_err * self.weights).mean()
+        # Map intensity from [-1, 1] to roughly [0, 1] for weighting
+        # We use a soft relu-like mapping to ensure positive weights
+        # (normalized data might be slightly < -1 due to artifacts, clamp it)
+        int_map = torch.clamp((intensity + 1.0) / 2.0, 0.0, 1.0)
         
-        # Weighted Huber (SmoothL1)
+        # Intensity weight: 1.0 (base) + scale * intensity
+        # e.g., if scale=5, max precip (1.0) gets weight 6.0, zero precip gets 1.0
+        w_int = 1.0 + (self.intensity_scale * int_map)
+        
+        # Combine area and intensity weights
+        # area_weights is (1, 1, H, 1), w_int is (B, C, H, W)
+        final_weights = self.area_weights * w_int
+        
+        # Weighted MSE
+        sq_err = (pred - target) ** 2
+        weighted_mse = (sq_err * final_weights).mean()
+        
+        # Weighted Huber
         abs_err = torch.abs(pred - target)
         huber = torch.where(
             abs_err < self.huber_delta,
             0.5 * sq_err / self.huber_delta,
             abs_err - 0.5 * self.huber_delta
         )
-        weighted_huber = (huber * self.weights).mean()
+        weighted_huber = (huber * final_weights).mean()
         
         return self.alpha * weighted_mse + (1 - self.alpha) * weighted_huber
 
