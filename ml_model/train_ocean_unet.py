@@ -60,11 +60,11 @@ if str(root_dir) not in sys.path:
 
 try:
     from ml_model.dataset import GeosSubCDataset
-    from ml_model.model_unet import TemporalAttentionUNet, PhysicalIntensityLoss
+    from ml_model.model_unet import TemporalAttentionUNet, PhysicalL1ACCLoss
     from ml_model.utils import denormalize, denormalize_residual, plot_comparison
 except ImportError:
     from dataset import GeosSubCDataset
-    from model_unet import TemporalAttentionUNet, PhysicalIntensityLoss
+    from model_unet import TemporalAttentionUNet, PhysicalL1ACCLoss
     from utils import denormalize, denormalize_residual, plot_comparison
 
 
@@ -83,9 +83,9 @@ def train_model():
         "output_dir": "ml_output_ocean_unet",
         "gradient_accumulation_steps": 1,
         # Loss config
-        "loss_alpha": 0.5,        # MSE weight (1-alpha = Huber weight)
-        "huber_delta": 2.0,       # Huber loss delta (mm/day)
-        "intensity_scale": 0.2,   # Weight scaling for mm/day (e.g. 0.2 * 50mm = +10 weight)
+        # Loss config (Physical L1 + ACC)
+        "intensity_scale": 0.2,   # Weight scaling for mm/day
+        "acc_weight": 2.0,        # Weight for (1 - ACC) term
     }
     
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -235,14 +235,13 @@ def train_model():
         "res_max": train_dataset.res_max
     }
     
-    criterion = PhysicalIntensityLoss(
+    criterion = PhysicalL1ACCLoss(
         norm_stats=norm_stats,
         n_lat=config["image_size"][0],
         n_lon=config["image_size"][1],
         lat_range=(90, -90),
-        alpha=config["loss_alpha"],
-        huber_delta=config["huber_delta"],
-        intensity_scale=config["intensity_scale"]
+        intensity_scale=config["intensity_scale"],
+        acc_weight=config["acc_weight"]
     ).to(accelerator.device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])

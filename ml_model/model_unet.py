@@ -267,41 +267,32 @@ class TemporalAttentionUNet(nn.Module):
 # LOSS FUNCTIONS
 # ==============================================================================
 
-class PhysicalIntensityLoss(nn.Module):
+class PhysicalL1ACCLoss(nn.Module):
     """
-    Physical Space Loss (Area + Intensity Weighted).
+    Physical Space L1 + ACC Loss.
     
-    Computes loss on DENORMALIZED precipitation (mm/day) instead of log-residuals.
-    This forces the model to minimize absolute error in physical units,
-    heavily penalizing underprediction of extreme events which are compressed in log-space.
+    Combines:
+    1. Weighted L1 Loss (MAE) on physical mm/day:
+       - Robust to outliers (no squared error double-penalty).
+       - Weights: Area (cos lat) * Intensity (1 + w * precip).
+    2. ACC Loss (1 - Anomaly Correlation Coefficient):
+       - Maximizes spatial pattern correlation.
+       - Prevents "mean collapse" (predicting flat fields).
+       - Computed on anomalies relative to batch spatial mean.
     
-    pipeline:
-    1. Denormalize forecast & predicted_residual -> predicted_precip_mm
-    2. Denormalize target_truth -> target_precip_mm
-    3. Compute Weighted MSE/Huber on deviation in mm/day.
-    
-    Weights:
-    - Area: cos(lat)
-    - Intensity: (1 + w * precip_mm)
+    Total = L1_Loss + acc_weight * (1 - ACC)
     
     Args:
         norm_stats: Dict with keys {'min', 'max', 'res_min', 'res_max'}
-        n_lat: Number of latitude points
-        n_lon: Number of longitude points
-        lat_range: Latitude range
-        alpha: MSE vs Huber weight (default 0.5)
-        huber_delta: Huber delta (in mm/day, e.g. 1.0 mm)
-        intensity_scale: Weight scaling for high precip (default 0.5)
-                         Note: physical precip can be 0-100+ mm. 
-                         Weight = 1 + scale * precip. 
-                         If scale=0.1, 50mm precip gets weight 6x.
+        n_lat, n_lon, lat_range: Grid details
+        intensity_scale: Weight scaling for L1 loss (default 0.1)
+        acc_weight: Weight for ACC term (default 0.1)
     """
     def __init__(self, norm_stats, n_lat=181, n_lon=360, lat_range=(90, -90),
-                 alpha=0.5, huber_delta=2.0, intensity_scale=0.1):
+                 intensity_scale=0.1, acc_weight=0.1):
         super().__init__()
-        self.alpha = alpha
-        self.huber_delta = huber_delta
         self.intensity_scale = intensity_scale
+        self.acc_weight = acc_weight
         
         # Norm stats for denormalization
         self.vmin = norm_stats['min']
@@ -323,26 +314,49 @@ class PhysicalIntensityLoss(nn.Module):
     
     def denormalize_precip(self, x_norm):
         """Unscale [-1, 1] log1p-norm to mm/day."""
-        # x_norm in [-1, 1] -> [vmin, vmax] log-space
         x_log = (x_norm + 1.0) / 2.0 * self.denom + self.vmin
-        # expm1 to linear space
         x_mm = torch.expm1(x_log)
         return torch.clamp(x_mm, min=0.0)
         
     def denormalize_prediction(self, res_norm, forecast_norm):
         """Reconstruct prediction in mm/day from residual and forecast."""
-        # 1. Unscale residual to log-diff
         res_log = (res_norm + 1.0) / 2.0 * self.res_denom + self.rmin
-        
-        # 2. Unscale forecast to log-space
         forc_log = (forecast_norm + 1.0) / 2.0 * self.denom + self.vmin
-        
-        # 3. Add: log(pred) = log(forecast) + log(residual)
         pred_log = forc_log + res_log
-        
-        # 4. Expm1
         pred_mm = torch.expm1(pred_log)
         return torch.clamp(pred_mm, min=0.0)
+
+    def acc_loss(self, pred, target):
+        """
+        Compute (1 - ACC) averaged over batch and channels.
+        Input: (B, C, H, W)
+        """
+        # 1. Compute anomalies (subtract spatial mean)
+        # dims 2,3 are H,W
+        pred_mean = pred.mean(dim=(2, 3), keepdim=True)
+        target_mean = target.mean(dim=(2, 3), keepdim=True)
+        
+        p_anom = pred - pred_mean
+        t_anom = target - target_mean
+        
+        # 2. Weighted Covariance and Variances (using area_weights)
+        # area_weights is (1, 1, H, 1) - broadcasts to W
+        # We invoke sum over H,W
+        
+        # Standard ACC usually doesn't area-weight, but for global grids it SHOULD.
+        # Let's use our area_weights buffer.
+        w = self.area_weights
+        
+        cov = (p_anom * t_anom * w).sum(dim=(2, 3))
+        p_var = (p_anom * p_anom * w).sum(dim=(2, 3))
+        t_var = (t_anom * t_anom * w).sum(dim=(2, 3))
+        
+        # 3. Correlation
+        # Clip to avoid division by zero
+        corr = cov / torch.sqrt(p_var * t_var + 1e-6)
+        
+        # 4. Loss = 1 - mean(ACC)
+        return 1.0 - corr.mean()
 
     def forward(self, pred_res, target_res, forecast):
         """
@@ -352,31 +366,21 @@ class PhysicalIntensityLoss(nn.Module):
         """
         # 1. Reconstruct Physical Values (mm/day)
         pred_mm = self.denormalize_prediction(pred_res, forecast)
-        
-        # Target: we can denormalize target_res OR just use the ground truth if passed.
-        # But target_res + forecast implies the truth relation. 
-        # Consistency: reconstruct target also from residual to match the graph.
         target_mm = self.denormalize_prediction(target_res, forecast)
         
-        # 2. Compute Physical Weights
+        # 2. Weighted L1 Loss
         # Weight = Area * (1 + scale * target_mm)
-        # e.g. if scale=0.1, 100mm event gets weight 11x compared to 0mm.
         w_int = 1.0 + (self.intensity_scale * target_mm)
         final_weights = self.area_weights * w_int
         
-        # 3. Compute Loss in Physical Space
-        sq_err = (pred_mm - target_mm) ** 2
-        weighted_mse = (sq_err * final_weights).mean()
-        
         abs_err = torch.abs(pred_mm - target_mm)
-        huber = torch.where(
-            abs_err < self.huber_delta,
-            0.5 * sq_err / self.huber_delta,
-            abs_err - 0.5 * self.huber_delta
-        )
-        weighted_huber = (huber * final_weights).mean()
+        l1_loss = (abs_err * final_weights).mean()
         
-        return self.alpha * weighted_mse + (1 - self.alpha) * weighted_huber
+        # 3. ACC Loss (Pattern matching)
+        acc_loss_val = self.acc_loss(pred_mm, target_mm)
+        
+        # Total Loss
+        return l1_loss + (self.acc_weight * acc_loss_val)
 
 
 # ==============================================================================
