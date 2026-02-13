@@ -41,11 +41,10 @@ class GeosSubCDataset(Dataset):
         # 0. Load Normalization Stats
         import json
         
-        # Z-Score Stats
+        # Precip Normalization (Z-Score or Log1p)
         if self.zscore:
             stats_path = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
             if not os.path.exists(stats_path):
-                 # Fallback/Error: User needs to generate this
                  raise FileNotFoundError(f"grid_stats.nc not found at {stats_path}. Run `python dataprocess/calculate_grid_stats.py` first.")
             
             ds_stats = xr.open_dataset(stats_path)
@@ -67,27 +66,29 @@ class GeosSubCDataset(Dataset):
             ds_stats.close()
             print("Loaded Per-Grid Z-Score Stats.")
             
-        elif ocean_vars:
-            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
-            if not os.path.exists(stats_path):
-                raise FileNotFoundError(
-                    f"norm_stats_ocean.json not found at {stats_path}. "
-                    f"Run `python ml_model/calculate_stats_ocean.py` first."
-                )
-            with open(stats_path, 'r') as f:
-                stats = json.load(f)
-            self.norm_min = stats["log1p_min"]
-            self.norm_max = stats["log1p_max"]
-            self.res_min = stats.get("residual_min", -5.0)
-            self.res_max = stats.get("residual_max", 5.0)
-            print(f"Norm stats ocean loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
+            # Since we switched, set dummy norm_min/max
+            self.norm_min = 0.0
+            self.norm_max = 1.0
+            self.res_min = -1.0
+            self.res_max = 1.0
+            
         else:
-            stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+            # Traditional Log1p Stats
+            if ocean_vars:
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+            else:
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+                
             if not os.path.exists(stats_path):
-                raise FileNotFoundError(
-                    f"norm_stats.json not found at {stats_path}. "
-                    f"Run `python ml_model/calculate_stats.py` first to generate it."
-                )
+                # Fallback to older files or error
+                # Try ocean_vars path if generic fails
+                fallback_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+                if os.path.exists(fallback_path):
+                    stats_path = fallback_path
+
+            if not os.path.exists(stats_path):
+                raise FileNotFoundError(f"norm_stats.json not found.")
+
             with open(stats_path, 'r') as f:
                 stats = json.load(f)
             self.norm_min = stats["log1p_min"]
@@ -95,16 +96,30 @@ class GeosSubCDataset(Dataset):
             self.res_min = stats.get("residual_min", -5.0)
             self.res_max = stats.get("residual_max", 5.0)
             print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
-            print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
-        
-        # Ocean variable stats (only loaded if ocean_vars=True)
-        if ocean_vars and not zscore: # Assuming ocean vars are 0-1 or something logic?
-             # For now keep as is, but we might need Z-score for ocean too?
-             # Stick to min-max for ocean if Z-score is only for precip
-            self.sst_min = stats.get("sst_min", 0.0)
-            self.sst_max = stats.get("sst_max", 1.0)
-            self.sss_min = stats.get("sss_min", 0.0)
-            self.sss_max = stats.get("sss_max", 1.0)
+
+        # Ocean variable stats (Min-Max) - Always verify if ocean_vars is True
+        if self.ocean_vars:
+            # We need ocean min/max regardless of zscore
+            # If zscore, we didn't load json above. We must load it now.
+            # If not zscore, we loaded it above (if ocean_vars was true in stats path logic).
+            
+            # To be safe, reload specifically for Ocean keys if missing
+            if not hasattr(self, 'sst_min'):
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+                if os.path.exists(stats_path):
+                    with open(stats_path, 'r') as f:
+                        stats = json.load(f)
+                    self.sst_min = stats.get("sst_min", 0.0)
+                    self.sst_max = stats.get("sst_max", 1.0)
+                    self.sss_min = stats.get("sss_min", 0.0)
+                    self.sss_max = stats.get("sss_max", 1.0)
+                    print(f"Ocean stats loaded: SST=[{self.sst_min:.2f}, {self.sst_max:.2f}]")
+                else:
+                    print("Warning: norm_stats_ocean.json not found for ocean vars. Using 0-1 defaults.")
+                    self.sst_min = 0.0
+                    self.sst_max = 1.0
+                    self.sss_min = 0.0
+                    self.sss_max = 1.0
 
         
         # 1. Load MJO Data
