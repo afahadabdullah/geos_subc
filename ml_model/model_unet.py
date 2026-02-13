@@ -269,7 +269,7 @@ class TemporalAttentionUNet(nn.Module):
 
 class ConservationMSELoss(nn.Module):
     """
-    Conservation + Pixel MSE Loss.
+    Conservation + Pixel MSE Loss for DIRECT PREDICTION.
     
     Combines:
     1. Pixel-wise MSE (Area + Intensity Weighted).
@@ -277,11 +277,11 @@ class ConservationMSELoss(nn.Module):
     
     Total = 0.5 * Pixel_MSE + 0.5 * Mass_MSE
     
-    This forces the model to predict the correct TOTAL volume of rain globally
-    (correcting the dry bias) even if valid local placement is difficult.
+    Note: Denormalizes inputs (which are log-normalized precip) directly to mm/day.
+          Does NOT expect residuals. Use for training model to predict GPCP directly.
     
     Args:
-        norm_stats: Dict with keys {'min', 'max', 'res_min', 'res_max'}
+        norm_stats: Dict with keys {'min', 'max'}
         n_lat, n_lon, lat_range: Grid details
         intensity_scale: Weight scaling for Pixel MSE (default 0.1)
     """
@@ -293,67 +293,58 @@ class ConservationMSELoss(nn.Module):
         # Norm stats for denormalization
         self.vmin = norm_stats['min']
         self.vmax = norm_stats['max']
-        self.rmin = norm_stats['res_min']
-        self.rmax = norm_stats['res_max']
         self.denom = self.vmax - self.vmin if self.vmax != self.vmin else 1.0
-        self.res_denom = self.rmax - self.rmin if self.rmax != self.rmin else 1.0
         
         # Compute cos(lat) weights
         import numpy as np
         lats = np.linspace(lat_range[0], lat_range[1], n_lat)
         cos_weights = np.cos(np.deg2rad(lats)).astype(np.float32)
         cos_weights = np.maximum(cos_weights, 0.0)
-        # For global mean, we need sum of weights to be the normalization factor
-        # But for pixel loss, we usually normalize so mean() matches scale.
-        # We'll normalize weights so mean(weights) = 1 (approx)
         cos_weights = cos_weights * (n_lat / cos_weights.sum()) 
         
         weights = torch.from_numpy(cos_weights).reshape(1, 1, n_lat, 1)
         self.register_buffer('area_weights', weights)
     
-    def denormalize_prediction(self, res_norm, forecast_norm):
-        """Reconstruct prediction in mm/day from residual and forecast."""
-        res_log = (res_norm + 1.0) / 2.0 * self.res_denom + self.rmin
-        forc_log = (forecast_norm + 1.0) / 2.0 * self.denom + self.vmin
-        pred_log = forc_log + res_log
-        pred_mm = torch.expm1(pred_log)
-        return torch.clamp(pred_mm, min=0.0)
+    def denormalize_precip(self, x_norm, forecast=None):
+        """
+        Unscale [-1, 1] log1p-norm to mm/day.
+        Args:
+            x_norm: (B, C, H, W) normalized log-precip
+            forecast: Unused (kept for API compatibility)
+        """
+        # x_norm in [-1, 1] -> [vmin, vmax] log-space
+        x_log = (x_norm + 1.0) / 2.0 * self.denom + self.vmin
+        # expm1 to linear space
+        x_mm = torch.expm1(x_log)
+        return torch.clamp(x_mm, min=0.0)
 
     def global_mean(self, x):
         """Compute area-weighted global mean."""
-        # x: (B, C, H, W)
-        # area_weights: (1, 1, H, 1)
-        # We broadcast weights to (B, C, H, W) implicitly
         weighted_sum = (x * self.area_weights).sum(dim=(2, 3))
-        # Total weight sum for the batch/channel
         total_weight = self.area_weights.expand_as(x).sum(dim=(2, 3))
-        
         return weighted_sum / (total_weight + 1e-6)
 
-    def forward(self, pred_res, target_res, forecast):
+    def forward(self, pred_norm, target_norm, forecast=None):
         """
-        pred_res, target_res: Normalized residuals [-1, 1]
-        forecast: Normalized forecast input [-1, 1]
+        pred_norm: Predicted Precip (normalized [-1, 1])
+        target_norm: True Precip (normalized [-1, 1])
+        forecast: Unused
         """
-        # 1. Reconstruct Physical Values (mm/day)
-        pred_mm = self.denormalize_prediction(pred_res, forecast)
-        target_mm = self.denormalize_prediction(target_res, forecast)
+        # 1. Denormalize to Physical Values (mm/day)
+        pred_mm = self.denormalize_precip(pred_norm)
+        target_mm = self.denormalize_precip(target_norm)
         
         # 2. Pixel-wise MSE Loss
-        # Weight = Area * (1 + scale * target_mm)
         w_pixel = self.area_weights * (1.0 + self.intensity_scale * target_mm)
         sq_diff = (pred_mm - target_mm) ** 2
         pixel_loss = (sq_diff * w_pixel).mean()
         
         # 3. Mass Conservation Loss (Global Mean Squared Error)
-        # Calculate area-weighted means scalar per sample/channel
         mean_pred = self.global_mean(pred_mm)
         mean_target = self.global_mean(target_mm)
-        
-        # MSE of the means
         mass_loss = ((mean_pred - mean_target) ** 2).mean()
         
-        # 4. Total Loss (50/50 split)
+        # 4. Total Loss (50/50)
         return 0.5 * pixel_loss + 0.5 * mass_loss
 
 

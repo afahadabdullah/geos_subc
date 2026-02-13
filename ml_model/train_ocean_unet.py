@@ -15,15 +15,15 @@ except Exception:
 """
 GEOS S2S3 Bias Correction — Deterministic UNet + Temporal Attention (Ocean)
 
-This script trains a TemporalAttentionUNet to directly predict the precipitation
-residual (GPCP − GEOS) in a SINGLE forward pass. No diffusion process.
+This script trains a TemporalAttentionUNet to DIRECTLY PREDICT GPCP precipitation
+in a SINGLE forward pass.
 
 Architecture: Conv2D UNet with temporal self-attention at the bottleneck.
 The model learns cross-week dependencies between the 4 lead weeks.
 
-Key Differences vs train_ocean.py (Diffusion):
-    - No noise schedule, no iterative denoising, no DDIM sampling
-    - Direct regression: MSE + Huber loss on residual
+Key Differences vs previous versions:
+    - Direct Prediction: Output is GPCP, not Residual (GPCP - GEOS).
+    - Loss: Conservation + MSE on direct values.
     - Single forward pass at inference (fast evaluation)
     - Input: 18 channels (no noisy target needed)
 
@@ -144,7 +144,6 @@ def train_model():
             sample = train_dataset[0]
             f_norm = sample["input_forecast"].numpy()
             t_norm = sample["target_truth"].numpy()
-            r_norm = sample["target_residual"].numpy()
             
             vmin, vmax = train_dataset.norm_min, train_dataset.norm_max
             denom = vmax - vmin if vmax != vmin else 1.0
@@ -160,22 +159,18 @@ def train_model():
             print(f"Norm Stats (Min/Max/Mean/Std):")
             print(f"  Forecast : {f_norm.min():.2f} / {f_norm.max():.2f} / {f_norm.mean():.2f} / {f_norm.std():.2f}")
             print(f"  Target   : {t_norm.min():.2f} / {t_norm.max():.2f} / {t_norm.mean():.2f} / {t_norm.std():.2f}")
-            print(f"  Residual : {r_norm.min():.2f} / {r_norm.max():.2f} / {r_norm.mean():.2f} / {r_norm.std():.2f}")
             
             print(f"Reconstructed Raw Stats (Min/Max/Mean/Std) [mm/day]:")
             print(f"  Forecast: {f_raw.min():.2f} / {f_raw.max():.2f} / {f_raw.mean():.2f} / {f_raw.std():.2f}")
             print(f"  Target  : {t_raw.min():.2f} / {t_raw.max():.2f} / {t_raw.mean():.2f} / {t_raw.std():.2f}")
             
             import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(2, 3, figsize=(18, 10))
+            fig, ax = plt.subplots(2, 2, figsize=(12, 10))
             
             ax[0,0].hist(f_norm.flatten(), bins=50, color='blue', alpha=0.7)
             ax[0,0].set_title("Normalized Forecast [-1, 1]")
             ax[0,1].hist(t_norm.flatten(), bins=50, color='green', alpha=0.7)
             ax[0,1].set_title("Normalized Target [-1, 1]")
-            ax[0,2].hist(r_norm.flatten(), bins=50, color='red', alpha=0.7)
-            ax[0,2].set_title("Normalized Residual [-1, 1]")
-            ax[0,2].axvline(0, color='k', linestyle='--')
             
             ax[1,0].hist(f_raw.flatten(), bins=50, color='blue', alpha=0.7)
             ax[1,0].set_title("Raw Forecast (mm/day)")
@@ -183,9 +178,6 @@ def train_model():
             ax[1,1].hist(t_raw.flatten(), bins=50, color='green', alpha=0.7)
             ax[1,1].set_title("Raw Target (mm/day)")
             ax[1,1].set_yscale('log')
-            ax[1,2].text(0.5, 0.5, f"Residual\nShould be centered near 0\nMean: {r_norm.mean():.3f}", 
-                        ha='center', va='center', fontsize=14, transform=ax[1,2].transAxes)
-            ax[1,2].set_title("Residual Info")
             
             plt.tight_layout()
             os.makedirs(f"{config['output_dir']}/plots", exist_ok=True)
@@ -209,7 +201,7 @@ def train_model():
     # Total Input Channels = 4 + 4 + 4 + 4 + 2 = 18
     
     in_channels = 18
-    out_channels = 4  # Predicted residual for 4 lead weeks
+    out_channels = 4  # Direct precipitation prediction for 4 lead weeks
     
     model = TemporalAttentionUNet(
         in_channels=in_channels, 
@@ -224,13 +216,11 @@ def train_model():
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Model: TemporalAttentionUNet | Params: {n_params:,}")
     
-    # Loss: Physical Space (Area + Intensity Weighted)
+    # Loss: Conservation + MSE
     # Collect norm stats from dataset
     norm_stats = {
         "min": train_dataset.norm_min,
-        "max": train_dataset.norm_max,
-        "res_min": train_dataset.res_min,
-        "res_max": train_dataset.res_max
+        "max": train_dataset.norm_max
     }
     
     criterion = ConservationMSELoss(
@@ -297,7 +287,7 @@ def train_model():
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(model):
                 # 1. Unpack
-                target_residual = batch["target_residual"]  # (B, 4, Y, X)
+                target_truth = batch["target_truth"]        # (B, 4, Y, X) -- DIRECT TARGET
                 forecast = batch["input_forecast"]          # (B, 4, Y, X)
                 observed = batch["observed_state"]          # (B, 4, Y, X)
                 ocean_sst = batch["ocean_sst"]              # (B, 4, Y, X)
@@ -307,26 +297,17 @@ def train_model():
                 
                 bs = forecast.shape[0]
                 
-                # DIAGNOSTIC: Check range periodically
-                if global_step % 500 == 0 and accelerator.is_main_process:
-                    print(f"\n[Step {global_step}] Input Stats (should be in [-1, 1]):")
-                    print(f"  Residual: min={target_residual.min():.2f}, max={target_residual.max():.2f}, mean={target_residual.mean():.2f}")
-                    print(f"  Forecast: min={forecast.min():.2f}, max={forecast.max():.2f}, mean={forecast.mean():.2f}")
-                    print(f"  SST: min={ocean_sst.min():.2f}, max={ocean_sst.max():.2f}, mean={ocean_sst.mean():.2f}")
-                    print(f"  SSS: min={ocean_sss.min():.2f}, max={ocean_sss.max():.2f}, mean={ocean_sss.mean():.2f}")
-                
                 # 2. Broadcast MJO
                 mjo_map = mjo.view(bs, 2, 1, 1).expand(-1, -1, config["image_size"][0], config["image_size"][1])
                 
-                # 3. Concatenate all conditioning inputs (NO noisy target)
+                # 3. Concatenate all conditioning inputs
                 model_input = torch.cat([forecast, observed, ocean_sst, ocean_sss, mjo_map], dim=1)
                 
-                # 4. Forward pass — predict residual directly
-                pred_residual = model(model_input, month_onehot)
+                # 4. Forward pass — predict precip directly
+                pred_precip = model(model_input, month_onehot)
                 
-                # 5. Loss on Physical Precip (mm/day)
-                # Pass forecast to reconstruct physical values
-                loss = criterion(pred_residual, target_residual, forecast)
+                # 5. Loss (Direct Precip)
+                loss = criterion(pred_precip, target_truth)
                 
                 accelerator.backward(loss)
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
@@ -337,8 +318,8 @@ def train_model():
             train_loss += loss.item()
             
             # Logging
-            pred_mean = pred_residual.mean().item()
-            pred_std = pred_residual.std().item()
+            pred_mean = pred_precip.mean().item()
+            pred_std = pred_precip.std().item()
             
             progress_bar.update(1)
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}", "p_mu": f"{pred_mean:.3f}", "p_std": f"{pred_std:.3f}"})
@@ -373,7 +354,6 @@ def train_model():
         
         with torch.no_grad():
             for idx, batch in enumerate(val_dataloader):
-                target_residual = batch["target_residual"]
                 target_truth = batch["target_truth"]
                 forecast = batch["input_forecast"]
                 observed = batch["observed_state"]
@@ -387,22 +367,22 @@ def train_model():
                 
                 model_input = torch.cat([forecast, observed, ocean_sst, ocean_sss, mjo_map], dim=1)
                 
-                # Single forward pass — no DDIM sampling!
-                pred_residual = model(model_input, month_onehot)
+                # Single forward pass
+                pred_precip = model(model_input, month_onehot)
                 
-                loss = criterion(pred_residual, target_residual, forecast)
+                loss = criterion(pred_precip, target_truth)
                 val_loss += loss.item()
                 
                 # Per-week MSE
                 for w in range(4):
-                    week_mse[w] += F.mse_loss(pred_residual[:, w], target_residual[:, w]).item()
+                    week_mse[w] += F.mse_loss(pred_precip[:, w], target_truth[:, w]).item()
                 n_val_batches += 1
 
                 # Cache first batch for plotting
                 if idx == 0 and accelerator.is_main_process:
                     first_batch_data = (
                         target_truth[0:1], forecast[0:1], 
-                        pred_residual[0:1].detach()
+                        pred_precip[0:1].detach()
                     )
 
         avg_val_loss = val_loss / len(val_dataloader)
@@ -425,19 +405,19 @@ def train_model():
             # Validation Plot (Periodic OR Best)
             # ------------------------------------------------------------------
             if (epoch % 5 == 0 or is_best) and first_batch_data is not None:
-                target_s, forecast_s, pred_res_s = first_batch_data
+                target_s, forecast_s, pred_precip_s = first_batch_data
                 
-                # Reconstruct physical precip from predicted residual
-                pred_physical = denormalize_residual(pred_res_s[0], forecast_s[0])
+                # Reconstruct physical precip from predicted precip directly
+                # Use denormalize() from utils (inv log1p)
+                pred_raw = denormalize(pred_precip_s[0]).detach().cpu().numpy()
                 input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
                 target_raw = denormalize(target_s[0]).detach().cpu().numpy()
-                pred_raw = pred_physical.detach().cpu().numpy()
                 
                 if accelerator.is_main_process:
-                    print(f"  Pred residual stats: mean={pred_res_s.mean().item():.3f}, "
-                          f"std={pred_res_s.std().item():.3f}, "
-                          f"min={pred_res_s.min().item():.3f}, "
-                          f"max={pred_res_s.max().item():.3f}")
+                    print(f"  Pred precip stats: mean={pred_precip_s.mean().item():.3f}, "
+                          f"std={pred_precip_s.std().item():.3f}, "
+                          f"min={pred_precip_s.min().item():.3f}, "
+                          f"max={pred_precip_s.max().item():.3f}")
                     print(f"  Pred physical stats: mean={pred_raw.mean():.2f}, "
                           f"max={pred_raw.max():.2f} mm/day")
                 
@@ -446,7 +426,7 @@ def train_model():
                 plot_comparison(
                     input_raw, target_raw, pred_raw, 
                     plot_save_path,
-                    title=f"Epoch {epoch} — UNet+TempAttn Direct {'(Best)' if is_best else ''}"
+                    title=f"Epoch {epoch} — UNet Direct Prediction {'(Best)' if is_best else ''}"
                 )
                 if accelerator.is_main_process:
                     print(f"  Validation plot saved to: {plot_save_path}")
