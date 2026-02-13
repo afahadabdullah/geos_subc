@@ -251,10 +251,12 @@ def train_model():
                 loss = F.mse_loss(pred_mm, target_mm)
                 val_loss += loss.item()
 
-                if idx == 0 and accelerator.is_main_process:
+                # Capture first batch for plotting (on main process)
+                if first_batch_data is None and accelerator.is_main_process:
                     first_batch_data = (
-                        target_truth_norm[0:1], forecast_norm[0:1], 
-                        pred_norm[0:1].detach()
+                        target_truth_norm[0:1].detach().cpu(), 
+                        forecast_norm[0:1].detach().cpu(), 
+                        pred_norm[0:1].detach().cpu()
                     )
 
         avg_val_loss = val_loss / len(val_dataloader)
@@ -266,18 +268,26 @@ def train_model():
             is_best = avg_val_loss < best_val_loss
             
             if (epoch % 5 == 0 or is_best) and first_batch_data is not None:
-                target_s, forecast_s, pred_precip_s = first_batch_data
-                
-                pred_raw = denormalize(pred_precip_s[0]).detach().cpu().numpy()
-                input_raw = denormalize(forecast_s[0]).detach().cpu().numpy()
-                target_raw = denormalize(target_s[0]).detach().cpu().numpy()
-                
-                plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}.png"
-                plot_comparison(
-                    input_raw, target_raw, pred_raw, 
-                    plot_save_path,
-                    title=f"Epoch {epoch} — CNN (Loss={avg_val_loss:.2f})"
-                )
+                try:
+                    target_s, forecast_s, pred_precip_s = first_batch_data
+                    
+                    # Move to CPU for plotting (if not already)
+                    # Use utils.denormalize for consistency with plots
+                    pred_raw = denormalize(pred_precip_s[0]).numpy()
+                    input_raw = denormalize(forecast_s[0]).numpy()
+                    target_raw = denormalize(target_s[0]).numpy()
+                    
+                    plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}.png"
+                    os.makedirs(os.path.dirname(plot_save_path), exist_ok=True)
+                    
+                    plot_comparison(
+                        input_raw, target_raw, pred_raw, 
+                        plot_save_path,
+                        title=f"Epoch {epoch} — CNN (Loss={avg_val_loss:.2f})"
+                    )
+                    print(f"  Plot saved to {plot_save_path}")
+                except Exception as e:
+                    print(f"  Plotting failed: {e}")
                 
             if is_best:
                 best_val_loss = avg_val_loss
