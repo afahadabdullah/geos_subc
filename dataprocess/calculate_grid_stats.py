@@ -43,30 +43,53 @@ def calculate_stats():
         gpcp_data = np.nan_to_num(gpcp_data, nan=0.0)
         
         if gpcp_sum is None:
-            H, W = gpcp_data.shape[-2:]
-            gpcp_sum = np.zeros((H, W), dtype=np.float64)
-            gpcp_sq_sum = np.zeros((H, W), dtype=np.float64)
+            # Check shape of sum reduction
+            sample_sum = np.sum(gpcp_data, axis=0)
+            gpcp_sum = np.zeros_like(sample_sum, dtype=np.float64)
+            gpcp_sq_sum = np.zeros_like(sample_sum, dtype=np.float64)
             
         gpcp_count += gpcp_data.shape[0] # N samples
         gpcp_sum += np.sum(gpcp_data, axis=0)
         gpcp_sq_sum += np.sum(gpcp_data**2, axis=0)
         
         # GEOS
-        geos_val = ds_geos['pr'].values # (S, M, L, Y, X) or similar
-        # Collapse S, M, L
-        # Make one big array (N, Y, X)
-        if 'M' in ds_geos.dims:
-             # (S, M, L, Y, X) -> reshape to (-1, Y, X)
-             geos_reshaped = geos_val.reshape(-1, H, W)
-        else:
-             # (S, L, Y, X) -> reshape
-             geos_reshaped = geos_val.reshape(-1, H, W)
-             
-        geos_reshaped = np.nan_to_num(geos_reshaped, nan=0.0)
-             
+        geos_val = ds_geos['pr'].values 
+        
+        # We need to maintain (L, Y, X) structure if it exists. 
+        # Only collapse S and M.
+        # Check dims
+        # if (S, M, L, Y, X) -> sum over S, M -> (L, Y, X)
+        # if (S, L, Y, X) -> sum over S -> (L, Y, X)
+        
         if geos_sum is None:
-            geos_sum = np.zeros((H, W), dtype=np.float64)
-            geos_sq_sum = np.zeros((H, W), dtype=np.float64)
+            # Do a trial sum to get shape
+            # We want to sum over axes corresponding to S and M
+            # Assuming 'S' is axis 0. 
+            # If 'M' exists?
+            pass
+
+        # We need generic reduction. 
+        # Let's count dimensions.
+        # Last 2 are Y, X.
+        # Middle is L?
+        # If ndim=5 (S, M, L, Y, X): reshape to (-1, L, Y, X)? 
+        # But M is ensemble members. They are independent samples of the distribution.
+        # So we treat (S, M) as N samples.
+        
+        if geos_val.ndim == 5: # (S, M, L, Y, X)
+            S, M, L, Y, X = geos_val.shape
+            geos_reshaped = geos_val.reshape(S*M, L, Y, X)
+        elif geos_val.ndim == 4: # (S, L, Y, X)
+            geos_reshaped = geos_val
+        elif geos_val.ndim == 3: # (S, Y, X) - unlikely if GPCP is 4D
+            geos_reshaped = geos_val
+            
+        geos_reshaped = np.nan_to_num(geos_reshaped, nan=0.0)
+            
+        if geos_sum is None:
+            sample_sum_g = np.sum(geos_reshaped, axis=0)
+            geos_sum = np.zeros_like(sample_sum_g, dtype=np.float64)
+            geos_sq_sum = np.zeros_like(sample_sum_g, dtype=np.float64)
             
         geos_count += geos_reshaped.shape[0]
         geos_sum += np.sum(geos_reshaped, axis=0)
@@ -75,22 +98,33 @@ def calculate_stats():
     # Final Compute
     gpcp_mean = gpcp_sum / gpcp_count
     gpcp_var = (gpcp_sq_sum / gpcp_count) - (gpcp_mean ** 2)
-    gpcp_std = np.sqrt(np.maximum(gpcp_var, 1e-6)) # Avoid sqrt(negative)
+    gpcp_std = np.sqrt(np.maximum(gpcp_var, 1e-6))
     
     geos_mean = geos_sum / geos_count
     geos_var = (geos_sq_sum / geos_count) - (geos_mean ** 2)
     geos_std = np.sqrt(np.maximum(geos_var, 1e-6))
     
-    # Clip very small std to avoid division by zero (e.g. deserts)
+    # Clip
     gpcp_std = np.maximum(gpcp_std, 1e-2)
     geos_std = np.maximum(geos_std, 1e-2)
     
     # Save
+    # Determine dims based on shape
+    if gpcp_mean.ndim == 3:
+        gpcp_dims = ('lead', 'lat', 'lon')
+    else:
+        gpcp_dims = ('lat', 'lon')
+        
+    if geos_mean.ndim == 3:
+        geos_dims = ('lead', 'lat', 'lon')
+    else:
+        geos_dims = ('lat', 'lon')
+        
     ds_out = xr.Dataset({
-        'geos_mean': (('lat', 'lon'), geos_mean),
-        'geos_std': (('lat', 'lon'), geos_std),
-        'gpcp_mean': (('lat', 'lon'), gpcp_mean),
-        'gpcp_std': (('lat', 'lon'), gpcp_std),
+        'geos_mean': (geos_dims, geos_mean),
+        'geos_std': (geos_dims, geos_std),
+        'gpcp_mean': (gpcp_dims, gpcp_mean),
+        'gpcp_std': (gpcp_dims, gpcp_std),
     })
     
     out_path = "ml_model/grid_stats.nc"

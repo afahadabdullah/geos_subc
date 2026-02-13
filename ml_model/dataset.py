@@ -49,10 +49,21 @@ class GeosSubCDataset(Dataset):
                  raise FileNotFoundError(f"grid_stats.nc not found at {stats_path}. Run `python dataprocess/calculate_grid_stats.py` first.")
             
             ds_stats = xr.open_dataset(stats_path)
-            self.geos_mean = torch.from_numpy(ds_stats['geos_mean'].values).float().unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
-            self.geos_std = torch.from_numpy(ds_stats['geos_std'].values).float().unsqueeze(0).unsqueeze(0)
-            self.gpcp_mean = torch.from_numpy(ds_stats['gpcp_mean'].values).float().unsqueeze(0) # (1, H, W)
-            self.gpcp_std = torch.from_numpy(ds_stats['gpcp_std'].values).float().unsqueeze(0)
+            
+            def process_stat(name):
+                val = torch.from_numpy(ds_stats[name].values).float()
+                # Target: (1, C, H, W) or (1, 1, H, W)
+                if val.ndim == 2: # (H, W)
+                    return val.unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+                elif val.ndim == 3: # (C, H, W)
+                    return val.unsqueeze(0) # (1, C, H, W)
+                return val
+            
+            self.geos_mean = process_stat('geos_mean')
+            self.geos_std = process_stat('geos_std')
+            self.gpcp_mean = process_stat('gpcp_mean')
+            self.gpcp_std = process_stat('gpcp_std')
+            
             ds_stats.close()
             print("Loaded Per-Grid Z-Score Stats.")
             
