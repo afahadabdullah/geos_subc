@@ -126,13 +126,16 @@ def train_model():
     # --------------------------------------------------------------------------
     # Dataset
     # --------------------------------------------------------------------------
+    use_zscore = True
+    
     train_dataset = GeosSubCDataset(
         data_root=config["data_root"],
         start_year=config["train_years"][0], 
         end_year=config["train_years"][1],
         mjo_file="mjo_processed.csv",
         preload=True,
-        ocean_vars=True # Loaded but not used
+        ocean_vars=True, # Loaded but not used
+        zscore=use_zscore
     )
     
     val_dataset = GeosSubCDataset(
@@ -141,7 +144,8 @@ def train_model():
         end_year=config["val_years"][1],
         mjo_file="mjo_processed.csv",
         preload=True,
-        ocean_vars=True
+        ocean_vars=True,
+        zscore=use_zscore
     )
     
     train_dataloader = DataLoader(
@@ -153,19 +157,40 @@ def train_model():
         shuffle=False, num_workers=0, pin_memory=True
     )
     
-    # Capture Norm Stats for Loss Function
-    norm_min = train_dataset.norm_min
-    norm_max = train_dataset.norm_max
-    
-    # Helper to denormalize batch in-graph
-    def denormalize_batch(x_norm):
-        # x_norm: [-1, 1]
-        x = (x_norm + 1.0) / 2.0
-        denom = norm_max - norm_min if norm_max != norm_min else 1.0
-        x = x * denom + norm_min
-        # Expm1 to Physical
-        # Safe clamp for exp
-        return torch.expm1(torch.clamp(x, max=10.0))
+    # Capture Norm Stats for Loss Function & Denorm
+    if use_zscore:
+        # Move stats to device for efficient denorm
+        # These are (1, 1, H, W) or (1, H, W)
+        device = accelerator.device
+        g_mean = train_dataset.geos_mean.to(device)
+        g_std = train_dataset.geos_std.to(device)
+        gp_mean = train_dataset.gpcp_mean.to(device)
+        gp_std = train_dataset.gpcp_std.to(device)
+        
+        # Helper to denormalize batch in-graph (Z-Score)
+        def denormalize_batch(x_norm, var_type='gpcp'):
+            # x_norm: (B, C, H, W)
+            if var_type == 'geos':
+                # broadcast mean/std (1, 1, H, W) to (B, C, H, W)
+                return x_norm * g_std + g_mean
+            elif var_type == 'gpcp':
+                # broadcast (1, H, W) to (B, H, W) or (B, 1, H, W)
+                return x_norm * gp_std + gp_mean
+            else:
+                return x_norm # Should not happen
+    else:
+        norm_min = train_dataset.norm_min
+        norm_max = train_dataset.norm_max
+        
+        # Helper to denormalize batch in-graph (Log1p)
+        def denormalize_batch(x_norm, var_type=None): # var_type ignored for simple min-max
+            # x_norm: [-1, 1]
+            x = (x_norm + 1.0) / 2.0
+            denom = norm_max - norm_min if norm_max != norm_min else 1.0
+            x = x * denom + norm_min
+            # Expm1 to Physical
+            # Safe clamp for exp
+            return torch.expm1(torch.clamp(x, max=10.0))
 
     # --------------------------------------------------------------------------
     # Model Setup
@@ -220,8 +245,8 @@ def train_model():
                 pred_norm = model(forecast_norm)
                 
                 # Denormalize to Physical
-                pred_mm = denormalize_batch(pred_norm)
-                target_mm = denormalize_batch(target_truth_norm)
+                pred_mm = denormalize_batch(pred_norm, 'gpcp')
+                target_mm = denormalize_batch(target_truth_norm, 'gpcp')
                 
                 # Loss Calculation
                 l_wl1 = loss_weighted_l1(pred_mm, target_mm)
@@ -262,8 +287,8 @@ def train_model():
                 
                 pred_norm = model(forecast_norm)
                 
-                pred_mm = denormalize_batch(pred_norm)
-                target_mm = denormalize_batch(target_truth_norm)
+                pred_mm = denormalize_batch(pred_norm, 'gpcp')
+                target_mm = denormalize_batch(target_truth_norm, 'gpcp')
                 
                 # Loss Calculation
                 l_wl1 = loss_weighted_l1(pred_mm, target_mm)
@@ -274,10 +299,12 @@ def train_model():
 
                 # Capture first batch for plotting (on main process)
                 if first_batch_data is None and accelerator.is_main_process:
+                    # We need physical forecast for plotting too
+                    forecast_mm = denormalize_batch(forecast_norm[0:1], 'geos')
                     first_batch_data = (
-                        target_truth_norm[0:1].detach().cpu(), 
-                        forecast_norm[0:1].detach().cpu(), 
-                        pred_norm[0:1].detach().cpu()
+                        target_mm[0:1].detach().cpu(), 
+                        forecast_mm[0:1].detach().cpu(), 
+                        pred_mm[0:1].detach().cpu()
                     )
 
         avg_val_loss = val_loss / len(val_dataloader)
@@ -295,9 +322,13 @@ def train_model():
                     
                     # Move to CPU for plotting (if not already)
                     # Use utils.denormalize for consistency with plots
-                    pred_raw = denormalize(pred_precip_s[0]).numpy()
-                    input_raw = denormalize(forecast_s[0]).numpy()
-                    target_raw = denormalize(target_s[0]).numpy()
+                    param_dict = {"input_raw": forecast_s[0].numpy(), 
+                                  "target_raw": target_s[0].numpy(), 
+                                  "pred_raw": pred_precip_s[0].numpy()}
+                    
+                    input_raw = param_dict["input_raw"]
+                    target_raw = param_dict["target_raw"]
+                    pred_raw = param_dict["pred_raw"]
                     
                     plot_save_path = f"{config['output_dir']}/plots/epoch_{epoch}.png"
                     os.makedirs(os.path.dirname(plot_save_path), exist_ok=True)

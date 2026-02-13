@@ -19,7 +19,7 @@ import pandas as pd
 import os
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, ocean_vars=False):
+    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, ocean_vars=False, zscore=False):
         """
         Args:
             data_root (str): Root directory containing 'geos_subc_{year}.zarr' and 'gpcp_weekly_{year}.zarr'.
@@ -29,22 +29,47 @@ class GeosSubCDataset(Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             preload (bool): If True, load all data into RAM (recommended for speed).
             ocean_vars (bool): If True, also load SST/SSS from sst_weekly_*.zarr and sss_weekly_*.zarr.
+            zscore (bool): If True, use per-grid Z-score normalization (requires ml_model/grid_stats.nc).
         """
         self.data_root = data_root
         self.years = list(range(start_year, end_year + 1))
         self.transform = transform
         self.preload = preload
         self.ocean_vars = ocean_vars
+        self.zscore = zscore
         
         # 0. Load Normalization Stats
         import json
-        if ocean_vars:
+        
+        # Z-Score Stats
+        if self.zscore:
+            stats_path = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
+            if not os.path.exists(stats_path):
+                 # Fallback/Error: User needs to generate this
+                 raise FileNotFoundError(f"grid_stats.nc not found at {stats_path}. Run `python dataprocess/calculate_grid_stats.py` first.")
+            
+            ds_stats = xr.open_dataset(stats_path)
+            self.geos_mean = torch.from_numpy(ds_stats['geos_mean'].values).float().unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+            self.geos_std = torch.from_numpy(ds_stats['geos_std'].values).float().unsqueeze(0).unsqueeze(0)
+            self.gpcp_mean = torch.from_numpy(ds_stats['gpcp_mean'].values).float().unsqueeze(0) # (1, H, W)
+            self.gpcp_std = torch.from_numpy(ds_stats['gpcp_std'].values).float().unsqueeze(0)
+            ds_stats.close()
+            print("Loaded Per-Grid Z-Score Stats.")
+            
+        elif ocean_vars:
             stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
             if not os.path.exists(stats_path):
                 raise FileNotFoundError(
                     f"norm_stats_ocean.json not found at {stats_path}. "
                     f"Run `python ml_model/calculate_stats_ocean.py` first."
                 )
+            with open(stats_path, 'r') as f:
+                stats = json.load(f)
+            self.norm_min = stats["log1p_min"]
+            self.norm_max = stats["log1p_max"]
+            self.res_min = stats.get("residual_min", -5.0)
+            self.res_max = stats.get("residual_max", 5.0)
+            print(f"Norm stats ocean loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
         else:
             stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
             if not os.path.exists(stats_path):
@@ -52,22 +77,24 @@ class GeosSubCDataset(Dataset):
                     f"norm_stats.json not found at {stats_path}. "
                     f"Run `python ml_model/calculate_stats.py` first to generate it."
                 )
-        with open(stats_path, 'r') as f:
-            stats = json.load(f)
-        self.norm_min = stats["log1p_min"]
-        self.norm_max = stats["log1p_max"]
-        self.res_min = stats.get("residual_min", -5.0)
-        self.res_max = stats.get("residual_max", 5.0)
+            with open(stats_path, 'r') as f:
+                stats = json.load(f)
+            self.norm_min = stats["log1p_min"]
+            self.norm_max = stats["log1p_max"]
+            self.res_min = stats.get("residual_min", -5.0)
+            self.res_max = stats.get("residual_max", 5.0)
+            print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
+            print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
         
         # Ocean variable stats (only loaded if ocean_vars=True)
-        if ocean_vars:
+        if ocean_vars and not zscore: # Assuming ocean vars are 0-1 or something logic?
+             # For now keep as is, but we might need Z-score for ocean too?
+             # Stick to min-max for ocean if Z-score is only for precip
             self.sst_min = stats.get("sst_min", 0.0)
             self.sst_max = stats.get("sst_max", 1.0)
             self.sss_min = stats.get("sss_min", 0.0)
             self.sss_max = stats.get("sss_max", 1.0)
-            print(f"Ocean stats loaded: SST=[{self.sst_min:.2f}, {self.sst_max:.2f}], SSS=[{self.sss_min:.2f}, {self.sss_max:.2f}]")
-        print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
-        print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
+
         
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
@@ -283,27 +310,78 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Log1p transform
-            vmin = self.norm_min
-            vmax = self.norm_max
-            denom = vmax - vmin if vmax != vmin else 1.0
-            
-            x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
-            y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
-            obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
-            
-            # Residual in log space: log1p(GPCP) - log1p(GEOS)
-            residual_log = y_truth_log - x_forecast_log
-            
-            # Normalize inputs to [-1, 1] using global min/max
-            x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
-            y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
-            obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
-            
-            # Normalize residual to [-1, 1] using residual min/max
-            res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
-            residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
-            residual_norm = np.clip(residual_norm, -1.0, 1.0)
+            # Z-Score or Log1p Normalization
+            if self.zscore:
+                # Per-Grid Z-Score: (X - mu) / sigma
+                # geos_mean is (1, 1, H, W) -> squeeze to (H, W) for numpy broadcasting
+                g_mean = self.geos_mean.squeeze().numpy()
+                g_std = self.geos_std.squeeze().numpy()
+                
+                gp_mean = self.gpcp_mean.squeeze().numpy()
+                gp_std = self.gpcp_std.squeeze().numpy()
+                
+                # Inputs are (L, H, W) or (H, W)
+                # x_forecast: (L, H, W)
+                x_forecast_norm = (np.nan_to_num(x_forecast, nan=0.0) - g_mean) / g_std
+                
+                # y_truth: (H, W) - wait, is it (L, H, W)?
+                # load_data says gpcp is (S, Y, X). So y_truth is (Y, X).
+                # But sometimes it might be (1, Y, X)? 
+                # Let's check shape. If (H, W), broadcast works.
+                y_truth_norm = (np.nan_to_num(y_truth, nan=0.0) - gp_mean) / gp_std
+                
+                # obs_state: (H, W) or matching y_truth. Using GPCP stats.
+                obs_state_norm = (np.nan_to_num(obs_state, nan=0.0) - gp_mean) / gp_std
+                
+                # Residual not strictly used in simple U-Net but for consistency:
+                # Res = Target - Input. 
+                # In Z-space? Or Phys space? 
+                # Let's just define residual_norm as difference of norms
+                # Ensure shapes match (if x_forecast is multi-lead)
+                # For SimpleUNet, we often take 1st lead or average?
+                # SimpleUNet (SimpleCNN) takes (B, 4, H, W).
+                # x_forecast is (4, H, W) usually.
+                # y_truth is (H, W)? No, target must be (H, W) or (1, H, W).
+                
+                # Check residual logic in log1p:
+                # residual_log = y_truth_log - x_forecast_log
+                # This explicitly subtracts. If shapes mismatch, numpy broadcasts.
+                if x_forecast_norm.shape != y_truth_norm.shape:
+                    # e.g. (4, H, W) - (H, W) -> (4, H, W).
+                    # But residual usually implies correction for specific lead?
+                    # The simple model predicts "corrected forecast".
+                    # If x is 4-channel, model outputs 4-channel?
+                    # User's model: In=4, Out=4. 
+                    # Target: GPCP is usually 1 channel (weekly avg).
+                    # SimpleCNN input=4 (4 weeks of forecast?).
+                    # Target=1 week of precip?
+                    # Let's stick to simple subtraction for residual metric container
+                    pass
+                
+                residual_norm = y_truth_norm - x_forecast_norm
+                
+            else:
+                # Log1p transform
+                vmin = self.norm_min
+                vmax = self.norm_max
+                denom = vmax - vmin if vmax != vmin else 1.0
+                
+                x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
+                y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
+                obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
+                
+                # Residual in log space: log1p(GPCP) - log1p(GEOS)
+                residual_log = y_truth_log - x_forecast_log
+                
+                # Normalize inputs to [-1, 1] using global min/max
+                x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
+                y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
+                obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
+                
+                # Normalize residual to [-1, 1] using residual min/max
+                res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
+                residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
+                residual_norm = np.clip(residual_norm, -1.0, 1.0)
             
             result = {
                 "input_forecast": torch.tensor(x_forecast_norm, dtype=torch.float32), 
