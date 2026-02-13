@@ -292,6 +292,12 @@ def train_model():
             if is_best:
                 best_val_loss = avg_val_loss
                 accelerator.save_state(f"{config['output_dir']}/best_model")
+        
+        # Save latest checkpoint for resuming
+        accelerator.save_state(f"{config['output_dir']}/latest_checkpoint")
+        if accelerator.is_main_process:
+            with open(os.path.join(config['output_dir'], "latest_checkpoint", "epoch.json"), "w") as f:
+                json.dump({"epoch": epoch, "best_val_loss": best_val_loss}, f)
 
 if __name__ == "__main__":
     train_model()
