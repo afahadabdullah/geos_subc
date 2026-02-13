@@ -61,6 +61,34 @@ except ImportError:
 # (GradientLoss class removed as it's replaced by WeightedL1 + SSIM)
 
 # ==============================================================================
+# SIMPLE CNN MODEL
+# ==============================================================================
+class SimpleCNN(nn.Module):
+    """
+    3-Layer ResNet-like block.
+    Learn correction: f(x) -> residual
+    Output = x + f(x)
+    """
+    def __init__(self, in_channels=4, hidden_dim=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.LeakyReLU(0.2),
+            nn.Conv2d(hidden_dim, in_channels, 3, padding=1)
+        )
+        
+        # Initialize last layer to near-zero so we start close to Identity
+        nn.init.uniform_(self.net[-1].weight, -0.001, 0.001)
+        nn.init.constant_(self.net[-1].bias, 0)
+        
+    def forward(self, x, emb=None):
+        # x: (B, 4, H, W)
+        correction = self.net(x)
+        return x + correction
+
+# ==============================================================================
 # TRAINING SCRIPT
 # ==============================================================================
 def train_model():
