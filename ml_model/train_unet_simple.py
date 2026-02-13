@@ -49,59 +49,16 @@ if str(root_dir) not in sys.path:
 try:
     from ml_model.dataset import GeosSubCDataset
     from ml_model.utils import denormalize, plot_comparison
+    from ml_model.loss import WeightedL1Loss, SSIMLoss
 except ImportError:
     from dataset import GeosSubCDataset
     from utils import denormalize, plot_comparison
+    from loss import WeightedL1Loss, SSIMLoss
 
 # ==============================================================================
-# SIMPLE CNN MODEL
+# LOSS FUNCTIONS - MOVED TO ml_model/loss.py
 # ==============================================================================
-class SimpleCNN(nn.Module):
-    """
-    3-Layer ResNet-like block.
-    Learn correction: f(x) -> residual
-    Output = x + f(x)
-    """
-    def __init__(self, in_channels=4, hidden_dim=64):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(hidden_dim, in_channels, 3, padding=1)
-        )
-        
-        # Initialize last layer to near-zero so we start close to Identity
-        nn.init.uniform_(self.net[-1].weight, -0.001, 0.001)
-        nn.init.constant_(self.net[-1].bias, 0)
-        
-    def forward(self, x, emb=None):
-        # x: (B, 4, H, W)
-        correction = self.net(x)
-        return x + correction
-
-# ==============================================================================
-# LOSS FUNCTIONS
-# ==============================================================================
-class GradientLoss(nn.Module):
-    """
-    Penalizes difference in spatial gradients (sharpness/texture).
-    """
-    def __init__(self):
-        super().__init__()
-        self.l1 = nn.L1Loss()
-
-    def forward(self, pred, target):
-        # Gradient X
-        pred_dx = torch.abs(pred[:, :, :, :-1] - pred[:, :, :, 1:])
-        target_dx = torch.abs(target[:, :, :, :-1] - target[:, :, :, 1:])
-        
-        # Gradient Y
-        pred_dy = torch.abs(pred[:, :, :-1, :] - pred[:, :, 1:, :])
-        target_dy = torch.abs(target[:, :, :-1, :] - target[:, :, 1:, :])
-        
-        return self.l1(pred_dx, target_dx) + self.l1(pred_dy, target_dy)
+# (GradientLoss class removed as it's replaced by WeightedL1 + SSIM)
 
 # ==============================================================================
 # TRAINING SCRIPT
@@ -186,7 +143,12 @@ def train_model():
     # Model Setup
     # --------------------------------------------------------------------------
     model = SimpleCNN()
-    gradient_loss_fn = GradientLoss()
+    
+    # ADVANCED LOSSES
+    # weighted_l1: Penalize heavy rain more (scale=5.0)
+    # ssim: Penalize blurriness
+    loss_weighted_l1 = WeightedL1Loss(scale=5.0)
+    loss_ssim_fn = SSIMLoss()
     
     if accelerator.is_main_process:
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -208,7 +170,7 @@ def train_model():
     # Training Loop
     # --------------------------------------------------------------------------
     if accelerator.is_main_process:
-        print(f"Starting training. Optimization Target: PHYSICAL L1 + 0.5*GRADIENT")
+        print(f"Starting training. Optimization Target: WEIGHTED_L1 + 0.2*SSIM")
     
     global_step = 0
     best_val_loss = float('inf')
@@ -234,10 +196,10 @@ def train_model():
                 target_mm = denormalize_batch(target_truth_norm)
                 
                 # Loss Calculation
-                loss_l1 = F.l1_loss(pred_mm, target_mm)
-                loss_grad = gradient_loss_fn(pred_mm, target_mm)
+                l_wl1 = loss_weighted_l1(pred_mm, target_mm)
+                l_ssim = loss_ssim_fn(pred_mm, target_mm) # Returns (1 - SSIM)
                 
-                loss = loss_l1 + 0.5 * loss_grad
+                loss = l_wl1 + 0.2 * l_ssim
                 
                 accelerator.backward(loss)
                 accelerator.clip_grad_norm_(model.parameters(), 1.0)
@@ -276,10 +238,10 @@ def train_model():
                 target_mm = denormalize_batch(target_truth_norm)
                 
                 # Loss Calculation
-                loss_l1 = F.l1_loss(pred_mm, target_mm)
-                loss_grad = gradient_loss_fn(pred_mm, target_mm)
+                l_wl1 = loss_weighted_l1(pred_mm, target_mm)
+                l_ssim = loss_ssim_fn(pred_mm, target_mm)
                 
-                loss = loss_l1 + 0.5 * loss_grad
+                loss = l_wl1 + 0.2 * l_ssim
                 val_loss += loss.item()
 
                 # Capture first batch for plotting (on main process)
