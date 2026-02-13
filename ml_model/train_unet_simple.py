@@ -167,6 +167,14 @@ def train_model():
         gp_mean = train_dataset.gpcp_mean.to(device)
         gp_std = train_dataset.gpcp_std.to(device)
         
+        if accelerator.is_main_process:
+            print("=== Z-Score Stats Diagnostics ===")
+            print(f"GEOS Mean: min={g_mean.min():.4e}, max={g_mean.max():.4e}, mean={g_mean.mean():.4e}")
+            print(f"GEOS Std : min={g_std.min():.4e}, max={g_std.max():.4e}, mean={g_std.mean():.4e}")
+            print(f"GPCP Mean: min={gp_mean.min():.4e}, max={gp_mean.max():.4e}, mean={gp_mean.mean():.4e}")
+            print(f"GPCP Std : min={gp_std.min():.4e}, max={gp_std.max():.4e}, mean={gp_std.mean():.4e}")
+            print("=================================")
+        
         # Helper to denormalize batch in-graph (Z-Score)
         def denormalize_batch(x_norm, var_type='gpcp'):
             # x_norm: (B, C, H, W)
@@ -243,6 +251,11 @@ def train_model():
                 
                 # Model predicts corrected forecast (norm space)
                 pred_norm = model(forecast_norm)
+                
+                if step == 0 and epoch == 0 and accelerator.is_main_process:
+                     print(f"DEBUG: Input Norm range: [{forecast_norm.min():.2f}, {forecast_norm.max():.2f}]")
+                     print(f"DEBUG: Target Norm range: [{target_truth_norm.min():.2f}, {target_truth_norm.max():.2f}]")
+                     print(f"DEBUG: Pred Norm range: [{pred_norm.min():.2f}, {pred_norm.max():.2f}]")
                 
                 # Denormalize to Physical
                 pred_mm = denormalize_batch(pred_norm, 'gpcp')
