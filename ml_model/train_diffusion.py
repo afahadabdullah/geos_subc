@@ -35,8 +35,9 @@ def train():
 
     # Dataset
     train_dataset = S2SHybridDataset(
-        root_dir=config["data_dir"],
-        year_range=config["train_years"],
+        data_root=config["data_dir"],
+        start_year=config["train_start_year"],
+        end_year=config["train_end_year"],
         normalize=True
     )
     
