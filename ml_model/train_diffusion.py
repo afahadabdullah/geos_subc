@@ -552,6 +552,9 @@ def test():
                         gm_full = gm.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
                         gs_full = gs.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
                     else:
+                         gm_full = gm
+                         gs_full = gs
+                
                 condition = torch.cat([x_obs_flat, x_geos_flat], dim=1) # (4, 8, H, W)
                 
                 # Plot Setup: 4 Rows (Leads), 5 Columns (GEOS, Target, Diffusion, Diff Bias, GEOS Bias)
