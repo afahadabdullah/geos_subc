@@ -24,7 +24,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     
     # Config
     config = {
-        "batch_size": 4,
+        "batch_size": 8,
         "lr": 1e-4,
         "epochs": 20,
         "output_dir": "ml_output_committee"
@@ -33,7 +33,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     # 1. Dataset
     print("Initializing Dataset...")
     # Adjust root path as needed. Assuming running from project root.
-    dataset = S2SHybridDataset(data_root="dataprocess", start_year=1999, end_year=2015, preload=False)
+    dataset = S2SHybridDataset(data_root="dataprocess", start_year=1999, end_year=2015, preload=True)
     # Val set? Using last year 2015-2016 from split?
     # Or simplified: Train 1999-2015.
     

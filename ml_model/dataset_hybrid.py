@@ -33,6 +33,9 @@ class S2SHybridDataset(Dataset):
         # Index samples
         self.prepare_samples()
         
+        if self.preload:
+            self._preload_data()
+        
     def load_stats(self):
         # Load Z-Score stats for Precip
         stats_path = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
@@ -121,6 +124,15 @@ class S2SHybridDataset(Dataset):
         self.samples = samples_tmp
         print(f"Found {len(self.samples)} samples. Prev-Init map built.")
 
+    def _preload_data(self):
+        print(f"Preloading {len(self.samples)} samples into RAM...")
+        self.data_cache = []
+        for i in range(len(self.samples)):
+            self.data_cache.append(self._load_sample(i))
+            if (i+1) % 100 == 0:
+                print(f"Loaded {i+1}/{len(self.samples)}")
+        print("Preloading complete.")
+
     def __len__(self):
         return len(self.samples)
         
@@ -149,6 +161,12 @@ class S2SHybridDataset(Dataset):
         return np.zeros((4, 181, 360), dtype=np.float32)
 
     def __getitem__(self, idx):
+        if self.preload:
+            return self.data_cache[idx]
+        else:
+            return self._load_sample(idx)
+
+    def _load_sample(self, idx):
         meta = self.samples[idx]
         
         # 1. Load GEOS (Dynamic) -> (M, L, H, W)
@@ -166,13 +184,9 @@ class S2SHybridDataset(Dataset):
         # Broadcast normalization
         if self.geos_mean is not None:
              # Ensure stats are broadcastable
-             # Mean/Std are (1, L, H, W) or (L, H, W)
-             # We need (1, 1, L, H, W) for broadcasting against (M, 1, L, H, W)
              gm = self.geos_mean
              gs = self.geos_std
              
-             # Expand stats to match (1, 1, L, H, W)
-             # Current gm shape: likely (L, H, W) or (1, L, H, W)
              if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
              if gs.ndim == 3: gs = gs.unsqueeze(0)
              
@@ -236,6 +250,7 @@ class S2SHybridDataset(Dataset):
         ds_gpcp.close()
             
         # Sanitize Inputs (Handle NaNs/Infs in Obs/GEOS)
+        # Use torch.nan_to_num on tensors directly
         if torch.isnan(geos_tensor).any():
             geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0)
             
@@ -245,11 +260,10 @@ class S2SHybridDataset(Dataset):
         target_tensor = torch.from_numpy(target_val).float()
         
         # Handle NaNs and Fill Values in Target
-        # GPCP Fill Value is often -9999 or similar
         if torch.isnan(target_tensor).any():
              target_tensor = torch.nan_to_num(target_tensor, nan=0.0)
              
-        # Clamp negative values to 0 (Precip cannot be negative)
+        # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
         return {
