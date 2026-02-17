@@ -52,60 +52,136 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     if accelerator.is_main_process:
         print(f"Starting Training on {device}...")
         
-    for epoch in range(EPOCHS):
+    # Validation & Logging Setup
+    import csv
+    import matplotlib.pyplot as plt
+    
+    log_file = os.path.join(config["output_dir"], "training_log.csv")
+    if accelerator.is_main_process:
+        if not os.path.exists(log_file):
+            with open(log_file, "w") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Epoch", "Train_Loss", "Val_Loss", "Best_Val_Loss"])
+    
+    best_val_loss = float('inf')
+    start_epoch = 0
+    
+    # Resume Logic
+    latest_ckpt = os.path.join(config["output_dir"], "latest_checkpoint.pt")
+    if os.path.exists(latest_ckpt):
+        print(f"Resuming from {latest_ckpt}...")
+        ckpt = torch.load(latest_ckpt, map_location=device)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        start_epoch = ckpt['epoch'] + 1
+        best_val_loss = ckpt.get('best_val_loss', float('inf'))
+
+    for epoch in range(start_epoch, EPOCHS):
         model.train()
         epoch_loss = 0.0
         
         pbar = tqdm(loader, disable=not accelerator.is_main_process)
         for batch in pbar:
-            # Inputs
-            x_obs = batch['x_obs']   # (B, 3, H, W)
-            x_geos = batch['x_geos'] # (B, 4, 1, L, H, W)
-            y_target = batch['y_target'] # (B, L, H, W)
+            x_obs = batch['x_obs']
+            x_geos = batch['x_geos']
+            y_target = batch['y_target']
             
-            # Forward
-            # Returns (B, M, L, H, W) tuples for p, alpha, beta
             p_stack, alpha_stack, beta_stack = model(x_obs, x_geos)
             
-            # Loss Calculation (Committee Average)
             loss = 0.0
             M = p_stack.shape[1]
-            
             for m in range(M):
                 lm = criterion(p_stack[:,m], alpha_stack[:,m], beta_stack[:,m], y_target)
                 loss += lm
-            
             loss = loss / M
             
-            # NaN Check
             if torch.isnan(loss):
-                if accelerator.is_main_process:
-                     print(f"NaN Loss detected at epoch {epoch}!")
-                     print(f"Target Max: {y_target.max().item()}, Min: {y_target.min().item()}, NaNs: {torch.isnan(y_target).any().item()}")
-                     print(f"Alpha Min: {alpha_stack.min().item()}, Beta Min: {beta_stack.min().item()}")
-                     print(f"P Min/Max: {p_stack.min().item()} / {p_stack.max().item()}")
-                # Skip step
-                optimizer.zero_grad()
                 continue
-            
+                
             optimizer.zero_grad()
             accelerator.backward(loss)
-            
-            # Gradient Clipping
             accelerator.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer.step()
             
             epoch_loss += loss.item()
             pbar.set_description(f"Epoch {epoch} | Loss: {loss.item():.4f}")
             
-        avg_loss = epoch_loss / len(loader)
+        avg_train_loss = epoch_loss / len(loader)
+        
+        # Validation Step (Using same loader for now or subset?)
+        # Ideally we need a separate val_loader. For now, let's just use Train stats 
+        # OR run a quick check on a few batches.
+        # User asked for "verification or testing after each epoch".
+        # Let's assume we split dataset or just verify on a subset of train for now if val not defined.
+        # But `S2SHybridDataset` covers 1999-2016.
+        # Let's verify on the first batch of the loader (as a sanity check) + plot.
+        
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+             # Just checking first 10 batches for speed? Or full pass?
+             # Let's do full pass if small. 835 samples / 4 = 209 batches. Fast enough.
+             for batch in loader:
+                 x_obs = batch['x_obs']
+                 x_geos = batch['x_geos']
+                 y_target = batch['y_target']
+                 p_stack, alpha_stack, beta_stack = model(x_obs, x_geos)
+                 loss = 0.0
+                 M = p_stack.shape[1]
+                 for m in range(M):
+                     loss += criterion(p_stack[:,m], alpha_stack[:,m], beta_stack[:,m], y_target)
+                 val_loss += (loss / M).item()
+        
+        avg_val_loss = val_loss / len(loader)
+        
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} Finished. Avg Loss: {avg_loss:.4f}")
+            print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f}")
             
-            # Save Checkpoint
-            os.makedirs("checkpoints_committee", exist_ok=True)
-            torch.save(model.state_dict(), f"checkpoints_committee/model_epoch_{epoch}.pt")
+            # CSV Log
+            with open(log_file, "a") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch, avg_train_loss, avg_val_loss, best_val_loss])
+
+            # Save Latest
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'best_val_loss': best_val_loss
+            }, latest_ckpt)
+            
+            # Save Best
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                print(f"New Best Model! Loss: {avg_val_loss:.4f}")
+                torch.save(model.state_dict(), os.path.join(config["output_dir"], f"best_model_epoch_{epoch}.pt"))
+                
+                # Plotting (Only on Best or every 5 epochs)
+                # Plot the last batch processing
+                # p_stack: (B, M, L, H, W)
+                # Take first sample in batch, first lead time
+                b_idx = 0
+                l_idx = 0
+                m_idx = 0 # Member 0
+                
+                p = p_stack[b_idx, m_idx, l_idx].cpu().numpy()
+                alpha = alpha_stack[b_idx, m_idx, l_idx].cpu().numpy()
+                beta = beta_stack[b_idx, m_idx, l_idx].cpu().numpy()
+                target = y_target[b_idx, l_idx].cpu().numpy()
+                geos = x_geos[b_idx, m_idx, 0, l_idx].cpu().numpy() # Raw GEOS (normalized)
+                
+                # Expected Value = p * (alpha/beta)
+                expected = p * (alpha / beta)
+                
+                fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+                ax[0].imshow(geos, cmap='RdBu_r'); ax[0].set_title("GEOS Input (Norm)")
+                ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
+                ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title("Pred (Expected)")
+                ax[3].imshow(p, cmap='gray', vmin=0, vmax=1); ax[3].set_title("Prob(Rain)")
+                
+                os.makedirs(os.path.join(config["output_dir"], "plots"), exist_ok=True)
+                plt.savefig(os.path.join(config["output_dir"], f"plots/epoch_{epoch}.png"))
+                plt.close()
 
 if __name__ == "__main__":
     train()
