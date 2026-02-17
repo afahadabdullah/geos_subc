@@ -235,10 +235,22 @@ class S2SHybridDataset(Dataset):
         target_val = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
         ds_gpcp.close()
             
+        # Sanitize Inputs (Handle NaNs/Infs in Obs/GEOS)
+        if torch.isnan(geos_tensor).any():
+            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0)
+            
+        if torch.isnan(obs_tensor).any():
+            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0)
+            
         target_tensor = torch.from_numpy(target_val).float()
-        # Handle NaNs in target (GPCP might have missing values)
+        
+        # Handle NaNs and Fill Values in Target
+        # GPCP Fill Value is often -9999 or similar
         if torch.isnan(target_tensor).any():
              target_tensor = torch.nan_to_num(target_tensor, nan=0.0)
+             
+        # Clamp negative values to 0 (Precip cannot be negative)
+        target_tensor = torch.clamp(target_tensor, min=0.0)
         
         return {
             "x_geos": geos_tensor, # (M, L, H, W)
