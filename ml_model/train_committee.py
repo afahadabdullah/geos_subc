@@ -26,7 +26,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     config = {
         "batch_size": 8,
         "lr": 1e-4,
-        "epochs": 20,
+        "epochs": 500,
         "output_dir": "ml_output_committee"
     }
     
