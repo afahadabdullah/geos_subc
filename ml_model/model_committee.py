@@ -125,15 +125,10 @@ class DecoderProbability(nn.Module):
         x = F.relu(self.up1(x))
         x = F.relu(self.up2(x))
         x = F.relu(self.up3(x))
-        # Resize to Exact target size?? (181, 360)
-        # Current logic: 16x upsample.
-        # If input 11x22 -> 176x352. Close but not exact.
-        # Interpolate to 181x360
-        x = F.interpolate(x, size=(181, 360), mode='bilinear', align_corners=False)
-        x = F.relu(self.up4(x)) # Wait, up4 was part of 16x.
+        x = F.relu(self.up4(x)) 
         
-        # Let's fix upsampling logic.
-        # Just interpolate at end.
+        # Last Step: Resize to Exact target size (181, 360)
+        x = F.interpolate(x, size=(181, 360), mode='bilinear', align_corners=False)
         
         out = self.head(x) # (B, 12, 181, 360)
         
