@@ -51,6 +51,26 @@ def train():
         pin_memory=True
     )
 
+    # Validation Dataset
+    val_dataset = S2SHybridDataset(
+        data_root=config["data_dir"],
+        start_year=config["val_start_year"],
+        end_year=config["val_end_year"],
+        normalize=True,
+        preload=preload
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        num_workers=config["num_workers"],
+        pin_memory=True
+    )
+    
+    # Validation Fixed Batch for consistent plotting
+    fixed_val_batch = next(iter(val_loader))
+    
     # Model: Conditional Diffusion
     # In: 1 (Target Noisy)
     # Cond: 4 (GEOS) + 4 (Obs) = 8
@@ -75,8 +95,9 @@ def train():
     )
 
     # Prepare
-    model, optimizer, loader, lr_scheduler = accelerator.prepare(
-        model, optimizer, loader, lr_scheduler
+    # Note: accelerator.prepare handles moving data to device
+    model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
+        model, optimizer, loader, val_loader, lr_scheduler
     )
 
     # Output Dir
@@ -200,91 +221,143 @@ def train():
             
         avg_train_loss = train_loss / len(loader)
         
-        # Validation (Sample 1 batch)
-        # Use first batch of loader (assuming consistent if shuffle=False? Train uses shuffle=True)
-        # Just grab one batch inside this process logic for now
-        # Ideally fix validation set.
-        
+        # --- VALIDATION LOOP ---
         model.eval()
-        val_rmse_sum = 0
+        val_loss_sum = 0
         val_count = 0
         
-        # Consistent Validation Data (from first batch of Epoch)
-        # In a real setup, use val_loader
-        # Let's verify on ONE sample from the LAST batch used (easy access)
-        # Or recreate small loop
+        # We will compute RMSE on normalized space for speed 
+        # (or denormalize if we want true RMSE, but normalized is fine for model selection)
+        # Let's compute Normalized MSE Loss as proxy for selection
         
         with torch.no_grad():
-            # Use last batch data for plotting (approximate val)
-            B_val = 1 
-            cond_val = condition[:B_val] 
-            target_val_norm = target_normalized[:B_val]
-            target_val_raw = y_target_flat[:B_val]
-            
-            # Need GEOS mean for denormalization later, or just use raw geos
-            # Just grab raw GEOS mean from x_geos_flat
-            geos_val_mean_raw = x_geos_flat[:B_val].mean(dim=1, keepdim=True) # Normalized scale!
-            # If dataset.geos_mean is present, x_geos is roughly N(0,1).
-            # But wait, dataset DOES normalize GEOS.
-            # So `geos_val_mean_raw` is in Normalized Space.
-            
-            
-            # Sample (Denoise)
-            unwrapped_model = accelerator.unwrap_model(model)
-            # 50 steps for speed in val
-            samples_norm = unwrapped_model.sample(cond_val, num_inference_steps=50)
-            
-            # Denormalize
-            if train_dataset.geos_mean is not None:
-                gm = train_dataset.geos_mean.to(device)
-                gs = train_dataset.geos_std.to(device)
+             for val_batch in val_loader:
+                vx_obs = val_batch['x_obs']
+                vx_geos = val_batch['x_geos']
+                vy_target = val_batch['y_target']
                 
-                # Reshape for broadcasting just in case
-                # samples_norm is (1, 1, H, W)
-                 # gm/gs might be (L, H, W)?
-                # We selected B_val=1 which is ONE sample from B*L flat batch. 
-                # Ideally we know WHICH lead time it is.
-                # It is the first one -> Lead 0.
+                vB, _, vH, vW = vx_obs.shape
+                # Preprocess same as train
+                vx_obs_flat = vx_obs.view(vB, 4, 4, vH, vW).permute(0, 2, 1, 3, 4).reshape(vB * 4, 4, vH, vW)
+                vx_geos_flat = vx_geos.squeeze(2).permute(0, 2, 1, 3, 4).reshape(vB * 4, 4, vH, vW)
+                vy_target_flat = vy_target.reshape(vB * 4, 1, vH, vW)
                 
-                if gm.numel() > 1:
-                    # Assume (1, L, H, W) -> slice lead 0
-                    gm_s = gm[0, 0] if gm.ndim == 4 else gm[0] # Handle shapes roughly
-                    gs_s = gs[0, 0] if gs.ndim == 4 else gs[0]
-                    # This is getting hacky.
-                    # Best effort denorm
-                    # If gm is scalar, easy.
-                    samples_denorm = (samples_norm * gs) + gm
-                    target_denorm = (target_val_norm * gs) + gm # Should match target_val_raw
-                    # geos_denorm = (geos_val_mean_raw * gs) + gm # GEOS was normalized
+                # Normalize Target
+                if train_dataset.geos_mean is not None:
+                    # Re-use gm/gs logic from above if valid
+                    gm = train_dataset.geos_mean.to(device)
+                    gs = train_dataset.geos_std.to(device)
+                    if gm.numel() > 1:
+                        if gm.ndim == 3: gm = gm.unsqueeze(0)
+                        gm_v = gm.expand(vB, -1, -1, -1).reshape(vB * 4, 1, vH, vW)
+                        gs_v = gs.expand(vB, -1, -1, -1).reshape(vB * 4, 1, vH, vW)
+                        vtarget_norm = (vy_target_flat - gm_v) / gs_v
+                    else:
+                        vtarget_norm = (vy_target_flat - gm) / gs
                 else:
-                    samples_denorm = (samples_norm * gs) + gm
-                    target_denorm = (target_val_norm * gs) + gm
-                    geos_denorm = (geos_val_mean_raw * gs) + gm
+                    vtarget_norm = vy_target_flat
+                
+                v_condition = torch.cat([vx_obs_flat, vx_geos_flat], dim=1)
+                
+                # We can't easily compute full generation RMSE for every batch (too slow)
+                # Instead, compute one-step denoising error or simple MSE loss on noise
+                # OR generated sample for subset. 
+                # Standard practice: Validation Loss (MSE on noise)
+                # If user wants "Best Model" based on generation quality, we should sample a subset.
+                # Let's stick to Noise MSE for speed and stability, 
+                # AND compute generation RMSE on the FIXED BATCH.
+                
+                # Validation Loss (Noise MSE)
+                v_timesteps = torch.randint(0, model.noise_scheduler.config.num_train_timesteps, (vx_obs_flat.shape[0],), device=device).long()
+                v_noise = torch.randn_like(vy_target_flat)
+                v_noisy = model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
+                v_pred = model(v_noisy, v_condition, v_timesteps)
+                val_loss_sum += F.mse_loss(v_pred, v_noise).item()
+                val_count += 1
+
+        avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
+        
+        # --- FIXED BATCH VISUALIZATION & RMSE ---
+        # Compute "Real" RMSE on fixed batch for checking generation quality
+        # This is what we will use for "Best Model" check to align with user request
+        
+        # Prepare Fixed Batch
+        fb_obs = fixed_val_batch['x_obs'].to(device)
+        fb_geos = fixed_val_batch['x_geos'].to(device)
+        fb_target = fixed_val_batch['y_target'].to(device)
+        
+        # Process Fixed Batch
+        # Just take first sample (Lead 0) for visualization
+        # But compute RMSE on whole batch
+        fb_B = fb_obs.shape[0]
+        fb_obs_flat = fb_obs.view(fb_B, 4, 4, H, W).permute(0, 2, 1, 3, 4).reshape(fb_B * 4, 4, H, W)
+        fb_geos_flat = fb_geos.squeeze(2).permute(0, 2, 1, 3, 4).reshape(fb_B * 4, 4, H, W)
+        fb_target_flat = fb_target.reshape(fb_B * 4, 1, H, W)
+        
+        # Normalize FB
+        if train_dataset.geos_mean is not None:
+            gm = train_dataset.geos_mean.to(device)
+            gs = train_dataset.geos_std.to(device)
+            if gm.numel() > 1:
+                if gm.ndim == 3: gm = gm.unsqueeze(0)
+                gm_fb = gm.expand(fb_B, -1, -1, -1).reshape(fb_B * 4, 1, H, W)
+                gs_fb = gs.expand(fb_B, -1, -1, -1).reshape(fb_B * 4, 1, H, W)
+                fb_target_norm = (fb_target_flat - gm_fb) / gs_fb
             else:
-                 samples_denorm = samples_norm
-                 target_denorm = target_val_norm
-                 geos_denorm = geos_val_mean_raw
+                fb_target_norm = (fb_target_flat - gm) / gs
+        else:
+            fb_target_norm = fb_target_flat
             
-            val_rmse = torch.sqrt(torch.mean((samples_denorm - target_denorm)**2)).item()
-            geos_rmse = torch.sqrt(torch.mean((geos_denorm - target_denorm)**2)).item()
-            
+        fb_cond = torch.cat([fb_obs_flat, fb_geos_flat], dim=1)
+        
+        unwrapped_model = accelerator.unwrap_model(model)
+        # Sample (Input: Condition)
+        # Using 20 steps for faster val check
+        fb_samples_norm = unwrapped_model.sample(fb_cond, num_inference_steps=20)
+        
+        # Denormalize for RMSE
+        if train_dataset.geos_mean is not None:
+             if gm.numel() > 1:
+                 fb_samples = (fb_samples_norm * gs_fb) + gm_fb
+             else:
+                 fb_samples = (fb_samples_norm * gs) + gm
+        else:
+             fb_samples = fb_samples_norm
+             
+        # Compute RMSE on Fixed Batch
+        val_rmse = torch.sqrt(torch.mean((fb_samples - fb_target_flat)**2)).item()
+        
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} | Loss: {avg_train_loss:.4f} | Val RMSE: {val_rmse:.4f} | GEOS RMSE: {geos_rmse:.4f}")
+            print(f"Epoch {epoch} | Loss: {avg_train_loss:.4f} | Val Noise Loss: {avg_val_loss:.4f} | Val RMSE (Fixed): {val_rmse:.4f}")
             
             # Log
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, val_rmse])
             
-            # Plot
+            # Plot (First Sample of Fixed Batch)
             # Move to CPU
-            s_img = samples_denorm.cpu().numpy().squeeze()
-            t_img = target_denorm.cpu().numpy().squeeze()
-            g_img = geos_denorm.cpu().numpy().squeeze()
+            s_img = fb_samples[0].cpu().numpy().squeeze()
+            t_img = fb_target_flat[0].cpu().numpy().squeeze()
+            g_mean = fb_geos_flat[0].mean(dim=0).cpu().numpy().squeeze() # GEOS Mean (Normalized space?)
+            # Wait, fb_geos_flat is normalized? 
+            # In dataset, geos is normalized.
+            # So we need to denorm GEOS for plot if we want to compare with target
+            if train_dataset.geos_mean is not None:
+                 # Quick denorm for plot
+                 # Using the first element of gm/gs
+                 if gm.numel() > 1:
+                     g_scalar_m = gm[0,0,0,0].item() if gm.ndim==4 else gm.mean().item()
+                     g_scalar_s = gs[0,0,0,0].item() if gs.ndim==4 else gs.mean().item()
+                 else:
+                     g_scalar_m = gm.item()
+                     g_scalar_s = gs.item()
+                 g_img = (g_img * g_scalar_s) + g_scalar_m
+
             diff_img = s_img - t_img
             
             fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-            im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Mean (RMSE: {geos_rmse:.2f})")
+            im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Mean")
             plt.colorbar(im0, ax=ax[0])
             
             im1 = ax[1].imshow(t_img, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target GPCP")
@@ -297,7 +370,7 @@ def train():
             plt.colorbar(im3, ax=ax[3])
             
             os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
-            plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}.png"))
+            plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}_rmse_{val_rmse:.2f}.png"))
             plt.close()
             
             # SAVE LATEST
@@ -313,20 +386,11 @@ def train():
             # Add current
             current_path = os.path.join(config["output_dir"], f"model_epoch_{epoch}_rmse_{val_rmse:.4f}.pt")
             
-            # We want to check if this is worthy
-            # Algorithm:
-            # 1. Append (rmse, epoch, current_path)
-            # 2. Sort
-            # 3. If len > K, remove worst
-            # 4. If current survived, SAVE IT.
-            
             top_k_ckpts.append((val_rmse, epoch, current_path))
             top_k_ckpts.sort(key=lambda x: x[0]) # Ascending RMSE
             
             if len(top_k_ckpts) > save_top_k:
                 worst = top_k_ckpts.pop() # Remove largest RMSE
-                # If worst was the one we just added (current), then we don't save.
-                # If worst was an old one, delete file.
                 if worst[2] != current_path:
                     if os.path.exists(worst[2]):
                         os.remove(worst[2])
