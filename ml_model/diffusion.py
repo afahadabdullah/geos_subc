@@ -90,15 +90,17 @@ class ConditionalDiffusion(nn.Module):
         return out
 
     @torch.no_grad()
-    def sample(self, condition, num_inference_steps=50, generator=None):
+    def sample(self, condition, num_inference_steps=50, generator=None, verbose=False):
         """
         Generate samples from noise conditioned on input.
         Args:
             condition: (B, C_cond, H, W)
             num_inference_steps: Number of steps for sampling
+            verbose: If True, show progress bar
         Returns:
             samples: (B, C_out, H, W)
         """
+        from tqdm import tqdm
         batch_size = condition.shape[0]
         device = condition.device
         H, W = condition.shape[2], condition.shape[3]
@@ -127,7 +129,11 @@ class ConditionalDiffusion(nn.Module):
         
         self.noise_scheduler.set_timesteps(num_inference_steps)
         
-        for t in self.noise_scheduler.timesteps:
+        timesteps = self.noise_scheduler.timesteps
+        if verbose:
+            timesteps = tqdm(timesteps, desc="Sampling Steps", leave=False)
+            
+        for t in timesteps:
             # Predict noise (using padded inputs)
             # We need to manually concatenate here or call a modified forward?
             # Calling self.forward would pad AGAIN if we passed unpadded tensors.

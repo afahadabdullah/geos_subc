@@ -161,11 +161,42 @@ def test():
                 diff_generations = []
                 unwrapped_model = accelerator.unwrap_model(model)
                 
-                for i_ens in range(10):
+                # Ensemble Loop
+                for i_ens in tqdm(range(10), desc=f"Generating Ensemble for Sample {current_idx}"):
                     # Sample (1000 steps)
-                    # cond_l0 is (1, 8, H, W)
-                    gen = unwrapped_model.sample(cond_l0, num_inference_steps=1000)
-                    diff_generations.append(gen)
+                    # Use tqdm inside sample? or just rely on outer?
+                    # diffusion.py sample doesn't have tqdm.
+                    # We can add tqdm to the iterator in sample() via a callback or just trust it's fast enough on GPU?
+                    # 1000 steps takes ~seconds. 
+                    # Let's Modify diffusion.py to accept 'disable_tqdm' or just add it here
+                    # Actually, better to just show "Member 1/10" etc.
+                    
+                    # To show 1000 steps progress, we need to modify sample() or wraper.
+                    # Let's just stick to ensemble progress for now to avoid modifying model code again
+                    # unless user really wants step progress.
+                    # User asked "1000 steps, can we show progressbar".
+                    # So we should probably modify `sample` in diffusion.py to support it or add it there.
+                    # BUT `sample` in `diffusion.py` loops over `self.noise_scheduler.timesteps`.
+                    # Let's modify `diffusion.py` to be verbose if requested?
+                    # Or just pass a `verbose` flag.
+                    
+                    # For now, let's just use the `sample` method as is, but maybe wrap the inner loop in diffusion.py?
+                    # I can't easily change diffusion.py from here.
+                    
+                    # Let's just print/tqdm the ensemble members.
+                    # If 1000 steps is slow, the user sees "Member 1/10...". 
+                    
+                    # Wait, I can pass a progress bar to the scheduler? No.
+                    # Let's modify `diffusion.py` briefly to allow tqdm?
+                    pass 
+                
+                # Re-writing the loop properly:
+                for i_ens in tqdm(range(10), desc=f"Sample {current_idx} Ensemble", leave=False):
+                     # We can't easily inject tqdm into `model.sample` without editing `diffusion.py`.
+                     # Let's edit `diffusion.py` in next step if needed. 
+                     # For now, just member progress.
+                     gen = unwrapped_model.sample(cond_l0, num_inference_steps=1000, verbose=True)
+                     diff_generations.append(gen)
                 
                 diff_ens = torch.cat(diff_generations, dim=0) # (10, 1, H, W)
                 diff_mean_norm = diff_ens.mean(dim=0, keepdim=True) # (1, 1, H, W)
