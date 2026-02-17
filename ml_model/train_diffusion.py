@@ -139,10 +139,10 @@ def train():
         optimizer.load_state_dict(checkpoint['optimizer'])
         # Scheduler might need state dict? 
         start_epoch = checkpoint['epoch'] + 1
-        top_k_ckpts = checkpoint.get('top_k_ckpts', [])
-        print(f"Resuming from epoch {start_epoch}")
-
     best_val_rmse = float('inf')
+    if top_k_ckpts:
+        best_val_rmse = top_k_ckpts[0][0] # RMSE is the first element
+        print(f"Resumed Best Val RMSE: {best_val_rmse:.4f}")
 
     for epoch in range(start_epoch, config["epochs"]):
         model.train()
@@ -355,45 +355,52 @@ def train():
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, val_rmse])
             
-            # Plot (First Sample of Fixed Batch)
-            # Move to CPU
-            s_img = fb_samples[0].cpu().numpy().squeeze()
-            t_img = fb_target_flat[0].cpu().numpy().squeeze()
-            g_mean = fb_geos_flat[0].mean(dim=0).cpu().numpy().squeeze() # GEOS Mean (Normalized space?)
-            # Wait, fb_geos_flat is normalized? 
-            # In dataset, geos is normalized.
-            # So we need to denorm GEOS for plot if we want to compare with target
-            if train_dataset.geos_mean is not None:
-                 # Quick denorm for plot
-                 # Using the first element of gm/gs
-                 if gm.numel() > 1:
-                     g_scalar_m = gm[0,0,0,0].item() if gm.ndim==4 else gm.mean().item()
-                     g_scalar_s = gs[0,0,0,0].item() if gs.ndim==4 else gs.mean().item()
-                 else:
-                     g_scalar_m = gm.item()
-                     g_scalar_s = gs.item()
-                 g_img = (g_mean * g_scalar_s) + g_scalar_m
-            else:
-                 g_img = g_mean
+            # Plot ONLY if a new best model is found
+            if val_rmse < best_val_rmse:
+                print(f"New Best Model Found! RMSE improved from {best_val_rmse:.4f} to {val_rmse:.4f}. Plotting...")
+                best_val_rmse = val_rmse
+                
+                # Plot (First Sample of Fixed Batch)
+                # Move to CPU
+                s_img = fb_samples[0].cpu().numpy().squeeze()
+                t_img = fb_target_flat[0].cpu().numpy().squeeze()
+                g_mean = fb_geos_flat[0].mean(dim=0).cpu().numpy().squeeze() 
+                
+                if train_dataset.geos_mean is not None:
+                     if gm.numel() > 1:
+                         g_scalar_m = gm[0,0,0,0].item() if gm.ndim==4 else gm.mean().item()
+                         g_scalar_s = gs[0,0,0,0].item() if gs.ndim==4 else gs.mean().item()
+                     else:
+                         g_scalar_m = gm.item()
+                         g_scalar_s = gs.item()
+                     g_img = (g_mean * g_scalar_s) + g_scalar_m
+                else:
+                     g_img = g_mean
 
-            diff_img = s_img - t_img
-            
-            fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-            im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Mean")
-            plt.colorbar(im0, ax=ax[0])
-            
-            im1 = ax[1].imshow(t_img, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target GPCP")
-            plt.colorbar(im1, ax=ax[1])
-            
-            im2 = ax[2].imshow(s_img, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Diff Sample (RMSE: {val_rmse:.2f})")
-            plt.colorbar(im2, ax=ax[2])
-            
-            im3 = ax[3].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Sample - Target)")
-            plt.colorbar(im3, ax=ax[3])
-            
-            os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
-            plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}_rmse_{val_rmse:.2f}.png"))
-            plt.close()
+                diff_img = s_img - t_img
+                geos_bias = g_img - t_img
+                
+                fig, ax = plt.subplots(1, 5, figsize=(25, 5))
+                im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Mean")
+                plt.colorbar(im0, ax=ax[0])
+                
+                im1 = ax[1].imshow(t_img, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target GPCP")
+                plt.colorbar(im1, ax=ax[1])
+                
+                im2 = ax[2].imshow(s_img, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Diff Sample\nRMSE: {val_rmse:.2f}")
+                plt.colorbar(im2, ax=ax[2])
+                
+                im3 = ax[3].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Sample - Target)")
+                plt.colorbar(im3, ax=ax[3])
+
+                im4 = ax[4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("GEOS Bias (GEOS - Target)")
+                plt.colorbar(im4, ax=ax[4])
+                
+                os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
+                plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}_rmse_{val_rmse:.2f}.png"))
+                plt.close()
+            else:
+                print(f"Validation RMSE ({val_rmse:.4f}) did not improve over current best ({best_val_rmse:.4f}). Skipping plot.")
             
             # SAVE LATEST
             ckpt_state = {
