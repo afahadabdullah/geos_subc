@@ -209,7 +209,14 @@ def train():
                  target_normalized = y_target_flat # Fallback
             
             # Condition: (B*L, 8, H, W) -> 4 GEOS + 4 Obs
-            condition = torch.cat([x_obs_flat, x_geos_flat], dim=1)
+            # NEW: Add Lead Time Map (9th channel)
+            # Create Lead Map: (B, 4, 1, H, W)
+            # Values: 0.25, 0.50, 0.75, 1.0 for leads 0, 1, 2, 3
+            lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
+            lead_map = lead_map.expand(B, -1, 1, H, W) # (B, 4, 1, H, W)
+            lead_map_flat = lead_map.reshape(B * L, 1, H, W)
+            
+            condition = torch.cat([x_obs_flat, x_geos_flat, lead_map_flat], dim=1)
             
             # Sample Timesteps
             timesteps = torch.randint(
@@ -274,7 +281,11 @@ def train():
                 else:
                     vtarget_norm = vy_target_flat
                 
-                v_condition = torch.cat([vx_obs_flat, vx_geos_flat], dim=1)
+                # Lead Map for Validation
+                v_lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
+                v_lead_map = v_lead_map.expand(vB, -1, 1, vH, vW).reshape(vB * 4, 1, vH, vW)
+                
+                v_condition = torch.cat([vx_obs_flat, vx_geos_flat, v_lead_map], dim=1)
                 
                 # We can't easily compute full generation RMSE for every batch (too slow)
                 # Instead, compute one-step denoising error or simple MSE loss on noise
@@ -328,7 +339,10 @@ def train():
         else:
             fb_target_norm = fb_target_flat
             
-        fb_cond = torch.cat([fb_obs_flat, fb_geos_flat], dim=1)
+        fb_lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
+        fb_lead_map = fb_lead_map.expand(fb_B, -1, 1, H, W).reshape(fb_B * 4, 1, H, W)
+
+        fb_cond = torch.cat([fb_obs_flat, fb_geos_flat, fb_lead_map], dim=1)
         
         unwrapped_model = accelerator.unwrap_model(model)
         # Sample (Input: Condition)
@@ -555,7 +569,11 @@ def test():
                          gm_full = gm
                          gs_full = gs
                 
-                condition = torch.cat([x_obs_flat, x_geos_flat], dim=1) # (4, 8, H, W)
+                # Lead Map for Test
+                lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
+                lead_map = lead_map.expand(B, -1, 1, H, W).reshape(B * 4, 1, H, W)
+                
+                condition = torch.cat([x_obs_flat, x_geos_flat, lead_map], dim=1) # (4, 9, H, W)
                 
                 # Plot Setup: 4 Rows (Leads), 5 Columns (GEOS, Target, Diffusion, Diff Bias, GEOS Bias)
                 fig = plt.figure(figsize=(25, 20))
