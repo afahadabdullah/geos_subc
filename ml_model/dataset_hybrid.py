@@ -236,6 +236,9 @@ class S2SHybridDataset(Dataset):
         ds_gpcp.close()
             
         target_tensor = torch.from_numpy(target_val).float()
+        # Handle NaNs in target (GPCP might have missing values)
+        if torch.isnan(target_tensor).any():
+             target_tensor = torch.nan_to_num(target_tensor, nan=0.0)
         
         return {
             "x_geos": geos_tensor, # (M, L, H, W)

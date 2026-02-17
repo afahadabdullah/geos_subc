@@ -68,20 +68,32 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
             p_stack, alpha_stack, beta_stack = model(x_obs, x_geos)
             
             # Loss Calculation (Committee Average)
-            # p_stack: (B, 4, L, H, W)
             loss = 0.0
             M = p_stack.shape[1]
             
-            # Broadcast target to members? Or strict per-member loss?
-            # Target is same for all members.
             for m in range(M):
                 lm = criterion(p_stack[:,m], alpha_stack[:,m], beta_stack[:,m], y_target)
                 loss += lm
             
             loss = loss / M
             
+            # NaN Check
+            if torch.isnan(loss):
+                if accelerator.is_main_process:
+                     print(f"NaN Loss detected at epoch {epoch}!")
+                     print(f"Target Max: {y_target.max().item()}, Min: {y_target.min().item()}, NaNs: {torch.isnan(y_target).any().item()}")
+                     print(f"Alpha Min: {alpha_stack.min().item()}, Beta Min: {beta_stack.min().item()}")
+                     print(f"P Min/Max: {p_stack.min().item()} / {p_stack.max().item()}")
+                # Skip step
+                optimizer.zero_grad()
+                continue
+            
             optimizer.zero_grad()
             accelerator.backward(loss)
+            
+            # Gradient Clipping
+            accelerator.clip_grad_norm_(model.parameters(), 1.0)
+            
             optimizer.step()
             
             epoch_loss += loss.item()
