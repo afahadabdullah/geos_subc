@@ -135,7 +135,8 @@ def process_year(year, output_dir=OUTPUT_DIR):
     try:
         # Check time encoding issues, sometimes need decode_times=False manually if units weird
         # But usually standard
-        ds_soil = xr.open_mfdataset(soil_files, combine='by_coords', chunks={'time': 30}, parallel=True)
+        # Disable parallel loading to avoid "can't start new thread" error
+        ds_soil = xr.open_mfdataset(soil_files, combine='by_coords', chunks={'time': 30}, parallel=False)
     except Exception as e:
         print(f"  Error loading SoilW files: {e}")
         return
