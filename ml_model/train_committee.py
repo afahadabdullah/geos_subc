@@ -225,7 +225,10 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 rmse_geos = np.sqrt(np.mean((geos_denorm - target)**2))
                 rmse_pred = np.sqrt(np.mean((expected - target)**2))
                 
-                fig, ax = plt.subplots(1, 6, figsize=(30, 5))
+                diff_geos = geos_denorm - target
+                diff_pred = expected - target
+                
+                fig, ax = plt.subplots(1, 7, figsize=(35, 5))
                 
                 im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Member (RMSE: {rmse_geos:.2f})")
                 plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
@@ -239,11 +242,14 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 im3 = ax[3].imshow(sampled_img, cmap='Blues', vmin=0, vmax=50); ax[3].set_title("Pred Sample (Sharp)")
                 plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
                 
-                im4 = ax[4].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("Diff (Mean-Target)")
+                im4 = ax[4].imshow(diff_geos, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("Diff (GEOS-Target)")
                 plt.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.04)
                 
-                im5 = ax[5].imshow(p, cmap='gray', vmin=0, vmax=1); ax[5].set_title("Prob(Rain)")
+                im5 = ax[5].imshow(diff_pred, cmap='RdBu_r', vmin=-20, vmax=20); ax[5].set_title("Diff (Pred-Target)")
                 plt.colorbar(im5, ax=ax[5], fraction=0.046, pad=0.04)
+                
+                im6 = ax[6].imshow(p, cmap='gray', vmin=0, vmax=1); ax[6].set_title("Prob(Rain)")
+                plt.colorbar(im6, ax=ax[6], fraction=0.046, pad=0.04)
                 
                 os.makedirs(os.path.join(config["output_dir"], "plots"), exist_ok=True)
                 plt.savefig(os.path.join(config["output_dir"], f"plots/epoch_{epoch}.png"))
