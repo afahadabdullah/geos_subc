@@ -41,7 +41,7 @@ class S2SHybridDataset(Dataset):
     def load_stats(self):
         # Load Z-Score stats for Precip
         stats_path = os.path.join(os.path.dirname(__file__), "global_stats.pt")
-        # If "global_stats.pt" exists, use it. Otherwise use grid_stats.nc
+        # Global stats (Precip)
         if os.path.exists(stats_path):
             print(f"Loading global stats from {stats_path}")
             stats = torch.load(stats_path)
@@ -50,8 +50,7 @@ class S2SHybridDataset(Dataset):
             self.obs_mean = stats['obs_mean'] # (16, 1, 1)
             self.obs_std = stats['obs_std']   # (16, 1, 1)
         else:
-            # Fallback (Old behaviour or partial)
-            print("Warning: global_stats.pt not found. Using default normalization logic or grid_stats.nc.")
+            print("Warning: global_stats.pt not found. Using default/fallback normalization.")
             self.obs_mean = None
             self.obs_std = None
             
@@ -66,6 +65,19 @@ class S2SHybridDataset(Dataset):
                     self.geos_std = self.geos_std.unsqueeze(0)
             else:
                  self.geos_mean = None
+                 
+        # Load Soil Moisture Stats (JSON)
+        sm_stats_path = os.path.join(os.path.dirname(__file__), "sm_stats.json")
+        if os.path.exists(sm_stats_path):
+            import json
+            with open(sm_stats_path, 'r') as f:
+                sm_stats = json.load(f)
+            self.sm_mean = float(sm_stats['sm_mean'])
+            self.sm_std = float(sm_stats['sm_std'])
+            print(f"Loaded SM Stats: Mean={self.sm_mean:.4f}, Std={self.sm_std:.4f}")
+        else:
+            self.sm_mean = None
+            self.sm_std = None
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -80,7 +92,7 @@ class S2SHybridDataset(Dataset):
             gpcp_path = os.path.join(self.data_root, f"gpcp_weekly_{year}.zarr")
             sst_path = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
             sss_path = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
-            sm_path = os.path.join(self.data_root, f"soil_moisture_weekly_{year}.zarr")
+            sm_path = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
             
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
@@ -203,7 +215,7 @@ class S2SHybridDataset(Dataset):
              
              # If using global scalar stats, gm/gs are scalars or (1,)
              if gm.numel() == 1:
-                 geos_tensor = (geos_tensor - gm) / gs
+                 geos_tensor = (geos_tensor - gm) / (gs * 3.0)
              else:
                  # Grid Stats (1, L, H, W)
                  if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
@@ -212,7 +224,7 @@ class S2SHybridDataset(Dataset):
                  gm = gm.unsqueeze(1) # (1, 1, L, H, W)
                  gs = gs.unsqueeze(1)
                  
-                 geos_tensor = (geos_tensor - gm) / gs
+                 geos_tensor = (geos_tensor - gm) / (gs * 3.0)
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
@@ -237,8 +249,13 @@ class S2SHybridDataset(Dataset):
         sm_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta["sm_path"]:
             ds_sm = xr.open_zarr(meta["sm_path"], consolidated=False)
-            var_name = 'sm' if 'sm' in ds_sm else 'soil_moisture'
-            if var_name in ds_sm:
+            var_name = None
+            for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40']:
+                if c in ds_sm:
+                    var_name = c
+                    break
+                    
+            if var_name:
                 v = ds_sm[var_name].isel(S=meta['s_idx']).values
                 if v.ndim == 3: sm_val = v
                 elif v.ndim == 2: sm_val[:] = v
@@ -270,15 +287,21 @@ class S2SHybridDataset(Dataset):
                 # obs_mean is (16,) -> broadcast to (16, H, W)
                 om = self.obs_mean.view(16, 1, 1)
                 os_ = self.obs_std.view(16, 1, 1)
-                obs_tensor = (obs_tensor - om) / os_
+                obs_tensor = (obs_tensor - om) / (os_ * 3.0)
             else:
                 # Fallback Min-Max scaling
                 # SST (K) ~ 270-310 -> (val - 270) / 40
                 obs_tensor[0:4] = (obs_tensor[0:4] - 273.15) / 30.0 
                 # SSS (psu) ~ 30-40 -> (val - 30) / 10
                 obs_tensor[4:8] = (obs_tensor[4:8] - 30.0) / 10.0
-                # SM (m3/m3) ~ 0-0.5 -> val / 0.5
-                obs_tensor[8:12] = obs_tensor[8:12] / 0.5
+                # SM (m3/m3)
+                if hasattr(self, 'sm_mean') and self.sm_mean is not None:
+                     # Z-Score using computed stats
+                     obs_tensor[8:12] = (obs_tensor[8:12] - self.sm_mean) / (self.sm_std * 3.0)
+                else:
+                     # Fallback Min-Max scaling ~ 0-0.5 -> val / 0.5
+                     obs_tensor[8:12] = obs_tensor[8:12] / 0.5
+                
                 # Prev GPCP (mm/day) ~ 0-20 -> val / 10
                 obs_tensor[12:16] = obs_tensor[12:16] / 10.0
         
@@ -289,23 +312,29 @@ class S2SHybridDataset(Dataset):
             
         # Sanitize Inputs (Handle NaNs/Infs in Obs/GEOS)
         # Use torch.nan_to_num on tensors directly
-        if torch.isnan(geos_tensor).any():
-            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0)
+        if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
+            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
             
-        if torch.isnan(obs_tensor).any():
-            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0)
+        if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
+            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
             
         target_tensor = torch.from_numpy(target_val).float()
         
         # Handle NaNs and Fill Values in Target
-        if torch.isnan(target_tensor).any():
-             target_tensor = torch.nan_to_num(target_tensor, nan=0.0)
+        if torch.isnan(target_tensor).any() or torch.isinf(target_tensor).any():
+             target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=100.0, neginf=0.0)
              
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
+        # FINAL SAFETY CLAMP (Prevent severe outliers in inputs)
+        # Z-Scores > 20 are likely data errors or land masks
+        geos_tensor = torch.clamp(geos_tensor, min=-20.0, max=20.0)
+        obs_tensor = torch.clamp(obs_tensor, min=-20.0, max=20.0)
+        
         return {
             "x_geos": geos_tensor, # (M, L, H, W)
             "x_obs": obs_tensor,   # (16, H, W)
-            "y_target": target_tensor # (L, H, W)
+            "y_target": target_tensor, # (L, H, W)
+            "month": meta['date'].month # Int 1-12
         }

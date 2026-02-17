@@ -83,12 +83,12 @@ def train():
     fixed_val_batch = next(iter(val_loader))
     
     # Model: Conditional Diffusion
-    # In: 1 (Target Noisy)
-    # Cond: 4 (GEOS) + 4 (Obs) = 8
+    # In: 4 (Target Noisy - 4 Leads)
+    # Cond: 16 (Obs) + 16 (GEOS) + 2 (Month) = 34
     model = ConditionalDiffusion(
-        in_channels=1,
-        condition_channels=8,
-        out_channels=1,
+        in_channels=4,
+        condition_channels=34,
+        out_channels=4,
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
         num_train_timesteps=1000
@@ -97,7 +97,6 @@ def train():
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["learning_rate"]))
     
     # Scheduler
-    # Standard Cosine or Linear warmup
     lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, 
         max_lr=float(config["learning_rate"]), 
@@ -106,7 +105,6 @@ def train():
     )
 
     # Prepare
-    # Note: accelerator.prepare handles moving data to device
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
         model, optimizer, loader, val_loader, lr_scheduler
     )
@@ -114,7 +112,7 @@ def train():
     # Area Weights for Loss
     # Latitude range: -90 to 90 (181 points)
     lats = np.linspace(-90, 90, 181)
-    area_weights = get_area_weights(lats, device)
+    area_weights = get_area_weights(lats, device) # (1, 1, H, 1) -> Broadcasts to (B, 4, H, W)
 
     # Output Dir
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -139,6 +137,8 @@ def train():
         optimizer.load_state_dict(checkpoint['optimizer'])
         # Scheduler might need state dict? 
         start_epoch = checkpoint['epoch'] + 1
+        if 'top_k_ckpts' in checkpoint:
+            top_k_ckpts = checkpoint['top_k_ckpts']
     best_val_rmse = float('inf')
     if top_k_ckpts:
         best_val_rmse = top_k_ckpts[0][0] # RMSE is the first element
@@ -151,85 +151,61 @@ def train():
 
         for batch in pbar:
             # Data Info:
-            # x_obs: (B, 3, L, H, W) -> Obs Var logic? 
-            # In dataset_hybrid, x_obs is (B, 3, L, H, W) [SST, SSS, Soil]
-            # x_geos: (B, 4, 1, L, H, W) [Members]
-            # y_target: (B, L, H, W)
+            # x_obs: (B, 16, H, W) [Stacked Obs]
+            # x_geos: (B, 4, 1, 4, H, W) [Members, 1, Leads, H, W]
+            # y_target: (B, 4, H, W) [4 Leads]
             
             x_obs = batch['x_obs']
             x_geos = batch['x_geos']
             y_target = batch['y_target']
+            months = batch['month'] # (B,)
             
-            B, C_obs, H, W = x_obs.shape
-            L = 4 # Hardcoded for now (4 weeks)
+            B, _, H, W = x_obs.shape
             
-            # Reshape: Treat Lead Time as independent samples
-            # x_obs: (B, 16, H, W). 
-            # Channels 0-3: SST (w1, w2, w3, w4), 4-7: SSS, 8-11: SM, 12-15: Prev
-            # We want (B*4, 4, H, W) where first dim is sample (B x Lead)
+            # GEOS: (B, 4, 1, 4, H, W) -> (B, 16, H, W)
+            # Flatten Members(4) and Leads(4) into Channels(16)
+            x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
             
-            # 1. Reshape to (B, 4, 4, H, W) -> (B, Var, Lead, H, W)
-            x_obs_reshaped = x_obs.view(B, 4, 4, H, W)
-            
-            # 2. Permute to (B, Lead, Var, H, W)
-            x_obs_lead = x_obs_reshaped.permute(0, 2, 1, 3, 4)
-            
-            # 3. Flatten (B*Lead, Var, H, W)
-            x_obs_flat = x_obs_lead.reshape(B * L, 4, H, W)
-            
-            # GEOS: (B, 4, 1, L, H, W) -> (B*L, 4, H, W)
-            # x_geos has (Members, 1, Lead)
-            # We want (B, Members, Lead, H, W)
-            # x_geos: (B, 4, 1, 4, H, W)
-            x_geos_lead = x_geos.squeeze(2).permute(0, 2, 1, 3, 4) # (B, 4, 4, H, W)
-            x_geos_flat = x_geos_lead.reshape(B * L, 4, H, W)
-            
-            # Target: (B, L, H, W) -> (B*L, 1, H, W)
-            y_target_flat = y_target.reshape(B * L, 1, H, W)
+            # Target is already (B, 4, H, W)
             
             # NORMALIZE TARGET
-            # Diffusion learns noise on normalized data ideally N(0,1)
             # Use GEOS stats for consistency
             if train_dataset.geos_mean is not None:
                 gm = train_dataset.geos_mean.to(device)
                 gs = train_dataset.geos_std.to(device)
-                # Careful: Check shape of gm/gs
-                # S2SHybridDataset: gm can be (1, L, H, W) or (1,)
-                # Let's handle generic case
-                if gm.numel() > 1:
-                    # Generic implementation: if (L, H, W) or similar
-                    # Expand B times
-                    if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
-                    gm_full = gm.expand(B, -1, -1, -1).reshape(B * L, 1, H, W)
-                    gs_full = gs.expand(B, -1, -1, -1).reshape(B * L, 1, H, W)
-                    target_normalized = (y_target_flat - gm_full) / gs_full
-                else:
-                    target_normalized = (y_target_flat - gm) / gs
+                # gm shape check. Dataset loads it. 
+                # If global scalar: (1,) or ()
+                # If grid: (1, 4, H, W) hopefully? Dataset loads grid_stats.nc
+                # If grid_stats.nc matches (L, H, W), then gm is (1, 4, H, W).
+                # Broadcasting (1,4,H,W) to (B,4,H,W) works.
+                
+                # Careful: If gm is (1,), it works.
+                # If gm is (1, L, H, W) == (1, 4, H, W), it works.
+                target_normalized = (y_target - gm) / (gs * 3.0)
             else:
-                 target_normalized = y_target_flat # Fallback
+                 target_normalized = y_target # Fallback
             
-            # Condition: (B*L, 8, H, W) -> 4 GEOS + 4 Obs
-            # NEW: Add Lead Time Map (9th channel)
-            # Create Lead Map: (B, 4, 1, H, W)
-            # Values: 0.25, 0.50, 0.75, 1.0 for leads 0, 1, 2, 3
-            lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
-            lead_map = lead_map.expand(B, -1, 1, H, W) # (B, 4, 1, H, W)
-            lead_map_flat = lead_map.reshape(B * L, 1, H, W)
+            # Month Embeddings (Seasonality)
+            # months is (B,)
+            sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
+            cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             
-            condition = torch.cat([x_obs_flat, x_geos_flat, lead_map_flat], dim=1)
+            # Condition: (B, 34, H, W)
+            condition = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1)
             
             # Sample Timesteps
             timesteps = torch.randint(
                 0, model.noise_scheduler.config.num_train_timesteps, 
-                (x_obs_flat.shape[0],), device=device
+                (B,), device=device
             ).long()
             
             # Add Noise
-            noise = torch.randn_like(y_target_flat)
+            noise = torch.randn_like(target_normalized)
             noisy_target = model.noise_scheduler.add_noise(target_normalized, noise, timesteps)
             
             # Predict Noise
-            # Inputs: noisy_target, condition, timesteps
+            # Inputs: noisy_target(B,4,H,W), condition(B,34,H,W), timesteps(B)
+            # Output: noise_pred(B,4,H,W)
             noise_pred = model(noisy_target, condition, timesteps)
             
             # Area-Weighted MSE Loss
@@ -250,58 +226,39 @@ def train():
         val_loss_sum = 0
         val_count = 0
         
-        # We will compute RMSE on normalized space for speed 
-        # (or denormalize if we want true RMSE, but normalized is fine for model selection)
-        # Let's compute Normalized MSE Loss as proxy for selection
-        
         with torch.no_grad():
              for val_batch in val_loader:
                 vx_obs = val_batch['x_obs']
                 vx_geos = val_batch['x_geos']
                 vy_target = val_batch['y_target']
+                v_months = val_batch['month']
                 
                 vB, _, vH, vW = vx_obs.shape
-                # Preprocess same as train
-                vx_obs_flat = vx_obs.view(vB, 4, 4, vH, vW).permute(0, 2, 1, 3, 4).reshape(vB * 4, 4, vH, vW)
-                vx_geos_flat = vx_geos.squeeze(2).permute(0, 2, 1, 3, 4).reshape(vB * 4, 4, vH, vW)
-                vy_target_flat = vy_target.reshape(vB * 4, 1, vH, vW)
                 
+                # Reshape GEOS
+                vx_geos_flat = vx_geos.squeeze(2).reshape(vB, 16, vH, vW)
+
                 # Normalize Target
                 if train_dataset.geos_mean is not None:
-                    # Re-use gm/gs logic from above if valid
                     gm = train_dataset.geos_mean.to(device)
                     gs = train_dataset.geos_std.to(device)
-                    if gm.numel() > 1:
-                        if gm.ndim == 3: gm = gm.unsqueeze(0)
-                        gm_v = gm.expand(vB, -1, -1, -1).reshape(vB * 4, 1, vH, vW)
-                        gs_v = gs.expand(vB, -1, -1, -1).reshape(vB * 4, 1, vH, vW)
-                        vtarget_norm = (vy_target_flat - gm_v) / gs_v
-                    else:
-                        vtarget_norm = (vy_target_flat - gm) / gs
+                    vtarget_norm = (vy_target - gm) / (gs * 3.0)
                 else:
-                    vtarget_norm = vy_target_flat
+                    vtarget_norm = vy_target
                 
-                # Lead Map for Validation
-                v_lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
-                v_lead_map = v_lead_map.expand(vB, -1, 1, vH, vW).reshape(vB * 4, 1, vH, vW)
+                # Month Embeddings
+                v_sin_month = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
+                v_cos_month = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 
-                v_condition = torch.cat([vx_obs_flat, vx_geos_flat, v_lead_map], dim=1)
-                
-                # We can't easily compute full generation RMSE for every batch (too slow)
-                # Instead, compute one-step denoising error or simple MSE loss on noise
-                # OR generated sample for subset. 
-                # Standard practice: Validation Loss (MSE on noise)
-                # If user wants "Best Model" based on generation quality, we should sample a subset.
-                # Let's stick to Noise MSE for speed and stability, 
-                # AND compute generation RMSE on the FIXED BATCH.
+                # Condition
+                v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin_month, v_cos_month], dim=1)
                 
                 # Validation Loss (Noise MSE)
-                v_timesteps = torch.randint(0, model.noise_scheduler.config.num_train_timesteps, (vx_obs_flat.shape[0],), device=device).long()
-                v_noise = torch.randn_like(vy_target_flat)
+                v_timesteps = torch.randint(0, model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
+                v_noise = torch.randn_like(vtarget_norm)
                 v_noisy = model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
                 v_pred = model(v_noisy, v_condition, v_timesteps)
                 
-                # Area-Weighted MSE Loss
                 v_loss = (area_weights * (v_pred - v_noise)**2).mean()
                 val_loss_sum += v_loss.item()
                 val_count += 1
@@ -309,107 +266,96 @@ def train():
         avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
         
         # --- FIXED BATCH VISUALIZATION & RMSE ---
-        # Compute "Real" RMSE on fixed batch for checking generation quality
-        # This is what we will use for "Best Model" check to align with user request
-        
         # Prepare Fixed Batch
         fb_obs = fixed_val_batch['x_obs'].to(device)
         fb_geos = fixed_val_batch['x_geos'].to(device)
         fb_target = fixed_val_batch['y_target'].to(device)
+        fb_months = fixed_val_batch['month'].to(device)
         
-        # Process Fixed Batch
-        # Just take first sample (Lead 0) for visualization
-        # But compute RMSE on whole batch
         fb_B = fb_obs.shape[0]
-        fb_obs_flat = fb_obs.view(fb_B, 4, 4, H, W).permute(0, 2, 1, 3, 4).reshape(fb_B * 4, 4, H, W)
-        fb_geos_flat = fb_geos.squeeze(2).permute(0, 2, 1, 3, 4).reshape(fb_B * 4, 4, H, W)
-        fb_target_flat = fb_target.reshape(fb_B * 4, 1, H, W)
+        fb_geos_flat = fb_geos.squeeze(2).reshape(fb_B, 16, H, W)
         
-        # Normalize FB
-        if train_dataset.geos_mean is not None:
-            gm = train_dataset.geos_mean.to(device)
-            gs = train_dataset.geos_std.to(device)
-            if gm.numel() > 1:
-                if gm.ndim == 3: gm = gm.unsqueeze(0)
-                gm_fb = gm.expand(fb_B, -1, -1, -1).reshape(fb_B * 4, 1, H, W)
-                gs_fb = gs.expand(fb_B, -1, -1, -1).reshape(fb_B * 4, 1, H, W)
-                fb_target_norm = (fb_target_flat - gm_fb) / gs_fb
-            else:
-                fb_target_norm = (fb_target_flat - gm) / gs
-        else:
-            fb_target_norm = fb_target_flat
-            
-        fb_lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
-        fb_lead_map = fb_lead_map.expand(fb_B, -1, 1, H, W).reshape(fb_B * 4, 1, H, W)
-
-        fb_cond = torch.cat([fb_obs_flat, fb_geos_flat, fb_lead_map], dim=1)
+        # Month
+        fb_sin_month = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
+        fb_cos_month = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
+        
+        # Condition
+        fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin_month, fb_cos_month], dim=1)
         
         unwrapped_model = accelerator.unwrap_model(model)
-        # Sample (Input: Condition)
-        # Using 20 steps for faster val check
+        
+        # Sample (Output: B, 4, H, W)
         fb_samples_norm = unwrapped_model.sample(fb_cond, num_inference_steps=20)
         
-        # Denormalize for RMSE
+        # Denormalize
         if train_dataset.geos_mean is not None:
-             if gm.numel() > 1:
-                 fb_samples = (fb_samples_norm * gs_fb) + gm_fb
-             else:
-                 fb_samples = (fb_samples_norm * gs) + gm
+             gm = train_dataset.geos_mean.to(device)
+             gs = train_dataset.geos_std.to(device)
+             fb_samples = (fb_samples_norm * gs * 3.0) + gm
         else:
              fb_samples = fb_samples_norm
              
-        # Compute RMSE on Fixed Batch
-        val_rmse = torch.sqrt(torch.mean((fb_samples - fb_target_flat)**2)).item()
+        # Compute RMSE on Fixed Batch (All Leads)
+        val_rmse = torch.sqrt(torch.mean((fb_samples - fb_target)**2)).item()
         
         if accelerator.is_main_process:
             print(f"Epoch {epoch} | Loss: {avg_train_loss:.4f} | Val Noise Loss: {avg_val_loss:.4f} | Val RMSE (Fixed): {val_rmse:.4f}")
             
-            # Log
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, val_rmse])
             
-            # Plot ONLY if a new best model is found
             if val_rmse < best_val_rmse:
                 print(f"New Best Model Found! RMSE improved from {best_val_rmse:.4f} to {val_rmse:.4f}. Plotting...")
                 best_val_rmse = val_rmse
                 
-                # Plot (First Sample of Fixed Batch)
-                # Move to CPU
-                s_img = fb_samples[0].cpu().numpy().squeeze()
-                t_img = fb_target_flat[0].cpu().numpy().squeeze()
-                g_mean = fb_geos_flat[0].mean(dim=0).cpu().numpy().squeeze() 
+                # Plot First Sample, All 4 Leads
+                # s_img: (4, H, W)
+                s_img_all = fb_samples[0].cpu().numpy()
+                t_img_all = fb_target[0].cpu().numpy()
                 
+                # GEOS Mean (4 leads)
+                # geos_flat: (16, H, W) -> Reshape to (4, 4, H, W) to avg over members
+                g_flat = fb_geos_flat[0] # (16, H, W)
+                g_ens = g_flat.view(4, 4, H, W) # (Members, Leads, H, W)
+                g_mean_norm = g_ens.mean(dim=0) # (Leads, H, W) -> (4, H, W)
+                
+                # Denormalize GEOS Mean
                 if train_dataset.geos_mean is not None:
-                     if gm.numel() > 1:
-                         g_scalar_m = gm[0,0,0,0].item() if gm.ndim==4 else gm.mean().item()
-                         g_scalar_s = gs[0,0,0,0].item() if gs.ndim==4 else gs.mean().item()
-                     else:
-                         g_scalar_m = gm.item()
-                         g_scalar_s = gs.item()
-                     g_img = (g_mean * g_scalar_s) + g_scalar_m
+                    # Need CPU stats
+                    gm_cpu = train_dataset.geos_mean.squeeze().cpu().numpy() # (4, H, W) or (1,)
+                    gs_cpu = train_dataset.geos_std.squeeze().cpu().numpy()
+                    g_img_all = (g_mean_norm.cpu().numpy() * gs_cpu * 3.0) + gm_cpu
                 else:
-                     g_img = g_mean
+                    g_img_all = g_mean_norm.cpu().numpy()
 
-                diff_img = s_img - t_img
-                geos_bias = g_img - t_img
+                fig, axes = plt.subplots(4, 5, figsize=(25, 20))
                 
-                fig, ax = plt.subplots(1, 5, figsize=(25, 5))
-                im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Mean")
-                plt.colorbar(im0, ax=ax[0])
-                
-                im1 = ax[1].imshow(t_img, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target GPCP")
-                plt.colorbar(im1, ax=ax[1])
-                
-                im2 = ax[2].imshow(s_img, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Diff Sample\nRMSE: {val_rmse:.2f}")
-                plt.colorbar(im2, ax=ax[2])
-                
-                im3 = ax[3].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Sample - Target)")
-                plt.colorbar(im3, ax=ax[3])
+                for l_idx in range(4):
+                    g_img = g_img_all[l_idx]
+                    t_img = t_img_all[l_idx]
+                    s_img = s_img_all[l_idx]
+                    diff_img = s_img - t_img
+                    geos_bias = g_img - t_img
+                    
+                    rmse_l = np.sqrt(np.mean((s_img - t_img)**2))
+                    
+                    if l_idx == 0: axes[l_idx, 0].set_title("GEOS Mean")
+                    axes[l_idx, 0].imshow(g_img, cmap='Blues', vmin=0, vmax=50)
+                    
+                    if l_idx == 0: axes[l_idx, 1].set_title("Target GPCP")
+                    axes[l_idx, 1].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
+                    
+                    if l_idx == 0: axes[l_idx, 2].set_title("Diffusion")
+                    axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
+                    axes[l_idx, 2].set_ylabel(f"Week {l_idx+1}\nRMSE: {rmse_l:.2f}")
+                    
+                    if l_idx == 0: axes[l_idx, 3].set_title("Diff Bias")
+                    axes[l_idx, 3].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20)
+                    
+                    if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
+                    axes[l_idx, 4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
 
-                im4 = ax[4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("GEOS Bias (GEOS - Target)")
-                plt.colorbar(im4, ax=ax[4])
-                
                 os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
                 plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}_rmse_{val_rmse:.2f}.png"))
                 plt.close()
@@ -426,28 +372,23 @@ def train():
             torch.save(ckpt_state, latest_ckpt)
             
             # SAVE TOP K logic
-            # Add current
             current_path = os.path.join(config["output_dir"], f"model_epoch_{epoch}_rmse_{val_rmse:.4f}.pt")
-            
             top_k_ckpts.append((val_rmse, epoch, current_path))
-            top_k_ckpts.sort(key=lambda x: x[0]) # Ascending RMSE
+            top_k_ckpts.sort(key=lambda x: x[0]) 
             
             if len(top_k_ckpts) > save_top_k:
-                worst = top_k_ckpts.pop() # Remove largest RMSE
-                if worst[2] != current_path:
-                    if os.path.exists(worst[2]):
+                worst = top_k_ckpts.pop()
+                if worst[2] != current_path and os.path.exists(worst[2]):
                         os.remove(worst[2])
                         print(f"Removed worse checkpoint: {worst[2]}")
             
-            # Now check if current is still in list
             is_in_top = any(x[2] == current_path for x in top_k_ckpts)
             if is_in_top:
                 print(f"New Top Model! RMSE: {val_rmse:.4f}")
                 torch.save(ckpt_state, current_path)
                 
-            # Update latest with new list
             ckpt_state['top_k_ckpts'] = top_k_ckpts
-            torch.save(ckpt_state, latest_ckpt) # Update latest again with correct list
+            torch.save(ckpt_state, latest_ckpt)
 
 def test():
     parser = argparse.ArgumentParser()
@@ -461,7 +402,8 @@ def test():
     accelerator = Accelerator(mixed_precision=config["mixed_precision"])
     device = accelerator.device
 
-    # Validation Dataset (2015-2017)
+    # Validation Dataset (TEST MODE usually uses Val set or separate Test set)
+    # Re-using Val parameters for consistency with user request
     val_dataset = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=config["val_start_year"],
@@ -480,9 +422,9 @@ def test():
 
     # Model
     model = ConditionalDiffusion(
-        in_channels=1,
-        condition_channels=8,
-        out_channels=1,
+        in_channels=4,
+        condition_channels=34,
+        out_channels=4,
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
         num_train_timesteps=1000
@@ -533,47 +475,23 @@ def test():
             if current_idx in test_indices:
                 print(f"Processing sample {current_idx}...")
                 
-                x_obs = batch['x_obs']
-                x_geos = batch['x_geos']
-                y_target = batch['y_target']
+                x_obs = batch['x_obs'].to(device)
+                x_geos = batch['x_geos'].to(device)
+                y_target = batch['y_target'].to(device)
+                t_months = batch['month'].to(device)
                 
                 # Assume B=1
                 B = x_obs.shape[0]
                 _, _, H, W = x_obs.shape
                 
-                # Preprocess (Same as train)
-                # x_obs: (B, 16, H, W)
-                # x_geos: (B, 4, 1, 4, H, W)
-                # y_target: (B, 4, H, W)
+                # Reshape GEOS
+                x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
                 
-                # Reshape logic from train:
-                x_obs_reshaped = x_obs.view(B, 4, 4, H, W)
-                x_obs_lead = x_obs_reshaped.permute(0, 2, 1, 3, 4) # (B, Lead, Var, H, W)
-                x_obs_flat = x_obs_lead.reshape(B * 4, 4, H, W) # (4, 4, H, W)
+                # Month Embeddings (Test)
+                t_sin_month = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
+                t_cos_month = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
                 
-                x_geos_lead = x_geos.squeeze(2).permute(0, 2, 1, 3, 4) # (B, 4, 4, H, W)
-                x_geos_flat = x_geos_lead.reshape(B * 4, 4, H, W)
-                
-                y_target_flat = y_target.reshape(B * 4, 1, H, W) 
-                
-                # Normalize Target for comparison/noise
-                if val_dataset.geos_mean is not None:
-                    gm = val_dataset.geos_mean.to(device)
-                    gs = val_dataset.geos_std.to(device)
-                    # Handle shapes
-                    if gm.numel() > 1:
-                        if gm.ndim == 3: gm = gm.unsqueeze(0)
-                        gm_full = gm.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
-                        gs_full = gs.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
-                    else:
-                         gm_full = gm
-                         gs_full = gs
-                
-                # Lead Map for Test
-                lead_map = torch.tensor([0.25, 0.50, 0.75, 1.0], device=device).view(1, 4, 1, 1, 1)
-                lead_map = lead_map.expand(B, -1, 1, H, W).reshape(B * 4, 1, H, W)
-                
-                condition = torch.cat([x_obs_flat, x_geos_flat, lead_map], dim=1) # (4, 9, H, W)
+                condition = torch.cat([x_obs, x_geos_flat, t_sin_month, t_cos_month], dim=1)
                 
                 # Plot Setup: 4 Rows (Leads), 5 Columns (GEOS, Target, Diffusion, Diff Bias, GEOS Bias)
                 fig = plt.figure(figsize=(25, 20))
@@ -595,62 +513,68 @@ def test():
                     if row < 3: gl.bottom_labels = False
                     return im
 
-                # Generate 5 Diffusion Members for ALL leads (Batched)
-                # condition is (4, 8, H, W) -> Output (4, 1, H, W)
+                # Generate 5 Diffusion Members (Batched)
+                # Output: (5, 4, H, W)
                 diff_generations = []
                 
                 print(f"  Generating 5 ensemble members for Sample {current_idx}...")
                 for i_ens in range(5):
                      print(f"    Member {i_ens+1}/5")
-                     # Verbose=True shows the 1000 steps progress bar
-                     gen = unwrapped_model.sample(condition, num_inference_steps=1000, verbose=True)
+                     gen_norm = unwrapped_model.sample(condition, num_inference_steps=1000, verbose=True)
+                     
+                     # Denormalize
+                     if val_dataset.geos_mean is not None:
+                        gm = val_dataset.geos_mean.to(device)
+                        gs = val_dataset.geos_std.to(device)
+                        gen = (gen_norm * gs * 3.0) + gm
+                     else:
+                        gen = gen_norm
+                        
                      diff_generations.append(gen)
                 
-                # Stack to (5, 4, 1, H, W) then mean over ensemble -> (4, 1, H, W)
-                diff_ens = torch.stack(diff_generations, dim=0) 
-                diff_mean_norm_all = diff_ens.mean(dim=0)
+                # Stack: (5, B, 4, H, W). B=1 -> (5, 4, H, W)
+                diff_ens = torch.cat(diff_generations, dim=0) 
+                diff_mean_all = diff_ens.mean(dim=0) # (4, H, W)
+
+                # Prepare Target & GEOS for plotting
+                # Target: (1, 4, H, W) -> (4, H, W)
+                target_all = y_target.squeeze(0)
+                
+                # GEOS: x_geos_flat is (1, 16, H, W) -> (4, 4, H, W) [Members, Leads, H, W]
+                geos_ens = x_geos_flat.view(4, 4, H, W)
+                geos_mean_norm = geos_ens.mean(dim=0) # (4, H, W)
+                
+                # Denormalize GEOS
+                if val_dataset.geos_mean is not None:
+                    # Need stats on device
+                     gm = val_dataset.geos_mean.to(device)
+                     gs = val_dataset.geos_std.to(device)
+                     # Handle broadcasting if needed
+                     # If gm is (1, 4, H, W) -> squeeze(0) -> (4, H, W) matches
+                     # If gm is (1,) -> matches
+                     if gm.ndim == 4:
+                         gm_sq = gm.squeeze(0)
+                         gs_sq = gs.squeeze(0)
+                     else:
+                         gm_sq = gm
+                         gs_sq = gs
+                         
+                     geos_mean_all = (geos_mean_norm * gs_sq * 3.0) + gm_sq
+                else:
+                    geos_mean_all = geos_mean_norm
+
 
                 for lead_idx in range(4):
-                    # print(f"  Plotting Lead Week {lead_idx+1}...")
-                    
-                    target_l = y_target_flat[lead_idx:lead_idx+1] # (1, 1, H, W)
-                    geos_l = x_geos_flat[lead_idx:lead_idx+1] # (1, 4, H, W) - 4 members
-                    
-                    # GEOS Ensemble Mean (Normalized)
-                    geos_mean_norm = geos_l.mean(dim=1, keepdim=True) # (1, 1, H, W)
-                    
-                    # Diffusion Mean (Normalized)
-                    diff_mean_norm = diff_mean_norm_all[lead_idx:lead_idx+1] # (1, 1, H, W)
-                    
-                    # DENORMALIZE
-                    if val_dataset.geos_mean is not None:
-                        if gm.numel() > 1:
-                             g_s = gm[0, lead_idx] if gm.ndim == 4 else gm[lead_idx]
-                             s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
-                             g_s = g_s.unsqueeze(0).unsqueeze(0)
-                             s_s = s_s.unsqueeze(0).unsqueeze(0)
-                        else:
-                             g_s = gm_full
-                             s_s = gs_full
-                             
-                        geos_mean = (geos_mean_norm * s_s) + g_s
-                        diff_mean = (diff_mean_norm * s_s) + g_s
-                        target = target_l # Targeted normalized or raw? usually gpcp is raw
-                    else:
-                        geos_mean = geos_mean_norm
-                        diff_mean = diff_mean_norm
-                        target = target_l
-                    
-                    # Calculate RMSEs
-                    geos_rmse = torch.sqrt(torch.mean((geos_mean - target)**2)).item()
-                    diff_rmse = torch.sqrt(torch.mean((diff_mean - target)**2)).item()
-                    
                     # Data for plotting
-                    g_img = geos_mean.cpu().numpy().squeeze()
-                    t_img = target.cpu().numpy().squeeze()
-                    d_img = diff_mean.cpu().numpy().squeeze()
+                    g_img = geos_mean_all[lead_idx].cpu().numpy().squeeze()
+                    t_img = target_all[lead_idx].cpu().numpy().squeeze()
+                    d_img = diff_mean_all[lead_idx].cpu().numpy().squeeze()
+                    
                     diff_map = d_img - t_img
                     geos_diff_map = g_img - t_img
+                    
+                    geos_rmse = np.sqrt(np.mean((g_img - t_img)**2))
+                    diff_rmse = np.sqrt(np.mean((d_img - t_img)**2))
                     
                     # Plot Row
                     im0 = plot_panel(fig, lead_idx, 0, g_img, f"W{lead_idx+1}: GEOS Ens Mean\nRMSE: {geos_rmse:.2f}", 'Blues', 0, 50)
