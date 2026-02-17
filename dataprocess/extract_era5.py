@@ -69,6 +69,9 @@ def process_era5_yearly(start_year=1999, end_year=2022, output_base_dir="/home1/
             
             # 4. Save to Zarr
             print(f"Saving to {output_path}...")
+            # Rechunk to ensure uniform sizes for Zarr
+            ds_interp = ds_interp.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
+            
             # Using synchronous scheduler for stability during save
             with dask.config.set(scheduler='synchronous'):
                 ds_interp.to_zarr(output_path, mode='w')
