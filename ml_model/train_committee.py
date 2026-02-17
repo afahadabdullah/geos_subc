@@ -125,19 +125,26 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
         
         model.eval()
         val_loss = 0.0
+        
+        # Validation Progress Bar
+        val_pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Validating Epoch {epoch}")
+        
         with torch.no_grad():
-             # Just checking first 10 batches for speed? Or full pass?
-             # Let's do full pass if small. 835 samples / 4 = 209 batches. Fast enough.
-             for batch in loader:
+             for batch in val_pbar:
                  x_obs = batch['x_obs']
                  x_geos = batch['x_geos']
                  y_target = batch['y_target']
+                 
                  p_stack, alpha_stack, beta_stack = model(x_obs, x_geos)
+                 
                  loss = 0.0
                  M = p_stack.shape[1]
                  for m in range(M):
                      loss += criterion(p_stack[:,m], alpha_stack[:,m], beta_stack[:,m], y_target)
-                 val_loss += (loss / M).item()
+                 
+                 batch_loss = (loss / M).item()
+                 val_loss += batch_loss
+                 val_pbar.set_postfix({"batch_loss": f"{batch_loss:.4f}"})
         
         avg_val_loss = val_loss / len(loader)
         
