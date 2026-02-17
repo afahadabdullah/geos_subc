@@ -115,7 +115,8 @@ def train():
             x_geos = batch['x_geos']
             y_target = batch['y_target']
             
-            B, _, L, H, W = x_obs.shape
+            B, C_obs, H, W = x_obs.shape
+            L = 4 # Hardcoded for now (4 weeks)
             
             # Reshape: Treat Lead Time as independent samples
             # x_obs: (B, 16, H, W). 
