@@ -22,10 +22,13 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     accelerator = Accelerator(mixed_precision="fp16")
     device = accelerator.device
     
-    # Config Defaults
-    BATCH_SIZE = 4
-    LR = 1e-4
-    EPOCHS = 20
+    # Config
+    config = {
+        "batch_size": 4,
+        "lr": 1e-4,
+        "epochs": 20,
+        "output_dir": "ml_output_committee"
+    }
     
     # 1. Dataset
     print("Initializing Dataset...")
@@ -34,7 +37,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     # Val set? Using last year 2015-2016 from split?
     # Or simplified: Train 1999-2015.
     
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, num_workers=2, pin_memory=True)
     
     # 2. Model
     # Obs channels: SST (4) + SSS (4) + SM (4) + PrevGPCP (4) = 16
@@ -43,7 +46,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     
     # 3. Loss & Optimizer
     criterion = ZeroInflatedGammaLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
     
     # Prepare
     model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
@@ -51,6 +54,10 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     # Training Loop
     if accelerator.is_main_process:
         print(f"Starting Training on {device}...")
+    
+    # Ensure output dir exists
+    if accelerator.is_main_process:
+        os.makedirs(config["output_dir"], exist_ok=True)
         
     # Validation & Logging Setup
     import csv
@@ -76,7 +83,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
         start_epoch = ckpt['epoch'] + 1
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
 
-    for epoch in range(start_epoch, EPOCHS):
+    for epoch in range(start_epoch, config["epochs"]):
         model.train()
         epoch_loss = 0.0
         
