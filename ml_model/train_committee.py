@@ -186,12 +186,24 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 
                 # Expected Value = p * (alpha/beta)
                 expected = p * (alpha / beta)
+                diff = expected - target
                 
-                fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-                ax[0].imshow(geos, cmap='RdBu_r'); ax[0].set_title("GEOS Input (Norm)")
-                ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
-                ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title("Pred (Expected)")
-                ax[3].imshow(p, cmap='gray', vmin=0, vmax=1); ax[3].set_title("Prob(Rain)")
+                fig, ax = plt.subplots(1, 5, figsize=(25, 5))
+                
+                im0 = ax[0].imshow(geos, cmap='RdBu_r'); ax[0].set_title("GEOS Input (Norm)")
+                plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
+                
+                im1 = ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
+                plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
+                
+                im2 = ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title("Pred (Expected)")
+                plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
+                
+                im3 = ax[3].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Pred-Target)")
+                plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
+                
+                im4 = ax[4].imshow(p, cmap='gray', vmin=0, vmax=1); ax[4].set_title("Prob(Rain)")
+                plt.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.04)
                 
                 os.makedirs(os.path.join(config["output_dir"], "plots"), exist_ok=True)
                 plt.savefig(os.path.join(config["output_dir"], f"plots/epoch_{epoch}.png"))
