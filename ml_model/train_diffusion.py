@@ -552,115 +552,100 @@ def test():
                         gm_full = gm.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
                         gs_full = gs.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
                     else:
-                         gm_full = gm
-                         gs_full = gs
-                
                 condition = torch.cat([x_obs_flat, x_geos_flat], dim=1) # (4, 8, H, W)
                 
-                # Lead Time 0
-                cond_l0 = condition[0:1] # (1, 8, H, W)
-                target_l0 = y_target_flat[0:1] # (1, 1, H, W)
-                geos_l0 = x_geos_flat[0:1] # (1, 4, H, W) - 4 members
-                
-                # GEOS Ensemble Mean (Normalized)
-                geos_mean_norm = geos_l0.mean(dim=1, keepdim=True) # (1, 1, H, W)
-                
-                # Generate 5 Diffusion Members
-                diff_generations = []
+                # Plot Setup: 4 Rows (Leads), 5 Columns (GEOS, Target, Diffusion, Diff Bias, GEOS Bias)
+                fig = plt.figure(figsize=(25, 20))
                 unwrapped_model = accelerator.unwrap_model(model)
                 
-                # Ensemble Loop
-                for i_ens in tqdm(range(5), desc=f"Sample {current_idx} Ensemble", leave=False):
-                     gen = unwrapped_model.sample(cond_l0, num_inference_steps=1000, verbose=True)
-                     diff_generations.append(gen)
-                
-                diff_ens = torch.cat(diff_generations, dim=0) # (5, 1, H, W)
-                diff_mean_norm = diff_ens.mean(dim=0, keepdim=True) # (1, 1, H, W)
-                
-                # DENORMALIZE ALL
-                if val_dataset.geos_mean is not None:
-                    # Need appropriate gm/gs for lead 0
-                    if gm.numel() > 1:
-                        # gm is (1, L, H, W) -> (1, 4, H, W)
-                         g_s = gm[0, 0] if gm.ndim == 4 else gm[0]
-                         s_s = gs[0, 0] if gs.ndim == 4 else gs[0]
-                         # Add dims (1, 1, H, W) if needed
-                         g_s = g_s.unsqueeze(0).unsqueeze(0)
-                         s_s = s_s.unsqueeze(0).unsqueeze(0)
-                    else:
-                         g_s = gm_full
-                         s_s = gs_full
-                         
-                    geos_mean = (geos_mean_norm * s_s) + g_s
-                    diff_mean = (diff_mean_norm * s_s) + g_s
-                    target = target_l0 
-                else:
-                    geos_mean = geos_mean_norm
-                    diff_mean = diff_mean_norm
-                    target = target_l0
-                
-                # Calculate RMSEs
-                geos_rmse = torch.sqrt(torch.mean((geos_mean - target)**2)).item()
-                diff_rmse = torch.sqrt(torch.mean((diff_mean - target)**2)).item()
-                
-                # Plot
-                # Move to CPU
-                g_img = geos_mean.cpu().numpy().squeeze()
-                t_img = target.cpu().numpy().squeeze()
-                d_img = diff_mean.cpu().numpy().squeeze()
-                diff_map = d_img - t_img
-                geos_diff_map = g_img - t_img
-                
-                # Lat/Lon for Cartopy
-                # Construct lat/lon grids based on shape
-                # 181x360 -> 1 degree resolution presumably? -90 to 90, 0 to 360?
-                # GEOS typically: Lat -90 to 90 (181), Lon -180 to 180 or 0 to 360 (360)
                 lats = np.linspace(-90, 90, H)
                 lons = np.linspace(0, 360, W)
                 
-                fig = plt.figure(figsize=(25, 6))
-                
-                def plot_panel(ax_idx, data, title, cmap, vmin, vmax):
-                    ax = fig.add_subplot(1, 5, ax_idx, projection=ccrs.PlateCarree())
+                def plot_panel(fig, row, col, data, title, cmap, vmin, vmax):
+                    ax = fig.add_subplot(4, 5, row * 5 + col + 1, projection=ccrs.PlateCarree())
                     im = ax.imshow(data, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()], 
                                    transform=ccrs.PlateCarree(), cmap=cmap, vmin=vmin, vmax=vmax)
                     ax.coastlines()
-                    ax.set_title(title)
+                    ax.set_title(title, fontsize=10)
                     gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
                     gl.top_labels = False
                     gl.right_labels = False
+                    if col > 0: gl.left_labels = False
+                    if row < 3: gl.bottom_labels = False
                     return im
 
-                # 1. GEOS Mean
-                im0 = plot_panel(1, g_img, f"GEOS Ens Mean\nRMSE: {geos_rmse:.2f}", 'Blues', 0, 50)
-                plt.colorbar(im0, ax=fig.axes[0], orientation='vertical', shrink=0.7)
-                
-                # 2. Target
-                im1 = plot_panel(2, t_img, "Target GPCP", 'Blues', 0, 50)
-                plt.colorbar(im1, ax=fig.axes[1], orientation='vertical', shrink=0.7)
-                
-                # 3. Diffusion Mean
-                im2 = plot_panel(3, d_img, f"Diffusion Ens Mean (5)\nRMSE: {diff_rmse:.2f}", 'Blues', 0, 50)
-                plt.colorbar(im2, ax=fig.axes[2], orientation='vertical', shrink=0.7)
-                
-                # 4. Diff (Diff - Target)
-                im3 = plot_panel(4, diff_map, "Diff (Diffusion - Target)", 'RdBu_r', -20, 20)
-                plt.colorbar(im3, ax=fig.axes[3], orientation='vertical', shrink=0.7)
-                
-                # 5. Diff (GEOS - Target)
-                im4 = plot_panel(5, geos_diff_map, "Diff (GEOS - Target)", 'RdBu_r', -20, 20)
-                plt.colorbar(im4, ax=fig.axes[4], orientation='vertical', shrink=0.7)
-                
-                plt.suptitle(f"Sample Index {current_idx} (Val)")
-                plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}.png"), bbox_inches='tight')
+                for lead_idx in range(4):
+                    print(f"  Lead Week {lead_idx+1}...")
+                    
+                    cond_l = condition[lead_idx:lead_idx+1] # (1, 8, H, W)
+                    target_l = y_target_flat[lead_idx:lead_idx+1] # (1, 1, H, W)
+                    geos_l = x_geos_flat[lead_idx:lead_idx+1] # (1, 4, H, W) - 4 members
+                    
+                    # GEOS Ensemble Mean (Normalized)
+                    geos_mean_norm = geos_l.mean(dim=1, keepdim=True) # (1, 1, H, W)
+                    
+                    # Generate 5 Diffusion Members
+                    diff_generations = []
+                    # Ensemble Loop
+                    for i_ens in range(5):
+                         gen = unwrapped_model.sample(cond_l, num_inference_steps=1000, verbose=False)
+                         diff_generations.append(gen)
+                    
+                    diff_ens = torch.cat(diff_generations, dim=0) # (5, 1, H, W)
+                    diff_mean_norm = diff_ens.mean(dim=0, keepdim=True) # (1, 1, H, W)
+                    
+                    # DENORMALIZE
+                    if val_dataset.geos_mean is not None:
+                        if gm.numel() > 1:
+                             g_s = gm[0, lead_idx] if gm.ndim == 4 else gm[lead_idx]
+                             s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
+                             g_s = g_s.unsqueeze(0).unsqueeze(0)
+                             s_s = s_s.unsqueeze(0).unsqueeze(0)
+                        else:
+                             g_s = gm_full
+                             s_s = gs_full
+                             
+                        geos_mean = (geos_mean_norm * s_s) + g_s
+                        diff_mean = (diff_mean_norm * s_s) + g_s
+                        target = target_l # Targeted normalized or raw? usually gpcp is raw
+                    else:
+                        geos_mean = geos_mean_norm
+                        diff_mean = diff_mean_norm
+                        target = target_l
+                    
+                    # Calculate RMSEs
+                    geos_rmse = torch.sqrt(torch.mean((geos_mean - target)**2)).item()
+                    diff_rmse = torch.sqrt(torch.mean((diff_mean - target)**2)).item()
+                    
+                    # Data for plotting
+                    g_img = geos_mean.cpu().numpy().squeeze()
+                    t_img = target.cpu().numpy().squeeze()
+                    d_img = diff_mean.cpu().numpy().squeeze()
+                    diff_map = d_img - t_img
+                    geos_diff_map = g_img - t_img
+                    
+                    # Plot Row
+                    im0 = plot_panel(fig, lead_idx, 0, g_img, f"W{lead_idx+1}: GEOS Ens Mean\nRMSE: {geos_rmse:.2f}", 'Blues', 0, 50)
+                    im1 = plot_panel(fig, lead_idx, 1, t_img, f"W{lead_idx+1}: Target GPCP", 'Blues', 0, 50)
+                    im2 = plot_panel(fig, lead_idx, 2, d_img, f"W{lead_idx+1}: Diffusion Mean\nRMSE: {diff_rmse:.2f}", 'Blues', 0, 50)
+                    im3 = plot_panel(fig, lead_idx, 3, diff_map, f"W{lead_idx+1}: Diff Bias (Diff-Target)", 'RdBu_r', -20, 20)
+                    im4 = plot_panel(fig, lead_idx, 4, geos_diff_map, f"W{lead_idx+1}: GEOS Bias (GEOS-Target)", 'RdBu_r', -20, 20)
+                    
+                    # Add colorbars to the right end
+                    if lead_idx == 0:
+                        cax1 = fig.add_axes([0.92, 0.6, 0.015, 0.25])
+                        fig.colorbar(im0, cax=cax1, label='mm/day')
+                        cax2 = fig.add_axes([0.92, 0.15, 0.015, 0.25])
+                        fig.colorbar(im3, cax=cax2, label='mm/day')
+
+                plt.suptitle(f"Sample Index {current_idx} (Val Set) - All Lead Weeks", fontsize=16)
+                plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}_all_leads.png"), bbox_inches='tight', dpi=150)
                 plt.close()
-                print(f"Saved plot for sample {current_idx}. G_RMSE={geos_rmse:.2f}, D_RMSE={diff_rmse:.2f}")
+                print(f"Saved multi-lead plot for sample {current_idx}.")
                 
                 samples_processed += 1
             
             current_idx += 1
-            if current_idx > max(test_indices):
-                break
                 
     print("Test Suite Completed.")
 
