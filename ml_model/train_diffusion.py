@@ -609,7 +609,6 @@ def test():
                         if gm.numel() > 1:
                              g_s = gm[0, lead_idx] if gm.ndim == 4 else gm[lead_idx]
                              s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
-                             s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
                              g_s = g_s.unsqueeze(0).unsqueeze(0)
                              s_s = s_s.unsqueeze(0).unsqueeze(0)
                         else:
