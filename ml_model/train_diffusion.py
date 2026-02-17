@@ -352,7 +352,9 @@ def train():
                  else:
                      g_scalar_m = gm.item()
                      g_scalar_s = gs.item()
-                 g_img = (g_img * g_scalar_s) + g_scalar_m
+                 g_img = (g_mean * g_scalar_s) + g_scalar_m
+            else:
+                 g_img = g_mean
 
             diff_img = s_img - t_img
             
