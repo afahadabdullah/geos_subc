@@ -199,6 +199,15 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 
                 p = p_stack[b_idx, m_idx, l_idx].cpu().numpy()
                 alpha = alpha_stack[b_idx, m_idx, l_idx].cpu().numpy()
+                beta = beta_stack[b_idx, m_idx, l_idx].cpu().numpy()
+                
+                # Target
+                target = y_target[b_idx, l_idx].cpu().numpy()
+                
+                # GEOS: Ensemble Mean
+                # x_geos: (B, M, 1, L, H, W)
+                geos = x_geos[b_idx, :, 0, l_idx].mean(dim=0).cpu().numpy()
+                
                 # Expected Value = p * (alpha/beta)
                 expected = p * (alpha / beta)
                 diff = expected - target
@@ -230,7 +239,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 
                 fig, ax = plt.subplots(1, 7, figsize=(35, 5))
                 
-                im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Member (RMSE: {rmse_geos:.2f})")
+                im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Ens Mean (RMSE: {rmse_geos:.2f})")
                 plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
                 
                 im1 = ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
@@ -242,7 +251,7 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 im3 = ax[3].imshow(sampled_img, cmap='Blues', vmin=0, vmax=50); ax[3].set_title("Pred Sample (Sharp)")
                 plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
                 
-                im4 = ax[4].imshow(diff_geos, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("Diff (GEOS-Target)")
+                im4 = ax[4].imshow(diff_geos, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("Diff (GEOS Mean-Target)")
                 plt.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.04)
                 
                 im5 = ax[5].imshow(diff_pred, cmap='RdBu_r', vmin=-20, vmax=20); ax[5].set_title("Diff (Pred-Target)")
