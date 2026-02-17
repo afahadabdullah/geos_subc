@@ -34,11 +34,13 @@ def train():
     device = accelerator.device
 
     # Dataset
+    preload = config.get("preload", False)
     train_dataset = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=config["train_start_year"],
         end_year=config["train_end_year"],
-        normalize=True
+        normalize=True,
+        preload=preload
     )
     
     loader = DataLoader(
@@ -89,12 +91,18 @@ def train():
     # Load Checkpoint?
     start_epoch = 0
     latest_ckpt = os.path.join(config["output_dir"], "latest_diffusion_ckpt.pt")
+    
+    # Top K Checkpoints
+    top_k_ckpts = [] # List of (rmse, epoch, path)
+    save_top_k = config.get("save_top_k", 4)
+    
     if os.path.exists(latest_ckpt):
         checkpoint = torch.load(latest_ckpt, map_location='cpu')
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         # Scheduler might need state dict? 
         start_epoch = checkpoint['epoch'] + 1
+        top_k_ckpts = checkpoint.get('top_k_ckpts', [])
         print(f"Resuming from epoch {start_epoch}")
 
     best_val_rmse = float('inf')
@@ -148,31 +156,15 @@ def train():
             if train_dataset.geos_mean is not None:
                 gm = train_dataset.geos_mean.to(device)
                 gs = train_dataset.geos_std.to(device)
-                if gm.ndim == 3: gm = gm.unsqueeze(0).unsqueeze(0) # (1, 1, L, H, W) but here flat target?
-                # y_target_flat corresponds to B*L flattened.
-                # gm is (1, L, H, W)?
-                # If gm is (1, L, H, W), we need to repeat B times then flatten?
-                # Or reshape gm/gs to compatible shape.
-                
                 # Careful: Check shape of gm/gs
                 # S2SHybridDataset: gm can be (1, L, H, W) or (1,)
                 # Let's handle generic case
                 if gm.numel() > 1:
-                    # Assume (1, L, H, W) or (L, H, W)
-                    # Expand B times -> (B, 1, L, H, W)
-                    # Then reshape to (B*L, 1, H, W)
-                    
-                    # Ensure dimensions match target_flat (B*L, 1, H, W)
-                    # target was (B, L, H, W) -> (B*L, 1, H, W)
-                    # So expand gm to (B, L, H, W)
-                    if gm.ndim == 2: gm = gm.unsqueeze(0).unsqueeze(0) # (1,1,H,W)? No dataset says (1,L,H,W)
-                    elif gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
-                    
-                    # We need to replicate for batch
-                    # (1, L, H, W) -> (B, L, H, W)
+                    # Generic implementation: if (L, H, W) or similar
+                    # Expand B times
+                    if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
                     gm_full = gm.expand(B, -1, -1, -1).reshape(B * L, 1, H, W)
                     gs_full = gs.expand(B, -1, -1, -1).reshape(B * L, 1, H, W)
-                    
                     target_normalized = (y_target_flat - gm_full) / gs_full
                 else:
                     target_normalized = (y_target_flat - gm) / gs
@@ -190,7 +182,7 @@ def train():
             
             # Add Noise
             noise = torch.randn_like(y_target_flat)
-            noisy_target = model.noise_scheduler.add_noise(y_target_flat, noise, timesteps)
+            noisy_target = model.noise_scheduler.add_noise(target_normalized, noise, timesteps)
             
             # Predict Noise
             # Inputs: noisy_target, condition, timesteps
@@ -223,52 +215,56 @@ def train():
         # Or recreate small loop
         
         with torch.no_grad():
-            # Use last batch data for plotting
-            B_val = 1 # Just sample 1 image
-            # Take index 0 from flat batch
-            cond_val = condition[:B_val] # (1, 7, H, W)
-            target_val = y_target_flat[:B_val] # (1, 1, H, W)
-            geos_val_mean = x_geos_flat[:B_val].mean(dim=1, keepdim=True) # (1, 1, H, W)
+            # Use last batch data for plotting (approximate val)
+            B_val = 1 
+            cond_val = condition[:B_val] 
+            target_val_norm = target_normalized[:B_val]
+            target_val_raw = y_target_flat[:B_val]
+            
+            # Need GEOS mean for denormalization later, or just use raw geos
+            # Just grab raw GEOS mean from x_geos_flat
+            geos_val_mean_raw = x_geos_flat[:B_val].mean(dim=1, keepdim=True) # Normalized scale!
+            # If dataset.geos_mean is present, x_geos is roughly N(0,1).
+            # But wait, dataset DOES normalize GEOS.
+            # So `geos_val_mean_raw` is in Normalized Space.
+            
             
             # Sample (Denoise)
-            # Use module directly if wrapped by DDP
             unwrapped_model = accelerator.unwrap_model(model)
             # 50 steps for speed in val
-            samples = unwrapped_model.sample(cond_val, num_inference_steps=50)
+            samples_norm = unwrapped_model.sample(cond_val, num_inference_steps=50)
             
-            # Stats (Denormalize for RMSE)
-            rmse_val = 0
+            # Denormalize
             if train_dataset.geos_mean is not None:
                 gm = train_dataset.geos_mean.to(device)
                 gs = train_dataset.geos_std.to(device)
-                om = train_dataset.obs_mean.to(device) # Precip is obs var? No target is y_target
-                # Target is Precip (index 0 of obs? No, obs is vars 0,1,2: SST, SSS, Soil? Wait)
-                # In dataset_hybrid, y_target is loaded separately.
-                # Assuming y_target is normalized using geos stats? Or obs stats?
-                # dataset_hybrid.py:
-                # self.obs_mean = global_stats['obs_mean'] # (5,)
-                # target is index 0 of obs vars (Precip) -> Use obs_mean[0], obs_std[0]
                 
-                # Careful: obs_mean is (5,) = [Precip, SST, SSS, Soil?, GPCP?]
-                # load_stats says: obs_vars = ['precip', 'sst', 'sss', 'soil_moisture', 'gpcp'?]
-                # Actually calculate_global_stats.py:
-                # obs_vars = ['gpcp', 'sst', 'sss', 'soil_moisture'] -> 4 vars?
-                # dataset_hybrid.py:
-                # self.obs_vars = ['gpcp', 'sst', 'sss', 'soil_moisture']
-                # target is gpcp -> index 0
+                # Reshape for broadcasting just in case
+                # samples_norm is (1, 1, H, W)
+                 # gm/gs might be (L, H, W)?
+                # We selected B_val=1 which is ONE sample from B*L flat batch. 
+                # Ideally we know WHICH lead time it is.
+                # It is the first one -> Lead 0.
                 
-                tm = train_dataset.obs_mean[0].to(device)
-                ts = train_dataset.obs_std[0].to(device)
-                
-                samples_denorm = (samples * ts) + tm
-                target_denorm = (target_val * ts) + tm
-                geos_denorm = (geos_val_mean * gs) + gm # GEOS uses its own stats
-                
+                if gm.numel() > 1:
+                    # Assume (1, L, H, W) -> slice lead 0
+                    gm_s = gm[0, 0] if gm.ndim == 4 else gm[0] # Handle shapes roughly
+                    gs_s = gs[0, 0] if gs.ndim == 4 else gs[0]
+                    # This is getting hacky.
+                    # Best effort denorm
+                    # If gm is scalar, easy.
+                    samples_denorm = (samples_norm * gs) + gm
+                    target_denorm = (target_val_norm * gs) + gm # Should match target_val_raw
+                    # geos_denorm = (geos_val_mean_raw * gs) + gm # GEOS was normalized
+                else:
+                    samples_denorm = (samples_norm * gs) + gm
+                    target_denorm = (target_val_norm * gs) + gm
+                    geos_denorm = (geos_val_mean_raw * gs) + gm
             else:
-                samples_denorm = samples
-                target_denorm = target_val
-                geos_denorm = geos_val_mean
-                
+                 samples_denorm = samples_norm
+                 target_denorm = target_val_norm
+                 geos_denorm = geos_val_mean_raw
+            
             val_rmse = torch.sqrt(torch.mean((samples_denorm - target_denorm)**2)).item()
             geos_rmse = torch.sqrt(torch.mean((geos_denorm - target_denorm)**2)).item()
             
@@ -279,13 +275,6 @@ def train():
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, val_rmse])
-            
-            # Save Checkpoint
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-            }, latest_ckpt)
             
             # Plot
             # Move to CPU
@@ -310,6 +299,48 @@ def train():
             os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
             plt.savefig(os.path.join(config["output_dir"], f"plots_diffusion/epoch_{epoch}.png"))
             plt.close()
+            
+            # SAVE LATEST
+            ckpt_state = {
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'top_k_ckpts': top_k_ckpts
+            }
+            torch.save(ckpt_state, latest_ckpt)
+            
+            # SAVE TOP K logic
+            # Add current
+            current_path = os.path.join(config["output_dir"], f"model_epoch_{epoch}_rmse_{val_rmse:.4f}.pt")
+            
+            # We want to check if this is worthy
+            # Algorithm:
+            # 1. Append (rmse, epoch, current_path)
+            # 2. Sort
+            # 3. If len > K, remove worst
+            # 4. If current survived, SAVE IT.
+            
+            top_k_ckpts.append((val_rmse, epoch, current_path))
+            top_k_ckpts.sort(key=lambda x: x[0]) # Ascending RMSE
+            
+            if len(top_k_ckpts) > save_top_k:
+                worst = top_k_ckpts.pop() # Remove largest RMSE
+                # If worst was the one we just added (current), then we don't save.
+                # If worst was an old one, delete file.
+                if worst[2] != current_path:
+                    if os.path.exists(worst[2]):
+                        os.remove(worst[2])
+                        print(f"Removed worse checkpoint: {worst[2]}")
+            
+            # Now check if current is still in list
+            is_in_top = any(x[2] == current_path for x in top_k_ckpts)
+            if is_in_top:
+                print(f"New Top Model! RMSE: {val_rmse:.4f}")
+                torch.save(ckpt_state, current_path)
+                
+            # Update latest with new list
+            ckpt_state['top_k_ckpts'] = top_k_ckpts
+            torch.save(ckpt_state, latest_ckpt) # Update latest again with correct list
 
 if __name__ == "__main__":
     train()

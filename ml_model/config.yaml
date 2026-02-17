@@ -9,3 +9,5 @@ num_workers: 4
 data_dir: dataprocess
 train_start_year: 1999
 train_end_year: 2016
+preload: True
+save_top_k: 4
