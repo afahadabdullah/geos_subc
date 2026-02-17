@@ -159,15 +159,25 @@ class S2SHybridDataset(Dataset):
         geos_tensor = torch.from_numpy(geos_data).float()
         if geos_tensor.ndim == 3: 
              geos_tensor = geos_tensor.unsqueeze(0)
+             
+        # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
+        geos_tensor = geos_tensor.unsqueeze(1)
         
         # Broadcast normalization
         if self.geos_mean is not None:
-             # Ensure stats are broadcastable against (M, L, H, W)
-             # Mean is (1, L, H, W) or (L, H, W) -> unsqueeze to (1, L, H, W) if needed
+             # Ensure stats are broadcastable
+             # Mean/Std are (1, L, H, W) or (L, H, W)
+             # We need (1, 1, L, H, W) for broadcasting against (M, 1, L, H, W)
              gm = self.geos_mean
              gs = self.geos_std
-             if gm.ndim == 3: gm = gm.unsqueeze(0)
+             
+             # Expand stats to match (1, 1, L, H, W)
+             # Current gm shape: likely (L, H, W) or (1, L, H, W)
+             if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
              if gs.ndim == 3: gs = gs.unsqueeze(0)
+             
+             gm = gm.unsqueeze(1) # (1, 1, L, H, W)
+             gs = gs.unsqueeze(1)
              
              geos_tensor = (geos_tensor - gm) / gs
 
