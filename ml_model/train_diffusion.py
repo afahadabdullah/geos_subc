@@ -21,6 +21,17 @@ if str(root_dir) not in sys.path:
 from ml_model.dataset_hybrid import S2SHybridDataset
 from ml_model.diffusion import ConditionalDiffusion
 
+def get_area_weights(lats, device):
+    """
+    Calculates area weights based on cosine of latitude.
+    Normalizes weights to have a mean of 1.
+    """
+    weights = np.cos(np.deg2rad(lats))
+    weights = weights / weights.mean()
+    # Shape: (1, 1, H, 1) for broadcasting with (B*L, 1, H, W)
+    weights_tensor = torch.from_numpy(weights).float().to(device)
+    return weights_tensor.view(1, 1, -1, 1)
+
 def train():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="ml_model/config.yaml", help="Path to config file")
@@ -99,6 +110,11 @@ def train():
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
         model, optimizer, loader, val_loader, lr_scheduler
     )
+
+    # Area Weights for Loss
+    # Latitude range: -90 to 90 (181 points)
+    lats = np.linspace(-90, 90, 181)
+    area_weights = get_area_weights(lats, device)
 
     # Output Dir
     os.makedirs(config["output_dir"], exist_ok=True)
@@ -209,7 +225,8 @@ def train():
             # Inputs: noisy_target, condition, timesteps
             noise_pred = model(noisy_target, condition, timesteps)
             
-            loss = F.mse_loss(noise_pred, noise)
+            # Area-Weighted MSE Loss
+            loss = (area_weights * (noise_pred - noise)**2).mean()
             
             accelerator.backward(loss)
             optimizer.step()
@@ -272,7 +289,10 @@ def train():
                 v_noise = torch.randn_like(vy_target_flat)
                 v_noisy = model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
                 v_pred = model(v_noisy, v_condition, v_timesteps)
-                val_loss_sum += F.mse_loss(v_pred, v_noise).item()
+                
+                # Area-Weighted MSE Loss
+                v_loss = (area_weights * (v_pred - v_noise)**2).mean()
+                val_loss_sum += v_loss.item()
                 val_count += 1
 
         avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
