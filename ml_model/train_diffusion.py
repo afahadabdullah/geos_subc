@@ -577,30 +577,38 @@ def test():
                     if row < 3: gl.bottom_labels = False
                     return im
 
+                # Generate 5 Diffusion Members for ALL leads (Batched)
+                # condition is (4, 8, H, W) -> Output (4, 1, H, W)
+                diff_generations = []
+                
+                print(f"  Generating 5 ensemble members for Sample {current_idx}...")
+                for i_ens in range(5):
+                     print(f"    Member {i_ens+1}/5")
+                     # Verbose=True shows the 1000 steps progress bar
+                     gen = unwrapped_model.sample(condition, num_inference_steps=1000, verbose=True)
+                     diff_generations.append(gen)
+                
+                # Stack to (5, 4, 1, H, W) then mean over ensemble -> (4, 1, H, W)
+                diff_ens = torch.stack(diff_generations, dim=0) 
+                diff_mean_norm_all = diff_ens.mean(dim=0)
+
                 for lead_idx in range(4):
-                    print(f"  Lead Week {lead_idx+1}...")
+                    # print(f"  Plotting Lead Week {lead_idx+1}...")
                     
-                    cond_l = condition[lead_idx:lead_idx+1] # (1, 8, H, W)
                     target_l = y_target_flat[lead_idx:lead_idx+1] # (1, 1, H, W)
                     geos_l = x_geos_flat[lead_idx:lead_idx+1] # (1, 4, H, W) - 4 members
                     
                     # GEOS Ensemble Mean (Normalized)
                     geos_mean_norm = geos_l.mean(dim=1, keepdim=True) # (1, 1, H, W)
                     
-                    # Generate 5 Diffusion Members
-                    diff_generations = []
-                    # Ensemble Loop
-                    for i_ens in range(5):
-                         gen = unwrapped_model.sample(cond_l, num_inference_steps=1000, verbose=False)
-                         diff_generations.append(gen)
-                    
-                    diff_ens = torch.cat(diff_generations, dim=0) # (5, 1, H, W)
-                    diff_mean_norm = diff_ens.mean(dim=0, keepdim=True) # (1, 1, H, W)
+                    # Diffusion Mean (Normalized)
+                    diff_mean_norm = diff_mean_norm_all[lead_idx:lead_idx+1] # (1, 1, H, W)
                     
                     # DENORMALIZE
                     if val_dataset.geos_mean is not None:
                         if gm.numel() > 1:
                              g_s = gm[0, lead_idx] if gm.ndim == 4 else gm[lead_idx]
+                             s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
                              s_s = gs[0, lead_idx] if gs.ndim == 4 else gs[lead_idx]
                              g_s = g_s.unsqueeze(0).unsqueeze(0)
                              s_s = s_s.unsqueeze(0).unsqueeze(0)
