@@ -481,7 +481,8 @@ def test():
     print(f"Running Test Suite on indices {test_indices}...")
 
     # Iterate and select
-    # Since loader is sequential, we can just iterate and pick
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
     
     current_idx = 0
     samples_processed = 0
@@ -496,17 +497,15 @@ def test():
                 y_target = batch['y_target']
                 
                 # Assume B=1
-                B, C_obs, H, W = x_obs.shape # (1, 3, L, H, W) in dataset? 
-                # Wait, dataset_hybrid returns x_obs as (16, H, W).
-                # Batch dim added by loader -> (1, 16, H, W)
+                B = x_obs.shape[0]
+                _, _, H, W = x_obs.shape
                 
                 # Preprocess (Same as train)
-                # x_obs: (1, 16, H, W)
-                # x_geos: (1, 4, 1, 4, H, W)
-                # y_target: (1, 4, H, W)
+                # x_obs: (B, 16, H, W)
+                # x_geos: (B, 4, 1, 4, H, W)
+                # y_target: (B, 4, H, W)
                 
                 # Reshape logic from train:
-                # x_obs_reshaped = x_obs.view(B, 4, 4, H, W) -> (B, Var, Lead, H, W)
                 x_obs_reshaped = x_obs.view(B, 4, 4, H, W)
                 x_obs_lead = x_obs_reshaped.permute(0, 2, 1, 3, 4) # (B, Lead, Var, H, W)
                 x_obs_flat = x_obs_lead.reshape(B * 4, 4, H, W) # (4, 4, H, W)
@@ -515,7 +514,6 @@ def test():
                 x_geos_flat = x_geos_lead.reshape(B * 4, 4, H, W)
                 
                 y_target_flat = y_target.reshape(B * 4, 1, H, W) 
-                # y_target_flat is (4, 1, H, W) - 4 lead times
                 
                 # Normalize Target for comparison/noise
                 if val_dataset.geos_mean is not None:
@@ -526,17 +524,13 @@ def test():
                         if gm.ndim == 3: gm = gm.unsqueeze(0)
                         gm_full = gm.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
                         gs_full = gs.expand(B, -1, -1, -1).reshape(B * 4, 1, H, W)
-                        # For plotting denorm, we need scalar/broadcastable keys
                     else:
                          gm_full = gm
                          gs_full = gs
                 
                 condition = torch.cat([x_obs_flat, x_geos_flat], dim=1) # (4, 8, H, W)
                 
-                # FOCUS ON LEAD TIME 0 (First Week) for Simplicity in specific plot?
-                # Or plot all 4? User said "5 samples".
-                # Let's plot Lead Time 0 for each of the 5 samples.
-                
+                # Lead Time 0
                 cond_l0 = condition[0:1] # (1, 8, H, W)
                 target_l0 = y_target_flat[0:1] # (1, 1, H, W)
                 geos_l0 = x_geos_flat[0:1] # (1, 4, H, W) - 4 members
@@ -544,48 +538,16 @@ def test():
                 # GEOS Ensemble Mean (Normalized)
                 geos_mean_norm = geos_l0.mean(dim=1, keepdim=True) # (1, 1, H, W)
                 
-                # Generate 10 Diffusion Members
+                # Generate 5 Diffusion Members
                 diff_generations = []
                 unwrapped_model = accelerator.unwrap_model(model)
                 
                 # Ensemble Loop
-                for i_ens in tqdm(range(10), desc=f"Generating Ensemble for Sample {current_idx}"):
-                    # Sample (1000 steps)
-                    # Use tqdm inside sample? or just rely on outer?
-                    # diffusion.py sample doesn't have tqdm.
-                    # We can add tqdm to the iterator in sample() via a callback or just trust it's fast enough on GPU?
-                    # 1000 steps takes ~seconds. 
-                    # Let's Modify diffusion.py to accept 'disable_tqdm' or just add it here
-                    # Actually, better to just show "Member 1/10" etc.
-                    
-                    # To show 1000 steps progress, we need to modify sample() or wraper.
-                    # Let's just stick to ensemble progress for now to avoid modifying model code again
-                    # unless user really wants step progress.
-                    # User asked "1000 steps, can we show progressbar".
-                    # So we should probably modify `sample` in diffusion.py to support it or add it there.
-                    # BUT `sample` in `diffusion.py` loops over `self.noise_scheduler.timesteps`.
-                    # Let's modify `diffusion.py` to be verbose if requested?
-                    # Or just pass a `verbose` flag.
-                    
-                    # For now, let's just use the `sample` method as is, but maybe wrap the inner loop in diffusion.py?
-                    # I can't easily change diffusion.py from here.
-                    
-                    # Let's just print/tqdm the ensemble members.
-                    # If 1000 steps is slow, the user sees "Member 1/10...". 
-                    
-                    # Wait, I can pass a progress bar to the scheduler? No.
-                    # Let's modify `diffusion.py` briefly to allow tqdm?
-                    pass 
-                
-                # Re-writing the loop properly:
-                for i_ens in tqdm(range(10), desc=f"Sample {current_idx} Ensemble", leave=False):
-                     # We can't easily inject tqdm into `model.sample` without editing `diffusion.py`.
-                     # Let's edit `diffusion.py` in next step if needed. 
-                     # For now, just member progress.
+                for i_ens in tqdm(range(5), desc=f"Sample {current_idx} Ensemble", leave=False):
                      gen = unwrapped_model.sample(cond_l0, num_inference_steps=1000, verbose=True)
                      diff_generations.append(gen)
                 
-                diff_ens = torch.cat(diff_generations, dim=0) # (10, 1, H, W)
+                diff_ens = torch.cat(diff_generations, dim=0) # (5, 1, H, W)
                 diff_mean_norm = diff_ens.mean(dim=0, keepdim=True) # (1, 1, H, W)
                 
                 # DENORMALIZE ALL
@@ -604,11 +566,7 @@ def test():
                          
                     geos_mean = (geos_mean_norm * s_s) + g_s
                     diff_mean = (diff_mean_norm * s_s) + g_s
-                    target = target_l0 # Target was already raw from dataset_hybrid? 
-                    # Wait, in train loop:
-                    # y_target = batch['y_target'] -> raw
-                    # target_normalized = ...
-                    # So y_target_flat is RAW.
+                    target = target_l0 
                 else:
                     geos_mean = geos_mean_norm
                     diff_mean = diff_mean_norm
@@ -624,27 +582,50 @@ def test():
                 t_img = target.cpu().numpy().squeeze()
                 d_img = diff_mean.cpu().numpy().squeeze()
                 diff_map = d_img - t_img
+                geos_diff_map = g_img - t_img
                 
-                fig, ax = plt.subplots(1, 4, figsize=(24, 6))
+                # Lat/Lon for Cartopy
+                # Construct lat/lon grids based on shape
+                # 181x360 -> 1 degree resolution presumably? -90 to 90, 0 to 360?
+                # GEOS typically: Lat -90 to 90 (181), Lon -180 to 180 or 0 to 360 (360)
+                lats = np.linspace(-90, 90, H)
+                lons = np.linspace(0, 360, W)
                 
-                im0 = ax[0].imshow(g_img, cmap='Blues', vmin=0, vmax=50)
-                ax[0].set_title(f"GEOS Ens Mean\nRMSE: {geos_rmse:.2f}")
-                plt.colorbar(im0, ax=ax[0])
+                fig = plt.figure(figsize=(25, 6))
                 
-                im1 = ax[1].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
-                ax[1].set_title("Target GPCP")
-                plt.colorbar(im1, ax=ax[1])
+                def plot_panel(ax_idx, data, title, cmap, vmin, vmax):
+                    ax = fig.add_subplot(1, 5, ax_idx, projection=ccrs.PlateCarree())
+                    im = ax.imshow(data, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()], 
+                                   transform=ccrs.PlateCarree(), cmap=cmap, vmin=vmin, vmax=vmax)
+                    ax.coastlines()
+                    ax.set_title(title)
+                    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
+                    gl.top_labels = False
+                    gl.right_labels = False
+                    return im
+
+                # 1. GEOS Mean
+                im0 = plot_panel(1, g_img, f"GEOS Ens Mean\nRMSE: {geos_rmse:.2f}", 'Blues', 0, 50)
+                plt.colorbar(im0, ax=fig.axes[0], orientation='vertical', shrink=0.7)
                 
-                im2 = ax[2].imshow(d_img, cmap='Blues', vmin=0, vmax=50)
-                ax[2].set_title(f"Diffusion Ens Mean (10)\nRMSE: {diff_rmse:.2f}")
-                plt.colorbar(im2, ax=ax[2])
+                # 2. Target
+                im1 = plot_panel(2, t_img, "Target GPCP", 'Blues', 0, 50)
+                plt.colorbar(im1, ax=fig.axes[1], orientation='vertical', shrink=0.7)
                 
-                im3 = ax[3].imshow(diff_map, cmap='RdBu_r', vmin=-20, vmax=20)
-                ax[3].set_title("Diff (Model - Target)")
-                plt.colorbar(im3, ax=ax[3])
+                # 3. Diffusion Mean
+                im2 = plot_panel(3, d_img, f"Diffusion Ens Mean (5)\nRMSE: {diff_rmse:.2f}", 'Blues', 0, 50)
+                plt.colorbar(im2, ax=fig.axes[2], orientation='vertical', shrink=0.7)
+                
+                # 4. Diff (Diff - Target)
+                im3 = plot_panel(4, diff_map, "Diff (Diffusion - Target)", 'RdBu_r', -20, 20)
+                plt.colorbar(im3, ax=fig.axes[3], orientation='vertical', shrink=0.7)
+                
+                # 5. Diff (GEOS - Target)
+                im4 = plot_panel(5, geos_diff_map, "Diff (GEOS - Target)", 'RdBu_r', -20, 20)
+                plt.colorbar(im4, ax=fig.axes[4], orientation='vertical', shrink=0.7)
                 
                 plt.suptitle(f"Sample Index {current_idx} (Val)")
-                plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}.png"))
+                plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}.png"), bbox_inches='tight')
                 plt.close()
                 print(f"Saved plot for sample {current_idx}. G_RMSE={geos_rmse:.2f}, D_RMSE={diff_rmse:.2f}")
                 
