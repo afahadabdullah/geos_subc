@@ -133,13 +133,26 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
         # Validation Progress Bar
         val_pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Validating Epoch {epoch}")
         
+        # Consistent Plotting Data
+        plot_data = None
+        
         with torch.no_grad():
-             for batch in val_pbar:
+             for i, batch in enumerate(val_pbar):
                  x_obs = batch['x_obs']
                  x_geos = batch['x_geos']
                  y_target = batch['y_target']
                  
                  p_stack, alpha_stack, beta_stack = model(x_obs, x_geos)
+                 
+                 if i == 0:
+                     # Save first batch for plotting
+                     plot_data = {
+                         "x_geos": x_geos,
+                         "y_target": y_target,
+                         "p_stack": p_stack,
+                         "alpha_stack": alpha_stack,
+                         "beta_stack": beta_stack
+                     }
                  
                  loss = 0.0
                  M = p_stack.shape[1]
@@ -189,13 +202,19 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 print(f"New Best Model! Loss: {avg_val_loss:.4f}")
                 torch.save(model.state_dict(), os.path.join(config["output_dir"], f"best_model_epoch_{epoch}.pt"))
                 
-                # Plotting (Only on Best or every 5 epochs)
-                # Plot the last batch processing
-                # p_stack: (B, M, L, H, W)
-                # Take first sample in batch, first lead time
-                b_idx = 0
-                l_idx = 0
-                m_idx = 0 # Member 0
+                # Plotting (Using consistent plot_data from first batch)
+                if plot_data is not None:
+                    # Unpack
+                    x_geos = plot_data["x_geos"]
+                    y_target = plot_data["y_target"]
+                    p_stack = plot_data["p_stack"]
+                    alpha_stack = plot_data["alpha_stack"]
+                    beta_stack = plot_data["beta_stack"]
+                    
+                    # Take first sample in batch, first lead time
+                    b_idx = 0
+                    l_idx = 0
+                    m_idx = 0
                 
                 p = p_stack[b_idx, m_idx, l_idx].cpu().numpy()
                 alpha = alpha_stack[b_idx, m_idx, l_idx].cpu().numpy()
