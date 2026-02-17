@@ -21,14 +21,16 @@ class S2SHybridDataset(Dataset):
         
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
-                 transform=None, preload=False):
+                 transform=None, preload=False, normalize=True):
         self.data_root = data_root
         self.years = range(start_year, end_year)
         self.transform = transform
         self.preload = preload
+        self.normalize = normalize
         
         # Load Stats
-        self.load_stats()
+        if self.normalize:
+            self.load_stats()
         
         # Index samples
         self.prepare_samples()
@@ -38,20 +40,32 @@ class S2SHybridDataset(Dataset):
         
     def load_stats(self):
         # Load Z-Score stats for Precip
-        stats_path = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
+        stats_path = os.path.join(os.path.dirname(__file__), "global_stats.pt")
+        # If "global_stats.pt" exists, use it. Otherwise use grid_stats.nc
         if os.path.exists(stats_path):
-            ds = xr.open_dataset(stats_path)
-            self.geos_mean = torch.from_numpy(ds['geos_mean'].values).float()
-            self.geos_std = torch.from_numpy(ds['geos_std'].values).float()
-            ds.close()
-            
-            # Ensure (1, L, H, W) or (L, H, W)
-            if self.geos_mean.ndim == 2:
-                self.geos_mean = self.geos_mean.unsqueeze(0)
-                self.geos_std = self.geos_std.unsqueeze(0)
+            print(f"Loading global stats from {stats_path}")
+            stats = torch.load(stats_path)
+            self.geos_mean = stats['geos_mean']
+            self.geos_std = stats['geos_std']
+            self.obs_mean = stats['obs_mean'] # (16, 1, 1)
+            self.obs_std = stats['obs_std']   # (16, 1, 1)
         else:
-            print("Warning: grid_stats.nc not found. Normalization will be disabled.")
-            self.geos_mean = None
+            # Fallback (Old behaviour or partial)
+            print("Warning: global_stats.pt not found. Using default normalization logic or grid_stats.nc.")
+            self.obs_mean = None
+            self.obs_std = None
+            
+            stats_path_old = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
+            if os.path.exists(stats_path_old):
+                ds = xr.open_dataset(stats_path_old)
+                self.geos_mean = torch.from_numpy(ds['geos_mean'].values).float()
+                self.geos_std = torch.from_numpy(ds['geos_std'].values).float()
+                ds.close()
+                if self.geos_mean.ndim == 2:
+                    self.geos_mean = self.geos_mean.unsqueeze(0)
+                    self.geos_std = self.geos_std.unsqueeze(0)
+            else:
+                 self.geos_mean = None
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -182,18 +196,23 @@ class S2SHybridDataset(Dataset):
         geos_tensor = geos_tensor.unsqueeze(1)
         
         # Broadcast normalization
-        if self.geos_mean is not None:
+        if self.normalize and self.geos_mean is not None:
              # Ensure stats are broadcastable
              gm = self.geos_mean
              gs = self.geos_std
              
-             if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
-             if gs.ndim == 3: gs = gs.unsqueeze(0)
-             
-             gm = gm.unsqueeze(1) # (1, 1, L, H, W)
-             gs = gs.unsqueeze(1)
-             
-             geos_tensor = (geos_tensor - gm) / gs
+             # If using global scalar stats, gm/gs are scalars or (1,)
+             if gm.numel() == 1:
+                 geos_tensor = (geos_tensor - gm) / gs
+             else:
+                 # Grid Stats (1, L, H, W)
+                 if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
+                 if gs.ndim == 3: gs = gs.unsqueeze(0)
+                 
+                 gm = gm.unsqueeze(1) # (1, 1, L, H, W)
+                 gs = gs.unsqueeze(1)
+                 
+                 geos_tensor = (geos_tensor - gm) / gs
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
@@ -243,6 +262,25 @@ class S2SHybridDataset(Dataset):
         obs_stack[12:16] = obs_stack[12:16] / 10.0
         
         obs_tensor = torch.from_numpy(obs_stack).float()
+        
+        # Normalize Obs
+        if self.normalize:
+            if hasattr(self, 'obs_mean') and self.obs_mean is not None:
+                # Global Z-Score Normalization
+                # obs_mean is (16,) -> broadcast to (16, H, W)
+                om = self.obs_mean.view(16, 1, 1)
+                os_ = self.obs_std.view(16, 1, 1)
+                obs_tensor = (obs_tensor - om) / os_
+            else:
+                # Fallback Min-Max scaling
+                # SST (K) ~ 270-310 -> (val - 270) / 40
+                obs_tensor[0:4] = (obs_tensor[0:4] - 273.15) / 30.0 
+                # SSS (psu) ~ 30-40 -> (val - 30) / 10
+                obs_tensor[4:8] = (obs_tensor[4:8] - 30.0) / 10.0
+                # SM (m3/m3) ~ 0-0.5 -> val / 0.5
+                obs_tensor[8:12] = obs_tensor[8:12] / 0.5
+                # Prev GPCP (mm/day) ~ 0-20 -> val / 10
+                obs_tensor[12:16] = obs_tensor[12:16] / 10.0
         
         # 3. Load Target (GPCP)
         ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)

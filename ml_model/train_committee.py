@@ -62,13 +62,14 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
     # Validation & Logging Setup
     import csv
     import matplotlib.pyplot as plt
+    import numpy as np
     
     log_file = os.path.join(config["output_dir"], "training_log.csv")
     if accelerator.is_main_process:
         if not os.path.exists(log_file):
             with open(log_file, "w") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Epoch", "Train_Loss", "Val_Loss", "Best_Val_Loss"])
+                writer.writerow(["Epoch", "Train_Loss", "Val_Loss", "Val_RMSE", "Best_Val_Loss"])
     
     best_val_loss = float('inf')
     start_epoch = 0
@@ -125,6 +126,8 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
         
         model.eval()
         val_loss = 0.0
+        val_mse = 0.0
+        val_count = 0 
         
         # Validation Progress Bar
         val_pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Validating Epoch {epoch}")
@@ -145,16 +148,31 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                  batch_loss = (loss / M).item()
                  val_loss += batch_loss
                  val_pbar.set_postfix({"batch_loss": f"{batch_loss:.4f}"})
+                 
+                 # RMSE for batch (approx, based on 1st member or avg?)
+                 # Let's compute RMSE of Expected Value vs Target
+                 # p_stack: (B, M, L, H, W) -> Mean across M?
+                 # Committee Mean Prediction
+                 p_mean = p_stack.mean(dim=1)
+                 alpha_mean = alpha_stack.mean(dim=1)
+                 beta_mean = beta_stack.mean(dim=1)
+                 
+                 expected = p_mean * (alpha_mean / beta_mean)
+                 # Target: (B, L, H, W)
+                 mse = F.mse_loss(expected, y_target, reduction='sum')
+                 val_mse += mse.item()
+                 val_count += y_target.numel()
         
         avg_val_loss = val_loss / len(loader)
+        val_rmse = np.sqrt(val_mse / val_count)
         
         if accelerator.is_main_process:
-            print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f}")
+            print(f"Epoch {epoch} | Train: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Val RMSE: {val_rmse:.4f}")
             
             # CSV Log
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch, avg_train_loss, avg_val_loss, best_val_loss])
+                writer.writerow([epoch, avg_train_loss, avg_val_loss, val_rmse, best_val_loss])
 
             # Save Latest
             torch.save({
@@ -183,20 +201,38 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 beta = beta_stack[b_idx, m_idx, l_idx].cpu().numpy()
                 target = y_target[b_idx, l_idx].cpu().numpy()
                 geos = x_geos[b_idx, m_idx, 0, l_idx].cpu().numpy() # Raw GEOS (normalized)
-                
                 # Expected Value = p * (alpha/beta)
                 expected = p * (alpha / beta)
                 diff = expected - target
                 
+                # RMSE Calculation
+                # GEOS (denormalized?)
+                # GEOS input is normalized. We need to denormalize to compare with Target (mm/day).
+                # If we use global stats:
+                if dataset.normalize and dataset.geos_mean is not None:
+                    # gm, gs are tensors. Move to cpu numpy.
+                    gm = dataset.geos_mean.cpu().numpy().squeeze()
+                    gs = dataset.geos_std.cpu().numpy().squeeze()
+                    geos_denorm = (geos * gs) + gm
+                else:
+                    # Fallback (assuming it was normalized with grid_stats.nc)
+                    geos_denorm = geos # Placeholder if unknown
+                
+                # RMSE
+                # GEOS vs Target
+                rmse_geos = np.sqrt(np.mean((geos_denorm - target)**2))
+                # Pred vs Target
+                rmse_pred = np.sqrt(np.mean((expected - target)**2))
+                
                 fig, ax = plt.subplots(1, 5, figsize=(25, 5))
                 
-                im0 = ax[0].imshow(geos, cmap='RdBu_r'); ax[0].set_title("GEOS Input (Norm)")
+                im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS (RMSE: {rmse_geos:.2f})")
                 plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
                 
                 im1 = ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
                 plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
                 
-                im2 = ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title("Pred (Expected)")
+                im2 = ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Pred (RMSE: {rmse_pred:.2f})")
                 plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
                 
                 im3 = ax[3].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Pred-Target)")
