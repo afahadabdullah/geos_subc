@@ -199,48 +199,51 @@ def train(config_path="config.yaml"): # Or hardcoded defaults
                 
                 p = p_stack[b_idx, m_idx, l_idx].cpu().numpy()
                 alpha = alpha_stack[b_idx, m_idx, l_idx].cpu().numpy()
-                beta = beta_stack[b_idx, m_idx, l_idx].cpu().numpy()
-                target = y_target[b_idx, l_idx].cpu().numpy()
-                geos = x_geos[b_idx, m_idx, 0, l_idx].cpu().numpy() # Raw GEOS (normalized)
                 # Expected Value = p * (alpha/beta)
                 expected = p * (alpha / beta)
                 diff = expected - target
                 
+                # Sample from Distribution (for sharpness)
+                # Re-do sampling on CPU for just this plot
+                p_cpu = torch.from_numpy(p)
+                alpha_cpu = torch.from_numpy(alpha)
+                beta_cpu = torch.from_numpy(beta)
+                
+                # Sample
+                mask = torch.bernoulli(p_cpu).bool()
+                g_sample = torch.distributions.Gamma(alpha_cpu, beta_cpu).sample()
+                sampled_img = torch.where(mask, g_sample, torch.zeros_like(g_sample)).numpy()
+                
                 # RMSE Calculation
-                # GEOS (denormalized?)
-                # GEOS input is normalized. We need to denormalize to compare with Target (mm/day).
-                # If we use global stats:
                 if dataset.normalize and dataset.geos_mean is not None:
-                    # gm, gs are tensors. Move to cpu numpy.
                     gm = dataset.geos_mean.cpu().numpy().squeeze()
                     gs = dataset.geos_std.cpu().numpy().squeeze()
                     geos_denorm = (geos * gs) + gm
                 else:
-                    # Fallback (assuming it was normalized with grid_stats.nc)
-                    geos_denorm = geos # Placeholder if unknown
+                    geos_denorm = geos 
                 
-                # RMSE
-                # GEOS vs Target
                 rmse_geos = np.sqrt(np.mean((geos_denorm - target)**2))
-                # Pred vs Target
                 rmse_pred = np.sqrt(np.mean((expected - target)**2))
                 
-                fig, ax = plt.subplots(1, 5, figsize=(25, 5))
+                fig, ax = plt.subplots(1, 6, figsize=(30, 5))
                 
-                im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS (RMSE: {rmse_geos:.2f})")
+                im0 = ax[0].imshow(geos_denorm, cmap='Blues', vmin=0, vmax=50); ax[0].set_title(f"GEOS Member (RMSE: {rmse_geos:.2f})")
                 plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
                 
                 im1 = ax[1].imshow(target, cmap='Blues', vmin=0, vmax=50); ax[1].set_title("Target (GPCP)")
                 plt.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.04)
                 
-                im2 = ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Pred (RMSE: {rmse_pred:.2f})")
+                im2 = ax[2].imshow(expected, cmap='Blues', vmin=0, vmax=50); ax[2].set_title(f"Pred Mean (RMSE: {rmse_pred:.2f})")
                 plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
                 
-                im3 = ax[3].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20); ax[3].set_title("Diff (Pred-Target)")
+                im3 = ax[3].imshow(sampled_img, cmap='Blues', vmin=0, vmax=50); ax[3].set_title("Pred Sample (Sharp)")
                 plt.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.04)
                 
-                im4 = ax[4].imshow(p, cmap='gray', vmin=0, vmax=1); ax[4].set_title("Prob(Rain)")
+                im4 = ax[4].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20); ax[4].set_title("Diff (Mean-Target)")
                 plt.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.04)
+                
+                im5 = ax[5].imshow(p, cmap='gray', vmin=0, vmax=1); ax[5].set_title("Prob(Rain)")
+                plt.colorbar(im5, ax=ax[5], fraction=0.046, pad=0.04)
                 
                 os.makedirs(os.path.join(config["output_dir"], "plots"), exist_ok=True)
                 plt.savefig(os.path.join(config["output_dir"], f"plots/epoch_{epoch}.png"))
