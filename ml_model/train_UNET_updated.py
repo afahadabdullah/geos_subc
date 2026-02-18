@@ -81,31 +81,18 @@ def ziln_expected_value(p, mu, sigma):
 
 def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     """
-    CRPS loss for Zero-Inflated Log-Normal distribution.
+    CRPS loss for Zero-Inflated Log-Normal distribution with anti-underprediction fixes.
     
-    The CRPS for a mixture: (1-p)*Dirac(0) + p*LogNormal(mu, sigma)
+    Base CRPS for mixture: (1-p)*Dirac(0) + p*LogNormal(mu, sigma)
     
-    For observation y and ZILN forecast F:
-      CRPS = E|X - y| - 0.5 * E|X - X'|
-    
-    Using the analytical CRPS of log-normal:
-      CRPS_LN(y; mu, sigma) = y*(2*Phi(z) - 1) - 2*exp(mu + sigma^2/2) * 
-                               (Phi(z - sigma) + Phi(-sigma/sqrt(2)) - 1)
-      where z = (ln(y) - mu) / sigma, Phi is the standard normal CDF.
-    
-    For the zero-inflated case:
-      CRPS_ZILN = (1-p)^2 * y                              (if y > 0, dry component)
-                + p * CRPS_LN(y; mu, sigma)                 (wet component)
-                + p*(1-p)*E_LN                              (cross-term)
-                - 0.5*p^2 * (correction for E|X-X'|)
-    
-    We use a simplified but correct formulation.
-    
-    Improvements over base CRPS:
-      Fix 1 (BCE auxiliary): Trains p as a binary wet/dry classifier with 3x
-        penalty for false negatives (missing rain). Weight = 0.3.
-      Fix 2 (Focal weighting): Wet cells (>1 mm/day) get 5x CRPS weight to
-        force sharper wet/dry contrasts and prevent intensity smearing.
+    Anti-underprediction improvements:
+      Fix 1 (Lead weighting): Leads 2-4 weighted [1.0, 1.5, 2.0, 2.5] to force
+        the model to maintain intensity at longer forecast horizons.
+      Fix 2 (Focal weighting): Wet cells (>1 mm/day) get 8x CRPS weight.
+      Fix 3 (BCE auxiliary): Binary wet/dry classifier with 5x false-negative
+        penalty, weighted at 0.3.
+      Fix 4 (Mean-bias penalty): Penalizes systematic underprediction per lead,
+        weighted at 0.2.
     
     Args:
         p:      (B, 4, H, W) - Rain probability [0, 1]
@@ -115,34 +102,26 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
         area_weights: (1, 1, H, 1) - cos(lat) weights
         
     Returns:
-        Scalar combined loss: CRPS + 0.3 * BCE (lower is better).
+        Scalar combined loss (lower is better).
     """
-    # Numerical stability
     eps = 1e-6
     y = target.clamp(min=0.0)
     
-    # Standard normal CDF helper
     Phi = lambda x: 0.5 * (1 + torch.erf(x / math.sqrt(2)))
     
     # --- Log-Normal CRPS component ---
-    y_safe = y.clamp(min=eps)  # Avoid log(0)
+    y_safe = y.clamp(min=eps)
     z = (torch.log(y_safe) - mu) / sigma
-    
-    # E_LN = exp(mu + sigma^2/2), the log-normal mean
     E_LN = torch.exp(mu + 0.5 * sigma**2)
     
-    # CRPS of LogNormal(mu, sigma) for observation y:
     crps_ln_wet = y_safe * (2 * Phi(z) - 1) \
                   - 2 * E_LN * (Phi(z - sigma) + Phi(-sigma / math.sqrt(2)) - 1)
-    
-    # For y == 0 (dry observation): z -> -inf, Phi(z) -> 0, Phi(z-sigma) -> 0
     crps_ln_dry = 2 * E_LN * (1 - Phi(-sigma / math.sqrt(2)))
     
     is_wet = (y > eps).float()
     crps_ln = is_wet * crps_ln_wet + (1 - is_wet) * crps_ln_dry
     
     # --- Zero-Inflated CRPS ---
-    # Spread of log-normal: E|X-X'| for two iid LogNormal(mu,sigma)
     ln_spread = 2 * E_LN * (2 * Phi(sigma / math.sqrt(2)) - 1)
     
     crps = (1 - p)**2 * y \
@@ -150,11 +129,15 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
          + p * (1 - p) * E_LN \
          - 0.5 * p**2 * ln_spread
     
-    # --- FIX 2: Focal-style upweighting of wet cells ---
-    # Cells with >1 mm/day get 5x weight to force sharper wet/dry contrasts.
-    # This counteracts the model's tendency to predict uniform low-intensity rain.
+    # --- FIX 1: Lead-dependent weighting ---
+    # Longer leads get higher weight to prevent the model from giving up on them.
+    # Shape: (1, 4, 1, 1) to broadcast over (B, 4, H, W)
+    lead_weights = torch.tensor([1.0, 1.5, 2.0, 2.5], device=crps.device).view(1, 4, 1, 1)
+    crps = crps * lead_weights
+    
+    # --- FIX 2: Focal-style upweighting of wet cells (8x) ---
     WET_THRESHOLD = 1.0  # mm/day
-    intensity_weight = 1.0 + 4.0 * (y > WET_THRESHOLD).float()  # 1x dry, 5x wet
+    intensity_weight = 1.0 + 7.0 * (y > WET_THRESHOLD).float()  # 1x dry, 8x wet
     crps = crps * intensity_weight
     
     # Area weighting
@@ -163,19 +146,27 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     
     crps_loss = crps.mean()
     
-    # --- FIX 1: BCE auxiliary loss for sharp wet/dry boundary ---
-    # Trains p directly as a binary classifier (wet/dry) with 3x penalty
-    # for false negatives (predicting dry when it's actually raining).
+    # --- FIX 3: BCE auxiliary with 5x false-negative penalty ---
     wet_label = (target > WET_THRESHOLD).float()
     bce = F.binary_cross_entropy(p, wet_label, reduction='none')
-    # Asymmetric weighting: penalize missing rain (false negative) 3x more
-    bce = bce * (1.0 + 3.0 * wet_label)
+    bce = bce * (1.0 + 4.0 * wet_label)  # 1x false-pos, 5x false-neg
+    bce = bce * lead_weights  # Lead-dependent too
     if area_weights is not None:
         bce = bce * area_weights
     bce_loss = bce.mean()
     
-    # Combined loss: CRPS (primary) + 0.3 * BCE (auxiliary)
-    return crps_loss + 0.3 * bce_loss
+    # --- FIX 4: Mean-bias penalty ---
+    # Penalizes systematic underprediction: if E[rain] < target on average,
+    # add a squared-bias term. This is asymmetric — only penalizes underprediction.
+    pred_mean = p * E_LN  # Expected value of ZILN
+    # Per-lead mean bias: average over batch and spatial dims
+    bias_per_lead = (y - pred_mean).mean(dim=(0, 2, 3))  # (4,) positive = underprediction
+    # Only penalize underprediction (positive bias), not overprediction
+    underpred_bias = torch.clamp(bias_per_lead, min=0.0)
+    bias_loss = (underpred_bias ** 2).mean()
+    
+    # Combined: CRPS + 0.3*BCE + 0.2*bias
+    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss
 
 
 def get_area_weights(lats, device):
