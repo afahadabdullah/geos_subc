@@ -93,6 +93,7 @@ class S2SHybridDataset(Dataset):
             sst_path = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
             sss_path = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
             sm_path = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
+            ivt_path = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
             
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
@@ -107,6 +108,7 @@ class S2SHybridDataset(Dataset):
                 has_sst = os.path.exists(sst_path)
                 has_sss = os.path.exists(sss_path)
                 has_sm = os.path.exists(sm_path)
+                has_ivt = os.path.exists(ivt_path)
                 
                 n_samples = ds_geos.sizes['S']
                 init_dates = pd.to_datetime(ds_geos['S'].values)
@@ -122,7 +124,8 @@ class S2SHybridDataset(Dataset):
                         "gpcp_path": gpcp_path,
                         "sst_path": sst_path if has_sst else None,
                         "sss_path": sss_path if has_sss else None,
-                        "sm_path": sm_path if has_sm else None
+                        "sm_path": sm_path if has_sm else None,
+                        "ivt_path": ivt_path if has_ivt else None
                     })
                 
                 ds_geos.close()
@@ -264,9 +267,18 @@ class S2SHybridDataset(Dataset):
         # Previous GPCP (4, H, W)
         prev_gpcp_val = self._load_prev_gpcp(meta)
         
+        # IVT (4, H, W)
+        ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
+        if meta.get("ivt_path"):
+            ds_ivt = xr.open_zarr(meta["ivt_path"], consolidated=False)
+            v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
+            if v.ndim == 3: ivt_val = v
+            elif v.ndim == 2: ivt_val[:] = v
+            ds_ivt.close()
+
         # Stack Obs along Channel dimension
-        # Obs: [SST(4), SSS(4), SM(4), Prev(4)] -> 16 channels
-        obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val], axis=0) 
+        # Obs: [SST(4), SSS(4), SM(4), Prev(4), IVT(4)] -> 20 channels
+        obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val, ivt_val], axis=0) 
         
         # Normalize Obs
         # SST (K) ~ 270-310 -> (val - 270) / 40
@@ -277,6 +289,8 @@ class S2SHybridDataset(Dataset):
         obs_stack[8:12] = obs_stack[8:12] / 0.5
         # Prev GPCP (mm/day) ~ 0-20 -> val / 10
         obs_stack[12:16] = obs_stack[12:16] / 10.0
+        # IVT (kg/m/s) ~ 0-1000 -> val / 1000.0
+        obs_stack[16:20] = obs_stack[16:20] / 1000.0
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         

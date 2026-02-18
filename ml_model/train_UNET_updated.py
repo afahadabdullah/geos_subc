@@ -237,9 +237,9 @@ def train():
     fixed_val_batch = next(iter(val_loader))
     
     # Model: TemporalAttentionUNet
-    # Input:  34 channels (16 Obs + 16 GEOS flat + 2 Month sin/cos)
+    # Input:  38 channels (16 Obs + 4 IVT + 16 GEOS flat + 2 Month sin/cos)
     # Output: 12 channels (3 ZILN params x 4 leads: p, mu, sigma)
-    in_channels = 34
+    in_channels = 38
     out_channels = 12   # 3 params * 4 leads
 
     model = TemporalAttentionUNet(
@@ -551,7 +551,7 @@ def test():
 
     # Model
     model = TemporalAttentionUNet(
-        in_channels=34,
+        in_channels=38,
         out_channels=12,
         base_filters=128,
         emb_dim=256,
