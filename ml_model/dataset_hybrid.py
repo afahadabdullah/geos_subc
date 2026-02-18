@@ -67,9 +67,9 @@ class S2SHybridDataset(Dataset):
                  self.geos_mean = None
                  
         # Load Soil Moisture Stats (JSON)
+        import json
         sm_stats_path = os.path.join(os.path.dirname(__file__), "sm_stats.json")
         if os.path.exists(sm_stats_path):
-            import json
             with open(sm_stats_path, 'r') as f:
                 sm_stats = json.load(f)
             self.sm_mean = float(sm_stats['sm_mean'])
@@ -78,6 +78,19 @@ class S2SHybridDataset(Dataset):
         else:
             self.sm_mean = None
             self.sm_std = None
+
+        # Load IVT Stats (JSON)
+        ivt_stats_path = os.path.join(os.path.dirname(__file__), "ivt_stats.json")
+        if os.path.exists(ivt_stats_path):
+            with open(ivt_stats_path, 'r') as f:
+                ivt_stats = json.load(f)
+            self.ivt_mean = float(ivt_stats['ivt_mean'])
+            self.ivt_std = float(ivt_stats['ivt_std'])
+            print(f"Loaded IVT Stats: Mean={self.ivt_mean:.2f}, Std={self.ivt_std:.2f} kg/m/s")
+        else:
+            print("Warning: ivt_stats.json not found. Run ml_model/calculate_stats_ivt.py first. Using fallback /1000.")
+            self.ivt_mean = None
+            self.ivt_std = None
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -289,8 +302,11 @@ class S2SHybridDataset(Dataset):
         obs_stack[8:12] = obs_stack[8:12] / 0.5
         # Prev GPCP (mm/day) ~ 0-20 -> val / 10
         obs_stack[12:16] = obs_stack[12:16] / 10.0
-        # IVT (kg/m/s) ~ 0-1000 -> val / 1000.0
-        obs_stack[16:20] = obs_stack[16:20] / 1000.0
+        # IVT (kg/m/s) — z-score normalization using computed stats
+        if self.ivt_mean is not None:
+            obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean) / (self.ivt_std * 3.0 + 1e-6)
+        else:
+            obs_stack[16:20] = obs_stack[16:20] / 1000.0  # Fallback
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
