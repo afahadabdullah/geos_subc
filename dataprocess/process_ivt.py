@@ -231,7 +231,7 @@ def process_year(year, daily_dir=DAILY_IVT_DIR, output_dir=OUTPUT_DIR):
     
     import dask
     with dask.config.set(scheduler='synchronous'):
-        ds_yearly.to_zarr(out_path, mode='w', zarr_format=2) # standard zarr
+        ds_yearly.to_zarr(out_path, mode='w') # standard zarr
         
     print(f"  ✓ Finished {year}: {out_path}")
     
