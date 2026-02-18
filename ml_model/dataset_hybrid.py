@@ -228,24 +228,10 @@ class S2SHybridDataset(Dataset):
         # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
         geos_tensor = geos_tensor.unsqueeze(1)
         
-        # Broadcast normalization
-        if self.normalize and self.geos_mean is not None:
-             # Ensure stats are broadcastable
-             gm = self.geos_mean
-             gs = self.geos_std
-             
-             # If using global scalar stats, gm/gs are scalars or (1,)
-             if gm.numel() == 1:
-                 geos_tensor = (geos_tensor - gm) / (gs * 3.0)
-             else:
-                 # Grid Stats (1, L, H, W)
-                 if gm.ndim == 3: gm = gm.unsqueeze(0) # (1, L, H, W)
-                 if gs.ndim == 3: gs = gs.unsqueeze(0)
-                 
-                 gm = gm.unsqueeze(1) # (1, 1, L, H, W)
-                 gs = gs.unsqueeze(1)
-                 
-                 geos_tensor = (geos_tensor - gm) / (gs * 3.0)
+        # Log1p normalization for GEOS precip (log-space mu parameterization)
+        # log1p(x) maps [0, inf) -> [0, inf) and squashes the heavy tail.
+        # Clamp to >= 0 first to handle any fill values.
+        geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
@@ -308,8 +294,8 @@ class S2SHybridDataset(Dataset):
         obs_stack[4:8]   = (obs_stack[4:8]   - self.sss_mean)  / (self.sss_std  * 3.0 + eps)
         # Soil Moisture (m3/m3)
         obs_stack[8:12]  = (obs_stack[8:12]  - self.sm_mean)   / (self.sm_std   * 3.0 + eps)
-        # GPCP prev (mm/day) — simple scale, not z-score
-        obs_stack[12:16] = obs_stack[12:16] / 10.0
+        # GPCP prev (mm/day) — log1p to match GEOS log-space representation
+        obs_stack[12:16] = np.log1p(np.maximum(obs_stack[12:16], 0.0))
         # IVT (kg/m/s)
         obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean)  / (self.ivt_std  * 3.0 + eps)
         

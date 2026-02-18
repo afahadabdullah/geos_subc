@@ -453,13 +453,8 @@ def train():
                 g_ens = g_flat.view(4, 4, H, W)  # (Members, Leads, H, W)
                 g_mean_norm = g_ens.mean(dim=0)   # (Leads, H, W) -> (4, H, W)
                 
-                # Denormalize GEOS Mean
-                if train_dataset.geos_mean is not None:
-                    gm_cpu = train_dataset.geos_mean.squeeze().cpu().numpy()
-                    gs_cpu = train_dataset.geos_std.squeeze().cpu().numpy()
-                    g_img_all = (g_mean_norm.cpu().numpy() * gs_cpu * 3.0) + gm_cpu
-                else:
-                    g_img_all = g_mean_norm.cpu().numpy()
+                # Denormalize GEOS Mean: inverse of log1p is expm1
+                g_img_all = np.expm1(np.maximum(g_mean_norm.cpu().numpy(), 0.0))
 
                 fig, axes = plt.subplots(4, 5, figsize=(25, 20))
                 
@@ -660,18 +655,8 @@ def test():
                 geos_ens = x_geos_flat.view(4, 4, H, W)
                 geos_mean_norm = geos_ens.mean(dim=0)  # (4, H, W)
                 
-                if val_dataset.geos_mean is not None:
-                    gm = val_dataset.geos_mean.to(device)
-                    gs = val_dataset.geos_std.to(device)
-                    if gm.ndim == 4:
-                        gm_sq = gm.squeeze(0)
-                        gs_sq = gs.squeeze(0)
-                    else:
-                        gm_sq = gm
-                        gs_sq = gs
-                    geos_mean_all = (geos_mean_norm * gs_sq * 3.0) + gm_sq
-                else:
-                    geos_mean_all = geos_mean_norm
+                # Denormalize GEOS Mean: inverse of log1p is expm1
+                geos_mean_all = torch.expm1(geos_mean_norm.clamp(min=0.0))
 
                 for lead_idx in range(4):
                     g_img = geos_mean_all[lead_idx].cpu().numpy().squeeze()
