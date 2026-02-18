@@ -66,31 +66,36 @@ class S2SHybridDataset(Dataset):
             else:
                  self.geos_mean = None
                  
-        # Load Soil Moisture Stats (JSON)
+        # Load Obs Stats (SST, SSS, SM, IVT) from unified obs_stats.json
         import json
-        sm_stats_path = os.path.join(os.path.dirname(__file__), "sm_stats.json")
-        if os.path.exists(sm_stats_path):
-            with open(sm_stats_path, 'r') as f:
-                sm_stats = json.load(f)
-            self.sm_mean = float(sm_stats['sm_mean'])
-            self.sm_std = float(sm_stats['sm_std'])
-            print(f"Loaded SM Stats: Mean={self.sm_mean:.4f}, Std={self.sm_std:.4f}")
+        obs_stats_path = os.path.join(os.path.dirname(__file__), "obs_stats.json")
+        if os.path.exists(obs_stats_path):
+            with open(obs_stats_path, 'r') as f:
+                obs_stats = json.load(f)
+            self.sst_mean = float(obs_stats.get('sst_mean', 288.0))
+            self.sst_std  = float(obs_stats.get('sst_std',  10.0))
+            self.sss_mean = float(obs_stats.get('sss_mean', 34.0))
+            self.sss_std  = float(obs_stats.get('sss_std',   2.0))
+            self.sm_mean  = float(obs_stats.get('sm_mean',   0.2))
+            self.sm_std   = float(obs_stats.get('sm_std',    0.1))
+            self.ivt_mean = float(obs_stats.get('ivt_mean', 150.0))
+            self.ivt_std  = float(obs_stats.get('ivt_std',  120.0))
+            print(f"Loaded obs_stats.json: "
+                  f"SST({self.sst_mean:.1f}±{self.sst_std:.1f}K) "
+                  f"SSS({self.sss_mean:.1f}±{self.sss_std:.1f}psu) "
+                  f"SM({self.sm_mean:.3f}±{self.sm_std:.3f}) "
+                  f"IVT({self.ivt_mean:.1f}±{self.ivt_std:.1f}kg/m/s)")
         else:
-            self.sm_mean = None
-            self.sm_std = None
-
-        # Load IVT Stats (JSON)
-        ivt_stats_path = os.path.join(os.path.dirname(__file__), "ivt_stats.json")
-        if os.path.exists(ivt_stats_path):
-            with open(ivt_stats_path, 'r') as f:
-                ivt_stats = json.load(f)
-            self.ivt_mean = float(ivt_stats['ivt_mean'])
-            self.ivt_std = float(ivt_stats['ivt_std'])
-            print(f"Loaded IVT Stats: Mean={self.ivt_mean:.2f}, Std={self.ivt_std:.2f} kg/m/s")
-        else:
-            print("Warning: ivt_stats.json not found. Run ml_model/calculate_stats_ivt.py first. Using fallback /1000.")
-            self.ivt_mean = None
-            self.ivt_std = None
+            print("Warning: obs_stats.json not found. Run ml_model/calculate_stats_obs.py first. "
+                  "Using physics-based fallback normalization.")
+            # Physics-based fallbacks (reasonable but not data-driven)
+            self.sst_mean = 288.0;  self.sst_std  = 10.0
+            self.sss_mean = 34.0;   self.sss_std  = 2.0
+            self.sm_mean  = 0.2;    self.sm_std   = 0.1
+            self.ivt_mean = 150.0;  self.ivt_std  = 120.0
+            # Keep backward-compat attrs
+            self.sm_mean = self.sm_mean
+            self.sm_std  = self.sm_std
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -293,20 +298,20 @@ class S2SHybridDataset(Dataset):
         # Obs: [SST(4), SSS(4), SM(4), Prev(4), IVT(4)] -> 20 channels
         obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val, ivt_val], axis=0) 
         
-        # Normalize Obs
-        # SST (K) ~ 270-310 -> (val - 270) / 40
-        obs_stack[0:4] = (obs_stack[0:4] - 273.15) / 30.0 
-        # SSS (psu) ~ 30-40 -> (val - 30) / 10
-        obs_stack[4:8] = (obs_stack[4:8] - 30.0) / 10.0
-        # SM (m3/m3) ~ 0-0.5 -> val / 0.5
-        obs_stack[8:12] = obs_stack[8:12] / 0.5
-        # Prev GPCP (mm/day) ~ 0-20 -> val / 10
+        # Normalize Obs using z-score: (val - mean) / (std * 3)
+        # The *3 divisor keeps most values in [-1, 1] while allowing extremes to exceed it.
+        # GPCP (prev) keeps simple /10 scaling (same physical quantity as target).
+        eps = 1e-6
+        # SST (K)
+        obs_stack[0:4]   = (obs_stack[0:4]   - self.sst_mean)  / (self.sst_std  * 3.0 + eps)
+        # SSS (psu)
+        obs_stack[4:8]   = (obs_stack[4:8]   - self.sss_mean)  / (self.sss_std  * 3.0 + eps)
+        # Soil Moisture (m3/m3)
+        obs_stack[8:12]  = (obs_stack[8:12]  - self.sm_mean)   / (self.sm_std   * 3.0 + eps)
+        # GPCP prev (mm/day) — simple scale, not z-score
         obs_stack[12:16] = obs_stack[12:16] / 10.0
-        # IVT (kg/m/s) — z-score normalization using computed stats
-        if self.ivt_mean is not None:
-            obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean) / (self.ivt_std * 3.0 + 1e-6)
-        else:
-            obs_stack[16:20] = obs_stack[16:20] / 1000.0  # Fallback
+        # IVT (kg/m/s)
+        obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean)  / (self.ivt_std  * 3.0 + eps)
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
