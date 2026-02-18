@@ -308,31 +308,6 @@ class S2SHybridDataset(Dataset):
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
-        # Normalize Obs
-        if self.normalize:
-            if hasattr(self, 'obs_mean') and self.obs_mean is not None:
-                # Global Z-Score Normalization
-                # obs_mean is (16,) -> broadcast to (16, H, W)
-                om = self.obs_mean.view(16, 1, 1)
-                os_ = self.obs_std.view(16, 1, 1)
-                obs_tensor = (obs_tensor - om) / (os_ * 3.0)
-            else:
-                # Fallback Min-Max scaling
-                # SST (K) ~ 270-310 -> (val - 270) / 40
-                obs_tensor[0:4] = (obs_tensor[0:4] - 273.15) / 30.0 
-                # SSS (psu) ~ 30-40 -> (val - 30) / 10
-                obs_tensor[4:8] = (obs_tensor[4:8] - 30.0) / 10.0
-                # SM (m3/m3)
-                if hasattr(self, 'sm_mean') and self.sm_mean is not None:
-                     # Z-Score using computed stats
-                     obs_tensor[8:12] = (obs_tensor[8:12] - self.sm_mean) / (self.sm_std * 3.0)
-                else:
-                     # Fallback Min-Max scaling ~ 0-0.5 -> val / 0.5
-                     obs_tensor[8:12] = obs_tensor[8:12] / 0.5
-                
-                # Prev GPCP (mm/day) ~ 0-20 -> val / 10
-                obs_tensor[12:16] = obs_tensor[12:16] / 10.0
-        
         # 3. Load Target (GPCP)
         ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)
         target_val = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
