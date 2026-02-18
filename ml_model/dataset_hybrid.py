@@ -271,13 +271,20 @@ class S2SHybridDataset(Dataset):
         # Previous GPCP (4, H, W)
         prev_gpcp_val = self._load_prev_gpcp(meta)
         
-        # IVT (4, H, W)
+        # IVT (4, H, W)  — H=181(lat), W=360(lon)
         ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta.get("ivt_path"):
             ds_ivt = xr.open_zarr(meta["ivt_path"], consolidated=False)
             v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
-            if v.ndim == 3: ivt_val = v
-            elif v.ndim == 2: ivt_val[:] = v
+            if v.ndim == 3:
+                # Fix transposed axes: (4, 360, 181) -> (4, 181, 360)
+                if v.shape[1] == 360 and v.shape[2] == 181:
+                    v = np.transpose(v, (0, 2, 1))
+                ivt_val = v
+            elif v.ndim == 2:
+                if v.shape[0] == 360 and v.shape[1] == 181:
+                    v = v.T
+                ivt_val[:] = v
             ds_ivt.close()
 
         # Stack Obs along Channel dimension
