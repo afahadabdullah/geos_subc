@@ -527,6 +527,7 @@ def test():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="ml_model/config_unet.yaml", help="Path to config file")
     parser.add_argument("--test", action="store_true", help="Run in test mode")
+    parser.add_argument("--n_samples", type=int, default=12, help="Number of test samples")
     args = parser.parse_args()
 
     with open(args.config, "r") as f:
@@ -587,109 +588,218 @@ def test():
     model, val_loader = accelerator.prepare(model, val_loader)
     model.eval()
 
-    # Indices to test
-    test_indices = [0, 10, 20, 30, 40]
+    # Pick N evenly-spaced indices from validation set
+    n_val = len(val_dataset)
+    n_samples = min(args.n_samples, n_val)
+    test_indices = set(np.linspace(0, n_val - 1, n_samples, dtype=int).tolist())
+    
     output_dir = os.path.join(config["output_dir"], "plots_test_suite")
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Running Test Suite on indices {test_indices}...")
+    print(f"Running Test Suite: {n_samples} samples from {n_val} validation samples...")
+    print(f"Indices: {sorted(test_indices)}")
 
     import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
+    from scipy import stats as sp_stats
+    
+    # Accumulators for correlation plot
+    # Per lead: list of (pred_flat, target_flat) arrays
+    all_pred = {lead: [] for lead in range(4)}
+    all_target = {lead: [] for lead in range(4)}
+    all_geos = {lead: [] for lead in range(4)}
+    rmse_unet = {lead: [] for lead in range(4)}
+    rmse_geos = {lead: [] for lead in range(4)}
     
     current_idx = 0
     samples_processed = 0
     
     with torch.no_grad():
         for batch in val_loader:
-            if current_idx in test_indices:
-                print(f"Processing sample {current_idx}...")
+            if current_idx not in test_indices:
+                current_idx += 1
+                continue
                 
-                x_obs = batch['x_obs'].to(device)
-                x_geos = batch['x_geos'].to(device)
-                y_target = batch['y_target'].to(device).clamp(min=0.0)
-                t_months = batch['month'].to(device)
+            print(f"  [{samples_processed+1}/{n_samples}] Sample {current_idx}...")
+            
+            x_obs = batch['x_obs'].to(device)
+            x_geos = batch['x_geos'].to(device)
+            y_target = batch['y_target'].to(device).clamp(min=0.0)
+            t_months = batch['month'].to(device)
+            
+            B = x_obs.shape[0]
+            _, _, H, W = x_obs.shape
+            
+            # Reshape GEOS
+            x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
+            
+            # Month Embeddings
+            t_sin = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            t_cos = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            
+            x_input = torch.cat([x_obs, x_geos_flat, t_sin, t_cos], dim=1)
+            month_onehot = F.one_hot(t_months.long() - 1, num_classes=12).float().to(device)
+            
+            # Forward
+            unwrapped = accelerator.unwrap_model(model)
+            raw_out = unwrapped(x_input, month_onehot)
+            pred_p, pred_mu, pred_sigma = parameterize_ziln(raw_out)
+            pred_mean = ziln_expected_value(pred_p, pred_mu, pred_sigma)  # (1, 4, H, W)
+            
+            target_np = y_target.squeeze(0).cpu().numpy()    # (4, H, W)
+            pred_np = pred_mean.squeeze(0).cpu().numpy()      # (4, H, W)
+            
+            # GEOS denormalize (inverse log1p = expm1)
+            geos_ens = x_geos_flat.view(4, 4, H, W)
+            geos_mean_log = geos_ens.mean(dim=0)  # (4, H, W)
+            geos_np = torch.expm1(geos_mean_log.clamp(min=0.0)).cpu().numpy()
+            
+            # Accumulate for correlation
+            for lead in range(4):
+                t_flat = target_np[lead].flatten()
+                p_flat = pred_np[lead].flatten()
+                g_flat = geos_np[lead].flatten()
                 
-                B = x_obs.shape[0]
-                _, _, H, W = x_obs.shape
+                all_target[lead].append(t_flat)
+                all_pred[lead].append(p_flat)
+                all_geos[lead].append(g_flat)
                 
-                # Reshape GEOS
-                x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
+                rmse_unet[lead].append(np.sqrt(np.mean((p_flat - t_flat)**2)))
+                rmse_geos[lead].append(np.sqrt(np.mean((g_flat - t_flat)**2)))
+            
+            # --- Per-Sample Map Plot ---
+            lats = np.linspace(-90, 90, H)
+            lons = np.linspace(0, 360, W)
+            
+            fig = plt.figure(figsize=(25, 20))
+            for lead in range(4):
+                g_img = geos_np[lead]
+                t_img = target_np[lead]
+                d_img = pred_np[lead]
                 
-                # Month Embeddings
-                t_sin_month = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
-                t_cos_month = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
+                u_rmse = rmse_unet[lead][-1]
+                g_rmse = rmse_geos[lead][-1]
                 
-                x_input = torch.cat([x_obs, x_geos_flat, t_sin_month, t_cos_month], dim=1)
-                month_onehot = F.one_hot(t_months.long() - 1, num_classes=12).float().to(device)
-                
-                # Forward
-                unwrapped_model = accelerator.unwrap_model(model)
-                raw_output = unwrapped_model(x_input, month_onehot)
-                pred_p, pred_mu, pred_sigma = parameterize_ziln(raw_output)
-                pred_mean = ziln_expected_value(pred_p, pred_mu, pred_sigma)  # (1, 4, H, W)
-                
-                lats = np.linspace(-90, 90, H)
-                lons = np.linspace(0, 360, W)
-                
-                def plot_panel(fig, row, col, data, title, cmap, vmin, vmax):
-                    ax = fig.add_subplot(4, 5, row * 5 + col + 1, projection=ccrs.PlateCarree())
-                    im = ax.imshow(data, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()], 
+                for col, (data, title, cmap, vmin, vmax) in enumerate([
+                    (g_img,         f"W{lead+1}: GEOS Mean\nRMSE: {g_rmse:.2f}",   'Blues',  0, 50),
+                    (t_img,         f"W{lead+1}: Target GPCP",                       'Blues',  0, 50),
+                    (d_img,         f"W{lead+1}: UNet E[Rain]\nRMSE: {u_rmse:.2f}", 'Blues',  0, 50),
+                    (d_img - t_img, f"W{lead+1}: UNet Bias",                         'RdBu_r', -20, 20),
+                    (g_img - t_img, f"W{lead+1}: GEOS Bias",                         'RdBu_r', -20, 20),
+                ]):
+                    ax = fig.add_subplot(4, 5, lead * 5 + col + 1, projection=ccrs.PlateCarree())
+                    im = ax.imshow(data, origin='lower',
+                                   extent=[lons.min(), lons.max(), lats.min(), lats.max()],
                                    transform=ccrs.PlateCarree(), cmap=cmap, vmin=vmin, vmax=vmax)
                     ax.coastlines()
                     ax.set_title(title, fontsize=10)
-                    gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
-                    gl.top_labels = False
-                    gl.right_labels = False
-                    if col > 0: gl.left_labels = False
-                    if row < 3: gl.bottom_labels = False
-                    return im
+                    
+                    if lead == 0 and col == 0:
+                        cax = fig.add_axes([0.92, 0.55, 0.015, 0.30])
+                        fig.colorbar(im, cax=cax, label='mm/day')
+                    if lead == 0 and col == 3:
+                        cax = fig.add_axes([0.92, 0.12, 0.015, 0.30])
+                        fig.colorbar(im, cax=cax, label='mm/day')
 
-                fig = plt.figure(figsize=(25, 20))
-                
-                # Prepare data
-                target_all = y_target.squeeze(0)  # (4, H, W)
-                pred_all = pred_mean.squeeze(0)    # (4, H, W)
-                
-                # GEOS Mean Denormalized
-                geos_ens = x_geos_flat.view(4, 4, H, W)
-                geos_mean_norm = geos_ens.mean(dim=0)  # (4, H, W)
-                
-                # Denormalize GEOS Mean: inverse of log1p is expm1
-                geos_mean_all = torch.expm1(geos_mean_norm.clamp(min=0.0))
-
-                for lead_idx in range(4):
-                    g_img = geos_mean_all[lead_idx].cpu().numpy().squeeze()
-                    t_img = target_all[lead_idx].cpu().numpy().squeeze()
-                    d_img = pred_all[lead_idx].cpu().numpy().squeeze()
-                    
-                    diff_map = d_img - t_img
-                    geos_diff_map = g_img - t_img
-                    
-                    geos_rmse = np.sqrt(np.mean((g_img - t_img)**2))
-                    unet_rmse = np.sqrt(np.mean((d_img - t_img)**2))
-                    
-                    im0 = plot_panel(fig, lead_idx, 0, g_img, f"W{lead_idx+1}: GEOS Ens Mean\nRMSE: {geos_rmse:.2f}", 'Blues', 0, 50)
-                    im1 = plot_panel(fig, lead_idx, 1, t_img, f"W{lead_idx+1}: Target GPCP", 'Blues', 0, 50)
-                    im2 = plot_panel(fig, lead_idx, 2, d_img, f"W{lead_idx+1}: UNet E[Rain]\nRMSE: {unet_rmse:.2f}", 'Blues', 0, 50)
-                    im3 = plot_panel(fig, lead_idx, 3, diff_map, f"W{lead_idx+1}: UNet Bias", 'RdBu_r', -20, 20)
-                    im4 = plot_panel(fig, lead_idx, 4, geos_diff_map, f"W{lead_idx+1}: GEOS Bias", 'RdBu_r', -20, 20)
-                    
-                    if lead_idx == 0:
-                        cax1 = fig.add_axes([0.92, 0.6, 0.015, 0.25])
-                        fig.colorbar(im0, cax=cax1, label='mm/day')
-                        cax2 = fig.add_axes([0.92, 0.15, 0.015, 0.25])
-                        fig.colorbar(im3, cax=cax2, label='mm/day')
-
-                plt.suptitle(f"UNet ZILN - Sample {current_idx} (Val Set) - All Lead Weeks", fontsize=16)
-                plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}_all_leads.png"), bbox_inches='tight', dpi=150)
-                plt.close()
-                print(f"Saved multi-lead plot for sample {current_idx}.")
-                
-                samples_processed += 1
+            plt.suptitle(f"UNet ZILN — Sample {current_idx} (Val Set)", fontsize=16)
+            plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}.png"),
+                        bbox_inches='tight', dpi=150)
+            plt.close()
             
+            samples_processed += 1
             current_idx += 1
-                
+    
+    # ==========================================================================
+    # SUMMARY: Correlation Scatter Plot (All Samples Combined)
+    # ==========================================================================
+    print(f"\n{'='*60}")
+    print(f"Generating Correlation Plots ({samples_processed} samples)...")
+    
+    fig, axes = plt.subplots(2, 4, figsize=(24, 12))
+    
+    for lead in range(4):
+        t_all = np.concatenate(all_target[lead])
+        p_all = np.concatenate(all_pred[lead])
+        g_all = np.concatenate(all_geos[lead])
+        
+        # Mean RMSE across samples
+        mean_rmse_u = np.mean(rmse_unet[lead])
+        mean_rmse_g = np.mean(rmse_geos[lead])
+        
+        # Correlation (Pearson r)
+        r_unet, _ = sp_stats.pearsonr(t_all, p_all)
+        r_geos, _ = sp_stats.pearsonr(t_all, g_all)
+        
+        # --- Row 1: UNet vs Target ---
+        ax = axes[0, lead]
+        # Subsample for plotting clarity (max 50k points)
+        n_pts = len(t_all)
+        if n_pts > 50000:
+            idx = np.random.choice(n_pts, 50000, replace=False)
+            t_sub, p_sub = t_all[idx], p_all[idx]
+        else:
+            t_sub, p_sub = t_all, p_all
+            
+        ax.scatter(t_sub, p_sub, s=0.5, alpha=0.15, c='steelblue', rasterized=True)
+        ax.plot([0, 50], [0, 50], 'r--', lw=1.5, label='1:1')
+        ax.set_xlim(0, 50)
+        ax.set_ylim(0, 50)
+        ax.set_aspect('equal')
+        ax.set_title(f"Week {lead+1}: UNet\nr={r_unet:.3f}  RMSE={mean_rmse_u:.2f}", fontsize=12)
+        ax.set_xlabel("Target GPCP (mm/day)")
+        ax.set_ylabel("UNet E[Rain] (mm/day)")
+        ax.legend(loc='upper left', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        
+        # --- Row 2: GEOS vs Target ---
+        ax2 = axes[1, lead]
+        if n_pts > 50000:
+            g_sub = g_all[idx]
+        else:
+            g_sub = g_all
+            
+        ax2.scatter(t_sub, g_sub, s=0.5, alpha=0.15, c='darkorange', rasterized=True)
+        ax2.plot([0, 50], [0, 50], 'r--', lw=1.5, label='1:1')
+        ax2.set_xlim(0, 50)
+        ax2.set_ylim(0, 50)
+        ax2.set_aspect('equal')
+        ax2.set_title(f"Week {lead+1}: GEOS\nr={r_geos:.3f}  RMSE={mean_rmse_g:.2f}", fontsize=12)
+        ax2.set_xlabel("Target GPCP (mm/day)")
+        ax2.set_ylabel("GEOS Ens Mean (mm/day)")
+        ax2.legend(loc='upper left', fontsize=9)
+        ax2.grid(True, alpha=0.3)
+    
+    plt.suptitle(f"Correlation: UNet (top) vs GEOS (bottom) — {samples_processed} Samples", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    corr_path = os.path.join(output_dir, "correlation_all_samples.png")
+    plt.savefig(corr_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved correlation plot: {corr_path}")
+    
+    # ==========================================================================
+    # SUMMARY TABLE
+    # ==========================================================================
+    print(f"\n{'='*60}")
+    print(f"{'Lead':<8} {'UNet RMSE':<12} {'GEOS RMSE':<12} {'UNet r':<10} {'GEOS r':<10} {'Improvement':<12}")
+    print(f"{'-'*60}")
+    for lead in range(4):
+        t_all = np.concatenate(all_target[lead])
+        p_all = np.concatenate(all_pred[lead])
+        g_all = np.concatenate(all_geos[lead])
+        
+        mu = np.mean(rmse_unet[lead])
+        mg = np.mean(rmse_geos[lead])
+        ru, _ = sp_stats.pearsonr(t_all, p_all)
+        rg, _ = sp_stats.pearsonr(t_all, g_all)
+        imp = (mg - mu) / mg * 100
+        
+        print(f"Week {lead+1:<3} {mu:<12.3f} {mg:<12.3f} {ru:<10.3f} {rg:<10.3f} {imp:>+.1f}%")
+    
+    overall_u = np.mean([np.mean(rmse_unet[l]) for l in range(4)])
+    overall_g = np.mean([np.mean(rmse_geos[l]) for l in range(4)])
+    overall_imp = (overall_g - overall_u) / overall_g * 100
+    print(f"{'-'*60}")
+    print(f"{'Mean':<8} {overall_u:<12.3f} {overall_g:<12.3f} {'':10} {'':10} {overall_imp:>+.1f}%")
+    print(f"{'='*60}")
     print("Test Suite Completed.")
 
 
