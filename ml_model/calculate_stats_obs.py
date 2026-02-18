@@ -168,6 +168,26 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
         stats["ivt_mean"] = ivt_mean
         stats["ivt_std"] = ivt_std
 
+    # Z500 (m²/s² geopotential at 500hPa)  — typical range ~45000–58000 m²/s²
+    z500_mean, z500_std = process_variable(
+        "Z500", "z500_u250_weekly_{year}.zarr", ["z500", "z", "geopotential"],
+        data_root, start_year, end_year,
+        filter_fn=lambda x: (x > 30000) & (x < 70000)
+    )
+    if z500_mean is not None:
+        stats["z500_mean"] = z500_mean
+        stats["z500_std"] = z500_std
+
+    # U250 (m/s zonal wind at 250hPa)  — can be negative (easterly)
+    u250_mean, u250_std = process_variable(
+        "U250", "z500_u250_weekly_{year}.zarr", ["u250", "u", "u_component_of_wind"],
+        data_root, start_year, end_year,
+        filter_fn=lambda x: (x > -100) & (x < 150)
+    )
+    if u250_mean is not None:
+        stats["u250_mean"] = u250_mean
+        stats["u250_std"] = u250_std
+
     if not stats:
         print("\nNo stats computed — check that Zarr files exist in data_root.")
         return

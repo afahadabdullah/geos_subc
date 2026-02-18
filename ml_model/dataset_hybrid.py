@@ -66,36 +66,36 @@ class S2SHybridDataset(Dataset):
             else:
                  self.geos_mean = None
                  
-        # Load Obs Stats (SST, SSS, SM, IVT) from unified obs_stats.json
+        # Load Obs Stats (SST, SSS, SM, IVT, Z500, U250) from unified obs_stats.json
         import json
         obs_stats_path = os.path.join(os.path.dirname(__file__), "obs_stats.json")
         if os.path.exists(obs_stats_path):
             with open(obs_stats_path, 'r') as f:
                 obs_stats = json.load(f)
-            self.sst_mean = float(obs_stats.get('sst_mean', 288.0))
-            self.sst_std  = float(obs_stats.get('sst_std',  10.0))
-            self.sss_mean = float(obs_stats.get('sss_mean', 34.0))
-            self.sss_std  = float(obs_stats.get('sss_std',   2.0))
-            self.sm_mean  = float(obs_stats.get('sm_mean',   0.2))
-            self.sm_std   = float(obs_stats.get('sm_std',    0.1))
-            self.ivt_mean = float(obs_stats.get('ivt_mean', 150.0))
-            self.ivt_std  = float(obs_stats.get('ivt_std',  120.0))
+            self.sst_mean  = float(obs_stats.get('sst_mean',  288.0))
+            self.sst_std   = float(obs_stats.get('sst_std',    10.0))
+            self.sss_mean  = float(obs_stats.get('sss_mean',   34.0))
+            self.sss_std   = float(obs_stats.get('sss_std',     2.0))
+            self.sm_mean   = float(obs_stats.get('sm_mean',     0.2))
+            self.sm_std    = float(obs_stats.get('sm_std',      0.1))
+            self.ivt_mean  = float(obs_stats.get('ivt_mean',  150.0))
+            self.ivt_std   = float(obs_stats.get('ivt_std',   120.0))
+            self.z500_mean = float(obs_stats.get('z500_mean', 5500.0))
+            self.z500_std  = float(obs_stats.get('z500_std',   500.0))
+            self.u250_mean = float(obs_stats.get('u250_mean',   15.0))
+            self.u250_std  = float(obs_stats.get('u250_std',    15.0))
             print(f"Loaded obs_stats.json: "
-                  f"SST({self.sst_mean:.1f}±{self.sst_std:.1f}K) "
-                  f"SSS({self.sss_mean:.1f}±{self.sss_std:.1f}psu) "
-                  f"SM({self.sm_mean:.3f}±{self.sm_std:.3f}) "
-                  f"IVT({self.ivt_mean:.1f}±{self.ivt_std:.1f}kg/m/s)")
+                  f"SST({self.sst_mean:.1f}) SSS({self.sss_mean:.1f}) "
+                  f"SM({self.sm_mean:.3f}) IVT({self.ivt_mean:.1f}) "
+                  f"Z500({self.z500_mean:.0f}) U250({self.u250_mean:.1f})")
         else:
-            print("Warning: obs_stats.json not found. Run ml_model/calculate_stats_obs.py first. "
-                  "Using physics-based fallback normalization.")
-            # Physics-based fallbacks (reasonable but not data-driven)
-            self.sst_mean = 288.0;  self.sst_std  = 10.0
-            self.sss_mean = 34.0;   self.sss_std  = 2.0
-            self.sm_mean  = 0.2;    self.sm_std   = 0.1
-            self.ivt_mean = 150.0;  self.ivt_std  = 120.0
-            # Keep backward-compat attrs
-            self.sm_mean = self.sm_mean
-            self.sm_std  = self.sm_std
+            print("Warning: obs_stats.json not found. Using physics-based fallback normalization.")
+            self.sst_mean  = 288.0;  self.sst_std   = 10.0
+            self.sss_mean  = 34.0;   self.sss_std   = 2.0
+            self.sm_mean   = 0.2;    self.sm_std    = 0.1
+            self.ivt_mean  = 150.0;  self.ivt_std   = 120.0
+            self.z500_mean = 5500.0; self.z500_std  = 500.0
+            self.u250_mean = 15.0;   self.u250_std  = 15.0
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -112,6 +112,7 @@ class S2SHybridDataset(Dataset):
             sss_path = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
             sm_path = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
             ivt_path = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
+            z500u250_path = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
             
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
@@ -127,6 +128,7 @@ class S2SHybridDataset(Dataset):
                 has_sss = os.path.exists(sss_path)
                 has_sm = os.path.exists(sm_path)
                 has_ivt = os.path.exists(ivt_path)
+                has_z500u250 = os.path.exists(z500u250_path)
                 
                 n_samples = ds_geos.sizes['S']
                 init_dates = pd.to_datetime(ds_geos['S'].values)
@@ -143,7 +145,8 @@ class S2SHybridDataset(Dataset):
                         "sst_path": sst_path if has_sst else None,
                         "sss_path": sss_path if has_sss else None,
                         "sm_path": sm_path if has_sm else None,
-                        "ivt_path": ivt_path if has_ivt else None
+                        "ivt_path": ivt_path if has_ivt else None,
+                        "z500u250_path": z500u250_path if has_z500u250 else None
                     })
                 
                 ds_geos.close()
@@ -277,7 +280,6 @@ class S2SHybridDataset(Dataset):
             ds_ivt = xr.open_zarr(meta["ivt_path"], consolidated=False)
             v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
             if v.ndim == 3:
-                # Fix transposed axes: (4, 360, 181) -> (4, 181, 360)
                 if v.shape[1] == 360 and v.shape[2] == 181:
                     v = np.transpose(v, (0, 2, 1))
                 ivt_val = v
@@ -287,24 +289,58 @@ class S2SHybridDataset(Dataset):
                 ivt_val[:] = v
             ds_ivt.close()
 
+        # Z500 (4, H, W) & U250 (4, H, W)
+        z500_val = np.zeros((4, 181, 360), dtype=np.float32)
+        u250_val = np.zeros((4, 181, 360), dtype=np.float32)
+        if meta.get("z500u250_path"):
+            ds_zu = xr.open_zarr(meta["z500u250_path"], consolidated=False)
+            # Z500
+            z_var = next((c for c in ['z500', 'z', 'geopotential'] if c in ds_zu), None)
+            if z_var:
+                v = ds_zu[z_var].isel(S=meta['s_idx']).values
+                if v.ndim == 3:
+                    if v.shape[1] == 360 and v.shape[2] == 181:
+                        v = np.transpose(v, (0, 2, 1))
+                    z500_val = v
+                elif v.ndim == 2:
+                    if v.shape[0] == 360 and v.shape[1] == 181:
+                        v = v.T
+                    z500_val[:] = v
+            # U250
+            u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
+            if u_var:
+                v = ds_zu[u_var].isel(S=meta['s_idx']).values
+                if v.ndim == 3:
+                    if v.shape[1] == 360 and v.shape[2] == 181:
+                        v = np.transpose(v, (0, 2, 1))
+                    u250_val = v
+                elif v.ndim == 2:
+                    if v.shape[0] == 360 and v.shape[1] == 181:
+                        v = v.T
+                    u250_val[:] = v
+            ds_zu.close()
+
         # Stack Obs along Channel dimension
-        # Obs: [SST(4), SSS(4), SM(4), Prev(4), IVT(4)] -> 20 channels
-        obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val, ivt_val], axis=0) 
+        # Obs: [SST(4), SSS(4), SM(4), Prev(4), IVT(4), Z500(4), U250(4)] -> 28 channels
+        obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val,
+                                    ivt_val, z500_val, u250_val], axis=0) 
         
         # Normalize Obs using z-score: (val - mean) / (std * 3)
-        # The *3 divisor keeps most values in [-1, 1] while allowing extremes to exceed it.
-        # GPCP (prev) keeps simple /10 scaling (same physical quantity as target).
         eps = 1e-6
-        # SST (K)
-        obs_stack[0:4]   = (obs_stack[0:4]   - self.sst_mean)  / (self.sst_std  * 3.0 + eps)
-        # SSS (psu)
-        obs_stack[4:8]   = (obs_stack[4:8]   - self.sss_mean)  / (self.sss_std  * 3.0 + eps)
-        # Soil Moisture (m3/m3)
-        obs_stack[8:12]  = (obs_stack[8:12]  - self.sm_mean)   / (self.sm_std   * 3.0 + eps)
-        # GPCP prev (mm/day) — log1p to match GEOS log-space representation
+        # SST
+        obs_stack[0:4]   = (obs_stack[0:4]   - self.sst_mean)   / (self.sst_std   * 3.0 + eps)
+        # SSS
+        obs_stack[4:8]   = (obs_stack[4:8]   - self.sss_mean)   / (self.sss_std   * 3.0 + eps)
+        # Soil Moisture
+        obs_stack[8:12]  = (obs_stack[8:12]  - self.sm_mean)    / (self.sm_std    * 3.0 + eps)
+        # GPCP prev — log1p
         obs_stack[12:16] = np.log1p(np.maximum(obs_stack[12:16], 0.0))
-        # IVT (kg/m/s)
-        obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean)  / (self.ivt_std  * 3.0 + eps)
+        # IVT
+        obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean)   / (self.ivt_std   * 3.0 + eps)
+        # Z500 (m²/s² geopotential)
+        obs_stack[20:24] = (obs_stack[20:24] - self.z500_mean)  / (self.z500_std  * 3.0 + eps)
+        # U250 (m/s zonal wind)
+        obs_stack[24:28] = (obs_stack[24:28] - self.u250_mean)  / (self.u250_std  * 3.0 + eps)
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
