@@ -614,6 +614,8 @@ def test():
     spatial_target = {lead: [] for lead in range(4)}
     spatial_pred = {lead: [] for lead in range(4)}
     spatial_geos = {lead: [] for lead in range(4)}
+    crps_unet_acc = {lead: [] for lead in range(4)}
+    crps_geos_acc = {lead: [] for lead in range(4)}
     
     current_idx = 0
     samples_processed = 0
@@ -675,6 +677,51 @@ def test():
                 
                 rmse_unet[lead].append(np.sqrt(np.mean((p_2d - t_2d)**2)))
                 rmse_geos[lead].append(np.sqrt(np.mean((g_2d - t_2d)**2)))
+            
+            # --- CRPS computation ---
+            # UNet CRPS: pure ZILN CRPS (no focal/BCE) for evaluation
+            Phi_np = lambda x: 0.5 * (1 + np.vectorize(math.erf)(x / math.sqrt(2)))
+            p_param = pred_p.squeeze(0).cpu().numpy()      # (4, H, W)
+            mu_param = pred_mu.squeeze(0).cpu().numpy()
+            sigma_param = pred_sigma.squeeze(0).cpu().numpy()
+            
+            for lead in range(4):
+                y = target_np[lead].clip(min=0.0)
+                pp = p_param[lead]
+                mm = mu_param[lead]
+                ss = sigma_param[lead]
+                
+                y_safe = np.maximum(y, 1e-6)
+                z = (np.log(y_safe) - mm) / ss
+                E_LN = np.exp(mm + 0.5 * ss**2)
+                
+                # CRPS LN for wet obs
+                crps_ln_wet = y_safe * (2 * Phi_np(z) - 1) \
+                    - 2 * E_LN * (Phi_np(z - ss) + Phi_np(-ss / math.sqrt(2)) - 1)
+                # CRPS LN for dry obs
+                crps_ln_dry = 2 * E_LN * (1 - Phi_np(-ss / math.sqrt(2)))
+                
+                is_wet = (y > 1e-6).astype(np.float32)
+                crps_ln = is_wet * crps_ln_wet + (1 - is_wet) * crps_ln_dry
+                
+                ln_spread = 2 * E_LN * (2 * Phi_np(ss / math.sqrt(2)) - 1)
+                crps_pixel = (1 - pp)**2 * y + pp * crps_ln + pp * (1 - pp) * E_LN - 0.5 * pp**2 * ln_spread
+                crps_unet_acc[lead].append(float(np.mean(crps_pixel)))
+            
+            # GEOS Ensemble CRPS: CRPS = (1/M)Σ|x_m-y| - (1/2M²)ΣΣ|x_m-x_n|
+            # geos_ens: (4_members, 4_leads, H, W) — denormalize each member
+            geos_members = torch.expm1(geos_ens.clamp(min=0.0)).cpu().numpy()  # (4, 4, H, W)
+            for lead in range(4):
+                y = target_np[lead]
+                members = geos_members[:, lead, :, :]  # (4, H, W)
+                M = members.shape[0]
+                mae_term = np.mean([np.abs(members[m] - y) for m in range(M)], axis=0)
+                spread_term = 0.0
+                for m in range(M):
+                    for n in range(M):
+                        spread_term += np.abs(members[m] - members[n])
+                spread_term = spread_term / (2 * M * M)
+                crps_geos_acc[lead].append(float(np.mean(mae_term - spread_term)))
             
             # --- Per-Sample Map Plot ---
             lats = np.linspace(-90, 90, H)
@@ -788,9 +835,9 @@ def test():
     # ==========================================================================
     # SUMMARY TABLE
     # ==========================================================================
-    print(f"\n{'='*60}")
-    print(f"{'Lead':<8} {'UNet RMSE':<12} {'GEOS RMSE':<12} {'UNet r':<10} {'GEOS r':<10} {'Improvement':<12}")
-    print(f"{'-'*60}")
+    print(f"\n{'='*90}")
+    print(f"{'Lead':<8} {'UNet RMSE':<11} {'GEOS RMSE':<11} {'UNet r':<9} {'GEOS r':<9} {'UNet CRPS':<11} {'GEOS CRPS':<11} {'RMSE Imp':<10}")
+    print(f"{'-'*90}")
     for lead in range(4):
         t_all = np.concatenate(all_target[lead])
         p_all = np.concatenate(all_pred[lead])
@@ -800,16 +847,20 @@ def test():
         mg = np.mean(rmse_geos[lead])
         ru, _ = sp_stats.pearsonr(t_all, p_all)
         rg, _ = sp_stats.pearsonr(t_all, g_all)
+        cu = np.mean(crps_unet_acc[lead])
+        cg = np.mean(crps_geos_acc[lead])
         imp = (mg - mu) / mg * 100
         
-        print(f"Week {lead+1:<3} {mu:<12.3f} {mg:<12.3f} {ru:<10.3f} {rg:<10.3f} {imp:>+.1f}%")
+        print(f"Week {lead+1:<3} {mu:<11.3f} {mg:<11.3f} {ru:<9.3f} {rg:<9.3f} {cu:<11.3f} {cg:<11.3f} {imp:>+.1f}%")
     
     overall_u = np.mean([np.mean(rmse_unet[l]) for l in range(4)])
     overall_g = np.mean([np.mean(rmse_geos[l]) for l in range(4)])
+    overall_cu = np.mean([np.mean(crps_unet_acc[l]) for l in range(4)])
+    overall_cg = np.mean([np.mean(crps_geos_acc[l]) for l in range(4)])
     overall_imp = (overall_g - overall_u) / overall_g * 100
-    print(f"{'-'*60}")
-    print(f"{'Mean':<8} {overall_u:<12.3f} {overall_g:<12.3f} {'':10} {'':10} {overall_imp:>+.1f}%")
-    print(f"{'='*60}")
+    print(f"{'-'*90}")
+    print(f"{'Mean':<8} {overall_u:<11.3f} {overall_g:<11.3f} {'':9} {'':9} {overall_cu:<11.3f} {overall_cg:<11.3f} {overall_imp:>+.1f}%")
+    print(f"{'='*90}")
     
     # ==========================================================================
     # SPATIAL CORRELATION MAPS
