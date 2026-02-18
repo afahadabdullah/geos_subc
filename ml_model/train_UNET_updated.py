@@ -99,7 +99,13 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
                 + p*(1-p)*E_LN                              (cross-term)
                 - 0.5*p^2 * (correction for E|X-X'|)
     
-    We use a simplified but correct formulation:
+    We use a simplified but correct formulation.
+    
+    Improvements over base CRPS:
+      Fix 1 (BCE auxiliary): Trains p as a binary wet/dry classifier with 3x
+        penalty for false negatives (missing rain). Weight = 0.3.
+      Fix 2 (Focal weighting): Wet cells (>1 mm/day) get 5x CRPS weight to
+        force sharper wet/dry contrasts and prevent intensity smearing.
     
     Args:
         p:      (B, 4, H, W) - Rain probability [0, 1]
@@ -109,7 +115,7 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
         area_weights: (1, 1, H, 1) - cos(lat) weights
         
     Returns:
-        Scalar CRPS loss (lower is better).
+        Scalar combined loss: CRPS + 0.3 * BCE (lower is better).
     """
     # Numerical stability
     eps = 1e-6
@@ -119,9 +125,6 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     Phi = lambda x: 0.5 * (1 + torch.erf(x / math.sqrt(2)))
     
     # --- Log-Normal CRPS component ---
-    # For y > 0: z = (ln(y) - mu) / sigma
-    # For y = 0: we handle separately
-    
     y_safe = y.clamp(min=eps)  # Avoid log(0)
     z = (torch.log(y_safe) - mu) / sigma
     
@@ -129,33 +132,17 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     E_LN = torch.exp(mu + 0.5 * sigma**2)
     
     # CRPS of LogNormal(mu, sigma) for observation y:
-    # crps_ln = y * (2*Phi(z) - 1) - 2*E_LN * (Phi(z - sigma) + Phi(-sigma/sqrt(2)) - 1)
     crps_ln_wet = y_safe * (2 * Phi(z) - 1) \
                   - 2 * E_LN * (Phi(z - sigma) + Phi(-sigma / math.sqrt(2)) - 1)
     
-    # For y == 0 (dry observation), the pure log-normal CRPS simplifies:
-    # crps_ln_dry = 2*E_LN * Phi(-sigma/sqrt(2)) - E_LN (from sign changes)
-    # Actually: crps_ln(0) = -y*(2*Phi(z)-1) becomes 0, and we get:
-    # crps_ln(0) = 2*E_LN * (1 - Phi(-sigma/sqrt(2)) - (Phi(z-sigma) at y=0))
-    # But for y=0, z -> -inf, Phi(z) -> 0, Phi(z-sigma) -> 0
+    # For y == 0 (dry observation): z -> -inf, Phi(z) -> 0, Phi(z-sigma) -> 0
     crps_ln_dry = 2 * E_LN * (1 - Phi(-sigma / math.sqrt(2)))
-    # Simplification: crps_ln_dry = 2*E_LN * Phi(sigma/sqrt(2))
     
     is_wet = (y > eps).float()
     crps_ln = is_wet * crps_ln_wet + (1 - is_wet) * crps_ln_dry
     
     # --- Zero-Inflated CRPS ---
-    # Full ZILN CRPS decomposition:
-    # CRPS = (1-p)*|y| + p*crps_ln - p*(1-p)*E_LN + 0.5*p^2 * (...)
-    # 
-    # Following Scheuerer & Hamill (2015) style:
-    # CRPS_ZILN(y) = (1-p)^2 * y * is_wet        (penalty: predicted dry but was wet)
-    #              + p * crps_ln                   (log-normal CRPS contribution)
-    #              + p*(1-p) * E_LN               (cross-component variance penalty)
-    #              - 0.5 * p^2 * E_LN * (2*Phi(sigma/sqrt(2)) - 1)  (self-spread)
-    
-    # Spread of log-normal: E|X-X'| for LogNormal
-    # For two iid LogNormal(mu,sigma): E|X-X'| = 2*E_LN*(2*Phi(sigma/sqrt(2)) - 1)
+    # Spread of log-normal: E|X-X'| for two iid LogNormal(mu,sigma)
     ln_spread = 2 * E_LN * (2 * Phi(sigma / math.sqrt(2)) - 1)
     
     crps = (1 - p)**2 * y \
@@ -163,11 +150,32 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
          + p * (1 - p) * E_LN \
          - 0.5 * p**2 * ln_spread
     
+    # --- FIX 2: Focal-style upweighting of wet cells ---
+    # Cells with >1 mm/day get 5x weight to force sharper wet/dry contrasts.
+    # This counteracts the model's tendency to predict uniform low-intensity rain.
+    WET_THRESHOLD = 1.0  # mm/day
+    intensity_weight = 1.0 + 4.0 * (y > WET_THRESHOLD).float()  # 1x dry, 5x wet
+    crps = crps * intensity_weight
+    
     # Area weighting
     if area_weights is not None:
         crps = crps * area_weights
     
-    return crps.mean()
+    crps_loss = crps.mean()
+    
+    # --- FIX 1: BCE auxiliary loss for sharp wet/dry boundary ---
+    # Trains p directly as a binary classifier (wet/dry) with 3x penalty
+    # for false negatives (predicting dry when it's actually raining).
+    wet_label = (target > WET_THRESHOLD).float()
+    bce = F.binary_cross_entropy(p, wet_label, reduction='none')
+    # Asymmetric weighting: penalize missing rain (false negative) 3x more
+    bce = bce * (1.0 + 3.0 * wet_label)
+    if area_weights is not None:
+        bce = bce * area_weights
+    bce_loss = bce.mean()
+    
+    # Combined loss: CRPS (primary) + 0.3 * BCE (auxiliary)
+    return crps_loss + 0.3 * bce_loss
 
 
 def get_area_weights(lats, device):
