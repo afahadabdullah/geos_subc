@@ -87,21 +87,34 @@ def process_variable(name, zarr_pattern, var_candidates, data_root, start_year, 
             data = ds[var_name].values.flatten().astype(np.float64)
             ds.close()
 
+            # Remove NaNs
             data = data[~np.isnan(data)]
-            if filter_fn is not None:
-                data = data[filter_fn(data)]
             if len(data) == 0:
+                print(f"    Skipping {year}: all NaN")
                 continue
+                
+            # Debug Stats range
+            dmin, dmax = data.min(), data.max()
+            # print(f"    {year} range: {dmin:.2f} to {dmax:.2f}")
+
+            if filter_fn is not None:
+                # Filter outliers / fill values
+                mask = filter_fn(data)
+                n_kept = mask.sum()
+                if n_kept == 0:
+                    print(f"    Skipping {year} (Range {dmin:.1f} to {dmax:.1f}): all values filtered out!")
+                    continue
+                data = data[mask]
 
             acc.update(data)
-            print(f"    {year}: {len(data):,} values  running mean={acc.mean:.4f}")
+            print(f"    {year}: {len(data):,} values (Range {dmin:.1f}–{dmax:.1f}) val mean={data.mean():.2f}")
 
         except Exception as e:
             print(f"    Error {year}: {e}")
 
     mean, std = acc.result()
     if mean is None:
-        print(f"    WARNING: No data found for {name}!")
+        print(f"    WARNING: No valid data found for {name}!")
     else:
         print(f"    Final → mean={mean:.4f}  std={std:.4f}  N={acc.count:,}")
     return mean, std
@@ -114,11 +127,12 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
 
     stats = {}
 
-    # SST (K)  — ocean only, valid range ~270–310 K
+    # SST (K or C) — check valid ranges for both
+    # Kelvin: ~270-310 | Celsius: ~-2 to 35
     sst_mean, sst_std = process_variable(
         "SST", "sst_weekly_{year}.zarr", ["sst", "SST", "analysed_sst"],
         data_root, start_year, end_year,
-        filter_fn=lambda x: (x > 200) & (x < 320)   # remove fill values
+        filter_fn=lambda x: ((x > 150) & (x < 350)) | ((x > -5) & (x < 50))
     )
     if sst_mean is not None:
         stats["sst_mean"] = sst_mean
