@@ -610,6 +610,10 @@ def test():
     all_geos = {lead: [] for lead in range(4)}
     rmse_unet = {lead: [] for lead in range(4)}
     rmse_geos = {lead: [] for lead in range(4)}
+    # Spatial accumulators: list of 2D arrays (H, W) per lead per sample
+    spatial_target = {lead: [] for lead in range(4)}
+    spatial_pred = {lead: [] for lead in range(4)}
+    spatial_geos = {lead: [] for lead in range(4)}
     
     current_idx = 0
     samples_processed = 0
@@ -656,16 +660,21 @@ def test():
             
             # Accumulate for correlation
             for lead in range(4):
-                t_flat = target_np[lead].flatten()
-                p_flat = pred_np[lead].flatten()
-                g_flat = geos_np[lead].flatten()
+                t_2d = target_np[lead]  # (H, W)
+                p_2d = pred_np[lead]
+                g_2d = geos_np[lead]
                 
-                all_target[lead].append(t_flat)
-                all_pred[lead].append(p_flat)
-                all_geos[lead].append(g_flat)
+                all_target[lead].append(t_2d.flatten())
+                all_pred[lead].append(p_2d.flatten())
+                all_geos[lead].append(g_2d.flatten())
                 
-                rmse_unet[lead].append(np.sqrt(np.mean((p_flat - t_flat)**2)))
-                rmse_geos[lead].append(np.sqrt(np.mean((g_flat - t_flat)**2)))
+                # Spatial accumulators (keep 2D)
+                spatial_target[lead].append(t_2d.copy())
+                spatial_pred[lead].append(p_2d.copy())
+                spatial_geos[lead].append(g_2d.copy())
+                
+                rmse_unet[lead].append(np.sqrt(np.mean((p_2d - t_2d)**2)))
+                rmse_geos[lead].append(np.sqrt(np.mean((g_2d - t_2d)**2)))
             
             # --- Per-Sample Map Plot ---
             lats = np.linspace(-90, 90, H)
@@ -801,6 +810,80 @@ def test():
     print(f"{'-'*60}")
     print(f"{'Mean':<8} {overall_u:<12.3f} {overall_g:<12.3f} {'':10} {'':10} {overall_imp:>+.1f}%")
     print(f"{'='*60}")
+    
+    # ==========================================================================
+    # SPATIAL CORRELATION MAPS
+    # ==========================================================================
+    print(f"\nGenerating Spatial Correlation Maps...")
+    
+    lats_plot = np.linspace(-90, 90, spatial_target[0][0].shape[0])
+    lons_plot = np.linspace(0, 360, spatial_target[0][0].shape[1])
+    
+    fig, axes = plt.subplots(3, 4, figsize=(24, 15),
+                             subplot_kw={'projection': ccrs.PlateCarree()})
+    
+    for lead in range(4):
+        # Stack: (N_samples, H, W)
+        t_stack = np.stack(spatial_target[lead], axis=0)
+        p_stack = np.stack(spatial_pred[lead], axis=0)
+        g_stack = np.stack(spatial_geos[lead], axis=0)
+        
+        N = t_stack.shape[0]
+        H, W = t_stack.shape[1], t_stack.shape[2]
+        
+        # Per-pixel Pearson r across samples
+        # r = cov(x,y) / (std(x)*std(y))
+        def pixel_corr(a, b):
+            """Compute per-pixel correlation between (N,H,W) arrays."""
+            a_mean = a.mean(axis=0, keepdims=True)
+            b_mean = b.mean(axis=0, keepdims=True)
+            a_dev = a - a_mean
+            b_dev = b - b_mean
+            cov = (a_dev * b_dev).mean(axis=0)
+            std_a = a_dev.std(axis=0) + 1e-8
+            std_b = b_dev.std(axis=0) + 1e-8
+            return cov / (std_a * std_b)
+        
+        r_unet_map = pixel_corr(t_stack, p_stack)
+        r_geos_map = pixel_corr(t_stack, g_stack)
+        r_diff_map = r_unet_map - r_geos_map  # positive = UNet better
+        
+        # Row 0: UNet spatial r
+        ax0 = axes[0, lead]
+        im0 = ax0.imshow(r_unet_map, origin='lower',
+                         extent=[lons_plot.min(), lons_plot.max(), lats_plot.min(), lats_plot.max()],
+                         transform=ccrs.PlateCarree(), cmap='RdYlGn', vmin=-0.2, vmax=1.0)
+        ax0.coastlines(linewidth=0.5)
+        ax0.set_title(f"Week {lead+1}: UNet r\nmean={np.nanmean(r_unet_map):.3f}", fontsize=11)
+        
+        # Row 1: GEOS spatial r
+        ax1 = axes[1, lead]
+        im1 = ax1.imshow(r_geos_map, origin='lower',
+                         extent=[lons_plot.min(), lons_plot.max(), lats_plot.min(), lats_plot.max()],
+                         transform=ccrs.PlateCarree(), cmap='RdYlGn', vmin=-0.2, vmax=1.0)
+        ax1.coastlines(linewidth=0.5)
+        ax1.set_title(f"Week {lead+1}: GEOS r\nmean={np.nanmean(r_geos_map):.3f}", fontsize=11)
+        
+        # Row 2: UNet - GEOS (improvement)
+        ax2 = axes[2, lead]
+        im2 = ax2.imshow(r_diff_map, origin='lower',
+                         extent=[lons_plot.min(), lons_plot.max(), lats_plot.min(), lats_plot.max()],
+                         transform=ccrs.PlateCarree(), cmap='RdBu', vmin=-0.3, vmax=0.3)
+        ax2.coastlines(linewidth=0.5)
+        ax2.set_title(f"Week {lead+1}: UNet−GEOS\nmean={np.nanmean(r_diff_map):.3f}", fontsize=11)
+    
+    # Colorbars
+    cax1 = fig.add_axes([0.92, 0.40, 0.015, 0.48])
+    fig.colorbar(im0, cax=cax1, label='Pearson r')
+    cax2 = fig.add_axes([0.92, 0.08, 0.015, 0.25])
+    fig.colorbar(im2, cax=cax2, label='Δr (UNet−GEOS)')
+    
+    plt.suptitle(f"Spatial Correlation Maps — {samples_processed} Samples", fontsize=16)
+    spatial_path = os.path.join(output_dir, "spatial_correlation_maps.png")
+    plt.savefig(spatial_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved spatial correlation map: {spatial_path}")
+    
     print("Test Suite Completed.")
 
 
