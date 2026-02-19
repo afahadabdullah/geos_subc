@@ -150,8 +150,9 @@ def train():
     # Target: 4 lead weeks of precipitation
     # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO + 1 topo = 49
     CMDE_RATIO = 0.1  # Reduced noise on condition channels
-    N_SAMPLES_VAL = 5  # Ensemble members during validation
-    INFERENCE_STEPS = 1000  # Full 1000 steps for both val and test
+    N_SAMPLES_VAL = 3  # Ensemble members during validation
+    INFERENCE_STEPS_VAL = 50  # Faster for validation
+    INFERENCE_STEPS_TEST = 1000  # Full schedule for test
 
     model = ConditionalDiffusion(
         in_channels=4,           # 4 lead weeks (noisy target)
@@ -358,7 +359,7 @@ def train():
         with torch.no_grad():
             ensemble_samples = []
             for i_ens in range(N_SAMPLES_VAL):
-                sample_norm = unwrapped_model.sample(fb_cond, num_inference_steps=INFERENCE_STEPS)
+                sample_norm = unwrapped_model.sample(fb_cond, num_inference_steps=INFERENCE_STEPS_VAL)
 
                 # Denormalize
                 if train_dataset.geos_mean is not None:
