@@ -37,6 +37,7 @@ if str(root_dir) not in sys.path:
 
 from ml_model.dataset_hybrid import S2SHybridDataset
 from ml_model.model_unet import TemporalAttentionUNet
+from ml_model.model_discriminator import PatchGANDiscriminator, discriminator_loss, generator_adversarial_loss
 
 
 # ==============================================================================
@@ -291,11 +292,19 @@ def train():
         steps_per_epoch=len(loader), 
         epochs=config["epochs"]
     )
+    
+    # --- PatchGAN Discriminator ---
+    disc = PatchGANDiscriminator(in_channels=5, ndf=64)
+    disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
+    GAN_WARMUP_START = 3   # Epoch to start adversarial loss
+    GAN_WARMUP_END = 6     # Epoch where adversarial loss reaches full weight
+    GAN_WEIGHT = 0.01      # Max adversarial loss weight
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
         model, optimizer, loader, val_loader, lr_scheduler
     )
+    disc, disc_optimizer = accelerator.prepare(disc, disc_optimizer)
 
     # Area Weights for Loss
     lats = np.linspace(-90, 90, 181)
@@ -322,6 +331,9 @@ def train():
         checkpoint = torch.load(latest_ckpt, map_location='cpu')
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
+        if 'disc' in checkpoint:
+            disc.load_state_dict(checkpoint['disc'])
+            disc_optimizer.load_state_dict(checkpoint['disc_optimizer'])
         start_epoch = checkpoint['epoch'] + 1
         if 'top_k_ckpts' in checkpoint:
             top_k_ckpts = checkpoint['top_k_ckpts']
@@ -339,54 +351,82 @@ def train():
 
     for epoch in range(start_epoch, config["epochs"]):
         model.train()
+        disc.train()
         train_loss = 0.0
-        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
+        train_disc_loss = 0.0
+        
+        # GAN weight warmup: 0 for epochs < 3, ramps to GAN_WEIGHT by epoch 6
+        if epoch < GAN_WARMUP_START:
+            gan_w = 0.0
+        elif epoch < GAN_WARMUP_END:
+            gan_w = GAN_WEIGHT * (epoch - GAN_WARMUP_START) / (GAN_WARMUP_END - GAN_WARMUP_START)
+        else:
+            gan_w = GAN_WEIGHT
+        
+        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch} (GAN w={gan_w:.4f})")
 
         for batch in pbar:
-            # Data Info:
-            # x_obs: (B, 16, H, W) [Stacked Obs]
-            # x_geos: (B, 4, 1, 4, H, W) [Members, 1, Leads, H, W]
-            # y_target: (B, 4, H, W) [4 Leads] - RAW GPCP (mm/day)
-            
             x_obs = batch['x_obs']
             x_geos = batch['x_geos']
             y_target = batch['y_target']
-            months = batch['month']  # (B,)
+            months = batch['month']
             
             B, _, H, W = x_obs.shape
             
             # GEOS: (B, 4, 1, 4, H, W) -> (B, 16, H, W)
             x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
             
-            # Target: RAW GPCP (mm/day), clamp >= 0
             y_target = y_target.clamp(min=0.0)
             
-            # Month Embeddings (Seasonality)
+            # Month Embeddings
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             
-            # Model Input: (B, 34, H, W)
             x_input = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1)
-            
-            # Month one-hot for FiLM conditioning
             month_onehot = F.one_hot(months.long() - 1, num_classes=12).float().to(device)
             
-            # Forward
-            raw_output = model(x_input, month_onehot)  # (B, 12, H, W)
-            
-            # ZILN Parameterization
+            # --- Generator Forward ---
+            raw_output = model(x_input, month_onehot)
             p, mu, sigma = parameterize_ziln(raw_output)
+            pred_mean = ziln_expected_value(p, mu, sigma)  # (B, 4, H, W)
             
-            # CRPS Loss
-            loss = crps_ziln_loss(p, mu, sigma, y_target, area_weights=area_weights)
+            # GEOS condition for discriminator: ensemble mean (B, 4, H, W)
+            geos_cond = x_geos_flat.view(B, 4, 4, H, W).mean(dim=2)  # avg over members
             
-            accelerator.backward(loss)
-            optimizer.step()
-            lr_scheduler.step()
+            # --- Step D: Update Discriminator ---
+            if gan_w > 0:
+                disc_optimizer.zero_grad()
+                
+                with torch.no_grad():
+                    fake_precip = pred_mean.detach()
+                
+                disc_real_out = disc.forward_all_leads(y_target, geos_cond)
+                disc_fake_out = disc.forward_all_leads(fake_precip, geos_cond)
+                d_loss = discriminator_loss(disc_real_out, disc_fake_out)
+                
+                accelerator.backward(d_loss)
+                disc_optimizer.step()
+                train_disc_loss += d_loss.item()
+            
+            # --- Step G: Update Generator ---
             optimizer.zero_grad()
             
-            train_loss += loss.item()
-            pbar.set_postfix({"crps": f"{loss.item():.4f}"})
+            # Base losses (CRPS + BCE + bias + L1 + Sobel)
+            g_loss = crps_ziln_loss(p, mu, sigma, y_target, area_weights=area_weights)
+            
+            # Adversarial loss (fool discriminator)
+            if gan_w > 0:
+                disc_fake_out_g = disc.forward_all_leads(pred_mean, geos_cond)
+                g_adv_loss = generator_adversarial_loss(disc_fake_out_g)
+                g_loss = g_loss + gan_w * g_adv_loss
+            
+            accelerator.backward(g_loss)
+            optimizer.step()
+            lr_scheduler.step()
+            
+            train_loss += g_loss.item()
+            d_str = f"{train_disc_loss / max(1, pbar.n+1):.3f}" if gan_w > 0 else "off"
+            pbar.set_postfix({"g_loss": f"{g_loss.item():.4f}", "d_loss": d_str})
             
         avg_train_loss = train_loss / len(loader)
         
@@ -517,6 +557,8 @@ def train():
             ckpt_state = {
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'disc': disc.state_dict(),
+                'disc_optimizer': disc_optimizer.state_dict(),
                 'epoch': epoch,
                 'top_k_ckpts': top_k_ckpts
             }
