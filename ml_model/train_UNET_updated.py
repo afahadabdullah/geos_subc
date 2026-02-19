@@ -82,6 +82,19 @@ def ziln_expected_value(p, mu, sigma):
     return p * torch.exp(mu + 0.5 * sigma**2)
 
 
+def ziln_sample(p, mu, sigma):
+    """
+    Draw a reparameterized sample from the Zero-Inflated Log-Normal.
+    
+    Uses the reparameterization trick so gradients flow through p, mu, sigma.
+    Produces SHARP fields (unlike E[rain] which is inherently smooth).
+    Used as discriminator input for meaningful adversarial training.
+    """
+    z = torch.randn_like(mu)
+    rain_amount = torch.exp((mu + sigma * z).clamp(max=10.0))  # prevent overflow
+    return p * rain_amount  # soft zero-inflation (differentiable)
+
+
 def crps_ziln_loss(p, mu, sigma, target, lead_indices=None, area_weights=None):
     """
     Args:
@@ -188,8 +201,23 @@ def crps_ziln_loss(p, mu, sigma, target, lead_indices=None, area_weights=None):
     
     grad_loss = F.l1_loss(pred_grad, targ_grad)
     
-    # Combined: CRPS + 0.3*BCE + 0.2*bias + 0.5*L1 + 0.3*gradient
-    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 0.5 * l1_loss + 0.3 * grad_loss
+    # Combined: CRPS + 0.3*BCE + 0.2*bias + 0.5*L1 + 1.0*gradient (increased for sharpness)
+    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 0.5 * l1_loss + 1.0 * grad_loss
+
+
+def spatial_gradient_loss(pred, target):
+    """
+    L1 loss on spatial gradients to encourage edge/texture sharpness.
+    Operates on raw pixel differences (simpler than Sobel, complementary).
+    """
+    # Horizontal gradients
+    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+    # Vertical gradients
+    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+    
+    return F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
 
 
 def get_area_weights(lats, device):
@@ -288,8 +316,9 @@ def train():
     disc = PatchGANDiscriminator(in_channels=2, ndf=64)
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
-    GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight (slower ramp)
-    GAN_WEIGHT = 0.2       # Reduced from 0.5 for stability (with clipping)
+    GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight
+    GAN_WEIGHT = 1.0       # Increased: grad clipping prevents NaN
+    SHARP_WEIGHT = 5.0     # Weight for spatial gradient (sharpness) loss
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
@@ -399,35 +428,40 @@ def train():
                 disc_optimizer.zero_grad()
                 
                 with torch.no_grad():
-                    fake_precip = pred_mean.detach()
+                    # Use SAMPLE (sharp) instead of E[rain] (smooth)
+                    fake_sample_d = ziln_sample(p, mu, sigma).detach()
                 
                 # Discriminator sees (Precip, GEOS_Cond) pair
                 disc_real_out = disc(y_target_lead, geos_cond_lead)
-                disc_fake_out = disc(fake_precip, geos_cond_lead)
+                disc_fake_out = disc(fake_sample_d, geos_cond_lead)
                 
-                # LSGAN Loss (pass as lists)
-                # Use One-Sided Label Smoothing: target_real=0.9
+                # LSGAN Loss with label smoothing
                 d_loss = discriminator_loss([disc_real_out], [disc_fake_out], target_real=0.9, target_fake=0.0)
                 
                 accelerator.backward(d_loss)
-                accelerator.clip_grad_norm_(disc.parameters(), max_norm=1.0)  # Gradient Clipping for D
+                accelerator.clip_grad_norm_(disc.parameters(), max_norm=1.0)
                 disc_optimizer.step()
                 train_disc_loss += d_loss.item()
             
             # --- Step G: Update Generator ---
             optimizer.zero_grad()
             
-            # Base losses on SINGLE LEAD
+            # Base losses on SINGLE LEAD (includes CRPS + BCE + Sobel gradient)
             g_loss = crps_ziln_loss(p, mu, sigma, y_target_lead, lead_indices=lead_indices, area_weights=area_weights)
             
-            # Adversarial loss (fool discriminator)
+            # Spatial gradient sharpness loss on E[rain]
+            sharp_loss = spatial_gradient_loss(pred_mean, y_target_lead)
+            g_loss = g_loss + SHARP_WEIGHT * sharp_loss
+            
+            # Adversarial loss (fool discriminator with SAMPLE, not E[rain])
             if gan_w > 0:
-                disc_fake_out_g = disc(pred_mean, geos_cond_lead)
+                fake_sample_g = ziln_sample(p, mu, sigma)  # new sample, with gradients
+                disc_fake_out_g = disc(fake_sample_g, geos_cond_lead)
                 g_adv_loss = generator_adversarial_loss([disc_fake_out_g])
                 g_loss = g_loss + gan_w * g_adv_loss
             
             accelerator.backward(g_loss)
-            accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient Clipping for G
+            accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             lr_scheduler.step()
             
