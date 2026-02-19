@@ -336,11 +336,7 @@ def train():
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=2e-5, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3
     GAN_WARMUP_END = 20
-    GAN_WEIGHT = 0.0       # DISABLED: D collapses to d_loss=0.003, provides no signal
-    SHARP_WEIGHT = 20.0    # Spatial gradient sharpness loss
-    SPECTRAL_WEIGHT = 1.0  # FFT spectral loss (replaces GAN for sharpness)
-    D_TRAIN_RATIO = 5
-    D_NOISE_STD = 0.1
+    GAN_WEIGHT = 0.0       # DISABLED: D collapses, provides no gradient signal
     global_step = 0
 
     # Prepare
@@ -477,18 +473,10 @@ def train():
             # --- Step G: Update Generator ---
             optimizer.zero_grad()
             
-            # Base losses on SINGLE LEAD (includes CRPS + BCE + Sobel gradient)
+            # CRPS loss (includes internal Sobel gradient + BCE + bias + L1)
             g_loss = crps_ziln_loss(p, mu, sigma, y_target_lead, lead_indices=lead_indices, area_weights=area_weights)
             
-            # Spatial gradient sharpness loss on E[rain]
-            sharp_loss = spatial_gradient_loss(pred_mean, y_target_lead)
-            g_loss = g_loss + SHARP_WEIGHT * sharp_loss
-            
-            # Spectral (FFT) sharpness loss on E[rain] — matches frequency content
-            spec_loss = spectral_loss(pred_mean, y_target_lead)
-            g_loss = g_loss + SPECTRAL_WEIGHT * spec_loss
-            
-            # Adversarial loss (fool discriminator with SAMPLE, not E[rain])
+            # Adversarial loss (if enabled)
             if gan_w > 0:
                 fake_sample_g = ziln_sample(p, mu, sigma)  # new sample, with gradients
                 disc_fake_out_g = disc(fake_sample_g, geos_cond_lead)
@@ -627,13 +615,19 @@ def train():
                 
                 # Denormalize GEOS Mean: inverse of log1p is expm1
                 g_img_all = np.expm1(np.maximum(g_mean_norm.cpu().numpy(), 0.0))
+                
+                # ZILN Sample (sharp) for visualization 
+                with torch.no_grad():
+                    fb_sample = ziln_sample(fb_p, fb_mu, fb_sigma)  # (B, 4, H, W)
+                sample_img_all = fb_sample[0].cpu().numpy()  # (4, H, W)
 
-                fig, axes = plt.subplots(4, 5, figsize=(25, 20))
+                fig, axes = plt.subplots(4, 6, figsize=(30, 20))
                 
                 for l_idx in range(4):
                     g_img = g_img_all[l_idx]
                     t_img = t_img_all[l_idx]
                     s_img = s_img_all[l_idx]
+                    samp_img = np.clip(sample_img_all[l_idx], 0, None)
                     diff_img = s_img - t_img
                     geos_bias = g_img - t_img
                     
@@ -649,11 +643,14 @@ def train():
                     axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
                     axes[l_idx, 2].set_ylabel(f"Week {l_idx+1}\nRMSE: {rmse_l:.2f}")
                     
-                    if l_idx == 0: axes[l_idx, 3].set_title("UNet Bias")
-                    axes[l_idx, 3].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20)
+                    if l_idx == 0: axes[l_idx, 3].set_title("UNet Sample")
+                    axes[l_idx, 3].imshow(samp_img, cmap='Blues', vmin=0, vmax=50)
                     
-                    if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
-                    axes[l_idx, 4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                    if l_idx == 0: axes[l_idx, 4].set_title("UNet Bias")
+                    axes[l_idx, 4].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20)
+                    
+                    if l_idx == 0: axes[l_idx, 5].set_title("GEOS Bias")
+                    axes[l_idx, 5].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
 
                 os.makedirs(os.path.join(config["output_dir"], "plots_unet"), exist_ok=True)
                 plt.suptitle(f"UNet ZILN - Epoch {epoch} | RMSE: {val_rmse:.2f} | CRPS: {avg_val_crps:.4f}", fontsize=14)
