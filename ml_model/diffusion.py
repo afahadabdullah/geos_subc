@@ -1,16 +1,37 @@
+"""
+Conditional Diffusion Model for S2S Precipitation Forecasting.
+
+Uses diffusers.UNet2DModel as the backbone with DDPMScheduler.
+Condition (GEOS + Obs + MJO + Seasonality) is concatenated with the
+noisy target along the channel dimension. CMDE adds reduced noise
+to the condition to prevent trivial copying.
+
+Input:  noisy_target (B, 4, H, W) + condition (B, 48, H, W) = 52 channels
+Output: predicted noise ε (B, 4, H, W)
+"""
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers import UNet2DModel, DDPMScheduler
+from tqdm import tqdm
+
 
 class ConditionalDiffusion(nn.Module):
     """
     Conditional Diffusion Model using diffusers.UNet2DModel.
-    Condition (GEOS + Obs) is concatenated with the noisy target along the channel dimension.
+    
+    Condition (GEOS + Obs + Seasonality + MJO) is concatenated with the 
+    noisy target along the channel dimension.
+    
+    CMDE: During training, reduced noise (cmde_ratio * sqrt(1-α_t)) is 
+    added to the condition channels to prevent the model from trivially
+    copying the condition to the output.
     """
     def __init__(self, 
-                 in_channels=1, 
-                 condition_channels=7, 
-                 out_channels=1, 
+                 in_channels=4, 
+                 condition_channels=48, 
+                 out_channels=4, 
                  block_out_channels=(64, 128, 256, 512), 
                  layers_per_block=2,
                  num_train_timesteps=1000):
@@ -18,10 +39,11 @@ class ConditionalDiffusion(nn.Module):
         
         self.in_channels = in_channels
         self.condition_channels = condition_channels
+        self.out_channels = out_channels
         self.total_channels = in_channels + condition_channels
         
         self.model = UNet2DModel(
-            sample_size=None, # Flexible size
+            sample_size=None,  # Flexible spatial size
             in_channels=self.total_channels,
             out_channels=out_channels,
             layers_per_block=layers_per_block,
@@ -41,51 +63,44 @@ class ConditionalDiffusion(nn.Module):
         )
         
         # Noise Scheduler
-        self.noise_scheduler = DDPMScheduler(num_train_timesteps=num_train_timesteps, clip_sample=False)
+        self.noise_scheduler = DDPMScheduler(
+            num_train_timesteps=num_train_timesteps, 
+            clip_sample=False
+        )
+        
+    def _pad_to_multiple(self, x, multiple=8):
+        """Pad spatial dims to next multiple of 8 (needed for 3 downsamples)."""
+        H, W = x.shape[2], x.shape[3]
+        target_H = ((H + multiple - 1) // multiple) * multiple
+        target_W = ((W + multiple - 1) // multiple) * multiple
+        pad_h = target_H - H
+        pad_w = target_W - W
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='replicate')
+        return x, H, W  # Return original dims for cropping
         
     def forward(self, x, condition, timesteps):
         """
         Predict noise for diffusion step t.
         Args:
-            x: Noisy input (B, C_in, H, W)
-            condition: Conditioning data (B, C_cond, H, W)
-            timesteps: Time step indices (B,)
+            x: Noisy target (B, in_channels, H, W)
+            condition: Conditioning data (B, condition_channels, H, W)
+            timesteps: Timestep indices (B,)
         Returns:
-            noise_pred: Predicted noise (B, C_out, H, W)
+            noise_pred: Predicted noise (B, out_channels, H, W)
         """
-        # Handle odd dimensions by padding to multiple of 8 (3 downsamples)
-        # Input is (181, 360). 181 is not divisible by 8.
-        # Pad H to 184 (181 + 3). W (360) is fine.
-        
-        H, W = x.shape[2], x.shape[3]
-        target_H = ((H // 8) + 1) * 8 if H % 8 != 0 else H
-        target_W = ((W // 8) + 1) * 8 if W % 8 != 0 else W
-        
-        pad_h = target_H - H
-        pad_w = target_W - W
-        
-        # Pad (left, right, top, bottom)
-        # We pad bottom and right
-        padding = (0, pad_w, 0, pad_h) # (W_left, W_right, H_top, H_bottom)
-        
-        if pad_h > 0 or pad_w > 0:
-            x_padded = torch.nn.functional.pad(x, padding, mode='replicate')
-            cond_padded = torch.nn.functional.pad(condition, padding, mode='replicate')
-        else:
-            x_padded = x
-            cond_padded = condition
+        # Pad to multiple of 8 (181 -> 184)
+        x_padded, orig_H, orig_W = self._pad_to_multiple(x)
+        cond_padded, _, _ = self._pad_to_multiple(condition)
             
         # Concatenate condition
-        # (B, C_in + C_cond, H, W)
         model_input = torch.cat([x_padded, cond_padded], dim=1)
         
         # Forward pass
-        # sample is noise prediction (or v-prediction depending on config)
         out = self.model(model_input, timesteps).sample
         
-        # Crop back
-        if pad_h > 0 or pad_w > 0:
-            out = out[..., :H, :W]
+        # Crop back to original size
+        out = out[..., :orig_H, :orig_W]
             
         return out
 
@@ -94,33 +109,21 @@ class ConditionalDiffusion(nn.Module):
         """
         Generate samples from noise conditioned on input.
         Args:
-            condition: (B, C_cond, H, W)
-            num_inference_steps: Number of steps for sampling
+            condition: (B, condition_channels, H, W)
+            num_inference_steps: Number of denoising steps
             verbose: If True, show progress bar
         Returns:
-            samples: (B, C_out, H, W)
+            samples: (B, out_channels, H, W)
         """
-        from tqdm import tqdm
         batch_size = condition.shape[0]
         device = condition.device
         H, W = condition.shape[2], condition.shape[3]
         
-        # Padding
-        target_H = ((H // 8) + 1) * 8 if H % 8 != 0 else H
-        target_W = ((W // 8) + 1) * 8 if W % 8 != 0 else W
+        # Pad condition
+        cond_padded, orig_H, orig_W = self._pad_to_multiple(condition)
+        final_H, final_W = cond_padded.shape[2], cond_padded.shape[3]
         
-        pad_h = target_H - H
-        pad_w = target_W - W
-        padding = (0, pad_w, 0, pad_h)
-        
-        if pad_h > 0 or pad_w > 0:
-            cond_padded = torch.nn.functional.pad(condition, padding, mode='replicate')
-            final_H, final_W = target_H, target_W
-        else:
-            cond_padded = condition
-            final_H, final_W = H, W
-        
-        # Initial noise matches PADDED size
+        # Initial noise in padded space
         latents = torch.randn(
             (batch_size, self.in_channels, final_H, final_W),
             device=device,
@@ -131,25 +134,17 @@ class ConditionalDiffusion(nn.Module):
         
         timesteps = self.noise_scheduler.timesteps
         if verbose:
-            timesteps = tqdm(timesteps, desc="Sampling Steps", leave=False)
+            timesteps = tqdm(timesteps, desc="Sampling", leave=False)
             
         for t in timesteps:
-            # Predict noise (using padded inputs)
-            # We need to manually concatenate here or call a modified forward?
-            # Calling self.forward would pad AGAIN if we passed unpadded tensors.
-            # But here we are working in PADDED space.
-            # So we should call model directly or handle concatenation manually here.
-            
-            # Since latents and cond_padded are ALREADY padded, we just concat and run model.
-            
+            # Concatenate and predict noise (padded space)
             model_input = torch.cat([latents, cond_padded], dim=1)
             noise_pred = self.model(model_input, t).sample
             
-            # Step
+            # DDPM step
             latents = self.noise_scheduler.step(noise_pred, t.item(), latents).prev_sample
             
-        # Crop at the end
-        if pad_h > 0 or pad_w > 0:
-            latents = latents[..., :H, :W]
+        # Crop to original size
+        latents = latents[..., :orig_H, :orig_W]
             
         return latents
