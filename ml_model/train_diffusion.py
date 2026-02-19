@@ -98,8 +98,7 @@ def train():
     # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO = 48
     CMDE_RATIO = 0.1  # Reduced noise on condition channels
     N_SAMPLES_VAL = 5  # Ensemble members during validation
-    INFERENCE_STEPS_VAL = 50
-    INFERENCE_STEPS_TEST = 100
+    INFERENCE_STEPS = 1000  # Full 1000 steps for both val and test
 
     model = ConditionalDiffusion(
         in_channels=4,           # 4 lead weeks (noisy target)
@@ -301,7 +300,7 @@ def train():
         with torch.no_grad():
             ensemble_samples = []
             for i_ens in range(N_SAMPLES_VAL):
-                sample_norm = unwrapped_model.sample(fb_cond, num_inference_steps=INFERENCE_STEPS_VAL)
+                sample_norm = unwrapped_model.sample(fb_cond, num_inference_steps=INFERENCE_STEPS)
 
                 # Denormalize
                 if train_dataset.geos_mean is not None:
@@ -344,8 +343,8 @@ def train():
                 t_img_all = fb_target_mm[0].cpu().numpy()         # (4, H, W) mm/day
                 ens_mean_img = ens_mean[0].cpu().numpy()          # (4, H, W)
 
-                # Individual samples for this batch item
-                sample_imgs = [ens_stack[i, 0].cpu().numpy() for i in range(N_SAMPLES_VAL)]  # list of (4, H, W)
+                # One individual sample for display
+                sample_img = ens_stack[0, 0].cpu().numpy()  # (4, H, W)
 
                 # GEOS Mean (denormalize)
                 g_flat = fb_geos_flat[0]  # (16, H, W)
@@ -353,40 +352,40 @@ def train():
                 g_mean_log = g_ens.mean(dim=0)    # (4, H, W)
                 g_img_all = np.expm1(np.maximum(g_mean_log.cpu().numpy(), 0.0))
 
-                # Plot: 4 rows (leads) x 8 cols (GEOS | Target | Sample1-5 | EnsMean | Bias)
-                n_cols = 3 + N_SAMPLES_VAL + 2  # GEOS, Target, N samples, EnsMean, Bias = 10
-                fig, axes = plt.subplots(4, n_cols, figsize=(4 * n_cols, 16))
+                # Plot: 4 rows (leads) x 6 cols: Target | GEOS | Sample | EnsMean | GEOS Bias | Diff Bias
+                fig, axes = plt.subplots(4, 6, figsize=(30, 16))
 
                 for l_idx in range(4):
-                    col = 0
-                    # GEOS Mean
-                    if l_idx == 0: axes[l_idx, col].set_title("GEOS Mean")
-                    axes[l_idx, col].imshow(g_img_all[l_idx], cmap='Blues', vmin=0, vmax=50)
-                    axes[l_idx, col].set_ylabel(f"Week {l_idx+1}")
+                    t_img = t_img_all[l_idx]
+                    g_img = g_img_all[l_idx]
+                    s_img = np.clip(sample_img[l_idx], 0, None)
+                    m_img = ens_mean_img[l_idx]
+                    geos_bias = g_img - t_img
+                    diff_bias = m_img - t_img
+                    
+                    g_rmse = np.sqrt(np.mean(geos_bias**2))
+                    d_rmse = np.sqrt(np.mean(diff_bias**2))
 
-                    col = 1
-                    # Target
-                    if l_idx == 0: axes[l_idx, col].set_title("Target GPCP")
-                    axes[l_idx, col].imshow(t_img_all[l_idx], cmap='Blues', vmin=0, vmax=50)
+                    if l_idx == 0: axes[l_idx, 0].set_title("Target GPCP")
+                    axes[l_idx, 0].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
+                    axes[l_idx, 0].set_ylabel(f"Week {l_idx+1}")
 
-                    # Individual samples
-                    for s_idx in range(N_SAMPLES_VAL):
-                        col = 2 + s_idx
-                        if l_idx == 0: axes[l_idx, col].set_title(f"Sample {s_idx+1}")
-                        axes[l_idx, col].imshow(np.clip(sample_imgs[s_idx][l_idx], 0, None), cmap='Blues', vmin=0, vmax=50)
+                    if l_idx == 0: axes[l_idx, 1].set_title("GEOS Mean")
+                    axes[l_idx, 1].imshow(g_img, cmap='Blues', vmin=0, vmax=50)
 
-                    # Ensemble Mean
-                    col = 2 + N_SAMPLES_VAL
-                    rmse_l = np.sqrt(np.mean((ens_mean_img[l_idx] - t_img_all[l_idx])**2))
-                    if l_idx == 0: axes[l_idx, col].set_title("Ens Mean")
-                    axes[l_idx, col].imshow(ens_mean_img[l_idx], cmap='Blues', vmin=0, vmax=50)
-                    axes[l_idx, col].set_ylabel(f"RMSE: {rmse_l:.2f}")
+                    if l_idx == 0: axes[l_idx, 2].set_title("Diff Sample")
+                    axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
 
-                    # Bias
-                    col = 3 + N_SAMPLES_VAL
-                    diff_img = ens_mean_img[l_idx] - t_img_all[l_idx]
-                    if l_idx == 0: axes[l_idx, col].set_title("Bias")
-                    axes[l_idx, col].imshow(diff_img, cmap='RdBu_r', vmin=-20, vmax=20)
+                    if l_idx == 0: axes[l_idx, 3].set_title("Ens Mean")
+                    axes[l_idx, 3].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
+
+                    if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
+                    axes[l_idx, 4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                    axes[l_idx, 4].set_ylabel(f"RMSE: {g_rmse:.2f}")
+
+                    if l_idx == 0: axes[l_idx, 5].set_title("Diff Bias")
+                    axes[l_idx, 5].imshow(diff_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                    axes[l_idx, 5].set_ylabel(f"RMSE: {d_rmse:.2f}")
 
                 os.makedirs(os.path.join(config["output_dir"], "plots_diffusion"), exist_ok=True)
                 plt.suptitle(f"Diffusion - Epoch {epoch} | RMSE: {val_rmse:.2f} | Noise Loss: {avg_val_loss:.4f}", fontsize=14)
@@ -498,7 +497,7 @@ def test():
     os.makedirs(output_dir, exist_ok=True)
 
     N_MEMBERS_TEST = 5
-    INFERENCE_STEPS_TEST = 100
+    INFERENCE_STEPS_TEST = 1000
 
     print(f"Test Suite: indices {test_indices}, {N_MEMBERS_TEST} members, {INFERENCE_STEPS_TEST} steps")
 
@@ -560,7 +559,6 @@ def test():
             target_mm = torch.expm1(y_target.clamp(min=0.0))
             target_np = target_mm.squeeze(0).cpu().numpy()    # (4, H, W)
             ens_mean_np = ens_mean.squeeze(0).cpu().numpy()   # (4, H, W)
-            sample_np_list = [ens_all[i, 0].cpu().numpy() for i in range(N_MEMBERS_TEST)]  # list of (4, H, W)
 
             # GEOS Mean (denormalize)
             geos_ens = x_geos_flat.view(4, 4, H, W)
@@ -572,63 +570,67 @@ def test():
                 rmse_diff[lead].append(np.sqrt(np.mean((ens_mean_np[lead] - target_np[lead])**2)))
                 rmse_geos[lead].append(np.sqrt(np.mean((geos_np[lead] - target_np[lead])**2)))
 
-            # --- Per-Sample Plot ---
+            # --- Per-Sample Plot: 6 cols with cartopy ---
             lats = np.linspace(-90, 90, H)
             lons = np.linspace(0, 360, W)
 
-            n_cols = 3 + N_MEMBERS_TEST + 2  # GEOS, Target, N samples, EnsMean, Bias
-            fig = plt.figure(figsize=(4 * n_cols, 16))
+            # One sample for display
+            sample_np = ens_all[0, 0].cpu().numpy()  # (4, H, W)
+
+            fig = plt.figure(figsize=(30, 16))
 
             for lead in range(4):
                 g_img = geos_np[lead]
                 t_img = target_np[lead]
+                s_img = np.clip(sample_np[lead], 0, None)
                 m_img = ens_mean_np[lead]
+                geos_bias = g_img - t_img
+                diff_bias = m_img - t_img
 
-                u_rmse = rmse_diff[lead][-1]
-                g_rmse = rmse_geos[lead][-1]
+                g_rmse = np.sqrt(np.mean(geos_bias**2))
+                d_rmse = np.sqrt(np.mean(diff_bias**2))
 
-                col = 0
-                # GEOS
-                ax = fig.add_subplot(4, n_cols, lead * n_cols + col + 1, projection=ccrs.PlateCarree())
-                ax.imshow(g_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
-                          transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
-                ax.coastlines()
-                ax.set_title(f"W{lead+1}: GEOS\nRMSE: {g_rmse:.2f}", fontsize=9)
-
-                col = 1
                 # Target
-                ax = fig.add_subplot(4, n_cols, lead * n_cols + col + 1, projection=ccrs.PlateCarree())
+                ax = fig.add_subplot(4, 6, lead * 6 + 1, projection=ccrs.PlateCarree())
                 ax.imshow(t_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
                           transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
                 ax.coastlines()
                 ax.set_title(f"W{lead+1}: Target", fontsize=9)
 
-                # Individual samples
-                for s_idx in range(N_MEMBERS_TEST):
-                    col = 2 + s_idx
-                    s_img = np.clip(sample_np_list[s_idx][lead], 0, None)
-                    ax = fig.add_subplot(4, n_cols, lead * n_cols + col + 1, projection=ccrs.PlateCarree())
-                    ax.imshow(s_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
-                              transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
-                    ax.coastlines()
-                    ax.set_title(f"W{lead+1}: S{s_idx+1}", fontsize=9)
+                # GEOS
+                ax = fig.add_subplot(4, 6, lead * 6 + 2, projection=ccrs.PlateCarree())
+                ax.imshow(g_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+                          transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
+                ax.coastlines()
+                ax.set_title(f"W{lead+1}: GEOS", fontsize=9)
 
-                # Ensemble Mean
-                col = 2 + N_MEMBERS_TEST
-                ax = fig.add_subplot(4, n_cols, lead * n_cols + col + 1, projection=ccrs.PlateCarree())
+                # Diff Sample
+                ax = fig.add_subplot(4, 6, lead * 6 + 3, projection=ccrs.PlateCarree())
+                ax.imshow(s_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+                          transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
+                ax.coastlines()
+                ax.set_title(f"W{lead+1}: Diff Sample", fontsize=9)
+
+                # Ens Mean
+                ax = fig.add_subplot(4, 6, lead * 6 + 4, projection=ccrs.PlateCarree())
                 ax.imshow(m_img, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
                           transform=ccrs.PlateCarree(), cmap='Blues', vmin=0, vmax=50)
                 ax.coastlines()
-                ax.set_title(f"W{lead+1}: Mean\nRMSE: {u_rmse:.2f}", fontsize=9)
+                ax.set_title(f"W{lead+1}: Ens Mean", fontsize=9)
 
-                # Bias
-                col = 3 + N_MEMBERS_TEST
-                diff_map = m_img - t_img
-                ax = fig.add_subplot(4, n_cols, lead * n_cols + col + 1, projection=ccrs.PlateCarree())
-                ax.imshow(diff_map, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+                # GEOS Bias
+                ax = fig.add_subplot(4, 6, lead * 6 + 5, projection=ccrs.PlateCarree())
+                ax.imshow(geos_bias, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
                           transform=ccrs.PlateCarree(), cmap='RdBu_r', vmin=-20, vmax=20)
                 ax.coastlines()
-                ax.set_title(f"W{lead+1}: Bias", fontsize=9)
+                ax.set_title(f"W{lead+1}: GEOS Bias\nRMSE: {g_rmse:.2f}", fontsize=9)
+
+                # Diff Bias
+                ax = fig.add_subplot(4, 6, lead * 6 + 6, projection=ccrs.PlateCarree())
+                ax.imshow(diff_bias, origin='lower', extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+                          transform=ccrs.PlateCarree(), cmap='RdBu_r', vmin=-20, vmax=20)
+                ax.coastlines()
+                ax.set_title(f"W{lead+1}: Diff Bias\nRMSE: {d_rmse:.2f}", fontsize=9)
 
             plt.suptitle(f"Diffusion Test — Sample {current_idx}", fontsize=14)
             plt.savefig(os.path.join(output_dir, f"test_sample_{current_idx}.png"),
