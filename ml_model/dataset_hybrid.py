@@ -32,6 +32,17 @@ class S2SHybridDataset(Dataset):
         if self.normalize:
             self.load_stats()
         
+        # Load MJO Index
+        mjo_path = os.path.join(data_root, "mjo_processed.csv")
+        if os.path.exists(mjo_path):
+            print(f"Loading MJO features from {mjo_path}...")
+            self.df_mjo = pd.read_csv(mjo_path)
+            self.df_mjo['S'] = pd.to_datetime(self.df_mjo['S'])
+            self.df_mjo = self.df_mjo.set_index('S')
+        else:
+            print(f"Warning: MJO file not found at {mjo_path}. MJO features will be zeros.")
+            self.df_mjo = None
+        
         # Index samples
         self.prepare_samples()
         
@@ -371,9 +382,19 @@ class S2SHybridDataset(Dataset):
         geos_tensor = torch.clamp(geos_tensor, min=-20.0, max=20.0)
         obs_tensor = torch.clamp(obs_tensor, min=-20.0, max=20.0)
         
+        # MJO Conditioning
+        s_date = meta['date']
+        if self.df_mjo is not None and s_date in self.df_mjo.index:
+            mjo_row = self.df_mjo.loc[s_date]
+            rmm_vals = np.array([mjo_row['RMM1_lagged'], mjo_row['RMM2_lagged']], dtype=np.float32)
+            rmm_vals = np.nan_to_num(rmm_vals, nan=0.0)
+        else:
+            rmm_vals = np.zeros(2, dtype=np.float32)
+        
         return {
             "x_geos": geos_tensor, # (M, L, H, W)
-            "x_obs": obs_tensor,   # (16, H, W)
+            "x_obs": obs_tensor,   # (28, H, W)
             "y_target": target_tensor, # (L, H, W)
-            "month": meta['date'].month # Int 1-12
+            "month": meta['date'].month, # Int 1-12
+            "mjo": torch.tensor(rmm_vals, dtype=torch.float32), # (2,) RMM1, RMM2
         }

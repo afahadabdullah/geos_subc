@@ -290,7 +290,7 @@ def train():
     # Input:  46 channels (28 Obs + 16 GEOS flat + 2 Month sin/cos)
     #   Obs: SST(4)+SSS(4)+SM(4)+PrevGPCP(4)+IVT(4)+Z500(4)+U250(4) = 28
     # Output: 3 channels (p, mu, sigma) for ONE lead week (conditioned on lead_idx)
-    in_channels = 46
+    in_channels = 48  # 28 Obs + 16 GEOS + 2 Seasonality + 2 MJO (RMM1, RMM2)
     out_channels = 3   # 3 params * 1 lead
 
     model = TemporalAttentionUNet(
@@ -402,7 +402,11 @@ def train():
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             
-            x_input = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1)
+            # MJO: broadcast (B, 2) -> (B, 2, H, W)
+            mjo = batch['mjo']  # (B, 2)
+            mjo_map = mjo.view(B, 2, 1, 1).expand(B, 2, H, W).to(device)
+            
+            x_input = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map], dim=1)
             month_onehot = F.one_hot(months.long() - 1, num_classes=12).float().to(device)
             
             # --- SINGLE LEAD TRAINING ---
@@ -492,8 +496,12 @@ def train():
                 v_sin_month = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_cos_month = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 
+                # MJO: broadcast (B, 2) -> (B, 2, H, W)
+                v_mjo = val_batch['mjo']
+                v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
+                
                 # Model Input
-                v_input = torch.cat([vx_obs, vx_geos_flat, v_sin_month, v_cos_month], dim=1)
+                v_input = torch.cat([vx_obs, vx_geos_flat, v_sin_month, v_cos_month, v_mjo_map], dim=1)
                 v_month_onehot = F.one_hot(v_months.long() - 1, num_classes=12).float().to(device)
                 
                 # Forward - Reconstruct full 4 leads iteratively
@@ -685,7 +693,7 @@ def test():
 
     # Model
     model = TemporalAttentionUNet(
-        in_channels=46,  # 28 Obs + 16 GEOS + 2 Seasonality
+        in_channels=48,  # 28 Obs + 16 GEOS + 2 Seasonality + 2 MJO
         out_channels=12,
         base_filters=128,
         emb_dim=256,
@@ -772,7 +780,11 @@ def test():
             t_sin = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
             t_cos = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
             
-            x_input = torch.cat([x_obs, x_geos_flat, t_sin, t_cos], dim=1)
+            # MJO: broadcast (B, 2) -> (B, 2, H, W)
+            t_mjo = batch['mjo'].to(device)
+            t_mjo_map = t_mjo.view(B, 2, 1, 1).expand(B, 2, H, W)
+            
+            x_input = torch.cat([x_obs, x_geos_flat, t_sin, t_cos, t_mjo_map], dim=1)
             month_onehot = F.one_hot(t_months.long() - 1, num_classes=12).float().to(device)
             
             # Forward
