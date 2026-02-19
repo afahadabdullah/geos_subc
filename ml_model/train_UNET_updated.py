@@ -288,8 +288,8 @@ def train():
     disc = PatchGANDiscriminator(in_channels=2, ndf=64)
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
-    GAN_WARMUP_END = 10     # Epoch where adversarial loss reaches full weight (slower ramp)
-    GAN_WEIGHT = 0.05      # Max adversarial loss weight (stronger signal)
+    GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight (slower ramp)
+    GAN_WEIGHT = 0.5       # Max adversarial loss weight (stronger signal)
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
@@ -406,7 +406,8 @@ def train():
                 disc_fake_out = disc(fake_precip, geos_cond_lead)
                 
                 # LSGAN Loss (pass as lists)
-                d_loss = discriminator_loss([disc_real_out], [disc_fake_out])
+                # Use One-Sided Label Smoothing: target_real=0.9
+                d_loss = discriminator_loss([disc_real_out], [disc_fake_out], target_real=0.9, target_fake=0.0)
                 
                 accelerator.backward(d_loss)
                 disc_optimizer.step()

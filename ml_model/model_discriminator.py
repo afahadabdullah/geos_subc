@@ -88,23 +88,26 @@ class PatchGANDiscriminator(nn.Module):
         return x
 
 
-def discriminator_loss(disc_real_outputs, disc_fake_outputs):
+def discriminator_loss(disc_real_outputs, disc_fake_outputs, target_real=1.0, target_fake=0.0):
     """
-    LSGAN discriminator loss: MSE toward 1 for real, 0 for fake.
-    More stable than vanilla GAN BCE loss.
+    LSGAN discriminator loss: MSE toward target_real for real, target_fake for fake.
+    Supports label smoothing (e.g., target_real=0.9).
     
     Args:
-        disc_real_outputs: list of 4 (B, 1, H', W') from real GPCP
-        disc_fake_outputs: list of 4 (B, 1, H', W') from fake E[rain]
+        disc_real_outputs: list of tensors from real GPCP
+        disc_fake_outputs: list of tensors from fake E[rain]
+        target_real: float, target label for real samples (default 1.0)
+        target_fake: float, target label for fake samples (default 0.0)
     
     Returns:
         Scalar discriminator loss
     """
     loss = 0.0
     for real_out, fake_out in zip(disc_real_outputs, disc_fake_outputs):
-        loss += torch.mean((real_out - 1.0) ** 2)  # real → 1
-        loss += torch.mean(fake_out ** 2)            # fake → 0
-    return loss / (2 * len(disc_real_outputs))
+        real_loss = F.mse_loss(real_out, torch.full_like(real_out, target_real))
+        fake_loss = F.mse_loss(fake_out, torch.full_like(fake_out, target_fake))
+        loss += (real_loss + fake_loss) * 0.5
+    return loss / len(disc_real_outputs)
 
 
 def generator_adversarial_loss(disc_fake_outputs):
