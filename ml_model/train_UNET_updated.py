@@ -197,8 +197,8 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     
     grad_loss = F.l1_loss(pred_grad, targ_grad)
     
-    # Combined: CRPS + 0.3*BCE + 0.2*bias + 1.0*L1 + 0.3*gradient
-    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 1.0 * l1_loss + 0.3 * grad_loss
+    # Combined: CRPS + 0.3*BCE + 0.2*bias + 0.5*L1 + 0.3*gradient
+    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 0.5 * l1_loss + 0.3 * grad_loss
 
 
 def get_area_weights(lats, device):
@@ -297,8 +297,8 @@ def train():
     disc = PatchGANDiscriminator(in_channels=5, ndf=64)
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
-    GAN_WARMUP_END = 6     # Epoch where adversarial loss reaches full weight
-    GAN_WEIGHT = 0.01      # Max adversarial loss weight
+    GAN_WARMUP_END = 10     # Epoch where adversarial loss reaches full weight (slower ramp)
+    GAN_WEIGHT = 0.05      # Max adversarial loss weight (stronger signal)
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
