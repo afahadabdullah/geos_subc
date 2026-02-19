@@ -159,14 +159,24 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     # Penalizes systematic underprediction: if E[rain] < target on average,
     # add a squared-bias term. This is asymmetric — only penalizes underprediction.
     pred_mean = p * E_LN  # Expected value of ZILN
-    # Per-lead mean bias: average over batch and spatial dims
     bias_per_lead = (y - pred_mean).mean(dim=(0, 2, 3))  # (4,) positive = underprediction
-    # Only penalize underprediction (positive bias), not overprediction
     underpred_bias = torch.clamp(bias_per_lead, min=0.0)
     bias_loss = (underpred_bias ** 2).mean()
     
-    # Combined: CRPS + 0.3*BCE + 0.2*bias
-    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss
+    # --- FIX 5: Direct L1 intensity matching ---
+    # Forces the model to actually match precipitation intensity pixel-by-pixel.
+    # Without this, ZILN can minimize CRPS by setting p low (predicting dry)
+    # because dry cells dominate the globe. L1 directly penalizes intensity errors.
+    l1_err = torch.abs(pred_mean - y)
+    # Weight by (1 + sqrt(y)): wet cells get proportional importance
+    l1_weight = 1.0 + torch.sqrt(y)
+    l1_err = l1_err * l1_weight * lead_weights
+    if area_weights is not None:
+        l1_err = l1_err * area_weights
+    l1_loss = l1_err.mean()
+    
+    # Combined: CRPS + 0.3*BCE + 0.2*bias + 0.5*L1
+    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 0.5 * l1_loss
 
 
 def get_area_weights(lats, device):
