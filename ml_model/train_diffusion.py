@@ -35,6 +35,7 @@ from ml_model.dataset_hybrid import S2SHybridDataset
 from ml_model.diffusion import ConditionalDiffusion
 
 import pandas as pd
+import xarray as xr
 
 # ==============================================================================
 # UTILITIES
@@ -93,16 +94,28 @@ def train():
     # Fixed validation batch for consistent plotting
     fixed_val_batch = next(iter(val_loader))
 
+    # --- Load Topography (constant) ---
+    topo_path = os.path.join(config["data_dir"], "era5_geopotential.nc")
+    ds_topo = xr.open_dataset(topo_path)
+    # Get the geopotential variable (usually 'z' or 'geopotential')
+    topo_varname = [v for v in ds_topo.data_vars][0]
+    topo_raw = ds_topo[topo_varname].values.squeeze()  # (H, W)
+    # Z-score normalize
+    topo_mean, topo_std = topo_raw.mean(), topo_raw.std()
+    topo_norm = (topo_raw - topo_mean) / (topo_std + 1e-8)
+    topo_tensor = torch.tensor(topo_norm, dtype=torch.float32)  # (H, W)
+    print(f"Loaded topography from {topo_path}: shape={topo_tensor.shape}, var={topo_varname}")
+
     # --- Model ---
     # Target: 4 lead weeks of precipitation
-    # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO = 48
+    # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO + 1 topo = 49
     CMDE_RATIO = 0.1  # Reduced noise on condition channels
     N_SAMPLES_VAL = 5  # Ensemble members during validation
     INFERENCE_STEPS = 1000  # Full 1000 steps for both val and test
 
     model = ConditionalDiffusion(
         in_channels=4,           # 4 lead weeks (noisy target)
-        condition_channels=48,   # 28 obs + 16 GEOS + 2 seasonality + 2 MJO
+        condition_channels=49,   # 28 obs + 16 GEOS + 2 seasonality + 2 MJO + 1 topo
         out_channels=4,          # predicted noise for 4 leads
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
@@ -112,7 +125,7 @@ def train():
     total_params = sum(p.numel() for p in model.parameters())
     if accelerator.is_main_process:
         print(f"ConditionalDiffusion Parameters: {total_params:,}")
-        print(f"Input: 4 noisy + 48 condition = 52 channels")
+        print(f"Input: 4 noisy + 49 condition = 53 channels")
         print(f"Output: 4 channels (predicted noise)")
         print(f"CMDE ratio: {CMDE_RATIO}, Val members: {N_SAMPLES_VAL}")
 
@@ -189,8 +202,11 @@ def train():
             # MJO: broadcast (B, 2) -> (B, 2, H, W)
             mjo_map = mjo.view(B, 2, 1, 1).expand(B, 2, H, W).to(device)
 
-            # Condition: (B, 48, H, W)
-            condition = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map], dim=1)
+            # Topography: (H, W) -> (B, 1, H, W)
+            topo_batch = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(B, 1, H, W)
+
+            # Condition: (B, 49, H, W)
+            condition = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map, topo_batch], dim=1)
 
             # Normalize target with GEOS stats
             if train_dataset.geos_mean is not None:
@@ -254,8 +270,9 @@ def train():
                 v_sin = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
+                v_topo = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(vB, 1, vH, vW)
 
-                v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map], dim=1)
+                v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map, v_topo], dim=1)
 
                 if train_dataset.geos_mean is not None:
                     gm = train_dataset.geos_mean.to(device)
@@ -291,8 +308,9 @@ def train():
         fb_sin = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         fb_cos = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         fb_mjo_map = fb_mjo.view(fb_B, 2, 1, 1).expand(fb_B, 2, H, W).to(device)
+        fb_topo = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(fb_B, 1, H, W)
 
-        fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin, fb_cos, fb_mjo_map], dim=1)
+        fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin, fb_cos, fb_mjo_map, fb_topo], dim=1)
 
         unwrapped_model = accelerator.unwrap_model(model)
 
@@ -455,10 +473,20 @@ def test():
         num_workers=config["num_workers"], pin_memory=True
     )
 
+    # --- Load Topography (constant) ---
+    topo_path = os.path.join(config["data_dir"], "era5_geopotential.nc")
+    ds_topo = xr.open_dataset(topo_path)
+    topo_varname = [v for v in ds_topo.data_vars][0]
+    topo_raw = ds_topo[topo_varname].values.squeeze()
+    topo_mean, topo_std = topo_raw.mean(), topo_raw.std()
+    topo_norm = (topo_raw - topo_mean) / (topo_std + 1e-8)
+    topo_tensor = torch.tensor(topo_norm, dtype=torch.float32)
+    print(f"Loaded topography: shape={topo_tensor.shape}")
+
     # Model (same architecture as training)
     model = ConditionalDiffusion(
         in_channels=4,
-        condition_channels=48,
+        condition_channels=49,
         out_channels=4,
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
@@ -528,8 +556,9 @@ def test():
             t_sin = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             t_cos = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             t_mjo_map = t_mjo.view(B, 2, 1, 1).expand(B, 2, H, W).to(device)
+            t_topo = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(B, 1, H, W)
 
-            condition = torch.cat([x_obs, x_geos_flat, t_sin, t_cos, t_mjo_map], dim=1)
+            condition = torch.cat([x_obs, x_geos_flat, t_sin, t_cos, t_mjo_map, t_topo], dim=1)
 
             unwrapped = accelerator.unwrap_model(model)
 
