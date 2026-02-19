@@ -908,11 +908,17 @@ def test():
             lats = np.linspace(-90, 90, H)
             lons = np.linspace(0, 360, W)
             
-            fig = plt.figure(figsize=(25, 20))
+            # Generate ZILN sample (sharp) for comparison
+            with torch.no_grad():
+                sample_draw = ziln_sample(pred_p, pred_mu, pred_sigma)
+            sample_np = np.clip(sample_draw.squeeze(0).cpu().numpy(), 0, None)  # (4, H, W)
+            
+            fig = plt.figure(figsize=(30, 20))
             for lead in range(4):
                 g_img = geos_np[lead]
                 t_img = target_np[lead]
                 d_img = pred_np[lead]
+                s_img = sample_np[lead]
                 
                 u_rmse = rmse_unet[lead][-1]
                 g_rmse = rmse_geos[lead][-1]
@@ -921,10 +927,11 @@ def test():
                     (g_img,         f"W{lead+1}: GEOS Mean\nRMSE: {g_rmse:.2f}",   'Blues',  0, 50),
                     (t_img,         f"W{lead+1}: Target GPCP",                       'Blues',  0, 50),
                     (d_img,         f"W{lead+1}: UNet E[Rain]\nRMSE: {u_rmse:.2f}", 'Blues',  0, 50),
+                    (s_img,         f"W{lead+1}: UNet Sample",                       'Blues',  0, 50),
                     (d_img - t_img, f"W{lead+1}: UNet Bias",                         'RdBu_r', -20, 20),
                     (g_img - t_img, f"W{lead+1}: GEOS Bias",                         'RdBu_r', -20, 20),
                 ]):
-                    ax = fig.add_subplot(4, 5, lead * 5 + col + 1, projection=ccrs.PlateCarree())
+                    ax = fig.add_subplot(4, 6, lead * 6 + col + 1, projection=ccrs.PlateCarree())
                     im = ax.imshow(data, origin='lower',
                                    extent=[lons.min(), lons.max(), lats.min(), lats.max()],
                                    transform=ccrs.PlateCarree(), cmap=cmap, vmin=vmin, vmax=vmax)
@@ -934,7 +941,7 @@ def test():
                     if lead == 0 and col == 0:
                         cax = fig.add_axes([0.92, 0.55, 0.015, 0.30])
                         fig.colorbar(im, cax=cax, label='mm/day')
-                    if lead == 0 and col == 3:
+                    if lead == 0 and col == 4:
                         cax = fig.add_axes([0.92, 0.12, 0.015, 0.30])
                         fig.colorbar(im, cax=cax, label='mm/day')
 
