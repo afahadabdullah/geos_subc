@@ -727,7 +727,7 @@ def test():
     # Model
     model = TemporalAttentionUNet(
         in_channels=48,  # 28 Obs + 16 GEOS + 2 Seasonality + 2 MJO
-        out_channels=12,
+        out_channels=3,   # Single-lead: 3 ZILN params (p, mu, sigma)
         base_filters=128,
         emb_dim=256,
         n_weeks=4,
@@ -820,10 +820,17 @@ def test():
             x_input = torch.cat([x_obs, x_geos_flat, t_sin, t_cos, t_mjo_map], dim=1)
             month_onehot = F.one_hot(t_months.long() - 1, num_classes=12).float().to(device)
             
-            # Forward
+            # Forward - iterate over 4 leads (single-lead model)
             unwrapped = accelerator.unwrap_model(model)
-            raw_out = unwrapped(x_input, month_onehot)
-            pred_p, pred_mu, pred_sigma = parameterize_ziln(raw_out)
+            p_list, mu_list, sigma_list = [], [], []
+            for lead in range(4):
+                lead_idx = torch.full((B,), lead, dtype=torch.long, device=device)
+                raw_lead = unwrapped(x_input, month_onehot, lead_idx)
+                lp, lmu, lsigma = parameterize_ziln(raw_lead)
+                p_list.append(lp); mu_list.append(lmu); sigma_list.append(lsigma)
+            pred_p = torch.cat(p_list, dim=1)      # (1, 4, H, W)
+            pred_mu = torch.cat(mu_list, dim=1)
+            pred_sigma = torch.cat(sigma_list, dim=1)
             pred_mean = ziln_expected_value(pred_p, pred_mu, pred_sigma)  # (1, 4, H, W)
             
             target_np = y_target.squeeze(0).cpu().numpy()    # (4, H, W)
