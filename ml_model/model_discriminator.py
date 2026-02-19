@@ -20,23 +20,22 @@ from torch.nn.utils import spectral_norm
 
 class PatchGANDiscriminator(nn.Module):
     """
-    PatchGAN discriminator conditioned on GEOS ensemble mean.
+    PatchGAN discriminator conditioned on GEOS ensemble mean for *one* lead.
     
-    For each lead week, receives:
+    Receives:
       - Precipitation map (1 channel): either real GPCP or fake UNet E[rain]
-      - Condition (4 channels): GEOS ensemble mean for all 4 leads
+      - Condition (1 channel): GEOS ensemble mean for *that specific* lead
     
-    Total input: 5 channels per forward pass.
-    Processes each lead week independently.
+    Total input: 2 channels per forward pass.
     
     Architecture: 4-layer strided convolutions → ~70×70 receptive field
     Output: (B, 1, H/8, W/8) real/fake patch scores
     """
     
-    def __init__(self, in_channels=5, ndf=64):
+    def __init__(self, in_channels=2, ndf=64):
         """
         Args:
-            in_channels: 1 (precip) + 4 (GEOS condition) = 5
+            in_channels: 1 (precip) + 1 (GEOS condition) = 2
             ndf: Base number of discriminator filters
         """
         super().__init__()
@@ -75,36 +74,18 @@ class PatchGANDiscriminator(nn.Module):
         """
         Args:
             precip:    (B, 1, H, W) - single lead's precipitation (real or fake)
-            condition: (B, 4, H, W) - GEOS ensemble mean for all 4 leads
+            condition: (B, 1, H, W) - GEOS ensemble mean for *that specific* lead
             
         Returns:
             (B, 1, H', W') - per-patch real/fake logits
         """
-        x = torch.cat([precip, condition], dim=1)  # (B, 5, H, W)
+        x = torch.cat([precip, condition], dim=1)  # (B, 2, H, W)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
         x = self.final(x)
         return x
-    
-    def forward_all_leads(self, precip_4leads, condition):
-        """
-        Process all 4 lead weeks and return combined adversarial score.
-        
-        Args:
-            precip_4leads: (B, 4, H, W) - all 4 leads of precipitation
-            condition:     (B, 4, H, W) - GEOS ensemble mean
-            
-        Returns:
-            List of 4 tensors, each (B, 1, H', W') per-patch logits
-        """
-        outputs = []
-        for lead in range(4):
-            precip_lead = precip_4leads[:, lead:lead+1, :, :]  # (B, 1, H, W)
-            out = self.forward(precip_lead, condition)
-            outputs.append(out)
-        return outputs
 
 
 def discriminator_loss(disc_real_outputs, disc_fake_outputs):
