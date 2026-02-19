@@ -227,7 +227,7 @@ def train():
         for batch in pbar:
             x_obs = batch['x_obs']           # (B, 28, H, W)
             x_geos = batch['x_geos']         # (B, 4, 1, 4, H, W)
-            y_target = batch['y_target']     # (B, 4, H, W) - log1p normalized
+            y_target = batch['y_target']     # (B, 4, H, W) - RAW mm/day
             months = batch['month']          # (B,)
             mjo = batch['mjo']              # (B, 2)
 
@@ -249,13 +249,16 @@ def train():
             # Condition: (B, 49, H, W)
             condition = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map, topo_batch], dim=1)
 
+            # Convert RAW target to log1p space before normalization
+            y_log = torch.log1p(y_target.clamp(min=0.0))
+
             # Normalize target with GEOS stats
             if train_dataset.geos_mean is not None:
                 gm = train_dataset.geos_mean.to(device)
                 gs = train_dataset.geos_std.to(device)
-                target_norm = (y_target - gm) / (gs * 3.0)
+                target_norm = (y_log - gm) / (gs * 3.0)
             else:
-                target_norm = y_target
+                target_norm = y_log
 
             # Sample random timesteps
             timesteps = torch.randint(
@@ -315,12 +318,13 @@ def train():
 
                 v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map, v_topo], dim=1)
 
+                vy_log = torch.log1p(vy_target.clamp(min=0.0))
                 if train_dataset.geos_mean is not None:
                     gm = train_dataset.geos_mean.to(device)
                     gs = train_dataset.geos_std.to(device)
-                    vtarget_norm = (vy_target - gm) / (gs * 3.0)
+                    vtarget_norm = (vy_log - gm) / (gs * 3.0)
                 else:
-                    vtarget_norm = vy_target
+                    vtarget_norm = vy_log
 
                 v_timesteps = torch.randint(0, model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
                 v_noise = torch.randn_like(vtarget_norm)
@@ -378,8 +382,8 @@ def train():
             ens_stack = torch.stack(ensemble_samples, dim=0)
             ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
 
-        # Target in mm/day (denormalize from log1p)
-        fb_target_mm = torch.expm1(fb_target.clamp(min=0.0, max=6.0))
+        # Target is already in mm/day (raw from dataset)
+        fb_target_mm = fb_target
 
         # RMSE of ensemble mean
         val_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
@@ -618,8 +622,8 @@ def test():
             ens_all = torch.stack(ensemble, dim=0)  # (N, 1, 4, H, W)
             ens_mean = ens_all.mean(dim=0)           # (1, 4, H, W)
 
-            # Target in mm/day
-            target_mm = torch.expm1(y_target.clamp(min=0.0, max=6.0))
+            # Target is already in mm/day
+            target_mm = y_target.clamp(min=0.0)
             target_np = target_mm.squeeze(0).cpu().numpy()    # (4, H, W)
             ens_mean_np = ens_mean.squeeze(0).cpu().numpy()   # (4, H, W)
 
