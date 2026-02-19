@@ -36,6 +36,7 @@ from ml_model.diffusion import ConditionalDiffusion
 
 import pandas as pd
 import xarray as xr
+from scipy.interpolate import RegularGridInterpolator
 
 # ==============================================================================
 # UTILITIES
@@ -47,6 +48,54 @@ def get_area_weights(lats, device):
     weights = weights / weights.mean()
     weights_tensor = torch.tensor(weights, dtype=torch.float32, device=device)
     return weights_tensor.view(1, 1, -1, 1)  # (1, 1, H, 1) broadcasts to (B, 4, H, W)
+
+
+def load_topography(data_dir):
+    """
+    Load ERA5 geopotential and interpolate to GEOS 1°x1° grid (181x360).
+    Returns z-score normalized tensor of shape (181, 360).
+    """
+    topo_path = os.path.join(data_dir, "era5_geopotential.nc")
+    ds = xr.open_dataset(topo_path)
+    varname = list(ds.data_vars)[0]
+    da = ds[varname].squeeze()
+    
+    # Get ERA5 native lat/lon
+    era5_lat = da.coords['latitude'].values if 'latitude' in da.coords else da.coords['lat'].values
+    era5_lon = da.coords['longitude'].values if 'longitude' in da.coords else da.coords['lon'].values
+    era5_data = da.values  # (lat, lon)
+    
+    # ERA5 lat is often descending (90 to -90) — flip if needed
+    if era5_lat[0] > era5_lat[-1]:
+        era5_lat = era5_lat[::-1]
+        era5_data = era5_data[::-1, :]
+    
+    # GEOS target grid: 181 x 360 (1° x 1°)
+    geos_lat = np.linspace(-90, 90, 181)
+    geos_lon = np.linspace(0, 359, 360)
+    
+    # Handle ERA5 lon convention (-180 to 180 vs 0 to 360)
+    if era5_lon.min() < 0:
+        # Convert -180..180 to 0..360
+        sort_idx = np.argsort((era5_lon % 360))
+        era5_lon = era5_lon[sort_idx] % 360
+        era5_data = era5_data[:, sort_idx]
+    
+    # Interpolate
+    interp = RegularGridInterpolator(
+        (era5_lat, era5_lon), era5_data, method='linear', bounds_error=False, fill_value=None
+    )
+    geos_lon_grid, geos_lat_grid = np.meshgrid(geos_lon, geos_lat)
+    points = np.stack([geos_lat_grid.ravel(), geos_lon_grid.ravel()], axis=-1)
+    topo_geos = interp(points).reshape(181, 360)
+    
+    # Z-score normalize
+    topo_mean, topo_std = topo_geos.mean(), topo_geos.std()
+    topo_norm = (topo_geos - topo_mean) / (topo_std + 1e-8)
+    
+    topo_tensor = torch.tensor(topo_norm, dtype=torch.float32)
+    print(f"Loaded topography from {topo_path}: ERA5 ({len(era5_lat)}x{len(era5_lon)}) → GEOS ({topo_tensor.shape})")
+    return topo_tensor
 
 
 # ==============================================================================
@@ -94,17 +143,8 @@ def train():
     # Fixed validation batch for consistent plotting
     fixed_val_batch = next(iter(val_loader))
 
-    # --- Load Topography (constant) ---
-    topo_path = os.path.join(config["data_dir"], "era5_geopotential.nc")
-    ds_topo = xr.open_dataset(topo_path)
-    # Get the geopotential variable (usually 'z' or 'geopotential')
-    topo_varname = [v for v in ds_topo.data_vars][0]
-    topo_raw = ds_topo[topo_varname].values.squeeze()  # (H, W)
-    # Z-score normalize
-    topo_mean, topo_std = topo_raw.mean(), topo_raw.std()
-    topo_norm = (topo_raw - topo_mean) / (topo_std + 1e-8)
-    topo_tensor = torch.tensor(topo_norm, dtype=torch.float32)  # (H, W)
-    print(f"Loaded topography from {topo_path}: shape={topo_tensor.shape}, var={topo_varname}")
+    # --- Load Topography (constant, interpolated to GEOS grid) ---
+    topo_tensor = load_topography(config["data_dir"])
 
     # --- Model ---
     # Target: 4 lead weeks of precipitation
@@ -473,15 +513,8 @@ def test():
         num_workers=config["num_workers"], pin_memory=True
     )
 
-    # --- Load Topography (constant) ---
-    topo_path = os.path.join(config["data_dir"], "era5_geopotential.nc")
-    ds_topo = xr.open_dataset(topo_path)
-    topo_varname = [v for v in ds_topo.data_vars][0]
-    topo_raw = ds_topo[topo_varname].values.squeeze()
-    topo_mean, topo_std = topo_raw.mean(), topo_raw.std()
-    topo_norm = (topo_raw - topo_mean) / (topo_std + 1e-8)
-    topo_tensor = torch.tensor(topo_norm, dtype=torch.float32)
-    print(f"Loaded topography: shape={topo_tensor.shape}")
+    # --- Load Topography (constant, interpolated to GEOS grid) ---
+    topo_tensor = load_topography(config["data_dir"])
 
     # Model (same architecture as training)
     model = ConditionalDiffusion(
