@@ -46,23 +46,25 @@ from ml_model.model_discriminator import PatchGANDiscriminator, discriminator_lo
 
 def parameterize_ziln(raw_output):
     """
-    Convert raw UNet output (B, 12, H, W) to ZILN parameters.
+    Convert raw UNet output (B, 3*leads, H, W) to ZILN parameters.
     
     Args:
-        raw_output: (B, 12, H, W) - Raw UNet output
+        raw_output: (B, 3*leads, H, W) - Raw UNet output
         
     Returns:
-        p:     (B, 4, H, W) - Rain probability [0, 1]
-        mu:    (B, 4, H, W) - Log-space mean (unbounded)
-        sigma: (B, 4, H, W) - Log-space std (positive)
+        p:     (B, leads, H, W) - Rain probability [0, 1]
+        mu:    (B, leads, H, W) - Log-space mean (unbounded)
+        sigma: (B, leads, H, W) - Log-space std (positive)
     """
     B, C, H, W = raw_output.shape
-    # Reshape: (B, 12, H, W) -> (B, 4, 3, H, W)
-    params = raw_output.view(B, 4, 3, H, W)
+    n_leads = C // 3
     
-    raw_p = params[:, :, 0, :, :]     # (B, 4, H, W)
-    raw_mu = params[:, :, 1, :, :]    # (B, 4, H, W)
-    raw_sigma = params[:, :, 2, :, :] # (B, 4, H, W)
+    # Reshape: (B, C, H, W) -> (B, n_leads, 3, H, W)
+    params = raw_output.view(B, n_leads, 3, H, W)
+    
+    raw_p = params[:, :, 0, :, :]     
+    raw_mu = params[:, :, 1, :, :]    
+    raw_sigma = params[:, :, 2, :, :] 
     
     p = torch.sigmoid(raw_p)
     mu = raw_mu
