@@ -19,7 +19,7 @@ import pandas as pd
 import os
 
 class GeosSubCDataset(Dataset):
-    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True):
+    def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, mjo_file="mjo_processed.csv", transform=None, preload=True, ocean_vars=False, zscore=False):
         """
         Args:
             data_root (str): Root directory containing 'geos_subc_{year}.zarr' and 'gpcp_weekly_{year}.zarr'.
@@ -28,28 +28,99 @@ class GeosSubCDataset(Dataset):
             mjo_file (str): Filename of MJO CSV in data_root.
             transform (callable, optional): Optional transform to be applied on a sample.
             preload (bool): If True, load all data into RAM (recommended for speed).
+            ocean_vars (bool): If True, also load SST/SSS from sst_weekly_*.zarr and sss_weekly_*.zarr.
+            zscore (bool): If True, use per-grid Z-score normalization (requires ml_model/grid_stats.nc).
         """
         self.data_root = data_root
         self.years = list(range(start_year, end_year + 1))
         self.transform = transform
         self.preload = preload
+        self.ocean_vars = ocean_vars
+        self.zscore = zscore
         
-        # 0. Load Normalization Stats (MUST exist — run calculate_stats.py first)
-        stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
-        if not os.path.exists(stats_path):
-            raise FileNotFoundError(
-                f"norm_stats.json not found at {stats_path}. "
-                f"Run `python ml_model/calculate_stats.py` first to generate it."
-            )
+        # 0. Load Normalization Stats
         import json
-        with open(stats_path, 'r') as f:
-            stats = json.load(f)
-        self.norm_min = stats["log1p_min"]
-        self.norm_max = stats["log1p_max"]
-        self.res_min = stats.get("residual_min", -5.0)
-        self.res_max = stats.get("residual_max", 5.0)
-        print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
-        print(f"Residual stats loaded: min={self.res_min:.4f}, max={self.res_max:.4f}")
+        
+        # Precip Normalization (Z-Score or Log1p)
+        if self.zscore:
+            stats_path = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
+            if not os.path.exists(stats_path):
+                 raise FileNotFoundError(f"grid_stats.nc not found at {stats_path}. Run `python dataprocess/calculate_grid_stats.py` first.")
+            
+            ds_stats = xr.open_dataset(stats_path)
+            
+            def process_stat(name):
+                val = torch.from_numpy(ds_stats[name].values).float()
+                # Target: (1, C, H, W) or (1, 1, H, W)
+                if val.ndim == 2: # (H, W)
+                    return val.unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+                elif val.ndim == 3: # (C, H, W)
+                    return val.unsqueeze(0) # (1, C, H, W)
+                return val
+            
+            self.geos_mean = process_stat('geos_mean')
+            self.geos_std = process_stat('geos_std')
+            self.gpcp_mean = process_stat('gpcp_mean')
+            self.gpcp_std = process_stat('gpcp_std')
+            
+            ds_stats.close()
+            print("Loaded Per-Grid Z-Score Stats.")
+            
+            # Since we switched, set dummy norm_min/max
+            self.norm_min = 0.0
+            self.norm_max = 1.0
+            self.res_min = -1.0
+            self.res_max = 1.0
+            
+        else:
+            # Traditional Log1p Stats
+            if ocean_vars:
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+            else:
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats.json")
+                
+            if not os.path.exists(stats_path):
+                # Fallback to older files or error
+                # Try ocean_vars path if generic fails
+                fallback_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+                if os.path.exists(fallback_path):
+                    stats_path = fallback_path
+
+            if not os.path.exists(stats_path):
+                raise FileNotFoundError(f"norm_stats.json not found.")
+
+            with open(stats_path, 'r') as f:
+                stats = json.load(f)
+            self.norm_min = stats["log1p_min"]
+            self.norm_max = stats["log1p_max"]
+            self.res_min = stats.get("residual_min", -5.0)
+            self.res_max = stats.get("residual_max", 5.0)
+            print(f"Norm stats loaded: min={self.norm_min:.4f}, max={self.norm_max:.4f}")
+
+        # Ocean variable stats (Min-Max) - Always verify if ocean_vars is True
+        if self.ocean_vars:
+            # We need ocean min/max regardless of zscore
+            # If zscore, we didn't load json above. We must load it now.
+            # If not zscore, we loaded it above (if ocean_vars was true in stats path logic).
+            
+            # To be safe, reload specifically for Ocean keys if missing
+            if not hasattr(self, 'sst_min'):
+                stats_path = os.path.join(os.path.dirname(__file__), "norm_stats_ocean.json")
+                if os.path.exists(stats_path):
+                    with open(stats_path, 'r') as f:
+                        stats = json.load(f)
+                    self.sst_min = stats.get("sst_min", 0.0)
+                    self.sst_max = stats.get("sst_max", 1.0)
+                    self.sss_min = stats.get("sss_min", 0.0)
+                    self.sss_max = stats.get("sss_max", 1.0)
+                    print(f"Ocean stats loaded: SST=[{self.sst_min:.2f}, {self.sst_max:.2f}]")
+                else:
+                    print("Warning: norm_stats_ocean.json not found for ocean vars. Using 0-1 defaults.")
+                    self.sst_min = 0.0
+                    self.sst_max = 1.0
+                    self.sss_min = 0.0
+                    self.sss_max = 1.0
+
         
         # 1. Load MJO Data
         mjo_path = os.path.join(data_root, mjo_file)
@@ -72,6 +143,8 @@ class GeosSubCDataset(Dataset):
         self.preloaded_geos = {} # (S, M) -> ndarray
         self.preloaded_gpcp = {} # S -> ndarray
         self.preloaded_gpcp_obs = {} # S -> ndarray (observed state from prev init)
+        self.preloaded_sst = {} # S -> ndarray (4 weeks of SST)
+        self.preloaded_sss = {} # S -> ndarray (4 weeks of SSS)
         
         # Collect ALL init dates across years for prev-init lookup
         all_init_dates = []
@@ -103,12 +176,38 @@ class GeosSubCDataset(Dataset):
                     geos_vals = ds_geos['pr'].compute()
                     gpcp_vals = ds_gpcp['precip'].compute()
                 
+                # Ocean vars: load SST/SSS for this year
+                sst_vals = None
+                sss_vals = None
+                if self.ocean_vars and self.preload:
+                    sst_path = os.path.join(data_root, f"sst_weekly_{year}.zarr")
+                    sss_path = os.path.join(data_root, f"sss_weekly_{year}.zarr")
+                    if os.path.exists(sst_path):
+                        ds_sst = xr.open_zarr(sst_path, consolidated=False)
+                        sst_vals = ds_sst['sst'].compute()
+                        ds_sst.close()
+                    else:
+                        print(f"  WARNING: SST zarr not found for {year}")
+                    if os.path.exists(sss_path):
+                        ds_sss = xr.open_zarr(sss_path, consolidated=False)
+                        sss_vals = ds_sss['sss'].compute()
+                        ds_sss.close()
+                    else:
+                        print(f"  WARNING: SSS zarr not found for {year}")
+                
                 for s_idx, s_date in enumerate(init_dates):
                     s_key = str(s_date)
                     all_init_dates.append(s_date)
                     
                     if self.preload:
                         self.preloaded_gpcp[s_key] = gpcp_vals.isel(S=s_idx).values.astype(np.float32)
+                        
+                        # Preload ocean vars
+                        if self.ocean_vars:
+                            if sst_vals is not None:
+                                self.preloaded_sst[s_key] = sst_vals.isel(S=s_idx).values.astype(np.float32)
+                            if sss_vals is not None:
+                                self.preloaded_sss[s_key] = sss_vals.isel(S=s_idx).values.astype(np.float32)
                     
                     for m_idx in members:
                         self.samples.append({
@@ -237,29 +336,76 @@ class GeosSubCDataset(Dataset):
             month_onehot = np.zeros(12, dtype=np.float32)
             month_onehot[month - 1] = 1.0
             
-            # Log1p transform
-            vmin = self.norm_min
-            vmax = self.norm_max
-            denom = vmax - vmin if vmax != vmin else 1.0
+            # Z-Score or Log1p Normalization
+            if self.zscore:
+                # Per-Grid Z-Score: (X - mu) / sigma
+                # geos_mean is (1, 1, H, W) -> squeeze to (H, W) for numpy broadcasting
+                g_mean = self.geos_mean.squeeze().numpy()
+                g_std = self.geos_std.squeeze().numpy()
+                
+                gp_mean = self.gpcp_mean.squeeze().numpy()
+                gp_std = self.gpcp_std.squeeze().numpy()
+                
+                # Inputs are (L, H, W) or (H, W)
+                # x_forecast: (L, H, W)
+                x_forecast_norm = (np.nan_to_num(x_forecast, nan=0.0) - g_mean) / g_std
+                
+                # y_truth: (H, W) - wait, is it (L, H, W)?
+                # load_data says gpcp is (S, Y, X). So y_truth is (Y, X).
+                # But sometimes it might be (1, Y, X)? 
+                # Let's check shape. If (H, W), broadcast works.
+                y_truth_norm = (np.nan_to_num(y_truth, nan=0.0) - gp_mean) / gp_std
+                
+                # obs_state: (H, W) or matching y_truth. Using GPCP stats.
+                obs_state_norm = (np.nan_to_num(obs_state, nan=0.0) - gp_mean) / gp_std
+                
+                # Residual not strictly used in simple U-Net but for consistency:
+                # Res = Target - Input. 
+                # In Z-space? Or Phys space? 
+                # Let's just define residual_norm as difference of norms
+                # Ensure shapes match (if x_forecast is multi-lead)
+                # For SimpleUNet, we often take 1st lead or average?
+                # SimpleUNet (SimpleCNN) takes (B, 4, H, W).
+                # x_forecast is (4, H, W) usually.
+                # y_truth is (H, W)? No, target must be (H, W) or (1, H, W).
+                
+                # Check residual logic in log1p:
+                # residual_log = y_truth_log - x_forecast_log
+                # This explicitly subtracts. If shapes mismatch, numpy broadcasts.
+                if x_forecast_norm.shape != y_truth_norm.shape:
+                    # e.g. (4, H, W) - (H, W) -> (4, H, W).
+                    pass
+                
+                residual_norm = y_truth_norm - x_forecast_norm
+                
+                # Metrics for return
+                vmin = 0.0
+                vmax = 1.0
+                
+            else:
+                # Log1p transform
+                vmin = self.norm_min
+                vmax = self.norm_max
+                denom = vmax - vmin if vmax != vmin else 1.0
+                
+                x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
+                y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
+                obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
+                
+                # Residual in log space: log1p(GPCP) - log1p(GEOS)
+                residual_log = y_truth_log - x_forecast_log
+                
+                # Normalize inputs to [-1, 1] using global min/max
+                x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
+                y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
+                obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
+                
+                # Normalize residual to [-1, 1] using residual min/max
+                res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
+                residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
+                residual_norm = np.clip(residual_norm, -1.0, 1.0)
             
-            x_forecast_log = np.log1p(np.maximum(np.nan_to_num(x_forecast, nan=0.0), 0.0))
-            y_truth_log = np.log1p(np.maximum(np.nan_to_num(y_truth, nan=0.0), 0.0))
-            obs_state_log = np.log1p(np.maximum(np.nan_to_num(obs_state, nan=0.0), 0.0))
-            
-            # Residual in log space: log1p(GPCP) - log1p(GEOS)
-            residual_log = y_truth_log - x_forecast_log
-            
-            # Normalize inputs to [-1, 1] using global min/max
-            x_forecast_norm = 2 * ((x_forecast_log - vmin) / denom) - 1.0
-            y_truth_norm = 2 * ((y_truth_log - vmin) / denom) - 1.0
-            obs_state_norm = 2 * ((obs_state_log - vmin) / denom) - 1.0
-            
-            # Normalize residual to [-1, 1] using residual min/max
-            res_denom = self.res_max - self.res_min if self.res_max != self.res_min else 1.0
-            residual_norm = 2 * ((residual_log - self.res_min) / res_denom) - 1.0
-            residual_norm = np.clip(residual_norm, -1.0, 1.0)
-            
-            return {
+            result = {
                 "input_forecast": torch.tensor(x_forecast_norm, dtype=torch.float32), 
                 "target_truth": torch.tensor(y_truth_norm, dtype=torch.float32),
                 "target_residual": torch.tensor(residual_norm, dtype=torch.float32),
@@ -271,8 +417,57 @@ class GeosSubCDataset(Dataset):
                 "M": m_idx,
                 "norm_stats": {"min": vmin, "max": vmax}
             }
+            
+            # Ocean variables (SST, SSS) — normalized to [-1, 1]
+            if self.ocean_vars:
+                # Load SST
+                sst_data = self.preloaded_sst.get(s_key)
+                if sst_data is None:
+                    sst_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                
+                # Squeeze any singleton dimensions (like depth=1) to ensure (4, Y, X)
+                sst_clean = np.nan_to_num(sst_data, nan=0.0).astype(np.float32)
+                if sst_clean.ndim > 3:
+                    sst_clean = np.squeeze(sst_clean)
+                
+                # Check for (Y, X, 4) case if squeeze made it 3D but in wrong order
+                # (Though unlikely given preloaded_sst logic, being robust)
+                if sst_clean.ndim == 3 and sst_clean.shape[0] != 4 and sst_clean.shape[2] == 4:
+                    sst_clean = np.transpose(sst_clean, (2, 0, 1))
+                
+                # Force strictly 3D shape if squeeze removed too much or if shape is weird
+                if sst_clean.ndim != 3 or sst_clean.shape[0] != 4:
+                    # Fallback resize if somehow it's still wrong
+                    sst_clean = sst_clean.reshape(4, x_forecast.shape[1], x_forecast.shape[2])
+
+                sst_denom = self.sst_max - self.sst_min if self.sst_max != self.sst_min else 1.0
+                sst_norm = 2 * ((sst_clean - self.sst_min) / sst_denom) - 1.0
+                sst_norm = np.clip(sst_norm, -1.0, 1.0)
+                result["ocean_sst"] = torch.tensor(sst_norm, dtype=torch.float32)
+                
+                # Load SSS
+                sss_data = self.preloaded_sss.get(s_key)
+                if sss_data is None:
+                    sss_data = np.zeros((4, x_forecast.shape[1], x_forecast.shape[2]), dtype=np.float32)
+                
+                # Squeeze and align SSS
+                sss_clean = np.nan_to_num(sss_data, nan=0.0).astype(np.float32)
+                if sss_clean.ndim > 3:
+                    sss_clean = np.squeeze(sss_clean)
+                
+                if sss_clean.ndim == 3 and sss_clean.shape[0] != 4 and sss_clean.shape[2] == 4:
+                    sss_clean = np.transpose(sss_clean, (2, 0, 1))
+                
+                if sss_clean.ndim != 3 or sss_clean.shape[0] != 4:
+                    sss_clean = sss_clean.reshape(4, x_forecast.shape[1], x_forecast.shape[2])
+
+                sss_denom = self.sss_max - self.sss_min if self.sss_max != self.sss_min else 1.0
+                sss_norm = 2 * ((sss_clean - self.sss_min) / sss_denom) - 1.0
+                sss_norm = np.clip(sss_norm, -1.0, 1.0)
+                result["ocean_sss"] = torch.tensor(sss_norm, dtype=torch.float32)
+            
+            return result
         except Exception as e:
-            # Better to show the error and fail than recurse infinitely
             print(f"Error loading sample {idx} (Date {s_date}, Member {m_idx}): {e}")
             raise e
 
