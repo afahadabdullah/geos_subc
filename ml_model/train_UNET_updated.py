@@ -544,7 +544,11 @@ def train():
         fb_sin_month = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         fb_cos_month = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         
-        fb_input = torch.cat([fb_obs, fb_geos_flat, fb_sin_month, fb_cos_month], dim=1)
+        # MJO
+        fb_mjo = fixed_val_batch['mjo']
+        fb_mjo_map = fb_mjo.view(fb_B, 2, 1, 1).expand(fb_B, 2, H, W).to(device)
+        
+        fb_input = torch.cat([fb_obs, fb_geos_flat, fb_sin_month, fb_cos_month, fb_mjo_map], dim=1)
         fb_month_onehot = F.one_hot(fb_months.long() - 1, num_classes=12).float().to(device)
         
         unwrapped_model = accelerator.unwrap_model(model)
