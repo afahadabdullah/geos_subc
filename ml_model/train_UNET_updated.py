@@ -80,30 +80,11 @@ def ziln_expected_value(p, mu, sigma):
     return p * torch.exp(mu + 0.5 * sigma**2)
 
 
-def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
+def crps_ziln_loss(p, mu, sigma, target, lead_indices=None, area_weights=None):
     """
-    CRPS loss for Zero-Inflated Log-Normal distribution with anti-underprediction fixes.
-    
-    Base CRPS for mixture: (1-p)*Dirac(0) + p*LogNormal(mu, sigma)
-    
-    Anti-underprediction improvements:
-      Fix 1 (Lead weighting): Leads 2-4 weighted [1.0, 1.5, 2.0, 2.5] to force
-        the model to maintain intensity at longer forecast horizons.
-      Fix 2 (Focal weighting): Wet cells (>1 mm/day) get 8x CRPS weight.
-      Fix 3 (BCE auxiliary): Binary wet/dry classifier with 5x false-negative
-        penalty, weighted at 0.3.
-      Fix 4 (Mean-bias penalty): Penalizes systematic underprediction per lead,
-        weighted at 0.2.
-    
     Args:
-        p:      (B, 4, H, W) - Rain probability [0, 1]
-        mu:     (B, 4, H, W) - Log-space mean
-        sigma:  (B, 4, H, W) - Log-space std
-        target: (B, 4, H, W) - Raw GPCP (mm/day), >= 0
-        area_weights: (1, 1, H, 1) - cos(lat) weights
-        
-    Returns:
-        Scalar combined loss (lower is better).
+        lead_indices: (B,) int tensor [0-3] indicating which lead each sample corresponds to.
+                      If None, assumes multi-lead batch (legacy/validation).
     """
     eps = 1e-6
     y = target.clamp(min=0.0)
@@ -131,9 +112,17 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
          - 0.5 * p**2 * ln_spread
     
     # --- FIX 1: Lead-dependent weighting ---
-    # Longer leads get higher weight to prevent the model from giving up on them.
-    # Shape: (1, 4, 1, 1) to broadcast over (B, 4, H, W)
-    lead_weights = torch.tensor([1.0, 1.5, 2.0, 2.5], device=crps.device).view(1, 4, 1, 1)
+    # Longer leads get higher weight.
+    # Weights table: [1.0, 1.5, 2.0, 2.5]
+    lead_weights_table = torch.tensor([1.0, 1.5, 2.0, 2.5], device=crps.device)
+    
+    if lead_indices is not None:
+        # Single-Lead Case: (B, 1, H, W) -> weights (B, 1, 1, 1)
+        lead_weights = lead_weights_table[lead_indices].view(-1, 1, 1, 1)
+    else:
+        # Multi-Lead Case: (B, 4, H, W) -> weights (1, 4, 1, 1)
+        lead_weights = lead_weights_table.view(1, 4, 1, 1)
+        
     crps = crps * lead_weights
     
     # --- FIX 2: Focal-style upweighting of wet cells (8x) ---
@@ -270,9 +259,9 @@ def train():
     # Model: TemporalAttentionUNet
     # Input:  46 channels (28 Obs + 16 GEOS flat + 2 Month sin/cos)
     #   Obs: SST(4)+SSS(4)+SM(4)+PrevGPCP(4)+IVT(4)+Z500(4)+U250(4) = 28
-    # Output: 12 channels (3 ZILN params x 4 leads: p, mu, sigma)
+    # Output: 3 channels (p, mu, sigma) for ONE lead week (conditioned on lead_idx)
     in_channels = 46
-    out_channels = 12   # 3 params * 4 leads
+    out_channels = 3   # 3 params * 1 lead
 
     model = TemporalAttentionUNet(
         in_channels=in_channels,
@@ -294,7 +283,7 @@ def train():
     )
     
     # --- PatchGAN Discriminator ---
-    disc = PatchGANDiscriminator(in_channels=5, ndf=64)
+    disc = PatchGANDiscriminator(in_channels=2, ndf=64)
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
     GAN_WARMUP_END = 10     # Epoch where adversarial loss reaches full weight (slower ramp)
@@ -385,13 +374,23 @@ def train():
             x_input = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1)
             month_onehot = F.one_hot(months.long() - 1, num_classes=12).float().to(device)
             
-            # --- Generator Forward ---
-            raw_output = model(x_input, month_onehot)
-            p, mu, sigma = parameterize_ziln(raw_output)
-            pred_mean = ziln_expected_value(p, mu, sigma)  # (B, 4, H, W)
+            # --- SINGLE LEAD TRAINING ---
+            # Randomly select one lead (0-3) for this batch
+            target_lead = torch.randint(0, 4, (1,)).item()
+            lead_indices = torch.full((B,), target_lead, dtype=torch.long, device=device)
             
-            # GEOS condition for discriminator: ensemble mean (B, 4, H, W)
-            geos_cond = x_geos_flat.view(B, 4, 4, H, W).mean(dim=2)  # avg over members
+            # Slice Target for this lead: (B, 1, H, W)
+            y_target_lead = y_target[:, target_lead:target_lead+1, :, :]
+            
+            # GEOS condition for discriminator: (B, 1, H, W) corresponding to target lead
+            # x_geos_flat (B, 16, H, W) -> view (B, 4, 4, H, W) -> slice lead -> mean members -> (B, 1, H, W)
+            geos_cond_lead = x_geos_flat.view(B, 4, 4, H, W)[:, :, target_lead, :, :].mean(dim=1, keepdim=True)
+            
+            # --- Generator Forward ---
+            # Predict only one lead (3 channels output)
+            raw_output = model(x_input, month_onehot, lead_indices)
+            p, mu, sigma = parameterize_ziln(raw_output)
+            pred_mean = ziln_expected_value(p, mu, sigma)  # (B, 1, H, W)
             
             # --- Step D: Update Discriminator ---
             if gan_w > 0:
@@ -400,9 +399,12 @@ def train():
                 with torch.no_grad():
                     fake_precip = pred_mean.detach()
                 
-                disc_real_out = disc.forward_all_leads(y_target, geos_cond)
-                disc_fake_out = disc.forward_all_leads(fake_precip, geos_cond)
-                d_loss = discriminator_loss(disc_real_out, disc_fake_out)
+                # Discriminator sees (Precip, GEOS_Cond) pair
+                disc_real_out = disc(y_target_lead, geos_cond_lead)
+                disc_fake_out = disc(fake_precip, geos_cond_lead)
+                
+                # LSGAN Loss (pass as lists)
+                d_loss = discriminator_loss([disc_real_out], [disc_fake_out])
                 
                 accelerator.backward(d_loss)
                 disc_optimizer.step()
@@ -411,13 +413,13 @@ def train():
             # --- Step G: Update Generator ---
             optimizer.zero_grad()
             
-            # Base losses (CRPS + BCE + bias + L1 + Sobel)
-            g_loss = crps_ziln_loss(p, mu, sigma, y_target, area_weights=area_weights)
+            # Base losses on SINGLE LEAD
+            g_loss = crps_ziln_loss(p, mu, sigma, y_target_lead, lead_indices=lead_indices, area_weights=area_weights)
             
             # Adversarial loss (fool discriminator)
             if gan_w > 0:
-                disc_fake_out_g = disc.forward_all_leads(pred_mean, geos_cond)
-                g_adv_loss = generator_adversarial_loss(disc_fake_out_g)
+                disc_fake_out_g = disc(pred_mean, geos_cond_lead)
+                g_adv_loss = generator_adversarial_loss([disc_fake_out_g])
                 g_loss = g_loss + gan_w * g_adv_loss
             
             accelerator.backward(g_loss)
@@ -455,12 +457,27 @@ def train():
                 v_input = torch.cat([vx_obs, vx_geos_flat, v_sin_month, v_cos_month], dim=1)
                 v_month_onehot = F.one_hot(v_months.long() - 1, num_classes=12).float().to(device)
                 
-                # Forward
-                v_raw_output = model(v_input, v_month_onehot)
-                v_p, v_mu, v_sigma = parameterize_ziln(v_raw_output)
+                # Forward - Reconstruct full 4 leads iteratively
+                v_p_list, v_mu_list, v_sigma_list = [], [], []
                 
-                # Validation CRPS
-                v_crps = crps_ziln_loss(v_p, v_mu, v_sigma, vy_target, area_weights=area_weights)
+                for lead in range(4):
+                    lead_indices = torch.full((vB,), lead, dtype=torch.long, device=device)
+                    # Generator forward for single lead
+                    v_raw_lead = model(v_input, v_month_onehot, lead_indices)
+                    vp, vmu, vsigma = parameterize_ziln(v_raw_lead)
+                    
+                    v_p_list.append(vp)
+                    v_mu_list.append(vmu)
+                    v_sigma_list.append(vsigma)
+                
+                # Stack to reconstruct (B, 4, H, W)
+                v_p = torch.cat(v_p_list, dim=1)
+                v_mu = torch.cat(v_mu_list, dim=1)
+                v_sigma = torch.cat(v_sigma_list, dim=1)
+                
+                # Validation CRPS (on full forecast)
+                # Pass lead_indices=None to use multi-lead weighting
+                v_crps = crps_ziln_loss(v_p, v_mu, v_sigma, vy_target, lead_indices=None, area_weights=area_weights)
                 val_crps_sum += v_crps.item()
                 val_count += 1
 
@@ -486,8 +503,17 @@ def train():
         unwrapped_model = accelerator.unwrap_model(model)
         
         with torch.no_grad():
-            fb_raw = unwrapped_model(fb_input, fb_month_onehot)  # (B, 12, H, W)
-            fb_p, fb_mu, fb_sigma = parameterize_ziln(fb_raw)
+            # Iterative Reconstruction
+            fb_p_list, fb_mu_list, fb_sigma_list = [], [], []
+            for lead in range(4):
+                ld_idx = torch.full((fb_B,), lead, dtype=torch.long, device=device)
+                fb_raw_lead = unwrapped_model(fb_input, fb_month_onehot, ld_idx)
+                fbp, fbmu, fbsigma = parameterize_ziln(fb_raw_lead)
+                fb_p_list.append(fbp); fb_mu_list.append(fbmu); fb_sigma_list.append(fbsigma)
+            
+            fb_p = torch.cat(fb_p_list, dim=1)
+            fb_mu = torch.cat(fb_mu_list, dim=1)
+            fb_sigma = torch.cat(fb_sigma_list, dim=1)
             
             # Expected value: E[Rain] = p * exp(mu + sigma^2/2)
             fb_pred = ziln_expected_value(fb_p, fb_mu, fb_sigma)  # (B, 4, H, W)

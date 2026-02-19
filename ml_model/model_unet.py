@@ -143,6 +143,14 @@ class TemporalAttentionUNet(nn.Module):
             nn.LeakyReLU(),
         )
         
+        # Lead-time conditioning: 4 → emb_dim
+        self.lead_proj = nn.Sequential(
+            nn.Embedding(4, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, emb_dim),
+            nn.LeakyReLU(),
+        )
+        
         # Encoder
         self.conv_in = nn.Conv2d(in_channels, base_filters, 3, padding=1)
         
@@ -177,9 +185,17 @@ class TemporalAttentionUNet(nn.Module):
         
         self.conv_out = nn.Conv2d(base_filters, out_channels, 1)
 
-    def forward(self, x_input, month_onehot):
+    def forward(self, x_input, month_onehot, lead_indices):
+        """
+        Args:
+            x_input: (B, C, H, W)
+            month_onehot: (B, 12)
+            lead_indices: (B,) int tensor 0-3
+        """
         # Conditioning embedding
-        cond_emb = self.month_proj(month_onehot)
+        month_emb = self.month_proj(month_onehot)
+        lead_emb = self.lead_proj(lead_indices)
+        cond_emb = month_emb + lead_emb  # Combine conditions
         
         # Encoder
         x = self.conv_in(x_input)
