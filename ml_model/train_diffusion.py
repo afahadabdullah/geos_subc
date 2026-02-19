@@ -370,7 +370,7 @@ def train():
                     sample_denorm = sample_norm
 
                 # Convert from log1p space to mm/day (clamp to prevent overflow)
-                sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=10.0))
+                sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=6.0))
                 sample_precip = sample_precip.clamp(min=0.0)
                 ensemble_samples.append(sample_precip)
 
@@ -379,7 +379,7 @@ def train():
             ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
 
         # Target in mm/day (denormalize from log1p)
-        fb_target_mm = torch.expm1(fb_target.clamp(min=0.0, max=10.0))
+        fb_target_mm = torch.expm1(fb_target.clamp(min=0.0, max=6.0))
 
         # RMSE of ensemble mean
         val_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
@@ -611,7 +611,7 @@ def test():
                     gen = gen_norm
 
                 # log1p -> mm/day
-                gen_mm = torch.expm1(gen.clamp(min=0.0, max=10.0)).clamp(min=0.0)
+                gen_mm = torch.expm1(gen.clamp(min=0.0, max=6.0)).clamp(min=0.0)
                 ensemble.append(gen_mm)
 
             # Stack and compute mean
@@ -619,14 +619,14 @@ def test():
             ens_mean = ens_all.mean(dim=0)           # (1, 4, H, W)
 
             # Target in mm/day
-            target_mm = torch.expm1(y_target.clamp(min=0.0, max=10.0))
+            target_mm = torch.expm1(y_target.clamp(min=0.0, max=6.0))
             target_np = target_mm.squeeze(0).cpu().numpy()    # (4, H, W)
             ens_mean_np = ens_mean.squeeze(0).cpu().numpy()   # (4, H, W)
 
             # GEOS Mean (denormalize)
             geos_ens = x_geos_flat.view(4, 4, H, W)
             geos_mean_log = geos_ens.mean(dim=0)
-            geos_np = torch.expm1(geos_mean_log.clamp(min=0.0, max=10.0)).cpu().numpy()
+            geos_np = torch.expm1(geos_mean_log.clamp(min=0.0, max=6.0)).cpu().numpy()
 
             # RMSE
             for lead in range(4):
