@@ -220,6 +220,25 @@ def spatial_gradient_loss(pred, target):
     return F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)
 
 
+def spectral_loss(pred, target):
+    """
+    FFT-based spectral loss: penalizes missing high-frequency content.
+    
+    Computes 2D FFT of pred and target, then matches log-magnitude spectra.
+    This directly targets blurriness (smooth = missing high frequencies).
+    More stable than GAN, no trainable discriminator needed.
+    """
+    # 2D Real FFT on spatial dims
+    pred_fft = torch.fft.rfft2(pred, norm='ortho')
+    target_fft = torch.fft.rfft2(target, norm='ortho')
+    
+    # Log-magnitude spectrum (log1p puts all frequency bands on equal footing)
+    pred_mag = torch.log1p(torch.abs(pred_fft))
+    target_mag = torch.log1p(torch.abs(target_fft))
+    
+    return F.l1_loss(pred_mag, target_mag)
+
+
 def get_area_weights(lats, device):
     """
     Calculates area weights based on cosine of latitude.
@@ -314,14 +333,15 @@ def train():
     
     # --- PatchGAN Discriminator ---
     disc = PatchGANDiscriminator(in_channels=2, ndf=64)
-    disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=2e-5, betas=(0.5, 0.999))  # Slower D lr
-    GAN_WARMUP_START = 3   # Epoch to start adversarial loss
-    GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight
-    GAN_WEIGHT = 1.0       # Increased: grad clipping prevents NaN
-    SHARP_WEIGHT = 20.0    # Strong spatial gradient sharpness loss
-    D_TRAIN_RATIO = 5      # Only update D every N generator steps (prevent D collapse)
-    D_NOISE_STD = 0.1      # Instance noise std for D inputs (prevent memorization)
-    global_step = 0        # Track steps for D_TRAIN_RATIO
+    disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=2e-5, betas=(0.5, 0.999))
+    GAN_WARMUP_START = 3
+    GAN_WARMUP_END = 20
+    GAN_WEIGHT = 0.0       # DISABLED: D collapses to d_loss=0.003, provides no signal
+    SHARP_WEIGHT = 20.0    # Spatial gradient sharpness loss
+    SPECTRAL_WEIGHT = 1.0  # FFT spectral loss (replaces GAN for sharpness)
+    D_TRAIN_RATIO = 5
+    D_NOISE_STD = 0.1
+    global_step = 0
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
@@ -463,6 +483,10 @@ def train():
             # Spatial gradient sharpness loss on E[rain]
             sharp_loss = spatial_gradient_loss(pred_mean, y_target_lead)
             g_loss = g_loss + SHARP_WEIGHT * sharp_loss
+            
+            # Spectral (FFT) sharpness loss on E[rain] — matches frequency content
+            spec_loss = spectral_loss(pred_mean, y_target_lead)
+            g_loss = g_loss + SPECTRAL_WEIGHT * spec_loss
             
             # Adversarial loss (fool discriminator with SAMPLE, not E[rain])
             if gan_w > 0:
