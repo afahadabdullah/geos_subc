@@ -314,11 +314,14 @@ def train():
     
     # --- PatchGAN Discriminator ---
     disc = PatchGANDiscriminator(in_channels=2, ndf=64)
-    disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
+    disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=2e-5, betas=(0.5, 0.999))  # Slower D lr
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
     GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight
     GAN_WEIGHT = 1.0       # Increased: grad clipping prevents NaN
-    SHARP_WEIGHT = 5.0     # Weight for spatial gradient (sharpness) loss
+    SHARP_WEIGHT = 20.0    # Strong spatial gradient sharpness loss
+    D_TRAIN_RATIO = 5      # Only update D every N generator steps (prevent D collapse)
+    D_NOISE_STD = 0.1      # Instance noise std for D inputs (prevent memorization)
+    global_step = 0        # Track steps for D_TRAIN_RATIO
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
@@ -427,17 +430,21 @@ def train():
             p, mu, sigma = parameterize_ziln(raw_output)
             pred_mean = ziln_expected_value(p, mu, sigma)  # (B, 1, H, W)
             
-            # --- Step D: Update Discriminator ---
-            if gan_w > 0:
+            # --- Step D: Update Discriminator (every D_TRAIN_RATIO steps) ---
+            if gan_w > 0 and global_step % D_TRAIN_RATIO == 0:
                 disc_optimizer.zero_grad()
                 
                 with torch.no_grad():
                     # Use SAMPLE (sharp) instead of E[rain] (smooth)
                     fake_sample_d = ziln_sample(p, mu, sigma).detach()
                 
-                # Discriminator sees (Precip, GEOS_Cond) pair
-                disc_real_out = disc(y_target_lead, geos_cond_lead)
-                disc_fake_out = disc(fake_sample_d, geos_cond_lead)
+                # Add instance noise to D inputs (prevents D from memorizing pixel-level differences)
+                noise_real = torch.randn_like(y_target_lead) * D_NOISE_STD
+                noise_fake = torch.randn_like(fake_sample_d) * D_NOISE_STD
+                
+                # Discriminator sees (Precip + noise, GEOS_Cond) pair
+                disc_real_out = disc(y_target_lead + noise_real, geos_cond_lead)
+                disc_fake_out = disc(fake_sample_d + noise_fake, geos_cond_lead)
                 
                 # LSGAN Loss with label smoothing
                 d_loss = discriminator_loss([disc_real_out], [disc_fake_out], target_real=0.9, target_fake=0.0)
@@ -468,6 +475,7 @@ def train():
             accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             lr_scheduler.step()
+            global_step += 1
             
             train_loss += g_loss.item()
             d_str = f"{train_disc_loss / max(1, pbar.n+1):.3f}" if gan_w > 0 else "off"
