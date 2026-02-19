@@ -164,19 +164,40 @@ def crps_ziln_loss(p, mu, sigma, target, area_weights=None):
     bias_loss = (underpred_bias ** 2).mean()
     
     # --- FIX 5: Direct L1 intensity matching ---
-    # Forces the model to actually match precipitation intensity pixel-by-pixel.
-    # Without this, ZILN can minimize CRPS by setting p low (predicting dry)
-    # because dry cells dominate the globe. L1 directly penalizes intensity errors.
     l1_err = torch.abs(pred_mean - y)
-    # Weight by (1 + sqrt(y)): wet cells get proportional importance
     l1_weight = 1.0 + torch.sqrt(y)
     l1_err = l1_err * l1_weight * lead_weights
     if area_weights is not None:
         l1_err = l1_err * area_weights
     l1_loss = l1_err.mean()
     
-    # Combined: CRPS + 0.3*BCE + 0.2*bias + 0.5*L1
-    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 0.5 * l1_loss
+    # --- FIX 6: Sobel gradient sharpness loss ---
+    # Penalizes the model for producing spatially blurry predictions.
+    # Computes Sobel edge-detection on both prediction and target, then
+    # matches them with L1 to force the model to preserve sharp spatial features.
+    sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                           dtype=pred_mean.dtype, device=pred_mean.device).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                           dtype=pred_mean.dtype, device=pred_mean.device).view(1, 1, 3, 3)
+    
+    # Reshape (B, 4, H, W) -> (B*4, 1, H, W) for conv2d
+    B_lead = pred_mean.shape[0] * pred_mean.shape[1]
+    pred_2d = pred_mean.reshape(B_lead, 1, pred_mean.shape[2], pred_mean.shape[3])
+    targ_2d = y.reshape(B_lead, 1, y.shape[2], y.shape[3])
+    
+    pred_gx = F.conv2d(pred_2d, sobel_x, padding=1)
+    pred_gy = F.conv2d(pred_2d, sobel_y, padding=1)
+    targ_gx = F.conv2d(targ_2d, sobel_x, padding=1)
+    targ_gy = F.conv2d(targ_2d, sobel_y, padding=1)
+    
+    # Gradient magnitude
+    pred_grad = torch.sqrt(pred_gx**2 + pred_gy**2 + 1e-8)
+    targ_grad = torch.sqrt(targ_gx**2 + targ_gy**2 + 1e-8)
+    
+    grad_loss = F.l1_loss(pred_grad, targ_grad)
+    
+    # Combined: CRPS + 0.3*BCE + 0.2*bias + 1.0*L1 + 0.3*gradient
+    return crps_loss + 0.3 * bce_loss + 0.2 * bias_loss + 1.0 * l1_loss + 0.3 * grad_loss
 
 
 def get_area_weights(lats, device):
