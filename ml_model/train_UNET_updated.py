@@ -67,8 +67,8 @@ def parameterize_ziln(raw_output):
     raw_sigma = params[:, :, 2, :, :] 
     
     p = torch.sigmoid(raw_p)
-    mu = raw_mu
-    sigma = F.softplus(raw_sigma) + 1e-4
+    mu = raw_mu.clamp(min=-10.0, max=10.0)  # Moderate clamping for stability
+    sigma = F.softplus(raw_sigma).clamp(max=3.0) + 1e-4  # Prevent explosion in exp()
     
     return p, mu, sigma
 
@@ -289,7 +289,7 @@ def train():
     disc_optimizer = torch.optim.AdamW(disc.parameters(), lr=1e-4, betas=(0.5, 0.999))
     GAN_WARMUP_START = 3   # Epoch to start adversarial loss
     GAN_WARMUP_END = 20     # Epoch where adversarial loss reaches full weight (slower ramp)
-    GAN_WEIGHT = 0.5       # Max adversarial loss weight (stronger signal)
+    GAN_WEIGHT = 0.2       # Reduced from 0.5 for stability (with clipping)
 
     # Prepare
     model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
@@ -410,6 +410,7 @@ def train():
                 d_loss = discriminator_loss([disc_real_out], [disc_fake_out], target_real=0.9, target_fake=0.0)
                 
                 accelerator.backward(d_loss)
+                accelerator.clip_grad_norm_(disc.parameters(), max_norm=1.0)  # Gradient Clipping for D
                 disc_optimizer.step()
                 train_disc_loss += d_loss.item()
             
@@ -426,6 +427,7 @@ def train():
                 g_loss = g_loss + gan_w * g_adv_loss
             
             accelerator.backward(g_loss)
+            accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient Clipping for G
             optimizer.step()
             lr_scheduler.step()
             
