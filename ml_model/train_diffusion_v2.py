@@ -93,9 +93,9 @@ def train():
     # Fixed validation batch
     fixed_val_batch = next(iter(val_loader))
 
-    # --- Target Normalization Constants (Derived from GPCP log1p) ---
-    TARGET_LOG_MIN = 0.0
-    TARGET_LOG_MAX = 6.55
+    # --- Target Normalization Constants (SymLog bounds for residual) ---
+    TARGET_SYMLOG_MIN = -6.55
+    TARGET_SYMLOG_MAX = 6.55
 
     # --- Model ---
     # Target: 1 lead week
@@ -180,7 +180,7 @@ def train():
         train_loss = 0.0
         pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
 
-        for batch in pbar:
+        for i, batch in enumerate(pbar):
             x_obs = batch['x_obs']           
             x_geos = batch['x_geos']         
             y_target = batch['y_target']     
@@ -213,9 +213,17 @@ def train():
             lead_indices = torch.full((B,), target_lead, dtype=torch.long, device=device)
             y_target_lead = y_target[:, target_lead:target_lead+1, :, :]
 
-            # RAW target -> log1p -> Normalization
-            y_log = torch.log1p(y_target_lead.clamp(min=0.0))
-            target_norm = 2.0 * (y_log - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+            # Compute GEOS ensemble mean in raw mm/day for the target lead
+            x_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
+            geos_raw_mean = x_geos_raw.mean(dim=1).squeeze(1) # (B, 4, H, W)
+            geos_mean_lead = geos_raw_mean[:, target_lead:target_lead+1, :, :]
+
+            # Compute raw residual target: GPCP - GEOS
+            y_residual = y_target_lead - geos_mean_lead
+
+            # SymLog normalize the residual
+            y_symlog = torch.sign(y_residual) * torch.log1p(torch.abs(y_residual))
+            target_norm = 2.0 * (y_symlog - TARGET_SYMLOG_MIN) / (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) - 1.0
 
             # Sample random timesteps
             timesteps = torch.randint(
@@ -226,7 +234,8 @@ def train():
             if epoch == start_epoch and i == 0 and accelerator.is_main_process:
                 print(f"\\nDEBUG INITIAL BATCH {epoch}")
                 print(f"Raw Target lead:   min={y_target_lead.min():.4f}, max={y_target_lead.max():.4f}")
-                print(f"Log Target    :    min={y_log.min():.4f}, max={y_log.max():.4f}")
+                print(f"Residual Target:   min={y_residual.min():.4f}, max={y_residual.max():.4f}")
+                print(f"SymLog Target  :   min={y_symlog.min():.4f}, max={y_symlog.max():.4f}")
                 print(f"Norm Target [-1,1]: min={target_norm.min():.4f}, max={target_norm.max():.4f}")
                 print(f"GEOS Cond [-1, 1] : min={x_geos_flat.min():.4f}, max={x_geos_flat.max():.4f}")
                 print(f"Obs Cond  [-1, 1] : min={x_obs.min():.4f}, max={x_obs.max():.4f}")
@@ -285,13 +294,19 @@ def train():
                 v_pred_leads_mm = []
 
                 # Reconstruct each lead
+                vx_geos_raw = torch.expm1(vx_geos.clamp(max=6.55))
+                vgeos_raw_mean = vx_geos_raw.mean(dim=1).squeeze(1)
+
                 for lead in range(4):
                     lead_indices = torch.full((vB,), lead, dtype=torch.long, device=device)
                     vy_target_lead = vy_target[:, lead:lead+1, :, :]
+                    vgeos_mean_lead = vgeos_raw_mean[:, lead:lead+1, :, :]
                     
                     # 1. Global Noise Loss
-                    vy_log = torch.log1p(vy_target_lead.clamp(min=0.0))
-                    vtarget_norm = 2.0 * (vy_log - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+                    vy_residual = vy_target_lead - vgeos_mean_lead
+                    vy_symlog = torch.sign(vy_residual) * torch.log1p(torch.abs(vy_residual))
+                    vtarget_norm = 2.0 * (vy_symlog - TARGET_SYMLOG_MIN) / (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) - 1.0
+
                     v_timesteps = torch.randint(0, unwrapped_model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
                     v_noise = torch.randn_like(vtarget_norm)
                     v_noisy = unwrapped_model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
@@ -302,8 +317,9 @@ def train():
                     # 2. Sampled RMSE (First 5 batches for performance)
                     if i < 5:
                         v_sample_norm = unwrapped_model.sample(v_condition, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
-                        v_sample_denorm = (v_sample_norm + 1.0) / 2.0 * (TARGET_LOG_MAX - TARGET_LOG_MIN) + TARGET_LOG_MIN
-                        v_pred_mm = torch.expm1(v_sample_denorm.clamp(min=0.0, max=6.55))
+                        v_sample_denorm = (v_sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
+                        v_pred_res_mm = torch.sign(v_sample_denorm) * torch.expm1(torch.abs(v_sample_denorm).clamp(max=6.55))
+                        v_pred_mm = (vgeos_mean_lead + v_pred_res_mm).clamp(min=0.0)
                         v_pred_leads_mm.append(v_pred_mm)
                         
                 val_count += 4
@@ -347,15 +363,20 @@ def train():
 
         # Generate ensemble
         with torch.no_grad():
+            fb_geos_raw = torch.expm1(fb_geos.clamp(max=6.55))
+            fb_geos_raw_mean = fb_geos_raw.mean(dim=1).squeeze(1)
+
             ensemble_samples = []
             for i_ens in range(N_SAMPLES_VAL):
                 fb_pred_leads_mm = []
                 for lead in range(4):
                     lead_indices = torch.full((fb_B,), lead, dtype=torch.long, device=device)
+                    fb_geos_mean_lead = fb_geos_raw_mean[:, lead:lead+1, :, :]
+
                     sample_norm = unwrapped_model.sample(fb_cond, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
-                    sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_LOG_MAX - TARGET_LOG_MIN) + TARGET_LOG_MIN
-                    sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=6.55))
-                    sample_precip = sample_precip.clamp(min=0.0)
+                    sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
+                    sample_res_mm = torch.sign(sample_denorm) * torch.expm1(torch.abs(sample_denorm).clamp(max=6.55))
+                    sample_precip = (fb_geos_mean_lead + sample_res_mm).clamp(min=0.0)
                     fb_pred_leads_mm.append(sample_precip)
                 ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
                 ensemble_samples.append(ens_member_full)
@@ -568,15 +589,21 @@ def test():
 
             unwrapped = accelerator.unwrap_model(model)
 
+            t_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
+            t_geos_raw_mean = t_geos_raw.mean(dim=1).squeeze(1)
+
             ensemble = []
             for i_ens in range(N_MEMBERS_TEST):
                 print(f"  Member {i_ens+1}/{N_MEMBERS_TEST}")
                 fb_pred_leads_mm = []
                 for lead in range(4):
                     lead_indices = torch.full((B,), lead, dtype=torch.long, device=device)
+                    t_geos_mean_lead = t_geos_raw_mean[:, lead:lead+1, :, :]
+                    
                     gen_norm = unwrapped.sample(condition, lead_indices, num_inference_steps=INFERENCE_STEPS_TEST, verbose=False)
-                    gen_denorm = (gen_norm + 1.0) / 2.0 * (TARGET_LOG_MAX - TARGET_LOG_MIN) + TARGET_LOG_MIN
-                    gen_mm = torch.expm1(gen_denorm.clamp(min=0.0, max=6.55)).clamp(min=0.0)
+                    gen_denorm = (gen_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
+                    gen_res_mm = torch.sign(gen_denorm) * torch.expm1(torch.abs(gen_denorm).clamp(max=6.55))
+                    gen_mm = (t_geos_mean_lead + gen_res_mm).clamp(min=0.0)
                     fb_pred_leads_mm.append(gen_mm)
                 ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
                 ensemble.append(ens_member_full)
