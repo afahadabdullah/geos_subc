@@ -303,6 +303,8 @@ def train():
         v_rmse_sum = 0.0
         v_rmse_count = 0
         
+        unwrapped_model = accelerator.unwrap_model(model)
+        
         with torch.no_grad():
             for i, val_batch in enumerate(val_loader):
                 vx_obs = val_batch['x_obs'].to(device)
@@ -374,8 +376,6 @@ def train():
         fb_topo = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(fb_B, 1, H, W)
 
         fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin, fb_cos, fb_mjo_map, fb_topo], dim=1)
-
-        unwrapped_model = accelerator.unwrap_model(model)
 
         # Generate N_SAMPLES_VAL ensemble members
         with torch.no_grad():
