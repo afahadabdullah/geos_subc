@@ -160,7 +160,8 @@ def train():
         out_channels=4,          # predicted noise for 4 leads
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
-        num_train_timesteps=1000
+        num_train_timesteps=1000,
+        cmde_ratio=0.0
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -528,9 +529,9 @@ def test():
         out_channels=4,
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
-        num_train_timesteps=1000
-    )
-
+        num_train_timesteps=1000,
+        cmde_ratio=0.0
+    ).to(device)
     # Load best checkpoint
     latest_ckpt = os.path.join(config["output_dir"], "latest_diffusion_ckpt.pt")
     if os.path.exists(latest_ckpt):
