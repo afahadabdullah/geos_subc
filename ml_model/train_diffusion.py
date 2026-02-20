@@ -150,7 +150,7 @@ def train():
     # Target: 4 lead weeks of precipitation
     # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO + 1 topo = 49
     CMDE_RATIO = 0.0  # Completely disabled to prevent any possible mismatch natively
-    N_SAMPLES_VAL = 3  # Ensemble members during validation
+    N_SAMPLES_VAL = 1  # Single reconstruction prediction instead of an ensemble
     INFERENCE_STEPS_VAL = 50  # Faster for validation
     INFERENCE_STEPS_TEST = 1000  # Full schedule for test
 
@@ -440,7 +440,7 @@ def train():
                     if l_idx == 0: axes[l_idx, 2].set_title("Diff Sample")
                     axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 3].set_title("Ens Mean")
+                    if l_idx == 0: axes[l_idx, 3].set_title("Reconstruction")
                     axes[l_idx, 3].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
 
                     if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
