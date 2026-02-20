@@ -29,10 +29,14 @@ def calculate_stats():
     geos_sum = 0.0
     geos_sq_sum = 0.0
     geos_count = 0
+    geos_min = float('inf')
+    geos_max = float('-inf')
     
     obs_sum = torch.zeros(16).float()
     obs_sq_sum = torch.zeros(16).float()
     obs_count = 0
+    obs_min = torch.full((16,), float('inf')).float()
+    obs_max = torch.full((16,), float('-inf')).float()
     
     for batch in tqdm(loader):
         # GEOS: (B, M, 1, L, H, W)
@@ -47,6 +51,8 @@ def calculate_stats():
         geos_sum += gx.sum(dim=0)
         geos_sq_sum += (gx ** 2).sum(dim=0)
         geos_count += gx.size(0)
+        geos_min = min(geos_min, float(gx.min()))
+        geos_max = max(geos_max, float(gx.max()))
         
         # Obs
         # We want stats per channel (16)
@@ -55,6 +61,12 @@ def calculate_stats():
         obs_sum += ox.sum(dim=1)
         obs_sq_sum += (ox ** 2).sum(dim=1)
         obs_count += ox.size(1)
+        
+        # Batch max and min
+        batch_min = ox.min(dim=1)[0]
+        batch_max = ox.max(dim=1)[0]
+        obs_min = torch.minimum(obs_min, batch_min)
+        obs_max = torch.maximum(obs_max, batch_max)
         
     print("Computing Mean/Std...")
     
@@ -70,16 +82,24 @@ def calculate_stats():
     
     print("GEOS Mean:", geos_mean)
     print("GEOS Std:", geos_std)
+    print("GEOS Min:", geos_min)
+    print("GEOS Max:", geos_max)
     print("Obs Mean:", obs_mean)
     print("Obs Std:", obs_std)
+    print("Obs Min:", obs_min)
+    print("Obs Max:", obs_max)
     
     # Save
     save_path = os.path.join(os.path.dirname(__file__), "global_stats.pt")
     torch.save({
         "geos_mean": geos_mean,
         "geos_std": geos_std,
+        "geos_min": torch.tensor(geos_min),
+        "geos_max": torch.tensor(geos_max),
         "obs_mean": obs_mean,
-        "obs_std": obs_std
+        "obs_std": obs_std,
+        "obs_min": obs_min,
+        "obs_max": obs_max
     }, save_path)
     print(f"Saved stats to {save_path}")
 

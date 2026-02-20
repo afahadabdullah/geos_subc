@@ -37,6 +37,8 @@ class WelfordAccumulator:
         self.count = 0
         self.mean = 0.0
         self.m2 = 0.0
+        self.min_val = float('inf')
+        self.max_val = float('-inf')
 
     def update(self, data: np.ndarray):
         """Update with a batch of values (1D float64 array, NaNs already removed)."""
@@ -48,11 +50,13 @@ class WelfordAccumulator:
         self.mean += delta.sum() / (self.count + n)
         self.m2 += (delta * (data - self.mean)).sum()
         self.count += n
+        self.min_val = min(self.min_val, float(data.min()))
+        self.max_val = max(self.max_val, float(data.max()))
 
     def result(self):
         if self.count < 2:
-            return None, None
-        return float(self.mean), float(np.sqrt(self.m2 / (self.count - 1)))
+            return None, None, None, None
+        return float(self.mean), float(np.sqrt(self.m2 / (self.count - 1))), self.min_val, self.max_val
 
 
 def process_variable(name, zarr_pattern, var_candidates, data_root, start_year, end_year,
@@ -112,12 +116,12 @@ def process_variable(name, zarr_pattern, var_candidates, data_root, start_year, 
         except Exception as e:
             print(f"    Error {year}: {e}")
 
-    mean, std = acc.result()
+    mean, std, vmin, vmax = acc.result()
     if mean is None:
         print(f"    WARNING: No valid data found for {name}!")
     else:
-        print(f"    Final → mean={mean:.4f}  std={std:.4f}  N={acc.count:,}")
-    return mean, std
+        print(f"    Final → min={vmin:.4f} max={vmax:.4f} mean={mean:.4f}  std={std:.4f}  N={acc.count:,}")
+    return mean, std, vmin, vmax
 
 
 def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEAR,
@@ -129,7 +133,7 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
 
     # SST (K or C) — check valid ranges for both
     # Kelvin: ~270-310 | Celsius: ~-2 to 35
-    sst_mean, sst_std = process_variable(
+    sst_mean, sst_std, sst_min, sst_max = process_variable(
         "SST", "sst_weekly_{year}.zarr", ["sst", "SST", "analysed_sst"],
         data_root, start_year, end_year,
         filter_fn=lambda x: ((x > 150) & (x < 350)) | ((x > -5) & (x < 50))
@@ -137,9 +141,11 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if sst_mean is not None:
         stats["sst_mean"] = sst_mean
         stats["sst_std"] = sst_std
+        stats["sst_min"] = sst_min
+        stats["sst_max"] = sst_max
 
     # SSS (psu)  — valid range ~20–40 psu
-    sss_mean, sss_std = process_variable(
+    sss_mean, sss_std, sss_min, sss_max = process_variable(
         "SSS", "sss_weekly_{year}.zarr", ["sss", "SSS", "so"],
         data_root, start_year, end_year,
         filter_fn=lambda x: (x > 0) & (x < 50)
@@ -147,9 +153,11 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if sss_mean is not None:
         stats["sss_mean"] = sss_mean
         stats["sss_std"] = sss_std
+        stats["sss_min"] = sss_min
+        stats["sss_max"] = sss_max
 
     # Soil Moisture (m³/m³)  — valid range 0–0.7
-    sm_mean, sm_std = process_variable(
+    sm_mean, sm_std, sm_min, sm_max = process_variable(
         "SM", "soilw_weekly_{year}.zarr", ["sm", "soil_moisture", "soilw", "swvl1", "var40"],
         data_root, start_year, end_year,
         filter_fn=lambda x: (x >= 0) & (x <= 1.0)
@@ -157,9 +165,11 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if sm_mean is not None:
         stats["sm_mean"] = sm_mean
         stats["sm_std"] = sm_std
+        stats["sm_min"] = sm_min
+        stats["sm_max"] = sm_max
 
     # IVT (kg/m/s)  — non-negative
-    ivt_mean, ivt_std = process_variable(
+    ivt_mean, ivt_std, ivt_min, ivt_max = process_variable(
         "IVT", "ivt_weekly_{year}.zarr", ["ivt", "IVT", "ivt_mag"],
         data_root, start_year, end_year,
         filter_fn=lambda x: x >= 0
@@ -167,9 +177,11 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if ivt_mean is not None:
         stats["ivt_mean"] = ivt_mean
         stats["ivt_std"] = ivt_std
+        stats["ivt_min"] = ivt_min
+        stats["ivt_max"] = ivt_max
 
     # Z500 (m²/s² geopotential at 500hPa)  — typical range ~45000–58000 m²/s²
-    z500_mean, z500_std = process_variable(
+    z500_mean, z500_std, z500_min, z500_max = process_variable(
         "Z500", "z500_u250_weekly_{year}.zarr", ["z500", "z", "geopotential"],
         data_root, start_year, end_year,
         filter_fn=lambda x: (x > 30000) & (x < 70000)
@@ -177,9 +189,11 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if z500_mean is not None:
         stats["z500_mean"] = z500_mean
         stats["z500_std"] = z500_std
+        stats["z500_min"] = z500_min
+        stats["z500_max"] = z500_max
 
     # U250 (m/s zonal wind at 250hPa)  — can be negative (easterly)
-    u250_mean, u250_std = process_variable(
+    u250_mean, u250_std, u250_min, u250_max = process_variable(
         "U250", "z500_u250_weekly_{year}.zarr", ["u250", "u", "u_component_of_wind"],
         data_root, start_year, end_year,
         filter_fn=lambda x: (x > -100) & (x < 150)
@@ -187,6 +201,8 @@ def calculate_stats(data_root=DATA_ROOT, start_year=START_YEAR, end_year=END_YEA
     if u250_mean is not None:
         stats["u250_mean"] = u250_mean
         stats["u250_std"] = u250_std
+        stats["u250_min"] = u250_min
+        stats["u250_max"] = u250_max
 
     if not stats:
         print("\nNo stats computed — check that Zarr files exist in data_root.")
