@@ -4,6 +4,13 @@ import os
 import argparse
 import numpy as np
 from torch.utils.data import DataLoader
+import sys
+from pathlib import Path
+
+# Add project root to sys.path
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
 
 from ml_model.dataset_hybrid import S2SHybridDataset
 from ml_model.diffusion import ConditionalDiffusion
