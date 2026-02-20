@@ -21,6 +21,9 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 echo "Python: $(which python)"
 python --version
 
+# Ensure we are in the project root directory
+cd /scratch/11353/afahad/geossub/geos_subc || exit 1
+
 mkdir -p ml_output_diffusion
 
 python ml_model/train_diffusion.py --config ml_model/config_diffusion.yaml
