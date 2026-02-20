@@ -15,6 +15,9 @@ echo "Running on node: $(hostname)"
 source ~/.bashrc
 conda activate geossub_env
 
+# Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
 echo "Python: $(which python)"
 python --version
 
