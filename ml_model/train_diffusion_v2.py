@@ -187,8 +187,7 @@ def train():
             if train_dataset.geos_min is not None:
                 x_geos_flat = 2.0 * (x_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
             
-            # Normalize Prev-GPCP slice within x_obs (Channels 12 to 15) using Min-Max to [-1, 1]
-            x_obs[:, 12:16, :, :] = 2.0 * (x_obs[:, 12:16, :, :] - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+            # (Prev-GPCP channels 12-15 are already min-max normalized to [-1, 1] in dataset_hybrid.py)
 
             # Month embeddings
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
@@ -258,8 +257,7 @@ def train():
 
                 if train_dataset.geos_min is not None:
                     vx_geos_flat = 2.0 * (vx_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
-                
-                vx_obs[:, 12:16, :, :] = 2.0 * (vx_obs[:, 12:16, :, :] - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+                # (Prev-GPCP channels already normalized in dataset)
 
                 v_sin = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
@@ -321,8 +319,7 @@ def train():
 
         if train_dataset.geos_min is not None:
             fb_geos_flat = 2.0 * (fb_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
-        
-        fb_obs[:, 12:16, :, :] = 2.0 * (fb_obs[:, 12:16, :, :] - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+        # (Prev-GPCP channels already normalized in dataset)
 
         fb_sin = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         fb_cos = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
@@ -543,7 +540,7 @@ def test():
             if val_dataset.geos_min is not None:
                 x_geos_flat = 2.0 * (x_geos_flat - val_dataset.geos_min.to(device)) / (val_dataset.geos_max.to(device) - val_dataset.geos_min.to(device)) - 1.0
 
-            x_obs[:, 12:16, :, :] = 2.0 * (x_obs[:, 12:16, :, :] - TARGET_LOG_MIN) / (TARGET_LOG_MAX - TARGET_LOG_MIN) - 1.0
+            # (Prev-GPCP channels already normalized in dataset)
 
             t_sin = torch.sin(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
             t_cos = torch.cos(2 * np.pi * (t_months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
