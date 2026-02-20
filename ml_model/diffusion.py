@@ -66,10 +66,13 @@ class ConditionalDiffusion(nn.Module):
         )
         
         # Noise Scheduler: DDIM for fast sampling steps
-        # clip_sample=False is crucial as our z-scored data exceeds [-1, 1]
+        # clip_sample=True with range 7.0 forces the intermediate x_0 estimates 
+        # strictly into [-7.0, 7.0], which perfectly contains our log-target 
+        # [-1.04, 6.55] while preventing the well-known DDIM divergence explosion at high t.
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_train_timesteps, 
-            clip_sample=False,
+            clip_sample=True,
+            clip_sample_range=7.0,
             prediction_type="epsilon"
         )
         
