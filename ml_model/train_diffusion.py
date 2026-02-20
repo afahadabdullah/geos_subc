@@ -256,7 +256,7 @@ def train():
             if train_dataset.geos_mean is not None:
                 gm = train_dataset.geos_mean.to(device)
                 gs = train_dataset.geos_std.to(device)
-                target_norm = (y_log - gm) / (gs * 3.0)
+                target_norm = (y_log - gm) / gs
             else:
                 target_norm = y_log
 
@@ -322,7 +322,7 @@ def train():
                 if train_dataset.geos_mean is not None:
                     gm = train_dataset.geos_mean.to(device)
                     gs = train_dataset.geos_std.to(device)
-                    vtarget_norm = (vy_log - gm) / (gs * 3.0)
+                    vtarget_norm = (vy_log - gm) / gs
                 else:
                     vtarget_norm = vy_log
 
@@ -369,7 +369,7 @@ def train():
                 if train_dataset.geos_mean is not None:
                     gm = train_dataset.geos_mean.to(device)
                     gs = train_dataset.geos_std.to(device)
-                    sample_denorm = (sample_norm * gs * 3.0) + gm
+                    sample_denorm = (sample_norm * gs) + gm
                 else:
                     sample_denorm = sample_norm
 
@@ -610,7 +610,7 @@ def test():
                 if val_dataset.geos_mean is not None:
                     gm = val_dataset.geos_mean.to(device)
                     gs = val_dataset.geos_std.to(device)
-                    gen = (gen_norm * gs * 3.0) + gm
+                    gen = (gen_norm * gs) + gm
                 else:
                     gen = gen_norm
 
