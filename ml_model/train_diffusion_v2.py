@@ -292,49 +292,49 @@ def train():
                     v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
                     v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map], dim=1)
 
-                v_pred_leads_mm = []
+                    v_pred_leads_mm = []
 
-                # Reconstruct each lead
-                vx_geos_raw = torch.expm1(vx_geos.clamp(max=6.55))
-                vgeos_raw_mean = vx_geos_raw.mean(dim=1).squeeze(1)
+                    # Reconstruct each lead
+                    vx_geos_raw = torch.expm1(vx_geos.clamp(max=6.55))
+                    vgeos_raw_mean = vx_geos_raw.mean(dim=1).squeeze(1)
 
-                for lead in range(4):
-                    lead_indices = torch.full((vB,), lead, dtype=torch.long, device=device)
-                    vy_target_lead = vy_target[:, lead:lead+1, :, :]
-                    vgeos_mean_lead = vgeos_raw_mean[:, lead:lead+1, :, :]
-                    
-                    # 1. Global Noise Loss
-                    vy_residual = vy_target_lead - vgeos_mean_lead
-                    vy_symlog = torch.sign(vy_residual) * torch.log1p(torch.abs(vy_residual))
-                    vtarget_norm = 2.0 * (vy_symlog - TARGET_SYMLOG_MIN) / (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) - 1.0
-
-                    v_timesteps = torch.randint(0, unwrapped_model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
-                    v_noise = torch.randn_like(vtarget_norm)
-                    v_noisy = unwrapped_model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
-                    v_pred_noise = model(v_noisy, v_condition, lead_indices, v_timesteps)
-                    v_loss = (area_weights * (v_pred_noise - v_noise)**2).mean()
-                    val_loss_sum += v_loss.item()
-                    
-                    # 2. Sampled RMSE (First 5 batches for performance)
-                    if i < 5:
-                        v_sample_norm = unwrapped_model.sample(v_condition, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
-                        v_sample_denorm = (v_sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
-                        v_pred_res_mm = torch.sign(v_sample_denorm) * torch.expm1(torch.abs(v_sample_denorm).clamp(max=6.55))
-                        v_pred_mm = (vgeos_mean_lead + v_pred_res_mm).clamp(min=0.0)
-                        v_pred_leads_mm.append(v_pred_mm)
+                    for lead in range(4):
+                        lead_indices = torch.full((vB,), lead, dtype=torch.long, device=device)
+                        vy_target_lead = vy_target[:, lead:lead+1, :, :]
+                        vgeos_mean_lead = vgeos_raw_mean[:, lead:lead+1, :, :]
                         
-                val_count += 4
+                        # 1. Global Noise Loss
+                        vy_residual = vy_target_lead - vgeos_mean_lead
+                        vy_symlog = torch.sign(vy_residual) * torch.log1p(torch.abs(vy_residual))
+                        vtarget_norm = 2.0 * (vy_symlog - TARGET_SYMLOG_MIN) / (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) - 1.0
 
-                if i < 5:
-                    v_pred_full_mm = torch.cat(v_pred_leads_mm, dim=1) # (B, 4, H, W)
-                    v_diff_sq = (v_pred_full_mm - vy_target.to(device))**2
-                    v_weighted_mse = (v_diff_sq * area_weights).mean()
-                    v_rmse_sum += torch.sqrt(v_weighted_mse).item()
-                    v_rmse_count += 1
-                    
-                    if i == 0 and accelerator.is_main_process:
-                        print(f"DEBUG | Val Batch 0 Stats | Target: {vy_target.min().item():.2f}/{vy_target.max().item():.2f} "
-                              f"| Pred: {v_pred_full_mm.min().item():.2f}/{v_pred_full_mm.max().item():.2f} ")
+                        v_timesteps = torch.randint(0, unwrapped_model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
+                        v_noise = torch.randn_like(vtarget_norm)
+                        v_noisy = unwrapped_model.noise_scheduler.add_noise(vtarget_norm, v_noise, v_timesteps)
+                        v_pred_noise = model(v_noisy, v_condition, lead_indices, v_timesteps)
+                        v_loss = (area_weights * (v_pred_noise - v_noise)**2).mean()
+                        val_loss_sum += v_loss.item()
+                        
+                        # 2. Sampled RMSE (First 5 batches for performance)
+                        if i < 5:
+                            v_sample_norm = unwrapped_model.sample(v_condition, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
+                            v_sample_denorm = (v_sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
+                            v_pred_res_mm = torch.sign(v_sample_denorm) * torch.expm1(torch.abs(v_sample_denorm).clamp(max=6.55))
+                            v_pred_mm = (vgeos_mean_lead + v_pred_res_mm).clamp(min=0.0)
+                            v_pred_leads_mm.append(v_pred_mm)
+                            
+                    val_count += 4
+
+                    if i < 5:
+                        v_pred_full_mm = torch.cat(v_pred_leads_mm, dim=1) # (B, 4, H, W)
+                        v_diff_sq = (v_pred_full_mm - vy_target.to(device))**2
+                        v_weighted_mse = (v_diff_sq * area_weights).mean()
+                        v_rmse_sum += torch.sqrt(v_weighted_mse).item()
+                        v_rmse_count += 1
+                        
+                        if i == 0 and accelerator.is_main_process:
+                            print(f"DEBUG | Val Batch 0 Stats | Target: {vy_target.min().item():.2f}/{vy_target.max().item():.2f} "
+                                  f"| Pred: {v_pred_full_mm.min().item():.2f}/{v_pred_full_mm.max().item():.2f} ")
 
             avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
             val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
