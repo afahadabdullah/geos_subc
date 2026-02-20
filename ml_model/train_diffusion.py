@@ -240,6 +240,13 @@ def train():
 
             # Flatten GEOS: (B, 4, 1, 4, H, W) -> (B, 16, H, W)
             x_geos_flat = x_geos.squeeze(2).reshape(B, 16, H, W)
+            
+            # Normalize GEOS condition
+            if train_dataset.geos_mean is not None:
+                x_geos_flat = (x_geos_flat - train_dataset.geos_mean.to(device)) / train_dataset.geos_std.to(device)
+            
+            # Normalize Prev-GPCP slice within x_obs (Channels 12 to 15)
+            x_obs[:, 12:16, :, :] = (x_obs[:, 12:16, :, :] - TARGET_MEAN) / TARGET_STD
 
             # Month embeddings: sin/cos spatial maps
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W).to(device)
@@ -316,6 +323,13 @@ def train():
                 vB, _, vH, vW = vx_obs.shape
                 vx_geos_flat = vx_geos.squeeze(2).reshape(vB, 16, vH, vW)
 
+                # Normalize GEOS condition
+                if train_dataset.geos_mean is not None:
+                    vx_geos_flat = (vx_geos_flat - train_dataset.geos_mean.to(device)) / train_dataset.geos_std.to(device)
+                
+                # Normalize Prev-GPCP slice within vx_obs (Channels 12 to 15)
+                vx_obs[:, 12:16, :, :] = (vx_obs[:, 12:16, :, :] - TARGET_MEAN) / TARGET_STD
+
                 v_sin = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
@@ -369,6 +383,13 @@ def train():
         fb_B = fb_obs.shape[0]
         _, _, H, W = fb_obs.shape
         fb_geos_flat = fb_geos.squeeze(2).reshape(fb_B, 16, H, W)
+
+        # Normalize GEOS condition
+        if train_dataset.geos_mean is not None:
+            fb_geos_flat = (fb_geos_flat - train_dataset.geos_mean.to(device)) / train_dataset.geos_std.to(device)
+        
+        # Normalize Prev-GPCP slice within fb_obs (Channels 12 to 15)
+        fb_obs[:, 12:16, :, :] = (fb_obs[:, 12:16, :, :] - TARGET_MEAN) / TARGET_STD
 
         fb_sin = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
         fb_cos = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
@@ -425,8 +446,10 @@ def train():
                 # One individual sample for display
                 sample_img = ens_stack[0, 0].cpu().numpy()  # (4, H, W)
 
-                # GEOS Mean (denormalize)
+                # GEOS Mean (denormalize for plotting)
                 g_flat = fb_geos_flat[0]  # (16, H, W)
+                if train_dataset.geos_mean is not None:
+                    g_flat = (g_flat * train_dataset.geos_std.to(device)) + train_dataset.geos_mean.to(device)
                 g_ens = g_flat.view(4, 4, H, W)  # (Members, Leads, H, W)
                 g_mean_log = g_ens.mean(dim=0)    # (4, H, W)
                 g_img_all = np.expm1(np.maximum(g_mean_log.cpu().numpy(), 0.0))
