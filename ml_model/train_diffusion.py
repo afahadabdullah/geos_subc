@@ -149,7 +149,7 @@ def train():
     # --- Model ---
     # Target: 4 lead weeks of precipitation
     # Condition: 28 obs + 16 GEOS + 2 sin/cos + 2 MJO + 1 topo = 49
-    CMDE_RATIO = 0.1  # Reduced noise on condition channels
+    CMDE_RATIO = 0.0  # Completely disabled to prevent any possible mismatch natively
     N_SAMPLES_VAL = 3  # Ensemble members during validation
     INFERENCE_STEPS_VAL = 50  # Faster for validation
     INFERENCE_STEPS_TEST = 1000  # Full schedule for test
