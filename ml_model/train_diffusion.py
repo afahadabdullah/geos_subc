@@ -422,11 +422,14 @@ def train():
                 writer.writerow([epoch, avg_train_loss, avg_val_loss, val_rmse])
 
             # ==============================================================
-            # PLOT: Best Model Validation
+            # PLOT: Validation Plot (Either New Best or every 5 Epochs)
             # ==============================================================
-            if val_rmse < best_val_rmse:
-                print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {val_rmse:.4f}. Plotting...")
-                best_val_rmse = val_rmse
+            if val_rmse < best_val_rmse or epoch % 5 == 0:
+                if val_rmse < best_val_rmse:
+                    print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {val_rmse:.4f}. Plotting...")
+                    best_val_rmse = val_rmse
+                else:
+                    print(f"Periodic Plotting at Epoch {epoch}...")
 
                 # First sample only, all 4 leads
                 t_img_all = fb_target_mm[0].cpu().numpy()         # (4, H, W) mm/day
