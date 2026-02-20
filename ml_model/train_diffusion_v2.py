@@ -105,12 +105,21 @@ def train():
 
     model = ConditionalDiffusionV2(
         in_channels=1,           
-        condition_channels=48,   
-        out_channels=1,          
         block_out_channels=(64, 128, 256, 512),
         layers_per_block=2,
         num_train_timesteps=1000
-    )
+    ).to(device)
+
+    if accelerator.is_main_process:
+        print("--- Training Dataset Bounds ---")
+        print(f"GEOS  : min={train_dataset.geos_min:.2f}, max={train_dataset.geos_max:.2f}")
+        print(f"SST   : min={train_dataset.sst_min:.2f}, max={train_dataset.sst_max:.2f}")
+        print(f"SSS   : min={train_dataset.sss_min:.2f}, max={train_dataset.sss_max:.2f}")
+        print(f"SM    : min={train_dataset.sm_min:.2f}, max={train_dataset.sm_max:.2f}")
+        print(f"IVT   : min={train_dataset.ivt_min:.2f}, max={train_dataset.ivt_max:.2f}")
+        print(f"Z500  : min={train_dataset.z500_min:.2f}, max={train_dataset.z500_max:.2f}")
+        print(f"U250  : min={train_dataset.u250_min:.2f}, max={train_dataset.u250_max:.2f}")
+        print("-------------------------------")
 
     if accelerator.is_main_process:
         total_params = sum(p.numel() for p in model.parameters())
@@ -213,6 +222,15 @@ def train():
                 0, model.noise_scheduler.config.num_train_timesteps,
                 (B,), device=device
             ).long()
+
+            if epoch == start_epoch and i == 0 and accelerator.is_main_process:
+                print(f"\\nDEBUG INITIAL BATCH {epoch}")
+                print(f"Raw Target lead:   min={y_target_lead.min():.4f}, max={y_target_lead.max():.4f}")
+                print(f"Log Target    :    min={y_log.min():.4f}, max={y_log.max():.4f}")
+                print(f"Norm Target [-1,1]: min={target_norm.min():.4f}, max={target_norm.max():.4f}")
+                print(f"GEOS Cond [-1, 1] : min={x_geos_flat.min():.4f}, max={x_geos_flat.max():.4f}")
+                print(f"Obs Cond  [-1, 1] : min={x_obs.min():.4f}, max={x_obs.max():.4f}")
+                print(f"Prev-GPCP [-1, 1] : min={x_obs[:,12:16].min():.4f}, max={x_obs[:,12:16].max():.4f}")
 
             noise = torch.randn_like(target_norm)
             noisy_target = model.noise_scheduler.add_noise(target_norm, noise, timesteps)
