@@ -221,20 +221,21 @@ def train():
         avg_train_loss = train_loss / len(loader)
 
         # ==============================================================
-        # VALIDATION: Iterative per-lead reconstruction
+        # VALIDATION: Iterative per-lead reconstruction (Epoch >= 20)
         # ==============================================================
-        model.eval()
-        val_loss_sum = 0
-        val_count = 0
-        v_rmse_sum = 0.0
-        v_rmse_count = 0
-        
-        unwrapped_model = accelerator.unwrap_model(model)
-        
-        with torch.no_grad():
-            for i, val_batch in enumerate(val_loader):
-                vy_target = val_batch['y_target'].to(device)
-                vB, _, vH, vW = vy_target.shape
+        if epoch >= 20:
+            model.eval()
+            val_loss_sum = 0
+            val_count = 0
+            v_rmse_sum = 0.0
+            v_rmse_count = 0
+            
+            unwrapped_model = accelerator.unwrap_model(model)
+            
+            with torch.no_grad():
+                for i, val_batch in enumerate(val_loader):
+                    vy_target = val_batch['y_target'].to(device)
+                    vB, _, vH, vW = vy_target.shape
 
                 v_pred_leads_mm = []
 
@@ -274,110 +275,123 @@ def train():
                         print(f"DEBUG | Val Batch 0 Stats | Target: {vy_target.min().item():.2f}/{vy_target.max().item():.2f} "
                               f"| Pred: {v_pred_full_mm.min().item():.2f}/{v_pred_full_mm.max().item():.2f} ")
 
-        avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
-        val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
+            avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
+            val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
 
-        # ==============================================================
-        # FIXED BATCH: Generate Ensemble + RMSE
-        # ==============================================================
-        fb_target = fixed_val_batch['y_target'].to(device)
+            # ==============================================================
+            # FIXED BATCH: Generate Ensemble + RMSE
+            # ==============================================================
+            fb_target = fixed_val_batch['y_target'].to(device)
 
-        fb_B, _, fb_H, fb_W = fb_target.shape
+            fb_B, _, fb_H, fb_W = fb_target.shape
 
-        # Generate ensemble
-        with torch.no_grad():
-            ensemble_samples = []
-            for i_ens in range(N_SAMPLES_VAL):
-                fb_pred_leads_mm = []
-                for lead in range(4):
-                    lead_indices = torch.full((fb_B,), lead, dtype=torch.long, device=device)
+            # Generate ensemble
+            with torch.no_grad():
+                ensemble_samples = []
+                for i_ens in range(N_SAMPLES_VAL):
+                    fb_pred_leads_mm = []
+                    for lead in range(4):
+                        lead_indices = torch.full((fb_B,), lead, dtype=torch.long, device=device)
 
-                    sample_norm = unwrapped_model.sample(fb_B, fb_H, fb_W, lead_indices, device, num_inference_steps=INFERENCE_STEPS_VAL)
-                    sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_LOG_MAX - TARGET_LOG_MIN) + TARGET_LOG_MIN
-                    sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=6.55))
-                    sample_precip = sample_precip.clamp(min=0.0)
-                    fb_pred_leads_mm.append(sample_precip)
-                ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
-                ensemble_samples.append(ens_member_full)
+                        sample_norm = unwrapped_model.sample(fb_B, fb_H, fb_W, lead_indices, device, num_inference_steps=INFERENCE_STEPS_VAL)
+                        sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_LOG_MAX - TARGET_LOG_MIN) + TARGET_LOG_MIN
+                        sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=6.55))
+                        sample_precip = sample_precip.clamp(min=0.0)
+                        fb_pred_leads_mm.append(sample_precip)
+                    ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
+                    ensemble_samples.append(ens_member_full)
 
-            ens_stack = torch.stack(ensemble_samples, dim=0)
-            ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
+                ens_stack = torch.stack(ensemble_samples, dim=0)
+                ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
 
-        fb_target_mm = fb_target
-        fb_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
+            fb_target_mm = fb_target
+            fb_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
 
-        if accelerator.is_main_process:
-            print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val Noise: {avg_val_loss:.4f} | Val FB RMSE: {fb_rmse:.4f} | Val Sampled RMSE: {val_rmse:.4f}")
+            if accelerator.is_main_process:
+                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val Noise: {avg_val_loss:.4f} | Val FB RMSE: {fb_rmse:.4f} | Val Sampled RMSE: {val_rmse:.4f}")
 
-            with open(log_file, "a") as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch, avg_train_loss, avg_val_loss, fb_rmse])
+                with open(log_file, "a") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([epoch, avg_train_loss, avg_val_loss, fb_rmse])
 
-            # PLOT (best based on Fixed Batch RMSE, starting after Epoch 20)
-            if epoch >= 20 and (fb_rmse < best_val_rmse or epoch % 5 == 0):
-                if fb_rmse < best_val_rmse:
-                    print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {fb_rmse:.4f}. Plotting...")
-                    best_val_rmse = fb_rmse
+                # PLOT (best based on Fixed Batch RMSE, starting after Epoch 20)
+                if epoch >= 20 and (fb_rmse < best_val_rmse or epoch % 5 == 0):
+                    if fb_rmse < best_val_rmse:
+                        print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {fb_rmse:.4f}. Plotting...")
+                        best_val_rmse = fb_rmse
 
-                t_img_all = fb_target_mm[0].cpu().numpy()         
-                sample_img = ens_stack[0, 0].cpu().numpy()  
-                ens_mean_img = ens_mean[0].cpu().numpy()          
+                    t_img_all = fb_target_mm[0].cpu().numpy()         
+                    sample_img = ens_stack[0, 0].cpu().numpy()  
+                    ens_mean_img = ens_mean[0].cpu().numpy()          
 
-                fig, axes = plt.subplots(4, 4, figsize=(20, 16))
+                    fig, axes = plt.subplots(4, 4, figsize=(20, 16))
 
-                for l_idx in range(4):
-                    t_img = t_img_all[l_idx]
-                    s_img = np.clip(sample_img[l_idx], 0, None)
-                    m_img = ens_mean_img[l_idx]
-                    diff_bias = m_img - t_img
-                    
-                    d_rmse = np.sqrt(np.mean(diff_bias**2))
+                    for l_idx in range(4):
+                        t_img = t_img_all[l_idx]
+                        s_img = np.clip(sample_img[l_idx], 0, None)
+                        m_img = ens_mean_img[l_idx]
+                        diff_bias = m_img - t_img
+                        
+                        d_rmse = np.sqrt(np.mean(diff_bias**2))
 
-                    if l_idx == 0: axes[l_idx, 0].set_title("Target GPCP")
-                    axes[l_idx, 0].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
-                    axes[l_idx, 0].set_ylabel(f"Week {l_idx+1}")
+                        if l_idx == 0: axes[l_idx, 0].set_title("Target GPCP")
+                        axes[l_idx, 0].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
+                        axes[l_idx, 0].set_ylabel(f"Week {l_idx+1}")
 
-                    if l_idx == 0: axes[l_idx, 1].set_title("Diff Sample")
-                    axes[l_idx, 1].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
+                        if l_idx == 0: axes[l_idx, 1].set_title("Diff Sample")
+                        axes[l_idx, 1].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 2].set_title("Reconstruction Mean")
-                    axes[l_idx, 2].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
+                        if l_idx == 0: axes[l_idx, 2].set_title("Reconstruction Mean")
+                        axes[l_idx, 2].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 3].set_title("Diff Bias")
-                    axes[l_idx, 3].imshow(diff_bias, cmap='RdBu_r', vmin=-20, vmax=20)
-                    axes[l_idx, 3].set_ylabel(f"RMSE: {d_rmse:.2f}")
+                        if l_idx == 0: axes[l_idx, 3].set_title("Diff Bias")
+                        axes[l_idx, 3].imshow(diff_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                        axes[l_idx, 3].set_ylabel(f"RMSE: {d_rmse:.2f}")
 
-                os.makedirs(os.path.join(output_dir, "plots_diffusion_uncond"), exist_ok=True)
-                plt.suptitle(f"Diffusion v3 (Uncond) - Epoch {epoch} | RMSE: {fb_rmse:.2f} | Noise Loss: {avg_val_loss:.4f}", fontsize=14)
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, f"plots_diffusion_uncond/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"), dpi=150)
-                plt.close()
+                    os.makedirs(os.path.join(output_dir, "plots_diffusion_uncond"), exist_ok=True)
+                    plt.suptitle(f"Diffusion v3 (Uncond) - Epoch {epoch} | RMSE: {fb_rmse:.2f} | Noise Loss: {avg_val_loss:.4f}", fontsize=14)
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(output_dir, f"plots_diffusion_uncond/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"), dpi=150)
+                    plt.close()
 
-            # SAVE CHECKPOINTS
-            ckpt_state = {
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                'top_k_ckpts': top_k_ckpts
-            }
-            torch.save(ckpt_state, latest_ckpt)
+                # SAVE CHECKPOINTS (Only if Validation was run)
+                ckpt_state = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'top_k_ckpts': top_k_ckpts
+                }
+                torch.save(ckpt_state, latest_ckpt)
 
-            current_path = os.path.join(output_dir, f"diffusion_epoch_{epoch}_rmse_{fb_rmse:.4f}.pt")
-            top_k_ckpts.append((fb_rmse, epoch, current_path))
-            top_k_ckpts.sort(key=lambda x: x[0])
+                current_path = os.path.join(output_dir, f"diffusion_epoch_{epoch}_rmse_{fb_rmse:.4f}.pt")
+                top_k_ckpts.append((fb_rmse, epoch, current_path))
+                top_k_ckpts.sort(key=lambda x: x[0])
 
-            if len(top_k_ckpts) > save_top_k:
-                worst = top_k_ckpts.pop()
-                if worst[2] != current_path and os.path.exists(worst[2]):
-                    os.remove(worst[2])
+                if len(top_k_ckpts) > save_top_k:
+                    worst = top_k_ckpts.pop()
+                    if worst[2] != current_path and os.path.exists(worst[2]):
+                        os.remove(worst[2])
 
-            is_in_top = any(x[2] == current_path for x in top_k_ckpts)
-            if is_in_top:
-                print(f"New Top Model! RMSE: {fb_rmse:.4f}")
-                torch.save(ckpt_state, current_path)
+                is_in_top = any(x[2] == current_path for x in top_k_ckpts)
+                if is_in_top:
+                    print(f"New Top Model! RMSE: {fb_rmse:.4f}")
+                    torch.save(ckpt_state, current_path)
 
-            ckpt_state['top_k_ckpts'] = top_k_ckpts
-            torch.save(ckpt_state, latest_ckpt)
+                ckpt_state['top_k_ckpts'] = top_k_ckpts
+                torch.save(ckpt_state, latest_ckpt)
+                
+        else:
+            # If skipping validation, just log training loss and save latest ckpt
+            if accelerator.is_main_process:
+                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Validation Skipped")
+                
+                ckpt_state_skip = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'top_k_ckpts': top_k_ckpts
+                }
+                torch.save(ckpt_state_skip, latest_ckpt)
 
 
 # ==============================================================================

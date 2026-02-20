@@ -261,35 +261,36 @@ def train():
         avg_train_loss = train_loss / len(loader)
 
         # ==============================================================
-        # VALIDATION: Iterative per-lead reconstruction
+        # VALIDATION: Iterative per-lead reconstruction (Epoch >= 20)
         # ==============================================================
-        model.eval()
-        val_loss_sum = 0
-        val_count = 0
-        v_rmse_sum = 0.0
-        v_rmse_count = 0
-        
-        unwrapped_model = accelerator.unwrap_model(model)
-        
-        with torch.no_grad():
-            for i, val_batch in enumerate(val_loader):
-                vx_obs = val_batch['x_obs'].to(device)
-                vx_geos = val_batch['x_geos'].to(device)
-                vy_target = val_batch['y_target'].to(device)
-                v_months = val_batch['month'].to(device)
-                v_mjo = val_batch['mjo'].to(device)
+        if epoch >= 20:
+            model.eval()
+            val_loss_sum = 0
+            val_count = 0
+            v_rmse_sum = 0.0
+            v_rmse_count = 0
+            
+            unwrapped_model = accelerator.unwrap_model(model)
+            
+            with torch.no_grad():
+                for i, val_batch in enumerate(val_loader):
+                    vx_obs = val_batch['x_obs'].to(device)
+                    vx_geos = val_batch['x_geos'].to(device)
+                    vy_target = val_batch['y_target'].to(device)
+                    v_months = val_batch['month'].to(device)
+                    v_mjo = val_batch['mjo'].to(device)
 
-                vB, _, vH, vW = vx_obs.shape
-                vx_geos_flat = vx_geos.squeeze(2).reshape(vB, 16, vH, vW)
+                    vB, _, vH, vW = vx_obs.shape
+                    vx_geos_flat = vx_geos.squeeze(2).reshape(vB, 16, vH, vW)
 
-                if train_dataset.geos_min is not None:
-                    vx_geos_flat = 2.0 * (vx_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
-                # (Prev-GPCP channels already normalized in dataset)
+                    if train_dataset.geos_min is not None:
+                        vx_geos_flat = 2.0 * (vx_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
+                    # (Prev-GPCP channels already normalized in dataset)
 
-                v_sin = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
-                v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
-                v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
-                v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map], dim=1)
+                    v_sin = torch.sin(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
+                    v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
+                    v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
+                    v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map], dim=1)
 
                 v_pred_leads_mm = []
 
@@ -335,147 +336,159 @@ def train():
                         print(f"DEBUG | Val Batch 0 Stats | Target: {vy_target.min().item():.2f}/{vy_target.max().item():.2f} "
                               f"| Pred: {v_pred_full_mm.min().item():.2f}/{v_pred_full_mm.max().item():.2f} ")
 
-        avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
-        val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
+            avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
+            val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
 
-        # ==============================================================
-        # FIXED BATCH: Generate Ensemble + RMSE
-        # ==============================================================
-        fb_obs = fixed_val_batch['x_obs'].to(device)
-        fb_geos = fixed_val_batch['x_geos'].to(device)
-        fb_target = fixed_val_batch['y_target'].to(device)
-        fb_months = fixed_val_batch['month'].to(device)
-        fb_mjo = fixed_val_batch['mjo'].to(device)
+            # ==============================================================
+            # FIXED BATCH: Generate Ensemble + RMSE
+            # ==============================================================
+            fb_obs = fixed_val_batch['x_obs'].to(device)
+            fb_geos = fixed_val_batch['x_geos'].to(device)
+            fb_target = fixed_val_batch['y_target'].to(device)
+            fb_months = fixed_val_batch['month'].to(device)
+            fb_mjo = fixed_val_batch['mjo'].to(device)
 
-        fb_B = fb_obs.shape[0]
-        _, _, H, W = fb_obs.shape
-        fb_geos_flat = fb_geos.squeeze(2).reshape(fb_B, 16, H, W)
+            fb_B = fb_obs.shape[0]
+            _, _, H, W = fb_obs.shape
+            fb_geos_flat = fb_geos.squeeze(2).reshape(fb_B, 16, H, W)
 
-        if train_dataset.geos_min is not None:
-            fb_geos_flat = 2.0 * (fb_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
-        # (Prev-GPCP channels already normalized in dataset)
+            if train_dataset.geos_min is not None:
+                fb_geos_flat = 2.0 * (fb_geos_flat - train_dataset.geos_min.to(device)) / (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) - 1.0
 
-        fb_sin = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
-        fb_cos = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
-        fb_mjo_map = fb_mjo.view(fb_B, 2, 1, 1).expand(fb_B, 2, H, W).to(device)
+            fb_sin = torch.sin(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
+            fb_cos = torch.cos(2 * np.pi * (fb_months - 1) / 12).view(fb_B, 1, 1, 1).expand(fb_B, 1, H, W).to(device)
+            fb_mjo_map = fb_mjo.view(fb_B, 2, 1, 1).expand(fb_B, 2, H, W).to(device)
 
-        fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin, fb_cos, fb_mjo_map], dim=1)
+            fb_cond = torch.cat([fb_obs, fb_geos_flat, fb_sin, fb_cos, fb_mjo_map], dim=1)
 
-        # Generate ensemble
-        with torch.no_grad():
-            fb_geos_raw = torch.expm1(fb_geos.clamp(max=6.55))
-            fb_geos_raw_mean = fb_geos_raw.mean(dim=1).squeeze(1)
+            # Generate ensemble
+            with torch.no_grad():
+                fb_geos_raw = torch.expm1(fb_geos.clamp(max=6.55))
+                fb_geos_raw_mean = fb_geos_raw.mean(dim=1).squeeze(1)
 
-            ensemble_samples = []
-            for i_ens in range(N_SAMPLES_VAL):
-                fb_pred_leads_mm = []
-                for lead in range(4):
-                    lead_indices = torch.full((fb_B,), lead, dtype=torch.long, device=device)
-                    fb_geos_mean_lead = fb_geos_raw_mean[:, lead:lead+1, :, :]
+                ensemble_samples = []
+                for i_ens in range(N_SAMPLES_VAL):
+                    fb_pred_leads_mm = []
+                    for lead in range(4):
+                        lead_indices = torch.full((fb_B,), lead, dtype=torch.long, device=device)
+                        fb_geos_mean_lead = fb_geos_raw_mean[:, lead:lead+1, :, :]
 
-                    sample_norm = unwrapped_model.sample(fb_cond, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
-                    sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
-                    sample_res_mm = torch.sign(sample_denorm) * torch.expm1(torch.abs(sample_denorm).clamp(max=6.55))
-                    sample_precip = (fb_geos_mean_lead + sample_res_mm).clamp(min=0.0)
-                    fb_pred_leads_mm.append(sample_precip)
-                ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
-                ensemble_samples.append(ens_member_full)
+                        sample_norm = unwrapped_model.sample(fb_cond, lead_indices, num_inference_steps=INFERENCE_STEPS_VAL)
+                        sample_denorm = (sample_norm + 1.0) / 2.0 * (TARGET_SYMLOG_MAX - TARGET_SYMLOG_MIN) + TARGET_SYMLOG_MIN
+                        sample_res_mm = torch.sign(sample_denorm) * torch.expm1(torch.abs(sample_denorm).clamp(max=6.55))
+                        sample_precip = (fb_geos_mean_lead + sample_res_mm).clamp(min=0.0)
+                        fb_pred_leads_mm.append(sample_precip)
+                    ens_member_full = torch.cat(fb_pred_leads_mm, dim=1)
+                    ensemble_samples.append(ens_member_full)
 
-            ens_stack = torch.stack(ensemble_samples, dim=0)
-            ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
+                ens_stack = torch.stack(ensemble_samples, dim=0)
+                ens_mean = ens_stack.mean(dim=0)  # (B, 4, H, W)
 
-        fb_target_mm = fb_target
-        fb_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
+            fb_target_mm = fb_target
+            fb_rmse = torch.sqrt(torch.mean((ens_mean - fb_target_mm)**2)).item()
 
-        if accelerator.is_main_process:
-            print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val Noise: {avg_val_loss:.4f} | Val FB RMSE: {fb_rmse:.4f} | Val Sampled RMSE: {val_rmse:.4f}")
+            if accelerator.is_main_process:
+                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val Noise: {avg_val_loss:.4f} | Val FB RMSE: {fb_rmse:.4f} | Val Sampled RMSE: {val_rmse:.4f}")
 
-            with open(log_file, "a") as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch, avg_train_loss, avg_val_loss, fb_rmse])
+                with open(log_file, "a") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([epoch, avg_train_loss, avg_val_loss, fb_rmse])
 
-            # PLOT (best based on Fixed Batch RMSE, starting after Epoch 20)
-            if epoch >= 20 and (fb_rmse < best_val_rmse or epoch % 5 == 0):
-                if fb_rmse < best_val_rmse:
-                    print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {fb_rmse:.4f}. Plotting...")
-                    best_val_rmse = fb_rmse
+                # PLOT (best based on Fixed Batch RMSE)
+                if fb_rmse < best_val_rmse or epoch % 5 == 0:
+                    if fb_rmse < best_val_rmse:
+                        print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {fb_rmse:.4f}. Plotting...")
+                        best_val_rmse = fb_rmse
 
-                t_img_all = fb_target_mm[0].cpu().numpy()         
-                ens_mean_img = ens_mean[0].cpu().numpy()          
-                sample_img = ens_stack[0, 0].cpu().numpy()  
+                    t_img_all = fb_target_mm[0].cpu().numpy()         
+                    ens_mean_img = ens_mean[0].cpu().numpy()          
+                    sample_img = ens_stack[0, 0].cpu().numpy()  
 
-                g_flat = fb_geos_flat[0]  
-                if train_dataset.geos_min is not None:
-                    g_flat = (g_flat + 1.0) / 2.0 * (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) + train_dataset.geos_min.to(device)
-                g_ens = g_flat.view(4, 4, H, W)  
-                g_mean_log = g_ens.mean(dim=0)    
-                g_img_all = np.expm1(np.maximum(g_mean_log.cpu().numpy(), 0.0))
+                    g_flat = fb_geos_flat[0]  
+                    if train_dataset.geos_min is not None:
+                        g_flat = (g_flat + 1.0) / 2.0 * (train_dataset.geos_max.to(device) - train_dataset.geos_min.to(device)) + train_dataset.geos_min.to(device)
+                    g_ens = g_flat.view(4, 4, H, W)  
+                    g_mean_log = g_ens.mean(dim=0)    
+                    g_img_all = np.expm1(np.maximum(g_mean_log.cpu().numpy(), 0.0))
 
-                fig, axes = plt.subplots(4, 6, figsize=(30, 16))
+                    fig, axes = plt.subplots(4, 6, figsize=(30, 16))
 
-                for l_idx in range(4):
-                    t_img = t_img_all[l_idx]
-                    g_img = g_img_all[l_idx]
-                    s_img = np.clip(sample_img[l_idx], 0, None)
-                    m_img = ens_mean_img[l_idx]
-                    geos_bias = g_img - t_img
-                    diff_bias = m_img - t_img
-                    
-                    g_rmse = np.sqrt(np.mean(geos_bias**2))
-                    d_rmse = np.sqrt(np.mean(diff_bias**2))
+                    for l_idx in range(4):
+                        t_img = t_img_all[l_idx]
+                        g_img = g_img_all[l_idx]
+                        s_img = np.clip(sample_img[l_idx], 0, None)
+                        m_img = ens_mean_img[l_idx]
+                        geos_bias = g_img - t_img
+                        diff_bias = m_img - t_img
+                        
+                        g_rmse = np.sqrt(np.mean(geos_bias**2))
+                        d_rmse = np.sqrt(np.mean(diff_bias**2))
 
-                    if l_idx == 0: axes[l_idx, 0].set_title("Target GPCP")
-                    axes[l_idx, 0].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
-                    axes[l_idx, 0].set_ylabel(f"Week {l_idx+1}")
+                        if l_idx == 0: axes[l_idx, 0].set_title("Target GPCP")
+                        axes[l_idx, 0].imshow(t_img, cmap='Blues', vmin=0, vmax=50)
+                        axes[l_idx, 0].set_ylabel(f"Week {l_idx+1}")
 
-                    if l_idx == 0: axes[l_idx, 1].set_title("GEOS Mean")
-                    axes[l_idx, 1].imshow(g_img, cmap='Blues', vmin=0, vmax=50)
+                        if l_idx == 0: axes[l_idx, 1].set_title("GEOS Mean")
+                        axes[l_idx, 1].imshow(g_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 2].set_title("Diff Sample")
-                    axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
+                        if l_idx == 0: axes[l_idx, 2].set_title("Diff Sample")
+                        axes[l_idx, 2].imshow(s_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 3].set_title("Reconstruction")
-                    axes[l_idx, 3].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
+                        if l_idx == 0: axes[l_idx, 3].set_title("Reconstruction")
+                        axes[l_idx, 3].imshow(m_img, cmap='Blues', vmin=0, vmax=50)
 
-                    if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
-                    axes[l_idx, 4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
-                    axes[l_idx, 4].set_ylabel(f"RMSE: {g_rmse:.2f}")
+                        if l_idx == 0: axes[l_idx, 4].set_title("GEOS Bias")
+                        axes[l_idx, 4].imshow(geos_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                        axes[l_idx, 4].set_ylabel(f"RMSE: {g_rmse:.2f}")
 
-                    if l_idx == 0: axes[l_idx, 5].set_title("Diff Bias")
-                    axes[l_idx, 5].imshow(diff_bias, cmap='RdBu_r', vmin=-20, vmax=20)
-                    axes[l_idx, 5].set_ylabel(f"RMSE: {d_rmse:.2f}")
+                        if l_idx == 0: axes[l_idx, 5].set_title("Diff Bias")
+                        axes[l_idx, 5].imshow(diff_bias, cmap='RdBu_r', vmin=-20, vmax=20)
+                        axes[l_idx, 5].set_ylabel(f"RMSE: {d_rmse:.2f}")
 
-                os.makedirs(os.path.join(output_dir, "plots_diffusion"), exist_ok=True)
-                plt.suptitle(f"Diffusion v2 - Epoch {epoch} | RMSE: {fb_rmse:.2f} | Noise Loss: {avg_val_loss:.4f}", fontsize=14)
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, f"plots_diffusion/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"), dpi=150)
-                plt.close()
+                    os.makedirs(os.path.join(output_dir, "plots_diffusion"), exist_ok=True)
+                    plt.suptitle(f"Diffusion v2 - Epoch {epoch} | RMSE: {fb_rmse:.2f} | Noise Loss: {avg_val_loss:.4f}", fontsize=14)
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(output_dir, f"plots_diffusion/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"), dpi=150)
+                    plt.close()
 
-            # SAVE CHECKPOINTS
-            ckpt_state = {
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                'top_k_ckpts': top_k_ckpts
-            }
-            torch.save(ckpt_state, latest_ckpt)
+                # SAVE CHECKPOINTS (Only if Validation was run)
+                ckpt_state = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'top_k_ckpts': top_k_ckpts
+                }
+                torch.save(ckpt_state, latest_ckpt)
 
-            current_path = os.path.join(output_dir, f"diffusion_epoch_{epoch}_rmse_{fb_rmse:.4f}.pt")
-            top_k_ckpts.append((fb_rmse, epoch, current_path))
-            top_k_ckpts.sort(key=lambda x: x[0])
+                current_path = os.path.join(output_dir, f"diffusion_epoch_{epoch}_rmse_{fb_rmse:.4f}.pt")
+                top_k_ckpts.append((fb_rmse, epoch, current_path))
+                top_k_ckpts.sort(key=lambda x: x[0])
 
-            if len(top_k_ckpts) > save_top_k:
-                worst = top_k_ckpts.pop()
-                if worst[2] != current_path and os.path.exists(worst[2]):
-                    os.remove(worst[2])
+                if len(top_k_ckpts) > save_top_k:
+                    worst = top_k_ckpts.pop()
+                    if worst[2] != current_path and os.path.exists(worst[2]):
+                        os.remove(worst[2])
 
-            is_in_top = any(x[2] == current_path for x in top_k_ckpts)
-            if is_in_top:
-                print(f"New Top Model! RMSE: {fb_rmse:.4f}")
-                torch.save(ckpt_state, current_path)
+                is_in_top = any(x[2] == current_path for x in top_k_ckpts)
+                if is_in_top:
+                    print(f"New Top Model! RMSE: {fb_rmse:.4f}")
+                    torch.save(ckpt_state, current_path)
 
-            ckpt_state['top_k_ckpts'] = top_k_ckpts
-            torch.save(ckpt_state, latest_ckpt)
+                ckpt_state['top_k_ckpts'] = top_k_ckpts
+                torch.save(ckpt_state, latest_ckpt)
+                
+        else:
+            # If skipping validation, just log training loss and save latest ckpt
+            if accelerator.is_main_process:
+                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Validation Skipped")
+                
+                ckpt_state_skip = {
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'top_k_ckpts': top_k_ckpts
+                }
+                torch.save(ckpt_state_skip, latest_ckpt)
 
 
 # ==============================================================================
