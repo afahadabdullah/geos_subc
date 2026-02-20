@@ -176,11 +176,10 @@ def train():
         print(f"CMDE ratio: {CMDE_RATIO}, Val members: {N_SAMPLES_VAL}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["learning_rate"]))
-    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        max_lr=float(config["learning_rate"]),
-        steps_per_epoch=len(loader),
-        epochs=config["epochs"]
+        T_max=config["epochs"] * len(loader),
+        eta_min=1e-6
     )
 
     # Prepare with accelerator
