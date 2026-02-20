@@ -18,9 +18,10 @@ from ml_model.train_diffusion import load_topography
 
 def print_stat(name, tensor):
     if isinstance(tensor, torch.Tensor):
+        float_tensor = tensor.float()
         print(f"{name+':':<20} shape={list(tensor.shape)} | type={tensor.dtype} | "
-              f"min={tensor.min().item():>8.4f} | max={tensor.max().item():>8.4f} | "
-              f"mean={tensor.mean().item():>8.4f} | std={tensor.std().item():>8.4f}")
+              f"min={float_tensor.min().item():>8.4f} | max={float_tensor.max().item():>8.4f} | "
+              f"mean={float_tensor.mean().item():>8.4f} | std={float_tensor.std().item():>8.4f}")
     else:
         print(f"{name+':':<20} {tensor}")
 

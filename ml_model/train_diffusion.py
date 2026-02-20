@@ -143,6 +143,10 @@ def train():
     # Fixed validation batch for consistent plotting
     fixed_val_batch = next(iter(val_loader))
 
+    # --- Target Normalization Constants (Derived from GPCP log1p) ---
+    TARGET_MEAN = 0.82
+    TARGET_STD = 0.79
+
     # --- Load Topography (constant, interpolated to GEOS grid) ---
     topo_tensor = load_topography(config["data_dir"])
 
@@ -253,13 +257,8 @@ def train():
             # Convert RAW target to log1p space before normalization
             y_log = torch.log1p(y_target.clamp(min=0.0))
 
-            # Normalize target with GEOS stats
-            if train_dataset.geos_mean is not None:
-                gm = train_dataset.geos_mean.to(device)
-                gs = train_dataset.geos_std.to(device)
-                target_norm = (y_log - gm) / gs
-            else:
-                target_norm = y_log
+            # Normalize perfectly to ~N(0, 1) using GPCP specific stats
+            target_norm = (y_log - TARGET_MEAN) / TARGET_STD
 
             # Sample random timesteps
             timesteps = torch.randint(
@@ -323,12 +322,7 @@ def train():
 
                 # 1. Global Noise Loss (for convergence tracking)
                 vy_log = torch.log1p(vy_target.clamp(min=0.0))
-                if train_dataset.geos_mean is not None:
-                    gm = train_dataset.geos_mean.to(device)
-                    gs = train_dataset.geos_std.to(device)
-                    vtarget_norm = (vy_log - gm) / gs
-                else:
-                    vtarget_norm = vy_log
+                vtarget_norm = (vy_log - TARGET_MEAN) / TARGET_STD
 
                 v_timesteps = torch.randint(0, model.noise_scheduler.config.num_train_timesteps, (vB,), device=device).long()
                 v_noise = torch.randn_like(vtarget_norm)
@@ -343,10 +337,8 @@ def train():
                 if i < 10:
                     v_sample_norm = unwrapped_model.sample(v_condition, num_inference_steps=INFERENCE_STEPS_VAL)
                     
-                    if train_dataset.geos_mean is not None:
-                        v_sample_denorm = (v_sample_norm * gs) + gm
-                    else:
-                        v_sample_denorm = v_sample_norm
+                    # Denormalize using GPCP target constants
+                    v_sample_denorm = (v_sample_norm * TARGET_STD) + TARGET_MEAN
                         
                     v_pred_mm = torch.expm1(v_sample_denorm.clamp(min=0.0, max=6.0))
                     
@@ -392,12 +384,7 @@ def train():
                 sample_norm = unwrapped_model.sample(fb_cond, num_inference_steps=INFERENCE_STEPS_VAL)
 
                 # Denormalize
-                if train_dataset.geos_mean is not None:
-                    gm = train_dataset.geos_mean.to(device)
-                    gs = train_dataset.geos_std.to(device)
-                    sample_denorm = (sample_norm * gs) + gm
-                else:
-                    sample_denorm = sample_norm
+                sample_denorm = (sample_norm * TARGET_STD) + TARGET_MEAN
 
                 # Convert from log1p space to mm/day (clamp to prevent overflow)
                 sample_precip = torch.expm1(sample_denorm.clamp(min=0.0, max=6.0))
