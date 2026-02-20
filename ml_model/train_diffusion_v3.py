@@ -144,7 +144,7 @@ def train():
     area_weights = get_area_weights(lats, device)
 
     # Output directory
-    output_dir = config["output_dir"] + "_v2"
+    output_dir = config["output_dir"] + "_v3"
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(output_dir, "training_log_diffusion.csv")
     if accelerator.is_main_process:
