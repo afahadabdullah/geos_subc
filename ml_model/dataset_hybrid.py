@@ -56,26 +56,27 @@ class S2SHybridDataset(Dataset):
         if os.path.exists(stats_path):
             print(f"Loading global stats from {stats_path}")
             stats = torch.load(stats_path)
-            self.geos_mean = stats['geos_mean']
-            self.geos_std = stats['geos_std']
-            self.obs_mean = stats['obs_mean'] # (16, 1, 1)
-            self.obs_std = stats['obs_std']   # (16, 1, 1)
+            self.geos_min = stats.get('geos_min', torch.tensor(0.0))
+            self.geos_max = stats.get('geos_max', torch.tensor(6.55))
+            self.obs_min = stats.get('obs_min', None)
+            self.obs_max = stats.get('obs_max', None)
         else:
             print("Warning: global_stats.pt not found. Using default/fallback normalization.")
-            self.obs_mean = None
-            self.obs_std = None
+            self.obs_min = None
+            self.obs_max = None
             
             stats_path_old = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
             if os.path.exists(stats_path_old):
                 ds = xr.open_dataset(stats_path_old)
-                self.geos_mean = torch.from_numpy(ds['geos_mean'].values).float()
-                self.geos_std = torch.from_numpy(ds['geos_std'].values).float()
+                self.geos_min = torch.from_numpy(ds['geos_min'].values).float() if 'geos_min' in ds else torch.tensor(0.0)
+                self.geos_max = torch.from_numpy(ds['geos_max'].values).float() if 'geos_max' in ds else torch.tensor(6.55)
                 ds.close()
-                if self.geos_mean.ndim == 2:
-                    self.geos_mean = self.geos_mean.unsqueeze(0)
-                    self.geos_std = self.geos_std.unsqueeze(0)
+                if self.geos_min.ndim == 2:
+                    self.geos_min = self.geos_min.unsqueeze(0)
+                    self.geos_max = self.geos_max.unsqueeze(0)
             else:
-                 self.geos_mean = None
+                 self.geos_min = torch.tensor(0.0)
+                 self.geos_max = torch.tensor(6.55)
                  
         # Load Obs Stats (SST, SSS, SM, IVT, Z500, U250) from unified obs_stats.json
         import json
@@ -83,30 +84,28 @@ class S2SHybridDataset(Dataset):
         if os.path.exists(obs_stats_path):
             with open(obs_stats_path, 'r') as f:
                 obs_stats = json.load(f)
-            self.sst_mean  = float(obs_stats.get('sst_mean',  288.0))
-            self.sst_std   = float(obs_stats.get('sst_std',    10.0))
-            self.sss_mean  = float(obs_stats.get('sss_mean',   34.0))
-            self.sss_std   = float(obs_stats.get('sss_std',     2.0))
-            self.sm_mean   = float(obs_stats.get('sm_mean',     0.2))
-            self.sm_std    = float(obs_stats.get('sm_std',      0.1))
-            self.ivt_mean  = float(obs_stats.get('ivt_mean',  150.0))
-            self.ivt_std   = float(obs_stats.get('ivt_std',   120.0))
-            self.z500_mean = float(obs_stats.get('z500_mean', 5500.0))
-            self.z500_std  = float(obs_stats.get('z500_std',   500.0))
-            self.u250_mean = float(obs_stats.get('u250_mean',   15.0))
-            self.u250_std  = float(obs_stats.get('u250_std',    15.0))
-            print(f"Loaded obs_stats.json: "
-                  f"SST({self.sst_mean:.1f}) SSS({self.sss_mean:.1f}) "
-                  f"SM({self.sm_mean:.3f}) IVT({self.ivt_mean:.1f}) "
-                  f"Z500({self.z500_mean:.0f}) U250({self.u250_mean:.1f})")
+            self.sst_min   = float(obs_stats.get('sst_min', 270.0))
+            self.sst_max   = float(obs_stats.get('sst_max', 310.0))
+            self.sss_min   = float(obs_stats.get('sss_min', 20.0))
+            self.sss_max   = float(obs_stats.get('sss_max',  41.0))
+            self.sm_min    = float(obs_stats.get('sm_min',   0.0))
+            self.sm_max    = float(obs_stats.get('sm_max',   0.7))
+            self.ivt_min   = float(obs_stats.get('ivt_min',   0.0))
+            self.ivt_max   = float(obs_stats.get('ivt_max', 1500.0))
+            self.z500_min  = float(obs_stats.get('z500_min', 45000.0))
+            self.z500_max  = float(obs_stats.get('z500_max', 59000.0))
+            self.u250_min  = float(obs_stats.get('u250_min', -50.0))
+            self.u250_max  = float(obs_stats.get('u250_max', 120.0))
+            print(f"Loaded obs_stats.json bounds: "
+                  f"SST({self.sst_min:.1f}, {self.sst_max:.1f}) SSS({self.sss_min:.1f}, {self.sss_max:.1f})")
         else:
-            print("Warning: obs_stats.json not found. Using physics-based fallback normalization.")
-            self.sst_mean  = 288.0;  self.sst_std   = 10.0
-            self.sss_mean  = 34.0;   self.sss_std   = 2.0
-            self.sm_mean   = 0.2;    self.sm_std    = 0.1
-            self.ivt_mean  = 150.0;  self.ivt_std   = 120.0
-            self.z500_mean = 5500.0; self.z500_std  = 500.0
-            self.u250_mean = 15.0;   self.u250_std  = 15.0
+            print("Warning: obs_stats.json not found. Using physics-based fallback min-max bounds.")
+            self.sst_min  = 270.0;   self.sst_max   = 310.0
+            self.sss_min  = 20.0;    self.sss_max   = 41.0
+            self.sm_min   = 0.0;     self.sm_max    = 0.7
+            self.ivt_min  = 0.0;     self.ivt_max   = 1500.0
+            self.z500_min = 45000.0; self.z500_max  = 59000.0
+            self.u250_min = -50.0;   self.u250_max  = 120.0
 
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
@@ -242,9 +241,7 @@ class S2SHybridDataset(Dataset):
         # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
         geos_tensor = geos_tensor.unsqueeze(1)
         
-        # Log1p normalization for GEOS precip (log-space mu parameterization)
-        # log1p(x) maps [0, inf) -> [0, inf) and squashes the heavy tail.
-        # Clamp to >= 0 first to handle any fill values.
+        # Log1p before normalization
         geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
 
         # 2. Load Obs (Static/State)
@@ -336,22 +333,28 @@ class S2SHybridDataset(Dataset):
         obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val,
                                     ivt_val, z500_val, u250_val], axis=0) 
         
-        # Normalize Obs using z-score: (val - mean) / (std * 3)
-        eps = 1e-6
-        # SST
-        obs_stack[0:4]   = (obs_stack[0:4]   - self.sst_mean)   / (self.sst_std   * 3.0 + eps)
-        # SSS
-        obs_stack[4:8]   = (obs_stack[4:8]   - self.sss_mean)   / (self.sss_std   * 3.0 + eps)
-        # Soil Moisture
-        obs_stack[8:12]  = (obs_stack[8:12]  - self.sm_mean)    / (self.sm_std    * 3.0 + eps)
-        # GPCP prev — log1p
-        obs_stack[12:16] = np.log1p(np.maximum(obs_stack[12:16], 0.0))
-        # IVT
-        obs_stack[16:20] = (obs_stack[16:20] - self.ivt_mean)   / (self.ivt_std   * 3.0 + eps)
-        # Z500 (m²/s² geopotential)
-        obs_stack[20:24] = (obs_stack[20:24] - self.z500_mean)  / (self.z500_std  * 3.0 + eps)
-        # U250 (m/s zonal wind)
-        obs_stack[24:28] = (obs_stack[24:28] - self.u250_mean)  / (self.u250_std  * 3.0 + eps)
+        if self.normalize:
+            # Normalize Obs using Min-Max scaling to [-1, 1] range: 2 * (val - min) / (max - min) - 1
+            def min_max_scale(val, vmin, vmax):
+                return 2.0 * (np.clip(val, vmin, vmax) - vmin) / (vmax - vmin + 1e-6) - 1.0
+
+            # SST
+            obs_stack[0:4]   = min_max_scale(obs_stack[0:4], self.sst_min, self.sst_max)
+            # SSS
+            obs_stack[4:8]   = min_max_scale(obs_stack[4:8], self.sss_min, self.sss_max)
+            # Soil Moisture
+            obs_stack[8:12]  = min_max_scale(obs_stack[8:12], self.sm_min, self.sm_max)
+            
+            # GPCP prev — log1p then min-max
+            obs_stack[12:16] = np.log1p(np.maximum(obs_stack[12:16], 0.0))
+            obs_stack[12:16] = min_max_scale(obs_stack[12:16], 0.0, 6.55)
+            
+            # IVT
+            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.ivt_min, self.ivt_max)
+            # Z500
+            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.z500_min, self.z500_max)
+            # U250
+            obs_stack[24:28] = min_max_scale(obs_stack[24:28], self.u250_min, self.u250_max)
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
