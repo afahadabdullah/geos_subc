@@ -71,8 +71,7 @@ class ConditionalDiffusion(nn.Module):
         # [-1.04, 6.55] while preventing the well-known DDIM divergence explosion at high t.
         self.noise_scheduler = DDIMScheduler(
             num_train_timesteps=num_train_timesteps, 
-            clip_sample=True,
-            clip_sample_range=7.0,
+            clip_sample=False,
             prediction_type="epsilon"
         )
         
