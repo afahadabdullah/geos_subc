@@ -301,13 +301,16 @@ def train():
         val_loss_sum = 0
         val_count = 0
 
+        v_rmse_sum = 0.0
+        v_rmse_count = 0
+        
         with torch.no_grad():
-            for val_batch in val_loader:
-                vx_obs = val_batch['x_obs']
-                vx_geos = val_batch['x_geos']
-                vy_target = val_batch['y_target']
-                v_months = val_batch['month']
-                v_mjo = val_batch['mjo']
+            for i, val_batch in enumerate(val_loader):
+                vx_obs = val_batch['x_obs'].to(device)
+                vx_geos = val_batch['x_geos'].to(device)
+                vy_target = val_batch['y_target'].to(device)
+                v_months = val_batch['month'].to(device)
+                v_mjo = val_batch['mjo'].to(device)
 
                 vB, _, vH, vW = vx_obs.shape
                 vx_geos_flat = vx_geos.squeeze(2).reshape(vB, 16, vH, vW)
@@ -316,9 +319,9 @@ def train():
                 v_cos = torch.cos(2 * np.pi * (v_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, vH, vW).to(device)
                 v_mjo_map = v_mjo.view(vB, 2, 1, 1).expand(vB, 2, vH, vW).to(device)
                 v_topo = topo_tensor.to(device).unsqueeze(0).unsqueeze(0).expand(vB, 1, vH, vW)
-
                 v_condition = torch.cat([vx_obs, vx_geos_flat, v_sin, v_cos, v_mjo_map, v_topo], dim=1)
 
+                # 1. Global Noise Loss (for convergence tracking)
                 vy_log = torch.log1p(vy_target.clamp(min=0.0))
                 if train_dataset.geos_mean is not None:
                     gm = train_dataset.geos_mean.to(device)
@@ -336,7 +339,29 @@ def train():
                 val_loss_sum += v_loss.item()
                 val_count += 1
 
+                # 2. Sampled Weighted RMSE (for physical fidelity tracking, first 10 batches)
+                if i < 10:
+                    v_sample_norm = unwrapped_model.sample(v_condition, num_inference_steps=INFERENCE_STEPS_VAL)
+                    
+                    if train_dataset.geos_mean is not None:
+                        v_sample_denorm = (v_sample_norm * gs) + gm
+                    else:
+                        v_sample_denorm = v_sample_norm
+                        
+                    v_pred_mm = torch.expm1(v_sample_denorm.clamp(min=0.0, max=6.0))
+                    
+                    v_diff_sq = (v_pred_mm - vy_target.to(device))**2
+                    v_weighted_mse = (v_diff_sq * area_weights).mean()
+                    v_rmse_sum += torch.sqrt(v_weighted_mse).item()
+                    v_rmse_count += 1
+                    
+                    if i == 0 and accelerator.is_main_process:
+                        print(f"DEBUG | Val Batch 0 Stats | Target: {vy_target.min().item():.2f}/{vy_target.max().item():.2f} "
+                              f"| Pred: {v_pred_mm.min().item():.2f}/{v_pred_mm.max().item():.2f} "
+                              f"| LogPred: {v_sample_denorm.min().item():.2f}/{v_sample_denorm.max().item():.2f}")
+
         avg_val_loss = val_loss_sum / val_count if val_count > 0 else 0
+        val_rmse = v_rmse_sum / v_rmse_count if v_rmse_count > 0 else 0
 
         # ==============================================================
         # FIXED BATCH: Generate Ensemble + RMSE
