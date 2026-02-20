@@ -123,13 +123,11 @@ class ConditionalDiffusion(nn.Module):
         batch_size = condition.shape[0]
         device = condition.device
         
-        # Pad condition
-        cond_padded, orig_H, orig_W = self._pad_to_multiple(condition)
-        final_H, final_W = cond_padded.shape[2], cond_padded.shape[3]
+        orig_H, orig_W = condition.shape[2], condition.shape[3]
         
-        # Initial noise
+        # Initial noise on the valid UNPADDED domain
         latents = torch.randn(
-            (batch_size, self.in_channels, final_H, final_W),
+            (batch_size, self.in_channels, orig_H, orig_W),
             device=device,
             generator=generator
         )
@@ -139,17 +137,15 @@ class ConditionalDiffusion(nn.Module):
         
         timesteps = self.noise_scheduler.timesteps
         if verbose:
+            from tqdm.auto import tqdm
             timesteps = tqdm(timesteps, desc="Sampling", leave=False)
             
         for t in timesteps:
-            # Concatenate and predict noise
-            model_input = torch.cat([latents, cond_padded], dim=1)
-            noise_pred = self.model(model_input, t).sample
+            # forward() automatically handles padding latents and condition,
+            # runs the UNet, and crops the predicted noise back to orig_H, orig_W
+            noise_pred = self.forward(latents, condition, t)
             
-            # DDIM step
+            # DDIM step strictly on the valid domain
             latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
-            
-        # Crop to original size
-        latents = latents[..., :orig_H, :orig_W]
             
         return latents
