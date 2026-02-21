@@ -221,9 +221,9 @@ def train():
         avg_train_loss = train_loss / len(loader)
 
         # ==============================================================
-        # VALIDATION: Iterative per-lead reconstruction (Epoch >= 20)
+        # VALIDATION: Iterative per-lead reconstruction (Epoch >= 100)
         # ==============================================================
-        if epoch >= 20:
+        if epoch >= 100:
             model.eval()
             val_loss_sum = 0
             val_count = 0
@@ -314,8 +314,8 @@ def train():
                     writer = csv.writer(f)
                     writer.writerow([epoch, avg_train_loss, avg_val_loss, fb_rmse])
 
-                # PLOT (best based on Fixed Batch RMSE, starting after Epoch 20)
-                if epoch >= 20 and (fb_rmse < best_val_rmse or epoch % 5 == 0):
+                # PLOT (best based on Fixed Batch RMSE, starting after Epoch 100)
+                if epoch >= 100 and (fb_rmse < best_val_rmse or epoch % 5 == 0):
                     if fb_rmse < best_val_rmse:
                         print(f"New Best! RMSE improved from {best_val_rmse:.4f} to {fb_rmse:.4f}. Plotting...")
                         best_val_rmse = fb_rmse
