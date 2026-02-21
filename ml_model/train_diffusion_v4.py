@@ -85,8 +85,19 @@ def train():
             
             for i, batch in enumerate(tqdm(loader, desc="Scanning Bounds")):
                 y = batch['y_target']
-                b_min = y.min().item()
-                b_max = y.max().item()
+                x_geos = batch['x_geos'].to(y.device) # [B, 4, M, H, W] expected, though m=1 is typically 4.
+                
+                # S2SHybridDataset transforms GEOS to log1p, we need raw mean for residual mapping 
+                # if we want physical residuals, but for stability we'll map the residual of raw values.
+                # Actually, Dataset provides [M, 1, L, H, W] for GEOS with log1p.
+                # We should retrieve the raw mean:
+                vx_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
+                geos_mean = vx_geos_raw.mean(dim=1).squeeze(1) # [B, L, H, W]
+                
+                residual = y - geos_mean
+                
+                b_min = residual.min().item()
+                b_max = residual.max().item()
                 if b_min < g_min: g_min = b_min
                 if b_max > g_max: g_max = b_max
 
@@ -162,13 +173,20 @@ def train():
 
             # Targets: [B, 4, H, W]
             y_target = batch['y_target'].to(device)
+            
+            # Reconstruct GEOS mean to calculate residual target
+            vx_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
+            geos_mean = vx_geos_raw.mean(dim=1).squeeze(1).to(device)
 
-            # Randomly select ONE lead week to reconstruct (stochastic depth modeling)
+            # Randomly select ONE lead week to reconstruct
             target_lead = torch.randint(0, 4, (1,)).item()
             y_target_lead = y_target[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
+            geos_mean_lead = geos_mean[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
+            
+            y_residual = y_target_lead - geos_mean_lead
 
-            # Linear Min-Max Normalization [-1, 1] WITHOUT logarithmic squashing
-            target_norm = 2.0 * ((y_target_lead - global_min) / (global_max - global_min)) - 1.0
+            # Linear Min-Max Normalization [-1, 1] applied to Residuals
+            target_norm = 2.0 * ((y_residual - global_min) / (global_max - global_min)) - 1.0
 
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
@@ -219,6 +237,10 @@ def train():
                 
                 fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_dy, fcos_dy, fmjo_amp, fmjo_phase], dim=1)
                 
+                # Reconstruct fixed batch GEOS mean to add back generated residual
+                vx_geos_raw = torch.expm1(fx_geos.clamp(max=6.55))
+                fx_geos_mean = vx_geos_raw.mean(dim=1).squeeze(1).to(device) # [B, L, H, W]
+
                 # Single Pass Reverse Sampling for the batch across all 4 Leads
                 fb_preds = []
                 for lead in range(4):
@@ -231,9 +253,14 @@ def train():
                         latents = scheduler.step(pred_noise, t, latents)
                         
                     # Reverse Normalization Linear Mapping
-                    denorm = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
-                    denorm = denorm.clamp(min=0.0) # Physical limit
-                    fb_preds.append(denorm)
+                    denorm_residual = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
+                    
+                    # Reconstruct GPCP by adding generating residual back onto GEOS Mean
+                    geos_mean_lead = fx_geos_mean[:, lead:lead+1, :, :]
+                    final_precip = geos_mean_lead + denorm_residual
+                    final_precip = final_precip.clamp(min=0.0) # Physical limit
+                    
+                    fb_preds.append(final_precip)
                     
                 full_pred = torch.cat(fb_preds, dim=1) # [B, 4, H, W]
                 
