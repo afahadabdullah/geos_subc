@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
 
-# Distributed Training
+import argparse
 from accelerate import Accelerator
 
 # Local Modules
@@ -24,7 +24,7 @@ def get_area_weights(lats, device):
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
 
-def train():
+def train(force_new_stats=False):
     accelerator = Accelerator(split_batches=True)
     device = accelerator.device
 
@@ -68,7 +68,7 @@ def train():
 
     # Calculate Global Min-Max for Target GPCP Precipitation
     stats_file = "v4_global_stats.pt"
-    if os.path.exists(stats_file):
+    if not force_new_stats and os.path.exists(stats_file):
         if accelerator.is_main_process:
             print(f"Loading cached Global Bounds from {stats_file}")
         stats = torch.load(stats_file)
@@ -316,4 +316,8 @@ def train():
                     plt.close()
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--new", action="store_true", help="Force recalculation of global stats")
+    args = parser.parse_args()
+    
+    train(force_new_stats=args.new)
