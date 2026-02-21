@@ -23,7 +23,7 @@ class S2SHybridDataset(Dataset):
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
                  transform=None, preload=False, normalize=True):
         self.data_root = data_root
-        self.years = range(start_year, end_year)
+        self.years = range(start_year, end_year + 1)
         self.transform = transform
         self.preload = preload
         self.normalize = normalize
