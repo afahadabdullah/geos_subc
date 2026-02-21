@@ -161,7 +161,7 @@ def train(force_new_stats=False):
             x_geos = batch['x_geos'].to(device) 
             x_obs  = batch['x_obs'].to(device)
             
-            B, _, L, H, W = x_geos.shape
+            B, M, C, L, H, W = x_geos.shape
             x_geos_flat = x_geos.view(B, -1, H, W)
             
             sin_dy = batch['sin_dy'].to(device).unsqueeze(1)
