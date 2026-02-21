@@ -164,12 +164,14 @@ def train(force_new_stats=False):
             B, M, C, L, H, W = x_geos.shape
             x_geos_flat = x_geos.view(B, -1, H, W)
             
-            sin_dy = batch['sin_dy'].to(device).unsqueeze(1)
-            cos_dy = batch['cos_dy'].to(device).unsqueeze(1)
-            mjo_amp = batch['mjo_amp'].to(device).unsqueeze(1).unsqueeze(2).unsqueeze(3).expand(-1, 1, H, W)
-            mjo_phase = batch['mjo_phase'].to(device).unsqueeze(1).unsqueeze(2).unsqueeze(3).expand(-1, 1, H, W)
+            months = batch['month'].to(device)
+            sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            
+            mjo = batch['mjo'].to(device)
+            mjo_map = mjo.view(B, 2, 1, 1).expand(B, 2, H, W)
 
-            x_cond = torch.cat([x_obs, x_geos_flat, sin_dy, cos_dy, mjo_amp, mjo_phase], dim=1) # [B, 48, H, W]
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map], dim=1) # [B, 48, H, W]
 
             # Targets: [B, 4, H, W]
             y_target = batch['y_target'].to(device)
@@ -234,12 +236,14 @@ def train(force_new_stats=False):
                 fx_obs  = fixed_val_batch['x_obs'].to(device)
                 fx_geos_flat = fx_geos.view(vB, -1, H, W)
                 
-                fsin_dy = fixed_val_batch['sin_dy'].to(device).unsqueeze(1)
-                fcos_dy = fixed_val_batch['cos_dy'].to(device).unsqueeze(1)
-                fmjo_amp = fixed_val_batch['mjo_amp'].to(device).unsqueeze(1).unsqueeze(2).unsqueeze(3).expand(-1, 1, H, W)
-                fmjo_phase = fixed_val_batch['mjo_phase'].to(device).unsqueeze(1).unsqueeze(2).unsqueeze(3).expand(-1, 1, H, W)
+                f_months = fixed_val_batch['month'].to(device)
+                fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+                fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
                 
-                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_dy, fcos_dy, fmjo_amp, fmjo_phase], dim=1)
+                fmjo = fixed_val_batch['mjo'].to(device)
+                fmjo_map = fmjo.view(vB, 2, 1, 1).expand(vB, 2, H, W)
+                
+                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month, fmjo_map], dim=1)
                 
                 # Reconstruct fixed batch GEOS mean to add back generated residual
                 vx_geos_raw = torch.expm1(fx_geos.clamp(max=6.55))
