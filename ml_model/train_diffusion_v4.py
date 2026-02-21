@@ -188,6 +188,10 @@ def train():
             # Linear Min-Max Normalization [-1, 1] applied to Residuals
             target_norm = 2.0 * ((y_residual - global_min) / (global_max - global_min)) - 1.0
 
+            if i == 0 and accelerator.is_main_process:
+                print(f"DEBUG | Train Batch 0 | Residual Target Bounds: {y_residual.min().item():.2f} to {y_residual.max().item():.2f}")
+                print(f"DEBUG | Train Batch 0 | Normalized Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
             noise = torch.randn_like(target_norm)
@@ -240,6 +244,9 @@ def train():
                 # Reconstruct fixed batch GEOS mean to add back generated residual
                 vx_geos_raw = torch.expm1(fx_geos.clamp(max=6.55))
                 fx_geos_mean = vx_geos_raw.mean(dim=1).squeeze(1).to(device) # [B, L, H, W]
+                
+                # Diagnostic target residual calculations for reference
+                f_y_residual = fb_target - fx_geos_mean
 
                 # Single Pass Reverse Sampling for the batch across all 4 Leads
                 fb_preds = []
@@ -270,6 +277,12 @@ def train():
                 fb_rmse = torch.sqrt(v_weighted_mse).item()
                 
             if accelerator.is_main_process:
+                print(f"DEBUG | Val Batch 0 | Target Residual: {f_y_residual.min().item():.2f} to {f_y_residual.max().item():.2f}")
+                
+                # Check how big the absolute predicted residual is vs expected
+                pred_residual = full_pred - fx_geos_mean
+                print(f"DEBUG | Val Batch 0 | Generated Residual: {pred_residual.min().item():.2f} to {pred_residual.max().item():.2f}")
+                print(f"DEBUG | Val Batch 0 | Final Reconstructed Precip: {full_pred.min().item():.2f} to {full_pred.max().item():.2f}")
                 print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB RMSE: {fb_rmse:.4f}")
 
                 with open(log_file, "a") as f:
