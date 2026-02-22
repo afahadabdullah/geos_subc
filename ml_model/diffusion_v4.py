@@ -53,14 +53,14 @@ class Block(nn.Module):
         
     def forward(self, x, t):
         # Time embedding
-        time_emb = self.relu(self.time_mlp(t))
+        time_emb = F.silu(self.time_mlp(t))
         time_emb = time_emb[(...,) + (None,) * 2]
         
         # Conv block + Time inject
-        h = self.gnorm1(self.relu(self.conv1(x)))
+        h = self.gnorm1(F.silu(self.conv1(x)))
         h = h + time_emb
         h = self.dropout(h)
-        h = self.gnorm2(self.relu(self.conv2(h)))
+        h = self.gnorm2(F.silu(self.conv2(h)))
         
         # Transform (Up or Down)
         return self.transform(h)
@@ -71,13 +71,13 @@ class DiffusionModelV4(nn.Module):
     Takes concatenated inputs: Noisy Target [B, 4, H, W] + Conditionals [B, 30, H, W]
     Predicts: Noise epsilon [B, 4, H, W]
     """
-    def __init__(self, in_channels=34, out_channels=4, time_emb_dim=32):
+    def __init__(self, in_channels=34, out_channels=4, time_emb_dim=128):
         super().__init__()
         
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(time_emb_dim),
             nn.Linear(time_emb_dim, time_emb_dim),
-            nn.ReLU()
+            nn.SiLU()
         )
         
         # Initial projection mapping (maintains spatial dim)
@@ -166,7 +166,7 @@ class DiffusionModelV4(nn.Module):
         if x_up4.shape[2:] != x_init.shape[2:]: x_up4 = F.interpolate(x_up4, size=x_init.shape[2:], mode='nearest')
 
         # Final projection
-        h = F.relu(self.final_conv(x_up4))
+        h = F.silu(self.final_conv(x_up4))
         out = self.out(h)
         
         # Crop back down
