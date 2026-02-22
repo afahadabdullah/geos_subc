@@ -1,10 +1,10 @@
 # ML Training Config - Custom Diffusion Model v4
 batch_size: 4
 learning_rate: 1e-4
-epochs: 500
+epochs: 1000
 output_dir: ml_output_diffusion_v4
 mixed_precision: fp16
-num_workers: 4
+num_workers: 8
 data_dir: dataprocess
 train_start_year: 1999
 train_end_year: 2014
