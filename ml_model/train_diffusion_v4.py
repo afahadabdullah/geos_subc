@@ -355,12 +355,15 @@ def train():
                     for l in range(4):
                         diff = p_img[l] - t_img[l]
                         
-                        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues')
+                        t_min = t_img[l].min()
+                        t_max = t_img[l].max()
+                        
+                        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
                         axes[l, 0].set_ylabel(f"Week {l+1}")
                         fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
                         if l == 0: axes[l, 0].set_title("Target GPCP")
                         
-                        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues')
+                        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
                         fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
                         if l == 0: axes[l, 1].set_title("Predicted GPCP")
                         
