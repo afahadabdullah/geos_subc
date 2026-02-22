@@ -224,6 +224,57 @@ def train():
                 print(f"Pure DataLoader Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
                 print(f"-----------------------------------------\n")
 
+                # --- Create Before/After Normalization Diagnostic Plot ---
+                # Take index 0, lead 1 for visualization
+                sample_idx = 0
+                lead_idx = 0
+                
+                # 1. Reverse Normalize GEOS
+                geos_norm_sample = x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy()
+                geos_raw_sample = ((geos_norm_sample + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+                
+                # 2. Reverse Normalize SST (Channel 0 of x_obs)
+                sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
+                sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
+                
+                # 3. Reverse Normalize Target Residual (Lead 0)
+                res_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
+                res_raw_sample = ((res_norm_sample + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+
+                fig, axes = plt.subplots(3, 2, figsize=(12, 12))
+                # Row 1: GEOS
+                im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
+                axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
+                fig.colorbar(im1, ax=axes[0, 0])
+                
+                im2 = axes[0, 1].imshow(geos_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[0, 1].set_title("Normalized GEOS [-1, 1]")
+                fig.colorbar(im2, ax=axes[0, 1])
+                
+                # Row 2: SST
+                im3 = axes[1, 0].imshow(sst_raw_sample, cmap='viridis')
+                axes[1, 0].set_title("Raw SST")
+                fig.colorbar(im3, ax=axes[1, 0])
+                
+                im4 = axes[1, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[1, 1].set_title("Normalized SST [-1, 1]")
+                fig.colorbar(im4, ax=axes[1, 1])
+                
+                # Row 3: Target Residual
+                im5 = axes[2, 0].imshow(res_raw_sample, cmap='RdBu_r')
+                axes[2, 0].set_title("Raw Residual (GPCP - GEOS)")
+                fig.colorbar(im5, ax=axes[2, 0])
+                
+                im6 = axes[2, 1].imshow(res_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[2, 1].set_title("Normalized Residual [-1, 1]")
+                fig.colorbar(im6, ax=axes[2, 1])
+
+                plt.tight_layout()
+                diag_path = os.path.join(output_dir, "normalization_check.png")
+                plt.savefig(diag_path)
+                plt.close()
+                print(f"✅ Normalization diagnostic plot saved to {diag_path}!")
+
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
             noise = torch.randn_like(target_norm)
