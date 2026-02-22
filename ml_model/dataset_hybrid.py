@@ -345,10 +345,8 @@ class S2SHybridDataset(Dataset):
             # If not normalizing (e.g. scanning), we just expose the raw log GPCP and do math externally
             pass
         
-        # FINAL SAFETY CLAMP (Prevent severe outliers in inputs)
-        # Z-Scores > 20 are likely data errors or land masks
-        geos_tensor = torch.clamp(geos_tensor, min=-20.0, max=20.0)
-        obs_tensor = torch.clamp(obs_tensor, min=-20.0, max=20.0)
+        # We no longer apply a generic [-20, 20] clamp here because it destroys the true physical values
+        # of variables like SST (300) and Z500 (50000) before they can be globally normalized or scanned.
         
         return {
             "x_geos": geos_tensor, # (1, 1, L, H, W)
