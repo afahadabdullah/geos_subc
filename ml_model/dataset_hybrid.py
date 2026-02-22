@@ -166,10 +166,15 @@ class S2SHybridDataset(Dataset):
         return np.zeros((4, 181, 360), dtype=np.float32)
 
     def __getitem__(self, idx):
-        if self.preload:
-            return self.data_cache[idx]
-        else:
-            return self._load_sample(idx)
+        # We only use cache if it was loaded in the same normalization state as current request.
+        # However, to avoid complexity, we just re-load if states don't match.
+        if self.preload and self.data_cache:
+            # We assume cache was loaded with normalize=True by default in __init__
+            # If currently normalize=False (e.g. for diagnostics), we ignore cache.
+            if self.normalize == True:
+                return self.data_cache[idx]
+        
+        return self._load_sample(idx)
 
     def _load_sample(self, idx):
         meta = self.samples[idx]

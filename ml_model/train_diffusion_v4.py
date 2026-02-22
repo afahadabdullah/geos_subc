@@ -423,12 +423,22 @@ def train():
                 # latents generated represented: pred_target_norm (the scaled residual)
                 pred_target_norm = latents
                 
+                if accelerator.is_main_process:
+                    print(f"--- RECONSTRUCTION DIAGNOSTICS ---")
+                    print(f"Pred Target Norm (Latents) Range: {pred_target_norm.min().item():.4f} to {pred_target_norm.max().item():.4f}")
+                    print(f"Residual Coeffs: Min={residual_min}, Max={residual_max}")
+                    print(f"GEOS Coeffs: Min={geos_min}, Max={geos_max}")
+
                 # Demap the Residual Normalized prediction back to raw space
                 denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
                 
                 # Un-normalize GEOS mean pattern to get unscaled geos_raw
                 fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
                 
+                if accelerator.is_main_process:
+                    print(f"Denorm Residual Raw Range : {denorm_residual_raw.min().item():.4f} to {denorm_residual_raw.max().item():.4f}")
+                    print(f"FX GEOS Raw Range         : {fx_geos_raw.min().item():.4f} to {fx_geos_raw.max().item():.4f}")
+
                 # Add unscaled linear residual back onto GEOS
                 pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
                 full_pred = torch.clamp(pred_gpcp_raw, min=0.0) # Physical limit
@@ -438,14 +448,17 @@ def train():
                 true_target_raw = fx_geos_raw + demap_target_residual_raw
                 true_target_precip = torch.clamp(true_target_raw, min=0.0)
                 
+                if accelerator.is_main_process:
+                    print(f"Pure GPCP Raw Prediction Range: {full_pred.min().item():.4f} to {full_pred.max().item():.4f}")
+                    print(f"Pure GPCP Raw Target Range    : {true_target_precip.min().item():.4f} to {true_target_precip.max().item():.4f}")
+                    print(f"--- END RECONSTRUCTION ---")
+
                 # Accuracy tracking
                 v_diff_sq = (full_pred - true_target_precip)**2
                 v_weighted_mse = (v_diff_sq * area_weights).mean()
                 fb_rmse = torch.sqrt(v_weighted_mse).item()
                 
             if accelerator.is_main_process:
-                print(f"DEBUG | Val Batch 0 | Final Reconstructed Precip: {full_pred.min().item():.2f} to {full_pred.max().item():.2f}")
-                print(f"DEBUG | Val Batch 0 | Target Physical Precip: {true_target_precip.min().item():.2f} to {true_target_precip.max().item():.2f}")
                 print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB Physical RMSE: {fb_rmse:.4f}")
 
                 with open(log_file, "a") as f:
