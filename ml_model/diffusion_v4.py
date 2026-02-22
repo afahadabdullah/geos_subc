@@ -189,6 +189,10 @@ class CustomDiffusionScheduler:
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
         
+        # Precompute alphas_cumprod_prev for posterior mean calculation
+        # alphabar_prev[0] is 1.0
+        self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0], device=device), self.alphas_cumprod[:-1]])
+        
         # Precompute square roots for mapping
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
@@ -206,28 +210,46 @@ class CustomDiffusionScheduler:
         return sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
 
     @torch.no_grad()
-    def step(self, model_output, timestep, sample):
+    def step(self, model_output, timestep, sample, clip_x0=True):
         """
-        Single DDPM Reverse step to reconstruct sample from t to t-1
-        x_{t-1} = 1/sqrt(alpha_t) * (x_t - ((1-alpha_t) / sqrt(1-alpha_bar_t)) * eps_theta) + sigma_t * z
+        Robust DDPM Reverse step with x0 clipping to maintain manifold stability.
+        1. Predict x0 from xt and noise_epsilon
+        2. Clip x0 to [-1, 1]
+        3. Compute posterior mean mu_t(xt, x0)
         """
         t = timestep
         
-        # Extract constants for this step
+        # Constants for this step
+        alpha_bar_t = self.alphas_cumprod[t]
+        alpha_bar_t_prev = self.alphas_cumprod_prev[t]
         beta_t = self.betas[t]
         alpha_t = self.alphas[t]
-        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
         
-        # Mean calculation
-        mean = (1.0 / torch.sqrt(alpha_t)) * (
-            sample - (beta_t / sqrt_one_minus_alpha_cumprod_t) * model_output
-        )
+        # 1. Predict x0 (Ho et al. 2020 Eq 15)
+        # x0 = (xt - sqrt(1-alphabar_t) * eps) / sqrt(alphabar_t)
+        sqrt_alpha_bar_t = self.sqrt_alphas_cumprod[t]
+        sqrt_one_minus_alpha_bar_t = self.sqrt_one_minus_alphas_cumprod[t]
+        
+        pred_x0 = (sample - sqrt_one_minus_alpha_bar_t * model_output) / sqrt_alpha_bar_t
+        
+        # 2. Clip x0 to stay on the [-1, 1] train-data manifold
+        if clip_x0:
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+            
+        # 3. Compute Posterior Mean mu_t (Ho et al. 2020 Eq 6/7)
+        # mu_t = [ (sqrt(alphabar_prev) * beta) / (1-alphabar_t) ] * x0 + [ (sqrt(alpha) * (1-alphabar_prev)) / (1-alphabar_t) ] * xt
+        one_minus_alpha_bar_t = 1.0 - alpha_bar_t
+        
+        coeff_x0 = (torch.sqrt(alpha_bar_t_prev) * beta_t) / one_minus_alpha_bar_t
+        coeff_xt = (torch.sqrt(alpha_t) * (1.0 - alpha_bar_t_prev)) / one_minus_alpha_bar_t
+        
+        mean = coeff_x0 * pred_x0 + coeff_xt * sample
 
         if t > 0:
-            # Add posterior variance (noise) for all steps except the final t=0 step
+            # Posterior variance sigma_t
+            variance = (beta_t * (1.0 - alpha_bar_t_prev)) / one_minus_alpha_bar_t
+            sigma_t = torch.sqrt(variance)
             noise = torch.randn_like(sample)
-            sigma_t = torch.sqrt(beta_t)
             return mean + sigma_t * noise
         else:
-            # At t=0, just return the mean
             return mean
