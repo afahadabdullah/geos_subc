@@ -241,11 +241,32 @@ def train():
                 res_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
                 res_raw_sample = ((res_norm_sample + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
 
-                # 4. Reverse Normalize Z500 (Channel 16 of x_obs)
+                # 4. Reverse Normalize Observational States
+                # Channel 0: SST
+                sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
+                sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
+                
+                # Channel 4: SSS
+                sss_norm_sample = x_obs[sample_idx, 4].cpu().numpy()
+                sss_raw_sample = ((sss_norm_sample + 1.0) / 2.0) * (global_bounds["sss"]["max"] - global_bounds["sss"]["min"]) + global_bounds["sss"]["min"]
+                
+                # Channel 8: Soil Moisture
+                sm_norm_sample = x_obs[sample_idx, 8].cpu().numpy()
+                sm_raw_sample = ((sm_norm_sample + 1.0) / 2.0) * (global_bounds["sm"]["max"] - global_bounds["sm"]["min"]) + global_bounds["sm"]["min"]
+                
+                # Channel 12: IVT
+                ivt_norm_sample = x_obs[sample_idx, 12].cpu().numpy()
+                ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
+                
+                # Channel 16: Z500
                 z500_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
                 z500_raw_sample = ((z500_norm_sample + 1.0) / 2.0) * (global_bounds["z500"]["max"] - global_bounds["z500"]["min"]) + global_bounds["z500"]["min"]
+                
+                # Channel 20: U250
+                u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
+                u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
 
-                fig, axes = plt.subplots(4, 2, figsize=(12, 16))
+                fig, axes = plt.subplots(8, 2, figsize=(14, 32))
                 # Row 1: GEOS
                 im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
                 axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -255,32 +276,68 @@ def train():
                 axes[0, 1].set_title("Normalized GEOS [-1, 1]")
                 fig.colorbar(im2, ax=axes[0, 1])
                 
-                # Row 2: SST
-                im3 = axes[1, 0].imshow(sst_raw_sample, cmap='viridis')
-                axes[1, 0].set_title("Raw SST")
+                # Row 2: Target Residual
+                im3 = axes[1, 0].imshow(res_raw_sample, cmap='RdBu_r')
+                axes[1, 0].set_title("Raw Residual (GPCP - GEOS)")
                 fig.colorbar(im3, ax=axes[1, 0])
                 
-                im4 = axes[1, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[1, 1].set_title("Normalized SST [-1, 1]")
+                im4 = axes[1, 1].imshow(res_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[1, 1].set_title("Normalized Residual [-1, 1]")
                 fig.colorbar(im4, ax=axes[1, 1])
                 
-                # Row 3: Target Residual
-                im5 = axes[2, 0].imshow(res_raw_sample, cmap='RdBu_r')
-                axes[2, 0].set_title("Raw Residual (GPCP - GEOS)")
+                # Row 3: SST
+                im5 = axes[2, 0].imshow(sst_raw_sample, cmap='viridis')
+                axes[2, 0].set_title("Raw SST")
                 fig.colorbar(im5, ax=axes[2, 0])
                 
-                im6 = axes[2, 1].imshow(res_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[2, 1].set_title("Normalized Residual [-1, 1]")
+                im6 = axes[2, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[2, 1].set_title("Normalized SST [-1, 1]")
                 fig.colorbar(im6, ax=axes[2, 1])
 
-                # Row 4: Z500
-                im7 = axes[3, 0].imshow(z500_raw_sample, cmap='magma')
-                axes[3, 0].set_title("Raw Z500")
+                # Row 4: SSS
+                im7 = axes[3, 0].imshow(sss_raw_sample, cmap='YlGnBu')
+                axes[3, 0].set_title("Raw SSS")
                 fig.colorbar(im7, ax=axes[3, 0])
                 
-                im8 = axes[3, 1].imshow(z500_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[3, 1].set_title("Normalized Z500 [-1, 1]")
+                im8 = axes[3, 1].imshow(sss_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[3, 1].set_title("Normalized SSS [-1, 1]")
                 fig.colorbar(im8, ax=axes[3, 1])
+
+                # Row 5: Soil Moisture
+                im9 = axes[4, 0].imshow(sm_raw_sample, cmap='YlOrBr')
+                axes[4, 0].set_title("Raw SM")
+                fig.colorbar(im9, ax=axes[4, 0])
+                
+                im10 = axes[4, 1].imshow(sm_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[4, 1].set_title("Normalized SM [-1, 1]")
+                fig.colorbar(im10, ax=axes[4, 1])
+
+                # Row 6: IVT
+                im11 = axes[5, 0].imshow(ivt_raw_sample, cmap='cubehelix')
+                axes[5, 0].set_title("Raw IVT")
+                fig.colorbar(im11, ax=axes[5, 0])
+                
+                im12 = axes[5, 1].imshow(ivt_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[5, 1].set_title("Normalized IVT [-1, 1]")
+                fig.colorbar(im12, ax=axes[5, 1])
+
+                # Row 7: Z500
+                im13 = axes[6, 0].imshow(z500_raw_sample, cmap='magma')
+                axes[6, 0].set_title("Raw Z500")
+                fig.colorbar(im13, ax=axes[6, 0])
+                
+                im14 = axes[6, 1].imshow(z500_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[6, 1].set_title("Normalized Z500 [-1, 1]")
+                fig.colorbar(im14, ax=axes[6, 1])
+
+                # Row 8: U250
+                im15 = axes[7, 0].imshow(u250_raw_sample, cmap='coolwarm')
+                axes[7, 0].set_title("Raw U250")
+                fig.colorbar(im15, ax=axes[7, 0])
+                
+                im16 = axes[7, 1].imshow(u250_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[7, 1].set_title("Normalized U250 [-1, 1]")
+                fig.colorbar(im16, ax=axes[7, 1])
 
                 plt.tight_layout()
                 diag_path = os.path.join(output_dir, "normalization_check.png")
