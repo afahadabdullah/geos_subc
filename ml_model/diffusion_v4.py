@@ -17,6 +17,21 @@ class SinusoidalPositionEmbeddings(nn.Module):
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
 
+class SelfAttention(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(in_channels, 4, batch_first=True)
+        self.norm = nn.GroupNorm(8, in_channels)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x_flat = x.view(B, C, -1).permute(0, 2, 1) # [B, H*W, C]
+        norm_x = self.norm(x).view(B, C, -1).permute(0, 2, 1)
+        
+        attn_out, _ = self.mha(norm_x, norm_x, norm_x)
+        out = x_flat + attn_out
+        return out.permute(0, 2, 1).view(B, C, H, W)
+
 class Block(nn.Module):
     def __init__(self, in_c, out_c, time_emb_dim, up=False):
         super().__init__()
@@ -29,8 +44,11 @@ class Block(nn.Module):
             self.transform = nn.Conv2d(out_c, out_c, 4, 2, 1)
             
         self.conv2 = nn.Conv2d(out_c, out_c, 3, padding=1)
-        self.bnorm1 = nn.BatchNorm2d(out_c)
-        self.bnorm2 = nn.BatchNorm2d(out_c)
+        # Replacing BatchNorm with GroupNorm for smaller batch sizes and stabler diffusion mapping
+        self.gnorm1 = nn.GroupNorm(8, out_c)
+        self.gnorm2 = nn.GroupNorm(8, out_c)
+        # Adding Dropout for high-variance linear stabilization
+        self.dropout = nn.Dropout2d(0.1)
         self.relu = nn.ReLU()
         
     def forward(self, x, t):
@@ -39,9 +57,10 @@ class Block(nn.Module):
         time_emb = time_emb[(...,) + (None,) * 2]
         
         # Conv block + Time inject
-        h = self.bnorm1(self.relu(self.conv1(x)))
+        h = self.gnorm1(self.relu(self.conv1(x)))
         h = h + time_emb
-        h = self.bnorm2(self.relu(self.conv2(h)))
+        h = self.dropout(h)
+        h = self.gnorm2(self.relu(self.conv2(h)))
         
         # Transform (Up or Down)
         return self.transform(h)
@@ -72,7 +91,8 @@ class DiffusionModelV4(nn.Module):
         # Bottleneck
         self.bottleneck_time = nn.Linear(time_emb_dim, 512)
         self.bottleneck_conv = nn.Conv2d(512, 512, 3, padding=1)
-        self.bottleneck_bn = nn.BatchNorm2d(512)
+        self.bottleneck_gn = nn.GroupNorm(8, 512)
+        self.attn = SelfAttention(512)
 
         # Upsample (c is multiplied by 2 due to skip connections)
         self.up1 = Block(512, 256, time_emb_dim, up=True) # H/4, W/4
@@ -124,7 +144,8 @@ class DiffusionModelV4(nn.Module):
         # Bottleneck
         t_bottle = F.relu(self.bottleneck_time(t))
         t_bottle = t_bottle[(...,) + (None,) * 2]
-        x_bottle = self.bottleneck_bn(F.relu(self.bottleneck_conv(x3))) + t_bottle
+        x_bottle = self.bottleneck_gn(F.relu(self.bottleneck_conv(x3))) + t_bottle
+        x_bottle = self.attn(x_bottle)
 
         # Decoder (Up path with skip connections)
         # Note: We concatenate the skip connection BEFORE the up block,
