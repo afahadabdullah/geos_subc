@@ -164,6 +164,32 @@ def train():
         print("---------------------------------------------------\n")
     
     # ---------------------------------------------------------
+    # Pre-Flight NaN Integrity Scan
+    # ---------------------------------------------------------
+    if accelerator.is_main_process:
+        print("\n--- INITIATING PRE-FLIGHT NaN SCAN (Checking entire dataset) ---")
+        nan_found = False
+        for batch_idx, batch in enumerate(tqdm(loader, desc="Scanning for NaNs/Infs")):
+            if torch.isnan(batch['x_geos']).any() or torch.isinf(batch['x_geos']).any():
+                print(f"CRITICAL: NaN/Inf detected in GEOS array at batch {batch_idx}")
+                nan_found = True
+            if torch.isnan(batch['x_obs']).any() or torch.isinf(batch['x_obs']).any():
+                print(f"CRITICAL: NaN/Inf detected in OBS array at batch {batch_idx}")
+                nan_found = True
+            if torch.isnan(batch['y_target']).any() or torch.isinf(batch['y_target']).any():
+                print(f"CRITICAL: NaN/Inf detected in TARGET array at batch {batch_idx}")
+                nan_found = True
+                
+            if nan_found:
+                raise ValueError(f"Pre-flight scan failed! NaNs detected in training data. Check dataset limits.")
+                
+        print("✅ Pre-flight scan complete. Zero NaNs detected across all batches.")
+        print("----------------------------------------------------------------\n")
+        
+    # Wait for all processes to finish checking before starting training
+    accelerator.wait_for_everyone()
+
+    # ---------------------------------------------------------
     # 3. Training Loop
     # ---------------------------------------------------------
     for epoch in range(start_epoch, epochs):
