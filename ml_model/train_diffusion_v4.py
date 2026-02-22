@@ -140,6 +140,28 @@ def train():
     else:
         if accelerator.is_main_process:
             print(f"\n🚀 Starting fresh training from Epoch 0\n")
+        
+    # ---------------------------------------------------------
+    # Pre-Training Diagnostics (Raw vs Normalized Bounds)
+    # ---------------------------------------------------------
+    if accelerator.is_main_process:
+        print("\n--- PRE-TRAINING DIAGNOSTICS: RAW vs NORMALIZED ---")
+        
+        # Disable normalization briefly to fetch pure values
+        train_dataset.normalize = False
+        raw_sample = train_dataset[0]
+        
+        # Re-enable normalization to fetch mapped values
+        train_dataset.normalize = True
+        norm_sample = train_dataset[0]
+        
+        def print_bounds(name, raw_t, norm_t):
+            print(f"{name:<12} | RAW: [{raw_t.min():>8.4f}, {raw_t.max():>8.4f}] --> NORM: [{norm_t.min():>8.4f}, {norm_t.max():>8.4f}]")
+            
+        print_bounds("OBS Arrays", raw_sample['x_obs'], norm_sample['x_obs'])
+        print_bounds("GEOS Log", raw_sample['x_geos'], norm_sample['x_geos'])
+        print_bounds("Target Log", raw_sample['y_target'], norm_sample['y_target'])
+        print("---------------------------------------------------\n")
     
     # ---------------------------------------------------------
     # 3. Training Loop
