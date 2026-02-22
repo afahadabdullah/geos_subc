@@ -285,8 +285,8 @@ def train():
                 
                 fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
                 
-                # Extract Fixed Batch already-normalized parameters
-                fx_geos_norm = fx_geos_flat # [B, 4, H, W]
+                # Extract Fixed Batch already-normalized parameters to evaluate reconstruction accuracy
+                fx_geos_norm = fx_geos.squeeze(1).squeeze(1) # [B, 4, H, W]
                 fb_target_norm = fb_target # [B, 4, H, W]
                 
                 # Single Pass Reverse Sampling predicting all 4 Leads simultaneously
@@ -348,7 +348,7 @@ def train():
                     torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
                     
                     # Plot Diagnostics
-                    t_img = fb_target[0].cpu().numpy()
+                    t_img = true_target_precip[0].cpu().numpy()
                     p_img = full_pred[0].cpu().numpy()
                     
                     fig, axes = plt.subplots(4, 3, figsize=(15, 16))
