@@ -77,6 +77,13 @@ def train():
     
     geos_min = global_bounds["geos_log"]["min"]
     geos_max = global_bounds["geos_log"]["max"]
+    
+    if accelerator.is_main_process:
+        print("\n=======================================================")
+        print(f"✅ Loaded Strict Global Stats: {stats_file}")
+        print(f"   [Residual Log Bounds]: Min = {residual_min:.4f}, Max = {residual_max:.4f}")
+        print(f"   [GEOS Log Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
+        print("=======================================================\n")
 
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
@@ -113,6 +120,27 @@ def train():
     start_epoch = 0
     best_val_rmse = float('inf')
     
+    # Load latest checkpoint if it exists
+    latest_ckpt = os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt")
+    if os.path.exists(latest_ckpt):
+        try:
+            checkpoint = torch.load(latest_ckpt, map_location='cpu', weights_only=False)
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint['epoch'] + 1
+            if 'best_val_rmse' in checkpoint:
+                best_val_rmse = checkpoint['best_val_rmse']
+            if accelerator.is_main_process:
+                print(f"\n🔄 Resumed from checkpoint: {latest_ckpt}")
+                print(f"   Starting at Epoch: {start_epoch}")
+                print(f"   Best Val RMSE so far: {best_val_rmse:.4f}\n")
+        except Exception as e:
+            if accelerator.is_main_process:
+                print(f"⚠️ Failed to load checkpoint {latest_ckpt}: {e}")
+    else:
+        if accelerator.is_main_process:
+            print(f"\n🚀 Starting fresh training from Epoch 0\n")
+    
     # ---------------------------------------------------------
     # 3. Training Loop
     # ---------------------------------------------------------
@@ -140,7 +168,13 @@ def train():
             target_norm = batch['y_target'].to(device) # [B, 4, H, W]
 
             if i == 0 and accelerator.is_main_process:
-                print(f"DEBUG | Train Batch 0 | Target Normalized Residual Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+                print(f"\n--- DEBUG | Train Batch 0 Diagnostics ---")
+                print(f"x_obs bounds         : {x_obs.min().item():.2f} to {x_obs.max().item():.2f}")
+                print(f"x_geos bounds        : {x_geos.min().item():.2f} to {x_geos.max().item():.2f}")
+                print(f"Final x_cond shape   : {x_cond.shape}")
+                print(f"Final x_cond bounds  : {x_cond.min().item():.2f} to {x_cond.max().item():.2f}")
+                print(f"Pure DataLoader Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+                print(f"-----------------------------------------\n")
 
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
