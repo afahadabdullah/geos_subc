@@ -114,7 +114,7 @@ def train(force_new_stats=False):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = DiffusionModelV4(in_channels=49, out_channels=1).to(device)
+    model = DiffusionModelV4(in_channels=34, out_channels=4).to(device)
     scheduler = CustomDiffusionScheduler(num_timesteps=1000, device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -165,25 +165,18 @@ def train(force_new_stats=False):
             months = batch['month'].to(device)
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
             cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
-            
-            mjo = batch['mjo'].to(device)
-            mjo_map = mjo.view(B, 2, 1, 1).expand(B, 2, H, W)
 
-            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, mjo_map], dim=1) # [B, 48, H, W]
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1) # [B, 30, H, W]
 
             # Targets: [B, 4, H, W]
             y_target = batch['y_target'].to(device)
             
-            # Reconstruct GEOS mean in log space
-            geos_mean_log = x_geos.mean(dim=1).squeeze(1).to(device)
+            # Extract GEOS mean in log space directly from dataset_hybrid mapped variable
+            geos_mean_log = x_geos_flat
             y_target_log = torch.log1p(y_target.clamp(min=0.0))
 
-            # Randomly select ONE lead week to reconstruct
-            target_lead = torch.randint(0, 4, (1,)).item()
-            y_target_log_lead = y_target_log[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
-            geos_mean_log_lead = geos_mean_log[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
-            
-            y_residual_log = y_target_log_lead - geos_mean_log_lead
+            # Target all 4 lead weeks simultaneously
+            y_residual_log = y_target_log - geos_mean_log
 
             # Linear Min-Max Normalization [-1, 1] applied to Log Residuals
             target_norm = 2.0 * ((y_residual_log - global_min) / (global_max - global_min)) - 1.0
@@ -238,41 +231,31 @@ def train(force_new_stats=False):
                 fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
                 fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
                 
-                fmjo = fixed_val_batch['mjo'].to(device)
-                fmjo_map = fmjo.view(vB, 2, 1, 1).expand(vB, 2, H, W)
-                
-                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month, fmjo_map], dim=1)
+                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1)
                 
                 # Extract fixed batch GEOS mean in log space
-                fx_geos_mean_log = fx_geos.mean(dim=1).squeeze(1).to(device) # [B, L, H, W]
+                fx_geos_mean_log = fx_geos_flat
                 fb_target_log = torch.log1p(fb_target.clamp(min=0.0))
                 
                 # Diagnostic target log residual calculations for reference
                 f_y_residual_log = fb_target_log - fx_geos_mean_log
 
-                # Single Pass Reverse Sampling for the batch across all 4 Leads
-                fb_preds = []
-                for lead in range(4):
-                    latents = torch.randn((vB, 1, H, W), device=device)
+                # Single Pass Reverse Sampling predicting all 4 Leads simultaneously
+                latents = torch.randn((vB, 4, H, W), device=device)
+                
+                # Iterative reverse diffusion loop
+                for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Evaluating generation", leave=False):
+                    t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
+                    pred_noise = unwrapped_model(latents, fx_cond, t_batched)
+                    latents = scheduler.step(pred_noise, t, latents)
                     
-                    # Iterative reverse diffusion loop
-                    for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc=f"Sampling L{lead+1}", leave=False):
-                        t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
-                        pred_noise = unwrapped_model(latents, fx_cond, t_batched)
-                        latents = scheduler.step(pred_noise, t, latents)
-                        
-                    # Reverse Normalization Linear Mapping back to Log Residual space
-                    denorm_residual_log = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
-                    
-                    # Reconstruct GPCP by adding generated log residual back onto GEOS log mean
-                    geos_mean_log_lead = fx_geos_mean_log[:, lead:lead+1, :, :]
-                    final_precip_log = geos_mean_log_lead + denorm_residual_log
-                    final_precip = torch.expm1(final_precip_log)
-                    final_precip = final_precip.clamp(min=0.0) # Physical limit
-                    
-                    fb_preds.append(final_precip)
-                    
-                full_pred = torch.cat(fb_preds, dim=1) # [B, 4, H, W]
+                # Reverse Normalization Linear Mapping back to Log Residual space
+                denorm_residual_log = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
+                
+                # Reconstruct GPCP by adding generated log residual back onto GEOS log mean
+                final_precip_log = fx_geos_mean_log + denorm_residual_log
+                final_precip = torch.expm1(final_precip_log)
+                full_pred = final_precip.clamp(min=0.0) # Physical limit
                 
                 # Accuracy tracking
                 v_diff_sq = (full_pred - fb_target)**2
