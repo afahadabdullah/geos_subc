@@ -68,10 +68,10 @@ class Block(nn.Module):
 class DiffusionModelV4(nn.Module):
     """
     Custom Unet built from scratch.
-    Takes concatenated inputs: Noisy Target [B, 1, H, W] + Conditionals [B, C, H, W]
-    Predicts: Noise epsilon [B, 1, H, W]
+    Takes concatenated inputs: Noisy Target [B, 4, H, W] + Conditionals [B, 28, H, W]
+    Predicts: Noise epsilon [B, 4, H, W]
     """
-    def __init__(self, in_channels=49, out_channels=1, time_emb_dim=32):
+    def __init__(self, in_channels=32, out_channels=4, time_emb_dim=32):
         super().__init__()
         
         self.time_mlp = nn.Sequential(
