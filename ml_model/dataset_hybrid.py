@@ -364,5 +364,6 @@ class S2SHybridDataset(Dataset):
         return {
             "x_geos": geos_tensor, # (1, 1, L, H, W)
             "x_obs": obs_tensor,   # (24, H, W)
-            "y_target": target_tensor # (L, H, W)
+            "y_target": target_tensor, # (L, H, W)
+            "month": meta['date'].month
         }
