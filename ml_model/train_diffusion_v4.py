@@ -215,7 +215,7 @@ def train():
             # Targets are already log-residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 4, H, W]
 
-            if i == 0 and accelerator.is_main_process:
+            if epoch == start_epoch and i == 0 and accelerator.is_main_process:
                 print(f"\n--- DEBUG | Train Batch 0 Diagnostics ---")
                 print(f"x_obs bounds         : {x_obs.min().item():.2f} to {x_obs.max().item():.2f}")
                 print(f"x_geos bounds        : {x_geos.min().item():.2f} to {x_geos.max().item():.2f}")
