@@ -355,14 +355,17 @@ def train():
                     for l in range(4):
                         diff = p_img[l] - t_img[l]
                         
-                        axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=0, vmax=50)
+                        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues')
                         axes[l, 0].set_ylabel(f"Week {l+1}")
+                        fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
                         if l == 0: axes[l, 0].set_title("Target GPCP")
                         
-                        axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=0, vmax=50)
+                        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues')
+                        fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
                         if l == 0: axes[l, 1].set_title("Predicted GPCP")
                         
-                        axes[l, 2].imshow(diff, cmap='RdBu_r', vmin=-20, vmax=20)
+                        im2 = axes[l, 2].imshow(diff, cmap='RdBu_r')
+                        fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
                         if l == 0: axes[l, 2].set_title("Diff Bias")
                         
                     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
