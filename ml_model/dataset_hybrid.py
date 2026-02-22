@@ -192,15 +192,12 @@ class S2SHybridDataset(Dataset):
         # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
         geos_tensor = geos_tensor.unsqueeze(1) # [1, 1, L, H, W]
         
-        # Log1p before normalization
-        geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
-        
-        # Save a pure copy of the log GEOS field to calculate the exact residual with the GPCP target later
-        pure_geos_log = geos_tensor.clone().squeeze(0).squeeze(0) # [L, H, W]
+        # Save a pure copy of the raw GEOS field to calculate the exact residual with the GPCP target later
+        pure_geos_raw = geos_tensor.clone().squeeze(0).squeeze(0) # [L, H, W]
         
         if self.normalize and self.bounds is not None:
-            g_min = self.bounds["geos_log"]["min"]
-            g_max = self.bounds["geos_log"]["max"]
+            g_min = self.bounds["geos_raw"]["min"]
+            g_max = self.bounds["geos_raw"]["max"]
             geos_tensor = 2.0 * (torch.clamp(geos_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
 
         # 2. Load Obs (Static/State)
@@ -342,18 +339,16 @@ class S2SHybridDataset(Dataset):
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
-        # Apply log1p and map the target into the pure residual space
-        target_tensor = torch.log1p(target_tensor)
         if self.normalize and self.bounds is not None:
             # We want to return the normalized RELATIVE residual directly to the model as our target
-            r_min = self.bounds["residual_log"]["min"]
-            r_max = self.bounds["residual_log"]["max"]
+            r_min = self.bounds["residual_raw"]["min"]
+            r_max = self.bounds["residual_raw"]["max"]
             
-            # target_tensor becomes the mathematically sound log-residual
-            residual_log = target_tensor - pure_geos_log
-            target_tensor = 2.0 * (torch.clamp(residual_log, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
+            # target_tensor becomes the mathematically sound linear residual
+            residual_raw = target_tensor - pure_geos_raw
+            target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
         else:
-            # If not normalizing (e.g. scanning), we just expose the raw log GPCP and do math externally
+            # If not normalizing (e.g. scanning), we just expose the raw GPCP and do math externally
             pass
         
         # We no longer apply a generic [-20, 20] clamp here because it destroys the true physical values

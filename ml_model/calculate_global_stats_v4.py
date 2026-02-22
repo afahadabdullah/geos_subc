@@ -24,8 +24,8 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
         "ivt": {"min": float('inf'), "max": float('-inf')},
         "z500": {"min": float('inf'), "max": float('-inf')},
         "u250": {"min": float('inf'), "max": float('-inf')},
-        "geos_log": {"min": float('inf'), "max": float('-inf')},
-        "residual_log": {"min": float('inf'), "max": float('-inf')}
+        "geos_raw": {"min": float('inf'), "max": float('-inf')},
+        "residual_raw": {"min": float('inf'), "max": float('-inf')}
     }
 
     def update_bounds(key, tensor):
@@ -56,16 +56,15 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
 
             # 2. GEOS Forecast [B, 1, 1, L, H, W]
             x_geos = batch['x_geos']
-            update_bounds("geos_log", x_geos)
+            update_bounds("geos_raw", x_geos)
 
             # 3. GPCP Target [B, L, H, W]
             y_target = batch['y_target']
-            y_log = torch.log1p(y_target.clamp(min=0.0))
             
-            # Calculate residual log bounds directly
-            geos_log = x_geos.squeeze(1).squeeze(1) # [B, L, H, W]
-            residual_log = y_log - geos_log
-            update_bounds("residual_log", residual_log)
+            # Calculate residual raw bounds directly
+            geos_raw = x_geos.squeeze(1).squeeze(1) # [B, L, H, W]
+            residual_raw = y_target - geos_raw
+            update_bounds("residual_raw", residual_raw)
             
             if i == 0:
                 print(f"\n--- BATCH 0 DIAGNOSTICS ---")
@@ -75,12 +74,12 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
                 print(f"IVT  Raw  : Min {ivt_b.min().item():.4f} | Max {ivt_b.max().item():.4f}")
                 print(f"Z500 Raw  : Min {z500_b.min().item():.4f} | Max {z500_b.max().item():.4f}")
                 print(f"U250 Raw  : Min {u250_b.min().item():.4f} | Max {u250_b.max().item():.4f}")
-                print(f"GEOS Log  : Min {x_geos.min().item():.4f} | Max {x_geos.max().item():.4f}")
-                print(f"RESID Log : Min {residual_log.min().item():.4f} | Max {residual_log.max().item():.4f}")
+                print(f"GEOS Raw  : Min {x_geos.min().item():.4f} | Max {x_geos.max().item():.4f}")
+                print(f"RESID Raw : Min {residual_raw.min().item():.4f} | Max {residual_raw.max().item():.4f}")
                 print(f"---------------------------\n")
             
             # Force Memory Cleanup to prevent OOM
-            del x_obs, x_geos, y_target, y_log, geos_log, residual_log, batch
+            del x_obs, x_geos, y_target, geos_raw, residual_raw, batch
             del sst_b, sss_b, sm_b, ivt_b, z500_b, u250_b
             gc.collect()
 

@@ -72,17 +72,17 @@ def train():
         raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v4.py first!")
     
     global_bounds = torch.load(stats_file)
-    residual_min = global_bounds["residual_log"]["min"]
-    residual_max = global_bounds["residual_log"]["max"]
+    residual_min = global_bounds["residual_raw"]["min"]
+    residual_max = global_bounds["residual_raw"]["max"]
     
-    geos_min = global_bounds["geos_log"]["min"]
-    geos_max = global_bounds["geos_log"]["max"]
+    geos_min = global_bounds["geos_raw"]["min"]
+    geos_max = global_bounds["geos_raw"]["max"]
     
     if accelerator.is_main_process:
         print("\n=======================================================")
         print(f"✅ Loaded Strict Global Stats: {stats_file}")
-        print(f"   [Residual Log Bounds]: Min = {residual_min:.4f}, Max = {residual_max:.4f}")
-        print(f"   [GEOS Log Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
+        print(f"   [Residual Raw Bounds]: Min = {residual_min:.4f}, Max = {residual_max:.4f}")
+        print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -159,8 +159,8 @@ def train():
             print(f"{name:<12} | RAW: [{raw_t.min():>8.4f}, {raw_t.max():>8.4f}] --> NORM: [{norm_t.min():>8.4f}, {norm_t.max():>8.4f}]")
             
         print_bounds("OBS Arrays", raw_sample['x_obs'], norm_sample['x_obs'])
-        print_bounds("GEOS Log", raw_sample['x_geos'], norm_sample['x_geos'])
-        print_bounds("Target Log", raw_sample['y_target'], norm_sample['y_target'])
+        print_bounds("GEOS Raw", raw_sample['x_geos'], norm_sample['x_geos'])
+        print_bounds("Target Raw", raw_sample['y_target'], norm_sample['y_target'])
         print("---------------------------------------------------\n")
     
     # ---------------------------------------------------------
@@ -302,21 +302,20 @@ def train():
                 # latents generated represented: pred_target_norm (the scaled residual)
                 pred_target_norm = latents
                 
-                # Demap the Residual log Normalized prediction back to log space
-                denorm_residual_log = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+                # Demap the Residual Normalized prediction back to raw space
+                denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
                 
-                # Un-normalize GEOS mean log to get unscaled geos_log
-                fx_geos_log = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+                # Un-normalize GEOS mean pattern to get unscaled geos_raw
+                fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
                 
-                # Safely clamp log values to prevent exp() from returning 'inf'
-                # log(22000) is ~10.0. Anything above 10 is mathematically impossible for precipitation.
-                pred_gpcp_log = torch.clamp(fx_geos_log + denorm_residual_log, max=10.0)
-                full_pred = torch.expm1(pred_gpcp_log).clamp(min=0.0) # Physical limit
+                # Add unscaled linear residual back onto GEOS
+                pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
+                full_pred = torch.clamp(pred_gpcp_raw, min=0.0) # Physical limit
                 
                 # Demap the absolute target for pure RMSE calculation
-                demap_target_residual_log = ((fb_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-                true_target_log = torch.clamp(fx_geos_log + demap_target_residual_log, max=10.0)
-                true_target_precip = torch.expm1(true_target_log).clamp(min=0.0)
+                demap_target_residual_raw = ((fb_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+                true_target_raw = fx_geos_raw + demap_target_residual_raw
+                true_target_precip = torch.clamp(true_target_raw, min=0.0)
                 
                 # Accuracy tracking
                 v_diff_sq = (full_pred - true_target_precip)**2
