@@ -383,7 +383,7 @@ def train():
         # ---------------------------------------------------------
         # 4. Validation Loop (Inference begins after epoch 20 to save compute)
         # ---------------------------------------------------------
-        if epoch >= 20 and epoch % 5 == 0:
+        if epoch >= 0:
             model.eval()
             val_loss_sum = 0
             val_count = 0
