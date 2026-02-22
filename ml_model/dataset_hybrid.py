@@ -32,16 +32,8 @@ class S2SHybridDataset(Dataset):
         if self.normalize:
             self.load_stats()
         
-        # Load MJO Index
-        mjo_path = os.path.join(data_root, "mjo_processed.csv")
-        if os.path.exists(mjo_path):
-            print(f"Loading MJO features from {mjo_path}...")
-            self.df_mjo = pd.read_csv(mjo_path)
-            self.df_mjo['S'] = pd.to_datetime(self.df_mjo['S'])
-            self.df_mjo = self.df_mjo.set_index('S')
-        else:
-            print(f"Warning: MJO file not found at {mjo_path}. MJO features will be zeros.")
-            self.df_mjo = None
+        # MJO is deliberately removed for V4 architecture as we are isolating atmospheric spatial mechanics.
+        self.df_mjo = None
         
         # Index samples
         self.prepare_samples()
@@ -372,6 +364,5 @@ class S2SHybridDataset(Dataset):
         return {
             "x_geos": geos_tensor, # (1, 1, L, H, W)
             "x_obs": obs_tensor,   # (24, H, W)
-            "y_target": target_tensor, # (L, H, W)
-            "month": meta['date'].month, # Int 1-12
+            "y_target": target_tensor # (L, H, W)
         }
