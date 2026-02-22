@@ -292,6 +292,7 @@ class S2SHybridDataset(Dataset):
                     if v.shape[0] == 360 and v.shape[1] == 181:
                         v = v.T
                     z500_val[:] = v
+            z500_val = np.clip(z500_val, a_min=30000.0, a_max=None)
             # U250
             u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
             if u_var:

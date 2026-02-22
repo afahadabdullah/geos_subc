@@ -44,7 +44,7 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
             sss_b = x_obs[:, 4:8, :, :]
             sm_b = x_obs[:, 8:12, :, :]
             ivt_b = x_obs[:, 12:16, :, :]
-            z500_b = x_obs[:, 16:20, :, :]
+            z500_b = x_obs[:, 16:20, :, :].clamp(min=30000.0) # Physical baseline to avoid 0.0 masks
             u250_b = x_obs[:, 20:24, :, :]
             
             update_bounds("sst", sst_b)
