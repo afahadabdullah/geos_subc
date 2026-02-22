@@ -238,8 +238,11 @@ class S2SHybridDataset(Dataset):
         if geos_tensor.ndim == 3: 
              geos_tensor = geos_tensor.unsqueeze(0)
              
+        # Take the ensemble mean across the 4 members
+        geos_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
+             
         # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
-        geos_tensor = geos_tensor.unsqueeze(1)
+        geos_tensor = geos_tensor.unsqueeze(1) # [1, 1, L, H, W]
         
         # Log1p before normalization
         geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
@@ -279,8 +282,6 @@ class S2SHybridDataset(Dataset):
                 elif v.ndim == 2: sm_val[:] = v
             ds_sm.close()
             
-        # Previous GPCP (4, H, W)
-        prev_gpcp_val = self._load_prev_gpcp(meta)
         
         # IVT (4, H, W)  — H=181(lat), W=360(lon)
         ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
@@ -329,8 +330,8 @@ class S2SHybridDataset(Dataset):
             ds_zu.close()
 
         # Stack Obs along Channel dimension
-        # Obs: [SST(4), SSS(4), SM(4), Prev(4), IVT(4), Z500(4), U250(4)] -> 28 channels
-        obs_stack = np.concatenate([sst_val, sss_val, sm_val, prev_gpcp_val,
+        # Obs: [SST(4), SSS(4), SM(4), IVT(4), Z500(4), U250(4)] -> 24 channels
+        obs_stack = np.concatenate([sst_val, sss_val, sm_val,
                                     ivt_val, z500_val, u250_val], axis=0) 
         
         if self.normalize:
@@ -345,16 +346,12 @@ class S2SHybridDataset(Dataset):
             # Soil Moisture
             obs_stack[8:12]  = min_max_scale(obs_stack[8:12], self.sm_min, self.sm_max)
             
-            # GPCP prev — log1p then min-max
-            obs_stack[12:16] = np.log1p(np.maximum(obs_stack[12:16], 0.0))
-            obs_stack[12:16] = min_max_scale(obs_stack[12:16], 0.0, 6.55)
-            
             # IVT
-            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.ivt_min, self.ivt_max)
+            obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.ivt_min, self.ivt_max)
             # Z500
-            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.z500_min, self.z500_max)
+            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.z500_min, self.z500_max)
             # U250
-            obs_stack[24:28] = min_max_scale(obs_stack[24:28], self.u250_min, self.u250_max)
+            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.u250_min, self.u250_max)
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
@@ -385,19 +382,9 @@ class S2SHybridDataset(Dataset):
         geos_tensor = torch.clamp(geos_tensor, min=-20.0, max=20.0)
         obs_tensor = torch.clamp(obs_tensor, min=-20.0, max=20.0)
         
-        # MJO Conditioning
-        s_date = meta['date']
-        if self.df_mjo is not None and s_date in self.df_mjo.index:
-            mjo_row = self.df_mjo.loc[s_date]
-            rmm_vals = np.array([mjo_row['RMM1_lagged'], mjo_row['RMM2_lagged']], dtype=np.float32)
-            rmm_vals = np.nan_to_num(rmm_vals, nan=0.0)
-        else:
-            rmm_vals = np.zeros(2, dtype=np.float32)
-        
         return {
-            "x_geos": geos_tensor, # (M, L, H, W)
-            "x_obs": obs_tensor,   # (28, H, W)
+            "x_geos": geos_tensor, # (1, 1, L, H, W)
+            "x_obs": obs_tensor,   # (24, H, W)
             "y_target": target_tensor, # (L, H, W)
             "month": meta['date'].month, # Int 1-12
-            "mjo": torch.tensor(rmm_vals, dtype=torch.float32), # (2,) RMM1, RMM2
         }
