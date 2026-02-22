@@ -249,7 +249,7 @@ def train():
         # ---------------------------------------------------------
         # 4. Validation Loop (Inference begins after epoch 20 to save compute)
         # ---------------------------------------------------------
-        if epoch >= 20:
+        if epoch >= 20 and epoch % 5 == 0:
             model.eval()
             val_loss_sum = 0
             val_count = 0
@@ -317,10 +317,23 @@ def train():
                     writer = csv.writer(f)
                     writer.writerow([epoch, avg_train_loss, 0.0, fb_rmse])
                     
-                # Plot
-                if fb_rmse < best_val_rmse or epoch % 5 == 0:
-                    if fb_rmse < best_val_rmse: best_val_rmse = fb_rmse
+                # ---------------------------------------------------------
+                # Checkpointing & Plotting (Only on New Best)
+                # ---------------------------------------------------------
+                if fb_rmse < best_val_rmse:
+                    best_val_rmse = fb_rmse
+                    print(f"🌟 New best Validation RMSE: {best_val_rmse:.4f}! Saving model & plotting...")
                     
+                    # Save Checkpoint
+                    ckpt = {
+                        'epoch': epoch,
+                        'model': unwrapped_model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'best_val_rmse': best_val_rmse
+                    }
+                    torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
+                    
+                    # Plot Diagnostics
                     t_img = fb_target[0].cpu().numpy()
                     p_img = full_pred[0].cpu().numpy()
                     
