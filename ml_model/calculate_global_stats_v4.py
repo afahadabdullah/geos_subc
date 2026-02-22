@@ -86,6 +86,11 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
     print("\n==================================")
     print("Calculated Global Bounds (1999-2014)")
     print("==================================")
+    # Enforce Robust Physical Limits for Precip/Residual
+    # This prevents e.g. a 340mm outlier from shifting physical zero to -0.48
+    bounds["residual_raw"] = {"min": -100.0, "max": 100.0}
+    bounds["geos_raw"] = {"min": 0.0, "max": 100.0}
+    
     for k, v in bounds.items():
         print(f"{k.upper():<10} | Min: {v['min']:>12.4f} | Max: {v['max']:>12.4f}")
 
