@@ -11,7 +11,7 @@ from dataset_hybrid import S2SHybridDataset
 def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=32):
     # Initialize the dataset with normalize=False so we get the pure physical arrays
     print("Initializing S2SHybridDataset for scanning (1999-2014)...")
-    dataset = S2SHybridDataset(data_root=data_root, years=range(1999, 2015), normalize=False)
+    dataset = S2SHybridDataset(data_root=data_root, start_year=1999, end_year=2014, normalize=False)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # Dictionary to keep track of Absolute Min and Max for every variable
