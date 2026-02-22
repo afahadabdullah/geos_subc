@@ -23,7 +23,7 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
         "z500": {"min": float('inf'), "max": float('-inf')},
         "u250": {"min": float('inf'), "max": float('-inf')},
         "geos_log": {"min": float('inf'), "max": float('-inf')},
-        "gpcp_log": {"min": float('inf'), "max": float('-inf')}
+        "residual_log": {"min": float('inf'), "max": float('-inf')}
     }
 
     def update_bounds(key, tensor):
@@ -51,10 +51,14 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
         update_bounds("geos_log", x_geos)
 
         # 3. GPCP Target [B, L, H, W]
-        # GPCP is returned as pure precipitation, so we apply log1p here before scanning bounds
         y_target = batch['y_target']
         y_log = torch.log1p(y_target.clamp(min=0.0))
-        update_bounds("gpcp_log", y_log)
+        
+        # Calculate residual log bounds directly
+        # x_geos is [B, 1, 1, L, H, W] in the dataset batch output
+        geos_log = x_geos.squeeze(1).squeeze(1) # [B, L, H, W]
+        residual_log = y_log - geos_log
+        update_bounds("residual_log", residual_log)
 
     print("\n==================================")
     print("Calculated Global Bounds (1999-2014)")

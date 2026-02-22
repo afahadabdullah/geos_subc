@@ -72,8 +72,8 @@ def train():
         raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v4.py first!")
     
     global_bounds = torch.load(stats_file)
-    gpcp_min = global_bounds["gpcp_log"]["min"]
-    gpcp_max = global_bounds["gpcp_log"]["max"]
+    residual_min = global_bounds["residual_log"]["min"]
+    residual_max = global_bounds["residual_log"]["max"]
     
     geos_min = global_bounds["geos_log"]["min"]
     geos_max = global_bounds["geos_log"]["max"]
@@ -136,20 +136,11 @@ def train():
             # Conditionals are already normalized [-1, 1] by dataset_hybrid
             x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1) # [B, 30, H, W]
 
-            # Targets are already log1p normalized [-1, 1] by dataset_hybrid
-            y_target_norm = batch['y_target'].to(device) # [B, 4, H, W]
-            
-            # Extract normalized GEOS log mean directly from dataset_hybrid mapped variable
-            geos_mean_norm = x_geos_flat # [B, 4, H, W]
-
-            # Target all 4 lead weeks identically as anomalies from the already normalized GEOS baseline
-            # Since both GPCP and GEOS were globally mapped to [-1, 1], their residual exists nicely in [-2, 2]
-            # but we explicitly divide by 2 to perfectly bound the noise learning to [-1, 1] space.
-            target_norm = (y_target_norm - geos_mean_norm) / 2.0
+            # Targets are already log-residual normalized [-1, 1] by dataset_hybrid
+            target_norm = batch['y_target'].to(device) # [B, 4, H, W]
 
             if i == 0 and accelerator.is_main_process:
-                print(f"DEBUG | Train Batch 0 | Target GPCP Norm Bounds: {y_target_norm.min().item():.2f} to {y_target_norm.max().item():.2f}")
-                print(f"DEBUG | Train Batch 0 | Final Noise Injection Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+                print(f"DEBUG | Train Batch 0 | Target Normalized Residual Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
 
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
@@ -213,19 +204,22 @@ def train():
                     latents = scheduler.step(pred_noise, t, latents)
                     
                 # Reverse mapping from [-1, 1] pure noise target back up to Normalized space
-                # latents generated represented: (pred_target_norm - geos_norm) / 2
-                pred_target_norm = (latents * 2.0) + fx_geos_norm
+                # latents generated represented: pred_target_norm (the scaled residual)
+                pred_target_norm = latents
                 
-                # Demap the GPCP Normalized prediction back to log space
-                # denorm = ((norm + 1) / 2) * (max - min) + min
-                denorm_gpcp_log = ((pred_target_norm + 1.0) / 2.0) * (gpcp_max - gpcp_min) + gpcp_min
+                # Demap the Residual log Normalized prediction back to log space
+                denorm_residual_log = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
                 
-                # Unstick the log parameter via expm1 to get absolute physical precip
-                full_pred = torch.expm1(denorm_gpcp_log).clamp(min=0.0) # Physical limit
+                # Un-normalize GEOS mean log to get unscaled geos_log
+                fx_geos_log = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+                
+                pred_gpcp_log = fx_geos_log + denorm_residual_log
+                full_pred = torch.expm1(pred_gpcp_log).clamp(min=0.0) # Physical limit
                 
                 # Demap the absolute target for pure RMSE calculation
-                demap_target_log = ((fb_target_norm + 1.0) / 2.0) * (gpcp_max - gpcp_min) + gpcp_min
-                true_target_precip = torch.expm1(demap_target_log).clamp(min=0.0)
+                demap_target_residual_log = ((fb_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+                true_target_log = fx_geos_log + demap_target_residual_log
+                true_target_precip = torch.expm1(true_target_log).clamp(min=0.0)
                 
                 # Accuracy tracking
                 v_diff_sq = (full_pred - true_target_precip)**2

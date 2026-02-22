@@ -200,6 +200,9 @@ class S2SHybridDataset(Dataset):
         # Log1p before normalization
         geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
         
+        # Save a pure copy of the log GEOS field to calculate the exact residual with the GPCP target later
+        pure_geos_log = geos_tensor.clone().squeeze(0).squeeze(0) # [L, H, W]
+        
         if self.normalize and self.bounds is not None:
             g_min = self.bounds["geos_log"]["min"]
             g_max = self.bounds["geos_log"]["max"]
@@ -328,12 +331,19 @@ class S2SHybridDataset(Dataset):
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
-        # Apply log1p and Min-Max scaling for target as well
+        # Apply log1p and map the target into the pure residual space
         target_tensor = torch.log1p(target_tensor)
         if self.normalize and self.bounds is not None:
-            t_min = self.bounds["gpcp_log"]["min"]
-            t_max = self.bounds["gpcp_log"]["max"]
-            target_tensor = 2.0 * (torch.clamp(target_tensor, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
+            # We want to return the normalized RELATIVE residual directly to the model as our target
+            r_min = self.bounds["residual_log"]["min"]
+            r_max = self.bounds["residual_log"]["max"]
+            
+            # target_tensor becomes the mathematically sound log-residual
+            residual_log = target_tensor - pure_geos_log
+            target_tensor = 2.0 * (torch.clamp(residual_log, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
+        else:
+            # If not normalizing (e.g. scanning), we just expose the raw log GPCP and do math externally
+            pass
         
         # FINAL SAFETY CLAMP (Prevent severe outliers in inputs)
         # Z-Scores > 20 are likely data errors or land masks
