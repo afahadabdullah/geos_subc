@@ -192,6 +192,9 @@ class S2SHybridDataset(Dataset):
         # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
         geos_tensor = geos_tensor.unsqueeze(1) # [1, 1, L, H, W]
         
+        # Enforce physical precipitation minimums (0 mm/day) on incoming raw GEOS fields
+        geos_tensor = torch.clamp(geos_tensor, min=0.0)
+        
         # Save a pure copy of the raw GEOS field to calculate the exact residual with the GPCP target later
         pure_geos_raw = geos_tensor.clone().squeeze(0).squeeze(0) # [L, H, W]
         
@@ -344,11 +347,13 @@ class S2SHybridDataset(Dataset):
             r_min = self.bounds["residual_raw"]["min"]
             r_max = self.bounds["residual_raw"]["max"]
             
-            # target_tensor becomes the mathematically sound linear residual
+            # Extract mathematically sound linear residual
             residual_raw = target_tensor - pure_geos_raw
+            
+            # y_target becomes the purely normalized linear residual [-1, 1]
             target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
         else:
-            # If not normalizing (e.g. scanning), we just expose the raw GPCP and do math externally
+            # If not normalizing (e.g. scanning), we just expose the raw GPCP target and do math externally
             pass
         
         # We no longer apply a generic [-20, 20] clamp here because it destroys the true physical values
