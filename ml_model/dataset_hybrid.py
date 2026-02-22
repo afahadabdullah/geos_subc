@@ -180,6 +180,9 @@ class S2SHybridDataset(Dataset):
         ds_geos.close()
         
         geos_tensor = torch.from_numpy(geos_data).float()
+        if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
+            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
+            
         if geos_tensor.ndim == 3: 
              geos_tensor = geos_tensor.unsqueeze(0)
              
@@ -322,18 +325,13 @@ class S2SHybridDataset(Dataset):
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
+        if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
+            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
+        
         # 3. Load Target (GPCP)
         ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)
         target_val = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
         ds_gpcp.close()
-            
-        # Sanitize Inputs (Handle NaNs/Infs in Obs/GEOS)
-        # Use torch.nan_to_num on tensors directly
-        if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
-            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
-            
-        if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
-            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
             
         target_tensor = torch.from_numpy(target_val).float()
         
