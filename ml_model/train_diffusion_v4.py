@@ -88,7 +88,7 @@ def train():
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = DiffusionModelV4(in_channels=32, out_channels=4).to(device)
+    model = DiffusionModelV4(in_channels=34, out_channels=4).to(device)
     scheduler = CustomDiffusionScheduler(num_timesteps=1000, device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -178,9 +178,13 @@ def train():
             
             B, M, C, L, H, W = x_geos.shape
             x_geos_flat = x_geos.view(B, -1, H, W)
+            
+            months = batch['month'].to(device)
+            sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
 
             # Conditionals are already normalized [-1, 1] by dataset_hybrid
-            x_cond = torch.cat([x_obs, x_geos_flat], dim=1) # [B, 28, H, W]
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1) # [B, 30, H, W]
 
             # Targets are already log-residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 4, H, W]
@@ -236,7 +240,11 @@ def train():
                 fx_obs  = fixed_val_batch['x_obs'].to(device)
                 fx_geos_flat = fx_geos.view(vB, -1, H, W)
                 
-                fx_cond = torch.cat([fx_obs, fx_geos_flat], dim=1) # [B, 28, H, W]
+                f_months = fixed_val_batch['month'].to(device)
+                fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+                fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+                
+                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
                 
                 # Extract Fixed Batch already-normalized parameters
                 fx_geos_norm = fx_geos_flat # [B, 4, H, W]
