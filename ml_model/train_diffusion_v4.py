@@ -241,7 +241,11 @@ def train():
                 res_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
                 res_raw_sample = ((res_norm_sample + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
 
-                fig, axes = plt.subplots(3, 2, figsize=(12, 12))
+                # 4. Reverse Normalize Z500 (Channel 16 of x_obs)
+                z500_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
+                z500_raw_sample = ((z500_norm_sample + 1.0) / 2.0) * (global_bounds["z500"]["max"] - global_bounds["z500"]["min"]) + global_bounds["z500"]["min"]
+
+                fig, axes = plt.subplots(4, 2, figsize=(12, 16))
                 # Row 1: GEOS
                 im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
                 axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -268,6 +272,15 @@ def train():
                 im6 = axes[2, 1].imshow(res_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
                 axes[2, 1].set_title("Normalized Residual [-1, 1]")
                 fig.colorbar(im6, ax=axes[2, 1])
+
+                # Row 4: Z500
+                im7 = axes[3, 0].imshow(z500_raw_sample, cmap='magma')
+                axes[3, 0].set_title("Raw Z500")
+                fig.colorbar(im7, ax=axes[3, 0])
+                
+                im8 = axes[3, 1].imshow(z500_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[3, 1].set_title("Normalized Z500 [-1, 1]")
+                fig.colorbar(im8, ax=axes[3, 1])
 
                 plt.tight_layout()
                 diag_path = os.path.join(output_dir, "normalization_check.png")
