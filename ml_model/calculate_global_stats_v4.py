@@ -97,7 +97,7 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="/scratch/11353/afahad/geossub/data")
-    parser.add_argument("--out", type=str, default="v4_global_stats.pt")
+    parser.add_argument("--out", type=str, default="ml_model/v4_global_stats.pt")
     args = parser.parse_args()
     
     calculate_global_stats(args.data_root, args.out)
