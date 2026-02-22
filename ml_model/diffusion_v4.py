@@ -84,9 +84,10 @@ class DiffusionModelV4(nn.Module):
         self.conv0 = nn.Conv2d(in_channels, 64, 3, padding=1)
 
         # Downsample
-        self.down1 = Block(64, 128, time_emb_dim)  # H/2, W/2
-        self.down2 = Block(128, 256, time_emb_dim) # H/4, W/4
-        self.down3 = Block(256, 512, time_emb_dim) # H/8, W/8
+        self.down0 = Block(64, 64, time_emb_dim)   # H, W -> H/2, W/2
+        self.down1 = Block(64, 128, time_emb_dim)  # H/2, W/2 -> H/4, W/4
+        self.down2 = Block(128, 256, time_emb_dim) # H/4, W/4 -> H/8, W/8
+        self.down3 = Block(256, 512, time_emb_dim) # H/8, W/8 -> H/16, W/16
 
         # Bottleneck
         self.bottleneck_time = nn.Linear(time_emb_dim, 512)
@@ -95,11 +96,13 @@ class DiffusionModelV4(nn.Module):
         self.attn = SelfAttention(512)
 
         # Upsample (c is multiplied by 2 due to skip connections)
-        self.up1 = Block(512, 256, time_emb_dim, up=True) # H/4, W/4
-        self.up2 = Block(256, 128, time_emb_dim, up=True) # H/2, W/2
-        self.up3 = Block(128, 64, time_emb_dim, up=True)  # H, W
+        self.up1 = Block(512, 256, time_emb_dim, up=True) # H/16 -> H/8
+        self.up2 = Block(256, 128, time_emb_dim, up=True) # H/8 -> H/4
+        self.up3 = Block(128, 64, time_emb_dim, up=True)  # H/4 -> H/2
+        self.up4 = Block(64, 64, time_emb_dim, up=True)   # H/2 -> H
         
         # Final output projection
+        self.final_conv = nn.Conv2d(64, 64, 3, padding=1)
         self.out = nn.Conv2d(64, out_channels, 1)
 
     def _pad_to_multiple(self, x, multiple=8):
@@ -134,9 +137,11 @@ class DiffusionModelV4(nn.Module):
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='replicate')
 
         # Initial Layer
-        x0 = self.conv0(x)
+        x_init = self.conv0(x)
         
         # Encoder (Down path)
+        # x0 is high-res skip for final up4
+        x0 = self.down0(x_init, t)
         x1 = self.down1(x0, t)
         x2 = self.down2(x1, t)
         x3 = self.down3(x2, t)
@@ -148,27 +153,21 @@ class DiffusionModelV4(nn.Module):
         x_bottle = self.attn(x_bottle)
 
         # Decoder (Up path with skip connections)
-        # Note: We concatenate the skip connection BEFORE the up block,
-        # so up1 expects (512 + 512) -> 256.
         x_up1 = self.up1(torch.cat([x_bottle, x3], dim=1), t)
-        
-        # Resize if dimensions misaligned after transpose conv
-        if x_up1.shape[2:] != x2.shape[2:]:
-            x_up1 = F.interpolate(x_up1, size=x2.shape[2:], mode='nearest')
+        if x_up1.shape[2:] != x2.shape[2:]: x_up1 = F.interpolate(x_up1, size=x2.shape[2:], mode='nearest')
             
         x_up2 = self.up2(torch.cat([x_up1, x2], dim=1), t)
-        
-        if x_up2.shape[2:] != x1.shape[2:]:
-            x_up2 = F.interpolate(x_up2, size=x1.shape[2:], mode='nearest')
+        if x_up2.shape[2:] != x1.shape[2:]: x_up2 = F.interpolate(x_up2, size=x1.shape[2:], mode='nearest')
             
         x_up3 = self.up3(torch.cat([x_up2, x1], dim=1), t)
-        
-        if x_up3.shape[2:] != x0.shape[2:]:
-            x_up3 = F.interpolate(x_up3, size=x0.shape[2:], mode='nearest')
+        if x_up3.shape[2:] != x0.shape[2:]: x_up3 = F.interpolate(x_up3, size=x0.shape[2:], mode='nearest')
+
+        x_up4 = self.up4(torch.cat([x_up3, x0], dim=1), t)
+        if x_up4.shape[2:] != x_init.shape[2:]: x_up4 = F.interpolate(x_up4, size=x_init.shape[2:], mode='nearest')
 
         # Final projection
-        # Add the original feature map to the final prediction
-        out = self.out(x_up3)
+        h = F.relu(self.final_conv(x_up4))
+        out = self.out(h)
         
         # Crop back down
         out = out[..., :orig_H, :orig_W]
