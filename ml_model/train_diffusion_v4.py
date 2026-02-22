@@ -245,6 +245,19 @@ def train():
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
+        
+        # ---------------------------------------------------------
+        # Unconditional Epoch-End Resume Checkpoint
+        # ---------------------------------------------------------
+        if accelerator.is_main_process:
+            unwrapped_model = accelerator.unwrap_model(model)
+            ckpt = {
+                'epoch': epoch,
+                'model': unwrapped_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'best_val_rmse': best_val_rmse
+            }
+            torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
         # ---------------------------------------------------------
         # 4. Validation Loop (Inference begins after epoch 20 to save compute)
@@ -326,14 +339,14 @@ def train():
                     best_val_rmse = fb_rmse
                     print(f"🌟 New best Validation RMSE: {best_val_rmse:.4f}! Saving model & plotting...")
                     
-                    # Save Checkpoint
+                    # Save Best Checkpoint
                     ckpt = {
                         'epoch': epoch,
                         'model': unwrapped_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_rmse': best_val_rmse
                     }
-                    torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
+                    torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
                     
                     # Plot Diagnostics
                     t_img = fb_target[0].cpu().numpy()
