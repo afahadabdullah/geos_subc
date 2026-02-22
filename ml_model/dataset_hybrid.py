@@ -240,6 +240,7 @@ class S2SHybridDataset(Dataset):
                 v = np.squeeze(v)
                 if v.ndim == 3: sss_val = v
                 elif v.ndim == 2: sss_val[:] = v
+            sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
             ds_sss.close()
             
         # Soil Moisture (4, H, W)
