@@ -213,20 +213,38 @@ class S2SHybridDataset(Dataset):
         sst_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta["sst_path"]:
             ds_sst = xr.open_zarr(meta["sst_path"], consolidated=False)
-            v = ds_sst['sst'].isel(S=meta['s_idx']).values
-            v = np.squeeze(v)
-            if v.ndim == 3: sst_val = v
-            elif v.ndim == 2: sst_val[:] = v 
+            
+            # Auto-detect target variable name
+            var_name = None
+            for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature', 'var']:
+                if c in ds_sst:
+                    var_name = c
+                    break
+                    
+            if var_name:
+                v = ds_sst[var_name].isel(S=meta['s_idx']).values
+                v = np.squeeze(v)
+                if v.ndim == 3: sst_val = v
+                elif v.ndim == 2: sst_val[:] = v 
             ds_sst.close()
             
         # SSS (4, H, W)
         sss_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta["sss_path"]:
             ds_sss = xr.open_zarr(meta["sss_path"], consolidated=False)
-            v = ds_sss['sss'].isel(S=meta['s_idx']).values
-            v = np.squeeze(v)
-            if v.ndim == 3: sss_val = v
-            elif v.ndim == 2: sss_val[:] = v
+            
+            # Auto-detect target variable name 
+            var_name = None
+            for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface', 'var']:
+                if c in ds_sss:
+                    var_name = c
+                    break
+                    
+            if var_name:
+                v = ds_sss[var_name].isel(S=meta['s_idx']).values
+                v = np.squeeze(v)
+                if v.ndim == 3: sss_val = v
+                elif v.ndim == 2: sss_val[:] = v
             ds_sss.close()
             
         # Soil Moisture (4, H, W)
