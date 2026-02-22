@@ -214,6 +214,7 @@ class S2SHybridDataset(Dataset):
         if meta["sst_path"]:
             ds_sst = xr.open_zarr(meta["sst_path"], consolidated=False)
             v = ds_sst['sst'].isel(S=meta['s_idx']).values
+            v = np.squeeze(v)
             if v.ndim == 3: sst_val = v
             elif v.ndim == 2: sst_val[:] = v 
             ds_sst.close()
@@ -223,6 +224,7 @@ class S2SHybridDataset(Dataset):
         if meta["sss_path"]:
             ds_sss = xr.open_zarr(meta["sss_path"], consolidated=False)
             v = ds_sss['sss'].isel(S=meta['s_idx']).values
+            v = np.squeeze(v)
             if v.ndim == 3: sss_val = v
             elif v.ndim == 2: sss_val[:] = v
             ds_sss.close()
@@ -239,6 +241,7 @@ class S2SHybridDataset(Dataset):
                     
             if var_name:
                 v = ds_sm[var_name].isel(S=meta['s_idx']).values
+                v = np.squeeze(v)
                 if v.ndim == 3: sm_val = v
                 elif v.ndim == 2: sm_val[:] = v
             ds_sm.close()
