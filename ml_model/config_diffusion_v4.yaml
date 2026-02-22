@@ -7,7 +7,7 @@ mixed_precision: fp16
 num_workers: 8
 data_dir: dataprocess
 train_start_year: 1999
-train_end_year: 2014
+train_end_year: 2004
 val_start_year: 2015
 val_end_year: 2016
 preload: True
