@@ -51,62 +51,15 @@ class S2SHybridDataset(Dataset):
         
     def load_stats(self):
         # Load Z-Score stats for Precip
-        stats_path = os.path.join(os.path.dirname(__file__), "global_stats.pt")
-        # Global stats (Precip)
-        if os.path.exists(stats_path):
-            print(f"Loading global stats from {stats_path}")
-            stats = torch.load(stats_path)
-            self.geos_min = stats.get('geos_min', torch.tensor(0.0))
-            self.geos_max = stats.get('geos_max', torch.tensor(6.55))
-            self.obs_min = stats.get('obs_min', None)
-            self.obs_max = stats.get('obs_max', None)
-        else:
-            print("Warning: global_stats.pt not found. Using default/fallback normalization.")
-            self.obs_min = None
-            self.obs_max = None
-            
-            stats_path_old = os.path.join(os.path.dirname(__file__), "grid_stats.nc")
-            if os.path.exists(stats_path_old):
-                ds = xr.open_dataset(stats_path_old)
-                self.geos_min = torch.from_numpy(ds['geos_min'].values).float() if 'geos_min' in ds else torch.tensor(0.0)
-                self.geos_max = torch.from_numpy(ds['geos_max'].values).float() if 'geos_max' in ds else torch.tensor(6.55)
-                ds.close()
-                if self.geos_min.ndim == 2:
-                    self.geos_min = self.geos_min.unsqueeze(0)
-                    self.geos_max = self.geos_max.unsqueeze(0)
+        self.bounds = None
+        if self.normalize:
+            stats_file = os.path.join(os.path.dirname(__file__), "v4_global_stats.pt")
+            if os.path.exists(stats_file):
+                self.bounds = torch.load(stats_file)
+                print(f"Loaded strict global bounds from {stats_file}")
             else:
-                 self.geos_min = torch.tensor(0.0)
-                 self.geos_max = torch.tensor(6.55)
-                 
-        # Load Obs Stats (SST, SSS, SM, IVT, Z500, U250) from unified obs_stats.json
-        import json
-        obs_stats_path = os.path.join(os.path.dirname(__file__), "obs_stats.json")
-        if os.path.exists(obs_stats_path):
-            with open(obs_stats_path, 'r') as f:
-                obs_stats = json.load(f)
-            self.sst_min   = float(obs_stats.get('sst_min', 270.0))
-            self.sst_max   = float(obs_stats.get('sst_max', 310.0))
-            self.sss_min   = float(obs_stats.get('sss_min', 20.0))
-            self.sss_max   = float(obs_stats.get('sss_max',  41.0))
-            self.sm_min    = float(obs_stats.get('sm_min',   0.0))
-            self.sm_max    = float(obs_stats.get('sm_max',   0.7))
-            self.ivt_min   = float(obs_stats.get('ivt_min',   0.0))
-            self.ivt_max   = float(obs_stats.get('ivt_max', 1500.0))
-            self.z500_min  = float(obs_stats.get('z500_min', 45000.0))
-            self.z500_max  = float(obs_stats.get('z500_max', 59000.0))
-            self.u250_min  = float(obs_stats.get('u250_min', -50.0))
-            self.u250_max  = float(obs_stats.get('u250_max', 120.0))
-            print(f"Loaded obs_stats.json bounds: "
-                  f"SST({self.sst_min:.1f}, {self.sst_max:.1f}) SSS({self.sss_min:.1f}, {self.sss_max:.1f})")
-        else:
-            print("Warning: obs_stats.json not found. Using physics-based fallback min-max bounds.")
-            self.sst_min  = 270.0;   self.sst_max   = 310.0
-            self.sss_min  = 20.0;    self.sss_max   = 41.0
-            self.sm_min   = 0.0;     self.sm_max    = 0.7
-            self.ivt_min  = 0.0;     self.ivt_max   = 1500.0
-            self.z500_min = 45000.0; self.z500_max  = 59000.0
-            self.u250_min = -50.0;   self.u250_max  = 120.0
-
+                print(f"CRITICAL WARNING: {stats_file} not found. Normalization enabled but no bounds available!")
+                self.bounds = None
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""
         print(f"Indexing samples from {self.years[0]} to {self.years[-1]}...")
@@ -246,6 +199,11 @@ class S2SHybridDataset(Dataset):
         
         # Log1p before normalization
         geos_tensor = torch.log1p(geos_tensor.clamp(min=0.0))
+        
+        if self.normalize and self.bounds is not None:
+            g_min = self.bounds["geos_log"]["min"]
+            g_max = self.bounds["geos_log"]["max"]
+            geos_tensor = 2.0 * (torch.clamp(geos_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
@@ -334,24 +292,17 @@ class S2SHybridDataset(Dataset):
         obs_stack = np.concatenate([sst_val, sss_val, sm_val,
                                     ivt_val, z500_val, u250_val], axis=0) 
         
-        if self.normalize:
-            # Normalize Obs using Min-Max scaling to [-1, 1] range: 2 * (val - min) / (max - min) - 1
+        if self.normalize and self.bounds is not None:
+            # Normalize Obs using Min-Max scaling to [-1, 1] range
             def min_max_scale(val, vmin, vmax):
                 return 2.0 * (np.clip(val, vmin, vmax) - vmin) / (vmax - vmin + 1e-6) - 1.0
 
-            # SST
-            obs_stack[0:4]   = min_max_scale(obs_stack[0:4], self.sst_min, self.sst_max)
-            # SSS
-            obs_stack[4:8]   = min_max_scale(obs_stack[4:8], self.sss_min, self.sss_max)
-            # Soil Moisture
-            obs_stack[8:12]  = min_max_scale(obs_stack[8:12], self.sm_min, self.sm_max)
-            
-            # IVT
-            obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.ivt_min, self.ivt_max)
-            # Z500
-            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.z500_min, self.z500_max)
-            # U250
-            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.u250_min, self.u250_max)
+            obs_stack[0:4]   = min_max_scale(obs_stack[0:4],   self.bounds["sst"]["min"],  self.bounds["sst"]["max"])
+            obs_stack[4:8]   = min_max_scale(obs_stack[4:8],   self.bounds["sss"]["min"],  self.bounds["sss"]["max"])
+            obs_stack[8:12]  = min_max_scale(obs_stack[8:12],  self.bounds["sm"]["min"],   self.bounds["sm"]["max"])
+            obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.bounds["ivt"]["min"],  self.bounds["ivt"]["max"])
+            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
+            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
         
         obs_tensor = torch.from_numpy(obs_stack).float()
         
@@ -376,6 +327,13 @@ class S2SHybridDataset(Dataset):
              
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
+        
+        # Apply log1p and Min-Max scaling for target as well
+        target_tensor = torch.log1p(target_tensor)
+        if self.normalize and self.bounds is not None:
+            t_min = self.bounds["gpcp_log"]["min"]
+            t_max = self.bounds["gpcp_log"]["max"]
+            target_tensor = 2.0 * (torch.clamp(target_tensor, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
         
         # FINAL SAFETY CLAMP (Prevent severe outliers in inputs)
         # Z-Scores > 20 are likely data errors or land masks

@@ -24,7 +24,7 @@ def get_area_weights(lats, device):
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
 
-def train(force_new_stats=False):
+def train():
     accelerator = Accelerator(split_batches=True)
     device = accelerator.device
 
@@ -67,49 +67,16 @@ def train(force_new_stats=False):
     )
 
     # Calculate Global Min-Max for Target GPCP Precipitation
-    stats_file = "v4_global_stats.pt"
-    if not force_new_stats and os.path.exists(stats_file):
-        if accelerator.is_main_process:
-            print(f"Loading cached Global Bounds from {stats_file}")
-        stats = torch.load(stats_file)
-        global_min = stats['global_min'].to(device)
-        global_max = stats['global_max'].to(device)
-    else:
-        if accelerator.is_main_process:
-            print("Computing Global GPCP Targets Bounds (Min/Max)...")
-            g_min, g_max = float('inf'), float('-inf')
-            
-            # Subsample random batches for speed, parsing the max/min of targets
-            import sys
-            sys.set_int_max_str_digits(100000)
-            
-            for i, batch in enumerate(tqdm(loader, desc="Scanning Bounds")):
-                y = batch['y_target']
-                x_geos = batch['x_geos'].to(y.device) # [B, 4, M, H, W] expected, though m=1 is typically 4.
-                
-                # S2SHybridDataset transforms GEOS to log1p mapping inherently.
-                # We calculate the residual strictly in the log-space to compress massive outliers.
-                geos_mean_log = x_geos.mean(dim=1).squeeze(1) # [B, L, H, W]
-                y_log = torch.log1p(y.clamp(min=0.0))
-                
-                residual_log = y_log - geos_mean_log
-                
-                b_min = residual_log.min().item()
-                b_max = residual_log.max().item()
-                if b_min < g_min: g_min = b_min
-                if b_max > g_max: g_max = b_max
-
-            print(f"Calculated Bounds -> Min: {g_min:.4f}, Max: {g_max:.4f}")
-            torch.save({'global_min': torch.tensor(g_min), 'global_max': torch.tensor(g_max)}, stats_file)
-            global_min = torch.tensor(g_min).to(device)
-            global_max = torch.tensor(g_max).to(device)
-            
-    # Broadcast bounds to all processes if using Multi-GPU
-    # Safe fallback if not multi-GPU
-    if "global_min" not in locals():
-        stats = torch.load(stats_file)
-        global_min = stats['global_min'].to(device)
-        global_max = stats['global_max'].to(device)
+    stats_file = "ml_model/v4_global_stats.pt"
+    if not os.path.exists(stats_file):
+        raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v4.py first!")
+    
+    global_bounds = torch.load(stats_file)
+    gpcp_min = global_bounds["gpcp_log"]["min"]
+    gpcp_max = global_bounds["gpcp_log"]["max"]
+    
+    geos_min = global_bounds["geos_log"]["min"]
+    geos_max = global_bounds["geos_log"]["max"]
 
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
@@ -166,24 +133,23 @@ def train(force_new_stats=False):
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
             cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
 
+            # Conditionals are already normalized [-1, 1] by dataset_hybrid
             x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1) # [B, 30, H, W]
 
-            # Targets: [B, 4, H, W]
-            y_target = batch['y_target'].to(device)
+            # Targets are already log1p normalized [-1, 1] by dataset_hybrid
+            y_target_norm = batch['y_target'].to(device) # [B, 4, H, W]
             
-            # Extract GEOS mean in log space directly from dataset_hybrid mapped variable
-            geos_mean_log = x_geos_flat
-            y_target_log = torch.log1p(y_target.clamp(min=0.0))
+            # Extract normalized GEOS log mean directly from dataset_hybrid mapped variable
+            geos_mean_norm = x_geos_flat # [B, 4, H, W]
 
-            # Target all 4 lead weeks simultaneously
-            y_residual_log = y_target_log - geos_mean_log
-
-            # Linear Min-Max Normalization [-1, 1] applied to Log Residuals
-            target_norm = 2.0 * ((y_residual_log - global_min) / (global_max - global_min)) - 1.0
+            # Target all 4 lead weeks identically as anomalies from the already normalized GEOS baseline
+            # Since both GPCP and GEOS were globally mapped to [-1, 1], their residual exists nicely in [-2, 2]
+            # but we explicitly divide by 2 to perfectly bound the noise learning to [-1, 1] space.
+            target_norm = (y_target_norm - geos_mean_norm) / 2.0
 
             if i == 0 and accelerator.is_main_process:
-                print(f"DEBUG | Train Batch 0 | Log Residual Target Bounds: {y_residual_log.min().item():.2f} to {y_residual_log.max().item():.2f}")
-                print(f"DEBUG | Train Batch 0 | Normalized Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+                print(f"DEBUG | Train Batch 0 | Target GPCP Norm Bounds: {y_target_norm.min().item():.2f} to {y_target_norm.max().item():.2f}")
+                print(f"DEBUG | Train Batch 0 | Final Noise Injection Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
 
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
@@ -233,13 +199,10 @@ def train(force_new_stats=False):
                 
                 fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1)
                 
-                # Extract fixed batch GEOS mean in log space
-                fx_geos_mean_log = fx_geos_flat
-                fb_target_log = torch.log1p(fb_target.clamp(min=0.0))
+                # Extract Fixed Batch already-normalized parameters
+                fx_geos_norm = fx_geos_flat # [B, 4, H, W]
+                fb_target_norm = fb_target # [B, 4, H, W]
                 
-                # Diagnostic target log residual calculations for reference
-                f_y_residual_log = fb_target_log - fx_geos_mean_log
-
                 # Single Pass Reverse Sampling predicting all 4 Leads simultaneously
                 latents = torch.randn((vB, 4, H, W), device=device)
                 
@@ -249,27 +212,30 @@ def train(force_new_stats=False):
                     pred_noise = unwrapped_model(latents, fx_cond, t_batched)
                     latents = scheduler.step(pred_noise, t, latents)
                     
-                # Reverse Normalization Linear Mapping back to Log Residual space
-                denorm_residual_log = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
+                # Reverse mapping from [-1, 1] pure noise target back up to Normalized space
+                # latents generated represented: (pred_target_norm - geos_norm) / 2
+                pred_target_norm = (latents * 2.0) + fx_geos_norm
                 
-                # Reconstruct GPCP by adding generated log residual back onto GEOS log mean
-                final_precip_log = fx_geos_mean_log + denorm_residual_log
-                final_precip = torch.expm1(final_precip_log)
-                full_pred = final_precip.clamp(min=0.0) # Physical limit
+                # Demap the GPCP Normalized prediction back to log space
+                # denorm = ((norm + 1) / 2) * (max - min) + min
+                denorm_gpcp_log = ((pred_target_norm + 1.0) / 2.0) * (gpcp_max - gpcp_min) + gpcp_min
+                
+                # Unstick the log parameter via expm1 to get absolute physical precip
+                full_pred = torch.expm1(denorm_gpcp_log).clamp(min=0.0) # Physical limit
+                
+                # Demap the absolute target for pure RMSE calculation
+                demap_target_log = ((fb_target_norm + 1.0) / 2.0) * (gpcp_max - gpcp_min) + gpcp_min
+                true_target_precip = torch.expm1(demap_target_log).clamp(min=0.0)
                 
                 # Accuracy tracking
-                v_diff_sq = (full_pred - fb_target)**2
+                v_diff_sq = (full_pred - true_target_precip)**2
                 v_weighted_mse = (v_diff_sq * area_weights).mean()
                 fb_rmse = torch.sqrt(v_weighted_mse).item()
                 
             if accelerator.is_main_process:
-                print(f"DEBUG | Val Batch 0 | Target Log Residual: {f_y_residual_log.min().item():.2f} to {f_y_residual_log.max().item():.2f}")
-                
-                # Check how big the absolute predicted residual is vs expected
-                pred_residual_log = torch.log1p(full_pred) - fx_geos_mean_log
-                print(f"DEBUG | Val Batch 0 | Generated Log Residual: {pred_residual_log.min().item():.2f} to {pred_residual_log.max().item():.2f}")
                 print(f"DEBUG | Val Batch 0 | Final Reconstructed Precip: {full_pred.min().item():.2f} to {full_pred.max().item():.2f}")
-                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB RMSE: {fb_rmse:.4f}")
+                print(f"DEBUG | Val Batch 0 | Target Physical Precip: {true_target_precip.min().item():.2f} to {true_target_precip.max().item():.2f}")
+                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB Physical RMSE: {fb_rmse:.4f}")
 
                 with open(log_file, "a") as f:
                     writer = csv.writer(f)
@@ -302,8 +268,4 @@ def train(force_new_stats=False):
                     plt.close()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--new", action="store_true", help="Force recalculation of global stats")
-    args = parser.parse_args()
-    
-    train(force_new_stats=args.new)
+    train()
