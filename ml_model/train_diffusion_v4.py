@@ -295,12 +295,14 @@ def train():
                 # Un-normalize GEOS mean log to get unscaled geos_log
                 fx_geos_log = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
                 
-                pred_gpcp_log = fx_geos_log + denorm_residual_log
+                # Safely clamp log values to prevent exp() from returning 'inf'
+                # log(22000) is ~10.0. Anything above 10 is mathematically impossible for precipitation.
+                pred_gpcp_log = torch.clamp(fx_geos_log + denorm_residual_log, max=10.0)
                 full_pred = torch.expm1(pred_gpcp_log).clamp(min=0.0) # Physical limit
                 
                 # Demap the absolute target for pure RMSE calculation
                 demap_target_residual_log = ((fb_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-                true_target_log = fx_geos_log + demap_target_residual_log
+                true_target_log = torch.clamp(fx_geos_log + demap_target_residual_log, max=10.0)
                 true_target_precip = torch.expm1(true_target_log).clamp(min=0.0)
                 
                 # Accuracy tracking
