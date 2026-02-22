@@ -87,17 +87,15 @@ def train(force_new_stats=False):
                 y = batch['y_target']
                 x_geos = batch['x_geos'].to(y.device) # [B, 4, M, H, W] expected, though m=1 is typically 4.
                 
-                # S2SHybridDataset transforms GEOS to log1p, we need raw mean for residual mapping 
-                # if we want physical residuals, but for stability we'll map the residual of raw values.
-                # Actually, Dataset provides [M, 1, L, H, W] for GEOS with log1p.
-                # We should retrieve the raw mean:
-                vx_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
-                geos_mean = vx_geos_raw.mean(dim=1).squeeze(1) # [B, L, H, W]
+                # S2SHybridDataset transforms GEOS to log1p mapping inherently.
+                # We calculate the residual strictly in the log-space to compress massive outliers.
+                geos_mean_log = x_geos.mean(dim=1).squeeze(1) # [B, L, H, W]
+                y_log = torch.log1p(y.clamp(min=0.0))
                 
-                residual = y - geos_mean
+                residual_log = y_log - geos_mean_log
                 
-                b_min = residual.min().item()
-                b_max = residual.max().item()
+                b_min = residual_log.min().item()
+                b_max = residual_log.max().item()
                 if b_min < g_min: g_min = b_min
                 if b_max > g_max: g_max = b_max
 
@@ -176,22 +174,22 @@ def train(force_new_stats=False):
             # Targets: [B, 4, H, W]
             y_target = batch['y_target'].to(device)
             
-            # Reconstruct GEOS mean to calculate residual target
-            vx_geos_raw = torch.expm1(x_geos.clamp(max=6.55))
-            geos_mean = vx_geos_raw.mean(dim=1).squeeze(1).to(device)
+            # Reconstruct GEOS mean in log space
+            geos_mean_log = x_geos.mean(dim=1).squeeze(1).to(device)
+            y_target_log = torch.log1p(y_target.clamp(min=0.0))
 
             # Randomly select ONE lead week to reconstruct
             target_lead = torch.randint(0, 4, (1,)).item()
-            y_target_lead = y_target[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
-            geos_mean_lead = geos_mean[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
+            y_target_log_lead = y_target_log[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
+            geos_mean_log_lead = geos_mean_log[:, target_lead:target_lead+1, :, :] # [B, 1, H, W]
             
-            y_residual = y_target_lead - geos_mean_lead
+            y_residual_log = y_target_log_lead - geos_mean_log_lead
 
-            # Linear Min-Max Normalization [-1, 1] applied to Residuals
-            target_norm = 2.0 * ((y_residual - global_min) / (global_max - global_min)) - 1.0
+            # Linear Min-Max Normalization [-1, 1] applied to Log Residuals
+            target_norm = 2.0 * ((y_residual_log - global_min) / (global_max - global_min)) - 1.0
 
             if i == 0 and accelerator.is_main_process:
-                print(f"DEBUG | Train Batch 0 | Residual Target Bounds: {y_residual.min().item():.2f} to {y_residual.max().item():.2f}")
+                print(f"DEBUG | Train Batch 0 | Log Residual Target Bounds: {y_residual_log.min().item():.2f} to {y_residual_log.max().item():.2f}")
                 print(f"DEBUG | Train Batch 0 | Normalized Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
 
             # Forward Diffusion (Noise injection)
@@ -245,12 +243,12 @@ def train(force_new_stats=False):
                 
                 fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month, fmjo_map], dim=1)
                 
-                # Reconstruct fixed batch GEOS mean to add back generated residual
-                vx_geos_raw = torch.expm1(fx_geos.clamp(max=6.55))
-                fx_geos_mean = vx_geos_raw.mean(dim=1).squeeze(1).to(device) # [B, L, H, W]
+                # Extract fixed batch GEOS mean in log space
+                fx_geos_mean_log = fx_geos.mean(dim=1).squeeze(1).to(device) # [B, L, H, W]
+                fb_target_log = torch.log1p(fb_target.clamp(min=0.0))
                 
-                # Diagnostic target residual calculations for reference
-                f_y_residual = fb_target - fx_geos_mean
+                # Diagnostic target log residual calculations for reference
+                f_y_residual_log = fb_target_log - fx_geos_mean_log
 
                 # Single Pass Reverse Sampling for the batch across all 4 Leads
                 fb_preds = []
@@ -263,12 +261,13 @@ def train(force_new_stats=False):
                         pred_noise = unwrapped_model(latents, fx_cond, t_batched)
                         latents = scheduler.step(pred_noise, t, latents)
                         
-                    # Reverse Normalization Linear Mapping
-                    denorm_residual = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
+                    # Reverse Normalization Linear Mapping back to Log Residual space
+                    denorm_residual_log = ((latents + 1.0) / 2.0) * (global_max - global_min) + global_min
                     
-                    # Reconstruct GPCP by adding generating residual back onto GEOS Mean
-                    geos_mean_lead = fx_geos_mean[:, lead:lead+1, :, :]
-                    final_precip = geos_mean_lead + denorm_residual
+                    # Reconstruct GPCP by adding generated log residual back onto GEOS log mean
+                    geos_mean_log_lead = fx_geos_mean_log[:, lead:lead+1, :, :]
+                    final_precip_log = geos_mean_log_lead + denorm_residual_log
+                    final_precip = torch.expm1(final_precip_log)
                     final_precip = final_precip.clamp(min=0.0) # Physical limit
                     
                     fb_preds.append(final_precip)
@@ -281,11 +280,11 @@ def train(force_new_stats=False):
                 fb_rmse = torch.sqrt(v_weighted_mse).item()
                 
             if accelerator.is_main_process:
-                print(f"DEBUG | Val Batch 0 | Target Residual: {f_y_residual.min().item():.2f} to {f_y_residual.max().item():.2f}")
+                print(f"DEBUG | Val Batch 0 | Target Log Residual: {f_y_residual_log.min().item():.2f} to {f_y_residual_log.max().item():.2f}")
                 
                 # Check how big the absolute predicted residual is vs expected
-                pred_residual = full_pred - fx_geos_mean
-                print(f"DEBUG | Val Batch 0 | Generated Residual: {pred_residual.min().item():.2f} to {pred_residual.max().item():.2f}")
+                pred_residual_log = torch.log1p(full_pred) - fx_geos_mean_log
+                print(f"DEBUG | Val Batch 0 | Generated Log Residual: {pred_residual_log.min().item():.2f} to {pred_residual_log.max().item():.2f}")
                 print(f"DEBUG | Val Batch 0 | Final Reconstructed Precip: {full_pred.min().item():.2f} to {full_pred.max().item():.2f}")
                 print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB RMSE: {fb_rmse:.4f}")
 
