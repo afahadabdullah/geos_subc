@@ -38,11 +38,15 @@ else
     echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
 fi
 
-echo "🔥 Launching V4 Diffusion Training [15 Epochs this session]..."
-accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 15
+echo "🔥 Launching V4 Diffusion Training [50 Epochs this session]..."
+accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 50
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
+echo "📍 Current Host: $(hostname)"
+echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
+echo "📍 Working Dir: $PWD"
+
 CKPT_FILE="ml_output_diffusion_v4/latest_diffusion_ckpt_v4.pt"
 MAX_EPOCHS=1000
 
@@ -52,13 +56,14 @@ if [ -f "$CKPT_FILE" ]; then
     
     if [ "$CURRENT_EPOCH" -lt "$((MAX_EPOCHS - 1))" ]; then
         echo "📍 Training at Epoch $CURRENT_EPOCH / $MAX_EPOCHS. Resubmitting job..."
-        # TACC Fix: Resubmit via SSH to the submission host because compute nodes are blocked from sbatch
-        if [ -n "$SLURM_SUBMIT_HOST" ]; then
-            ssh -o StrictHostKeyChecking=no "$SLURM_SUBMIT_HOST" "cd $PWD && sbatch ml_model/submit_train_diffusion_v4.sh"
-        else
-            echo "⚠️ SLURM_SUBMIT_HOST not set. Trying default login node..."
-            ssh -o StrictHostKeyChecking=no login1 "cd $PWD && sbatch ml_model/submit_train_diffusion_v4.sh"
+        # TACC Fix: Resubmit via SSH to the submission host (full domain)
+        SUBMIT_TARGET="${SLURM_SUBMIT_HOST}.vista.tacc.utexas.edu"
+        if [[ "$SLURM_SUBMIT_HOST" == *"vista"* ]]; then
+            SUBMIT_TARGET="$SLURM_SUBMIT_HOST"
         fi
+
+        echo "📡 Attempting SSH resubmission to $SUBMIT_TARGET..."
+        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch ml_model/submit_train_diffusion_v4.sh"
     else
         echo "✅ Final Epoch $CURRENT_EPOCH reached. Chaining complete."
     fi
