@@ -353,9 +353,9 @@ class S2SHybridDataset(Dataset):
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
         if self.normalize and self.bounds is not None:
-            # We want to return the normalized RELATIVE residual directly to the model as our target
-            r_min = self.bounds["residual_raw"]["min"]
-            r_max = self.bounds["residual_raw"]["max"]
+            # We use a tightened robust range for residuals to prevent outlier-driven instability
+            r_min = -30.0
+            r_max = 30.0
             
             # Extract mathematically sound linear residual
             residual_raw = target_tensor - pure_geos_mean_raw

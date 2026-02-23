@@ -254,8 +254,9 @@ def train(args, accelerator):
         raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v4.py first!")
     
     global_bounds = torch.load(stats_file, weights_only=True)
-    residual_min = global_bounds["residual_raw"]["min"]
-    residual_max = global_bounds["residual_raw"]["max"]
+    # Force robust physical range for residuals instead of absolute global Min-Max
+    residual_min = -30.0
+    residual_max = 30.0
     
     geos_min = global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_raw"]["max"]
