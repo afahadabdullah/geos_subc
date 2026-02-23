@@ -46,19 +46,22 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
     
     if is_fast_recon and not is_test:
-        # 1-Step Reconstruction at t=500 (Representative middle of noise schedule)
+        # Ensemble-based Fast Reconstruction at t=500
+        num_ensemble = 3
         t_recon = 500
-        noise = torch.randn_like(fb_target)
         t_batched = torch.full((vB,), t_recon, device=device, dtype=torch.long)
         
-        # Noise the ground truth target
-        x_t = scheduler.add_noise(fb_target, noise, t_batched)
-        
-        # Predict noise and reconstruct x0
-        pred_noise = unwrapped_model(x_t, fx_cond, t_batched)
-        pred_target_norm = scheduler.reconstruct_x0(pred_noise, t_batched, x_t)
-        
-        recon_type = "FastRecon (t=500)"
+        ensemble_preds = []
+        for _ in range(num_ensemble):
+            noise = torch.randn_like(fb_target)
+            x_t = scheduler.add_noise(fb_target, noise, t_batched)
+            pred_noise = unwrapped_model(x_t, fx_cond, t_batched)
+            pred_x0 = scheduler.reconstruct_x0(pred_noise, t_batched, x_t)
+            ensemble_preds.append(pred_x0)
+            
+        # Average the ensemble members in the latent space
+        pred_target_norm = torch.stack(ensemble_preds).mean(dim=0)
+        recon_type = f"FastEnsemble (n={num_ensemble}, t={500})"
     else:
         # Full Reverse Sampling (1000 steps)
         latents = torch.randn((vB, 4, H, W), device=device)
@@ -547,9 +550,9 @@ def train(args, accelerator):
                     fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
                     if l == 0: axes[l, 1].set_title("Predicted GPCP")
                     
-                    im2 = axes[l, 2].imshow(diff, cmap='RdBu_r')
+                    im2 = axes[l, 2].imshow(diff, cmap='RdBu_r', vmin=-50, vmax=50)
                     fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-                    if l == 0: axes[l, 2].set_title("Diff Bias")
+                    if l == 0: axes[l, 2].set_title("Diff Bias [-50, 50]")
                 
                 os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
                 plt.tight_layout()
