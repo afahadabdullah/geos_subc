@@ -84,19 +84,6 @@ def train(args, accelerator):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    if accelerator.is_main_process:
-        print(f"\n--- ACCELERATOR DIAGNOSTICS ---")
-        print(f"   Accelerator Device: {device}")
-        print(f"   CUDA Available: {torch.cuda.is_available()}")
-        if torch.cuda.is_available():
-            print(f"   CUDA Current Device: {torch.cuda.current_device()}")
-            print(f"   CUDA Device Name: {torch.cuda.get_device_name(0)}")
-        print(f"   Mixed Precision: {accelerator.mixed_precision}")
-        
-        # Check model device
-        model_device = next(model.parameters()).device
-        print(f"   Model Parameter Device: {model_device}")
-        print(f"---------------------------------\n")
 
     epochs = config.get("epochs", 500)
     batch_size = config.get("batch_size", 4)
@@ -172,6 +159,20 @@ def train(args, accelerator):
         model, val_loader = accelerator.prepare(model, val_loader)
         optimizer = None
         lr_scheduler = None
+
+    if accelerator.is_main_process:
+        print(f"\n--- ACCELERATOR DIAGNOSTICS ---")
+        print(f"   Accelerator Device: {device}")
+        print(f"   CUDA Available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"   CUDA Current Device: {torch.cuda.current_device()}")
+            print(f"   CUDA Device Name: {torch.cuda.get_device_name(0)}")
+        print(f"   Mixed Precision: {accelerator.mixed_precision}")
+        
+        # Check model device
+        model_device = next(model.parameters()).device
+        print(f"   Model Parameter Device: {model_device}")
+        print(f"---------------------------------\n")
 
     # Area weights
     lats = np.linspace(-90, 90, 181)
