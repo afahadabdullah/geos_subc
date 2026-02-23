@@ -47,6 +47,35 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map * area_weights).mean()
     return weighted_crps.item()
 
+def save_val_plot(epoch, full_pred, true_target_precip, metric_val, output_dir, suffix=""):
+    """
+    Standardizes plotting logic for validation results.
+    """
+    t_img = true_target_precip[0].cpu().numpy()
+    p_img = full_pred[0].cpu().numpy()
+    fig, axes = plt.subplots(4, 3, figsize=(15, 16))
+    for l in range(4):
+        diff = p_img[l] - t_img[l]
+        t_min, t_max = t_img[l].min(), t_img[l].max()
+        
+        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 0].set_title("Target GPCP")
+        
+        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 1].set_title("Predicted GPCP")
+        
+        im2 = axes[l, 2].imshow(diff, cmap='RdBu_r', vmin=-50, vmax=50)
+        fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 2].set_title(f"Diff Bias [-50, 50]")
+    
+    os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
+    plt.tight_layout()
+    filename = f"epoch_{epoch}_{suffix}_score_{metric_val:.4f}.png" if suffix else f"epoch_{epoch}_score_{metric_val:.4f}.png"
+    plt.savefig(os.path.join(output_dir, "plots", filename))
+    plt.close()
+
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                       residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True):
@@ -558,21 +587,27 @@ def train(args, accelerator):
         )
         
         if accelerator.is_main_process:
-            # Check for new best CRPS
+            # 1. Always plot the results from the first validation pass (usually fast ensemble)
+            plot_suffix = "fast" if not is_plot_epoch else "full"
+            save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, output_dir, suffix=plot_suffix)
+
+            # 2. Check for new best CRPS
             is_new_best = False
             if current_val_metric < best_val_crps:
                 print(f"🌟 New best Validation CRPS: {current_val_metric:.4f} (Previous: {best_val_crps:.4f})! Saving best model...")
                 best_val_crps = current_val_metric
                 is_new_best = True
                 
-                # Trigger high-quality sampling if we haven't already done it for this epoch
+                # Trigger high-quality sampling if we haven't already done it (only if we were in fast mode)
                 if not is_plot_epoch:
                     print(f"📸 New best found! Triggering high-quality 1000-step sampling for diagnostic plots...")
-                    _, full_pred, true_target_precip = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target = run_val_inference(
                         epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
+                    # Save the "Best" plot specifically from the full 1000-step sample
+                    save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, output_dir, suffix="BEST_sampled")
 
             # Save checkoints and logs
             unwrapped_model = accelerator.unwrap_model(model)
@@ -590,31 +625,6 @@ def train(args, accelerator):
                     
             if is_new_best:
                 torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
-                
-                # Plot high-quality results
-                t_img = true_target_precip[0].cpu().numpy()
-                p_img = full_pred[0].cpu().numpy()
-                fig, axes = plt.subplots(4, 3, figsize=(15, 16))
-                for l in range(4):
-                    diff = p_img[l] - t_img[l]
-                    t_min, t_max = t_img[l].min(), t_img[l].max()
-                    
-                    im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-                    fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
-                    if l == 0: axes[l, 0].set_title("Target GPCP")
-                    
-                    im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-                    fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-                    if l == 0: axes[l, 1].set_title("Predicted GPCP")
-                    
-                    im2 = axes[l, 2].imshow(diff, cmap='RdBu_r', vmin=-50, vmax=50)
-                    fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-                    if l == 0: axes[l, 2].set_title("Diff Bias [-50, 50]")
-                
-                os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
-                plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, f"plots/epoch_{epoch}_crps_{current_val_metric:.4f}.png"))
-                plt.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Train or Test Diffusion Model V4")
