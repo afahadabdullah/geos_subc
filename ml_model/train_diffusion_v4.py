@@ -47,32 +47,45 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map * area_weights).mean()
     return weighted_crps.item()
 
-def save_val_plot(epoch, full_pred, true_target_precip, metric_val, output_dir, suffix=""):
+def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, suffix=""):
     """
-    Standardizes plotting logic for validation results.
+    Standardizes plotting logic for validation results (4-column layout).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
-    fig, axes = plt.subplots(4, 3, figsize=(15, 16))
+    g_img = geos_pred[0].cpu().numpy()
+    
+    fig, axes = plt.subplots(4, 4, figsize=(20, 16))
     for l in range(4):
-        diff = p_img[l] - t_img[l]
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
+        # Col 1: Target
         im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
         fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 0].set_title("Target GPCP")
         
+        # Col 2: Model Pred
         im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
         fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 1].set_title("Predicted GPCP")
+        if l == 0: axes[l, 1].set_title("Model Pred (Mean)")
         
-        im2 = axes[l, 2].imshow(diff, cmap='RdBu_r', vmin=-50, vmax=50)
+        # Col 3: Model Diff
+        diff_model = p_img[l] - t_img[l]
+        im2 = axes[l, 2].imshow(diff_model, cmap='RdBu_r', vmin=-50, vmax=50)
         fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 2].set_title(f"Diff Bias [-50, 50]")
+        if l == 0: 
+            axes[l, 2].set_title(f"Model Diff (Skill vs GEOS)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        
+        # Col 4: GEOS Diff
+        diff_geos = g_img[l] - t_img[l]
+        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
+        fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
+        if l == 0:
+            axes[l, 3].set_title(f"GEOS Baseline Diff\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
     
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plt.tight_layout()
-    filename = f"epoch_{epoch}_{suffix}_score_{metric_val:.4f}.png" if suffix else f"epoch_{epoch}_score_{metric_val:.4f}.png"
+    filename = f"epoch_{epoch}_{suffix}_score_{model_crps:.4f}.png" if suffix else f"epoch_{epoch}_score_{model_crps:.4f}.png"
     plt.savefig(os.path.join(output_dir, "plots", filename))
     plt.close()
 
@@ -132,8 +145,16 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         # Calculate CRPS
         val_metric = compute_crps(ensemble_full_precip, true_target_precip, area_weights)
         
-        # For plotting, use the ensemble mean
+        # Calculate Model RMSE
         full_pred = ensemble_full_precip.mean(dim=0)
+        model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
+        
+        # Calculate GEOS Baseline Metrics
+        geos_ens_raw = batch['geos_ens_raw'].to(device) # [B, M=4, L, H, W]
+        geos_crps = compute_crps(geos_ens_raw.transpose(0, 1), true_target_precip, area_weights)
+        geos_mean_raw = geos_ens_raw.mean(dim=1)
+        geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
+        
         recon_type = f"FastEnsembleCRPS (n={num_ensemble}, t=500)"
     else:
         # Full Reverse Sampling (1000 steps)
@@ -150,23 +171,30 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
         fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
         
-        pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
-        full_pred = torch.clamp(pred_gpcp_raw, min=0.0)
+        full_pred = torch.clamp(fx_geos_raw + denorm_residual_raw, min=0.0)
         
+        # Ground truth in physical units
         demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-        true_target_raw = fx_geos_raw + demap_target_residual_raw
-        true_target_precip = torch.clamp(true_target_raw, min=0.0)
+        true_target_precip = torch.clamp(fx_geos_raw + demap_target_residual_raw, min=0.0)
         
-        # RMSE for full sampling (or just use consistency)
-        v_diff_sq = (full_pred - true_target_precip)**2
-        val_metric = torch.sqrt((v_diff_sq * area_weights).mean()).item()
-        recon_type = "FullSampling (RMSE)"
+        # For full sampling, we use the single prediction for RMSE/CRPS
+        # (Though CRPS needs ensemble, we treat this as a 1-member ensemble for the metric score if needed)
+        val_metric = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item() # Use RMSE for full sample metric if needed
+        model_rmse = val_metric
+        
+        # Calculate GEOS Baseline Metrics
+        geos_ens_raw = batch['geos_ens_raw'].to(device)
+        geos_crps = compute_crps(geos_ens_raw.transpose(0, 1), true_target_precip, area_weights)
+        geos_mean_raw = geos_ens_raw.mean(dim=1)
+        geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
+        
+        recon_type = "FullSampling"
 
     if accelerator.is_main_process:
         metric_name = "CRPS" if "CRPS" in recon_type else "RMSE"
         print(f"Epoch {epoch} | Val {metric_name} [{recon_type}]: {val_metric:.4f}")
         
-    return val_metric, full_pred, true_target_precip
+    return val_metric, full_pred, true_target_precip, model_rmse, geos_mean_raw, geos_crps, geos_rmse
 
 def train(args, accelerator):
     device = accelerator.device
@@ -315,7 +343,7 @@ def train(args, accelerator):
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
-                    print(f"   Best Val RMSE so far: {best_val_rmse:.4f}\n")
+                    print(f"   Best Val CRPS so far: {best_val_crps:.4f}\n")
         except Exception as e:
             if accelerator.is_main_process:
                 print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
@@ -333,9 +361,15 @@ def train(args, accelerator):
             print(f"\n🧪 RUNNING TEST MODE: Evaluating {ckpt_path}\n")
         
         # Test mode runs a single full-range validation inference
-        run_val_inference(start_epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, 
-                         is_test=True, is_fast_recon=False)
+        val_outputs = run_val_inference(
+            start_epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
+            residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, 
+            is_test=True, is_fast_recon=False
+        )
+        v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse = val_outputs
+        
+        if accelerator.is_main_process:
+            save_val_plot(start_epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, suffix="test_mode")
         return
 
     # ---------------------------------------------------------
@@ -584,17 +618,19 @@ def train(args, accelerator):
         # Use fast reconstruction for the CRPS check to keep epochs moving quickly
         is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0) or args.full_val
         
-        current_val_metric, full_pred, true_target_precip = run_val_inference(
+        val_outputs = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
             residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
+        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse = val_outputs
         
         if accelerator.is_main_process:
             # 1. Always plot the results from the first validation pass (usually fast ensemble)
             plot_suffix = "fast" if not is_plot_epoch else "full"
-            save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, output_dir, suffix=plot_suffix)
+            save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
+                          geos_mean, geos_crps, geos_rmse, output_dir, suffix=plot_suffix)
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
@@ -613,12 +649,13 @@ def train(args, accelerator):
                 # Trigger high-quality sampling if new BEST (absolute) found
                 if is_new_best and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse = run_val_inference(
                         epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
-                    save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, output_dir, suffix="BEST_sampled")
+                    save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
+                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, suffix="BEST_sampled")
 
                 # Manage Top 4 Persistence
                 new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"

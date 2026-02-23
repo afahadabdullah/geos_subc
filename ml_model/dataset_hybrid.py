@@ -191,22 +191,25 @@ class S2SHybridDataset(Dataset):
         if geos_tensor.ndim == 3: 
              geos_tensor = geos_tensor.unsqueeze(0)
              
-        # Take the ensemble mean across the 4 members
-        geos_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
-             
-        # Add Channel Dim: (M, L, H, W) -> (M, 1, L, H, W)
-        geos_tensor = geos_tensor.unsqueeze(1) # [1, 1, L, H, W]
-        
-        # Enforce physical precipitation minimums (0 mm/day) on incoming raw GEOS fields
+        # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
         geos_tensor = torch.clamp(geos_tensor, min=0.0)
         
-        # Save a pure copy of the raw GEOS field to calculate the exact residual with the GPCP target later
-        pure_geos_raw = geos_tensor.clone().squeeze(0).squeeze(0) # [L, H, W]
+        # Save raw ensemble for baseline metrics (M, L, H, W)
+        geos_ens_raw = geos_tensor.clone() 
+             
+        # Take the ensemble mean across the members for model conditioning
+        geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
+             
+        # Add Channel Dim for conditioning: (1, L, H, W) -> (1, 1, L, H, W)
+        geos_cond_tensor = geos_mean_tensor.unsqueeze(1) # [1, 1, L, H, W]
+        
+        # Standard pure copy of the mean for residual mapping (L, H, W)
+        pure_geos_mean_raw = geos_mean_tensor.squeeze(0) 
         
         if self.normalize and self.bounds is not None:
             g_min = self.bounds["geos_raw"]["min"]
             g_max = self.bounds["geos_raw"]["max"]
-            geos_tensor = 2.0 * (torch.clamp(geos_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
+            geos_cond_tensor = 2.0 * (torch.clamp(geos_cond_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
@@ -355,7 +358,7 @@ class S2SHybridDataset(Dataset):
             r_max = self.bounds["residual_raw"]["max"]
             
             # Extract mathematically sound linear residual
-            residual_raw = target_tensor - pure_geos_raw
+            residual_raw = target_tensor - pure_geos_mean_raw
             
             # y_target becomes the purely normalized linear residual [-1, 1]
             target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
@@ -367,8 +370,9 @@ class S2SHybridDataset(Dataset):
         # of variables like SST (300) and Z500 (50000) before they can be globally normalized or scanned.
         
         return {
-            "x_geos": geos_tensor, # (1, 1, L, H, W)
-            "x_obs": obs_tensor,   # (24, H, W)
-            "y_target": target_tensor, # (L, H, W)
-            "month": meta['date'].month
+            "x_geos": geos_cond_tensor, # (1, 1, L, H, W)
+            "x_obs": obs_tensor,        # (24, H, W)
+            "y_target": target_tensor,  # (L, H, W)
+            "month": meta['date'].month,
+            "geos_ens_raw": geos_ens_raw # (M=4, L, H, W)
         }
