@@ -78,10 +78,10 @@ class CustomDiffusionScheduler:
         
     @torch.no_grad()
     def step(self, model_output, timestep, sample, clip_x0=True):
-        # Diffusers expects timestep as a tensor or compatible int
-        # Ensure it's on the correct device
+        # Diffusers typically indexes CPU-based scheduler tensors.
+        # Ensure t is either an integer or a CPU tensor.
         t = timestep
-        if not torch.is_tensor(t):
-            t = torch.tensor([t], device=sample.device)
+        if torch.is_tensor(t):
+            t = t.to("cpu")
             
         return self.scheduler.step(model_output, t, sample).prev_sample
