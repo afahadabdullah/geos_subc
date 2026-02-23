@@ -24,12 +24,63 @@ def get_area_weights(lats, device):
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
 
-def train():
-    accelerator = Accelerator(split_batches=True)
+@torch.no_grad()
+def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
+                      residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=False):
+    model.eval()
+    unwrapped_model = accelerator.unwrap_model(model)
+    
+    # We'll evaluate on the first batch of the val_loader for consistent plotting/metrics
+    batch = next(iter(val_loader))
+    fb_target = batch['y_target'].to(device)
+    vB, _, H, W = fb_target.shape
+    
+    fx_geos = batch['x_geos'].to(device) 
+    fx_obs  = batch['x_obs'].to(device)
+    fx_geos_flat = fx_geos.view(vB, -1, H, W)
+    
+    f_months = batch['month'].to(device)
+    fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    
+    fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
+    
+    # Sampling
+    latents = torch.randn((vB, 4, H, W), device=device)
+    for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Reverse Sampling", leave=False, disable=not accelerator.is_main_process):
+        t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
+        pred_noise = unwrapped_model(latents, fx_cond, t_batched)
+        latents = scheduler.step(pred_noise, t, latents)
+        
+    pred_target_norm = latents
+    
+    # Denormalization
+    denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+    fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
+    fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+    
+    pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
+    full_pred = torch.clamp(pred_gpcp_raw, min=0.0)
+    
+    demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+    true_target_raw = fx_geos_raw + demap_target_residual_raw
+    true_target_precip = torch.clamp(true_target_raw, min=0.0)
+    
+    # Metrics
+    v_diff_sq = (full_pred - true_target_precip)**2
+    v_weighted_mse = (v_diff_sq * area_weights).mean()
+    fb_rmse = torch.sqrt(v_weighted_mse).item()
+    
+    if accelerator.is_main_process:
+        print(f"Epoch {epoch} | Val FB Physical RMSE: {fb_rmse:.4f}")
+        
+    return fb_rmse, full_pred, true_target_precip
+
+def train(args, accelerator):
     device = accelerator.device
 
     # Load config
-    config_path = "ml_model/config_diffusion_v4.yaml"
+    config_path = args.config
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
@@ -121,26 +172,50 @@ def train():
     best_val_rmse = float('inf')
     
     # Load latest checkpoint if it exists
-    latest_ckpt = os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt")
-    if os.path.exists(latest_ckpt):
+    if args.test:
+        ckpt_path = os.path.join(output_dir, args.ckpt)
+    else:
+        ckpt_path = os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt")
+
+    if os.path.exists(ckpt_path):
         try:
-            checkpoint = torch.load(latest_ckpt, map_location='cpu', weights_only=False)
-            model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            start_epoch = checkpoint['epoch'] + 1
-            if 'best_val_rmse' in checkpoint:
-                best_val_rmse = checkpoint['best_val_rmse']
+            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            # Unwrap for loading
+            unwrapped_model = accelerator.unwrap_model(model)
+            unwrapped_model.load_state_dict(checkpoint['model'])
+            
+            if not args.test:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                start_epoch = checkpoint['epoch'] + 1
+                if 'best_val_rmse' in checkpoint:
+                    best_val_rmse = checkpoint['best_val_rmse']
+                
             if accelerator.is_main_process:
-                print(f"\n🔄 Resumed from checkpoint: {latest_ckpt}")
-                print(f"   Starting at Epoch: {start_epoch}")
-                print(f"   Best Val RMSE so far: {best_val_rmse:.4f}\n")
+                print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
+                if not args.test:
+                    print(f"   Starting at Epoch: {start_epoch}")
+                    print(f"   Best Val RMSE so far: {best_val_rmse:.4f}\n")
         except Exception as e:
             if accelerator.is_main_process:
-                print(f"⚠️ Failed to load checkpoint {latest_ckpt}: {e}")
+                print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
     else:
+        if args.test:
+            raise FileNotFoundError(f"CRITICAL: Checkpoint {ckpt_path} not found for testing!")
         if accelerator.is_main_process:
             print(f"\n🚀 Starting fresh training from Epoch 0\n")
         
+    # ---------------------------------------------------------
+    # 3. Execution Mode: Train or Test
+    # ---------------------------------------------------------
+    if args.test:
+        if accelerator.is_main_process:
+            print(f"\n🧪 RUNNING TEST MODE: Evaluating {ckpt_path}\n")
+        
+        # Test mode runs a single full-range validation inference
+        run_val_inference(start_epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
+                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=True)
+        return
+
     # ---------------------------------------------------------
     # Pre-Training Diagnostics (Raw vs Normalized Bounds)
     # ---------------------------------------------------------
@@ -381,134 +456,68 @@ def train():
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
         # ---------------------------------------------------------
-        # 4. Validation Loop (Inference begins after epoch 20 to save compute)
+        # 4. Validation & Checkpointing
         # ---------------------------------------------------------
-        if epoch >= 0:
-            model.eval()
-            val_loss_sum = 0
-            val_count = 0
-            rmse_sum = 0
-            
+        fb_rmse, full_pred, true_target_precip = run_val_inference(
+            epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
+            residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds
+        )
+        
+        if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
-            
-            with torch.no_grad():
-                # Process strictly the fixed evaluation batch to gauge qualitative reconstruction
-                fb_target = fixed_val_batch['y_target'].to(device)
-                vB = fb_target.shape[0]
-                
-                fx_geos = fixed_val_batch['x_geos'].to(device) 
-                fx_obs  = fixed_val_batch['x_obs'].to(device)
-                fx_geos_flat = fx_geos.view(vB, -1, H, W)
-                
-                f_months = fixed_val_batch['month'].to(device)
-                fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
-                fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
-                
-                fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
-                
-                # Extract Fixed Batch already-normalized parameters to evaluate reconstruction accuracy
-                fx_geos_norm = fx_geos.squeeze(1).squeeze(1) # [B, 4, H, W]
-                fb_target_norm = fb_target # [B, 4, H, W]
-                
-                # Single Pass Reverse Sampling predicting all 4 Leads simultaneously
-                latents = torch.randn((vB, 4, H, W), device=device)
-                
-                # Iterative reverse diffusion loop
-                for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Evaluating generation", leave=False):
-                    t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
-                    pred_noise = unwrapped_model(latents, fx_cond, t_batched)
-                    latents = scheduler.step(pred_noise, t, latents)
-                    
-                # Reverse mapping from [-1, 1] pure noise target back up to Normalized space
-                # latents generated represented: pred_target_norm (the scaled residual)
-                pred_target_norm = latents
-                
-                if accelerator.is_main_process:
-                    print(f"--- RECONSTRUCTION DIAGNOSTICS ---")
-                    print(f"Pred Target Norm (Latents) Range: {pred_target_norm.min().item():.4f} to {pred_target_norm.max().item():.4f}")
-                    print(f"Residual Coeffs: Min={residual_min}, Max={residual_max}")
-                    print(f"GEOS Coeffs: Min={geos_min}, Max={geos_max}")
+            ckpt = {
+                'epoch': epoch,
+                'model': unwrapped_model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'best_val_rmse': best_val_rmse
+            }
+            torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
-                # Demap the Residual Normalized prediction back to raw space
-                denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+            with open(log_file, "a") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch, avg_train_loss, 0.0, fb_rmse])
+                    
+            if fb_rmse < best_val_rmse:
+                best_val_rmse = fb_rmse
+                print(f"🌟 New best Validation RMSE: {best_val_rmse:.4f}! Saving best model...")
+                ckpt['best_val_rmse'] = best_val_rmse
+                torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
                 
-                # Un-normalize GEOS mean pattern to get unscaled geos_raw
-                fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+                # Plot
+                t_img = true_target_precip[0].cpu().numpy()
+                p_img = full_pred[0].cpu().numpy()
+                fig, axes = plt.subplots(4, 3, figsize=(15, 16))
+                for l in range(4):
+                    diff = p_img[l] - t_img[l]
+                    t_min, t_max = t_img[l].min(), t_img[l].max()
+                    
+                    im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+                    fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
+                    if l == 0: axes[l, 0].set_title("Target GPCP")
+                    
+                    im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+                    fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
+                    if l == 0: axes[l, 1].set_title("Predicted GPCP")
+                    
+                    im2 = axes[l, 2].imshow(diff, cmap='RdBu_r')
+                    fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
+                    if l == 0: axes[l, 2].set_title("Diff Bias")
                 
-                if accelerator.is_main_process:
-                    print(f"Denorm Residual Raw Range : {denorm_residual_raw.min().item():.4f} to {denorm_residual_raw.max().item():.4f}")
-                    print(f"FX GEOS Raw Range         : {fx_geos_raw.min().item():.4f} to {fx_geos_raw.max().item():.4f}")
+                os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
+                plt.tight_layout()
+                plt.savefig(os.path.join(output_dir, f"plots/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"))
+                plt.close()
 
-                # Add unscaled linear residual back onto GEOS
-                pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
-                full_pred = torch.clamp(pred_gpcp_raw, min=0.0) # Physical limit
-                
-                # Demap the absolute target for pure RMSE calculation
-                demap_target_residual_raw = ((fb_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-                true_target_raw = fx_geos_raw + demap_target_residual_raw
-                true_target_precip = torch.clamp(true_target_raw, min=0.0)
-                
-                if accelerator.is_main_process:
-                    print(f"Pure GPCP Raw Prediction Range: {full_pred.min().item():.4f} to {full_pred.max().item():.4f}")
-                    print(f"Pure GPCP Raw Target Range    : {true_target_precip.min().item():.4f} to {true_target_precip.max().item():.4f}")
-                    print(f"--- END RECONSTRUCTION ---")
+def main():
+    parser = argparse.ArgumentParser(description="Train or Test Diffusion Model V4")
+    parser.add_argument("--config", type=str, default="ml_model/config_diffusion_v4.yaml")
+    parser.add_argument("--test", action="store_true", help="Run in inference/test mode only")
+    parser.add_argument("--ckpt", type=str, default="best_diffusion_ckpt_v4.pt", 
+                        help="Checkpoint filename in output_dir to load for testing (default: best_diffusion_ckpt_v4.pt)")
+    args = parser.parse_args()
 
-                # Accuracy tracking
-                v_diff_sq = (full_pred - true_target_precip)**2
-                v_weighted_mse = (v_diff_sq * area_weights).mean()
-                fb_rmse = torch.sqrt(v_weighted_mse).item()
-                
-            if accelerator.is_main_process:
-                print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val FB Physical RMSE: {fb_rmse:.4f}")
-
-                with open(log_file, "a") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([epoch, avg_train_loss, 0.0, fb_rmse])
-                    
-                # ---------------------------------------------------------
-                # Checkpointing & Plotting (Only on New Best)
-                # ---------------------------------------------------------
-                if fb_rmse < best_val_rmse:
-                    best_val_rmse = fb_rmse
-                    print(f"🌟 New best Validation RMSE: {best_val_rmse:.4f}! Saving model & plotting...")
-                    
-                    # Save Best Checkpoint
-                    ckpt = {
-                        'epoch': epoch,
-                        'model': unwrapped_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'best_val_rmse': best_val_rmse
-                    }
-                    torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
-                    
-                    # Plot Diagnostics
-                    t_img = true_target_precip[0].cpu().numpy()
-                    p_img = full_pred[0].cpu().numpy()
-                    
-                    fig, axes = plt.subplots(4, 3, figsize=(15, 16))
-                    for l in range(4):
-                        diff = p_img[l] - t_img[l]
-                        
-                        t_min = t_img[l].min()
-                        t_max = t_img[l].max()
-                        
-                        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-                        axes[l, 0].set_ylabel(f"Week {l+1}")
-                        fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
-                        if l == 0: axes[l, 0].set_title("Target GPCP")
-                        
-                        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-                        fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-                        if l == 0: axes[l, 1].set_title("Predicted GPCP")
-                        
-                        im2 = axes[l, 2].imshow(diff, cmap='RdBu_r')
-                        fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-                        if l == 0: axes[l, 2].set_title("Diff Bias")
-                        
-                    os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(output_dir, f"plots/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"))
-                    plt.close()
+    accelerator = Accelerator(split_batches=True)
+    train(args, accelerator)
 
 if __name__ == "__main__":
-    train()
+    main()
