@@ -285,6 +285,7 @@ def train(args, accelerator):
 
     start_epoch = 0
     best_val_crps = float('inf')
+    top_models = [] # List of {"path": str, "crps": float, "epoch": int}
     
     # Load latest checkpoint if it exists
     if args.test:
@@ -306,6 +307,9 @@ def train(args, accelerator):
                     best_val_crps = checkpoint['best_val_crps']
                 elif 'best_val_rmse' in checkpoint:
                     best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
+                
+                if 'top_models' in checkpoint:
+                    top_models = checkpoint['top_models']
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
@@ -569,7 +573,8 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps
+                'best_val_crps': best_val_crps,
+                'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
@@ -591,31 +596,66 @@ def train(args, accelerator):
             plot_suffix = "fast" if not is_plot_epoch else "full"
             save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, output_dir, suffix=plot_suffix)
 
-            # 2. Check for new best CRPS
-            is_new_best = False
-            if current_val_metric < best_val_crps:
-                print(f"🌟 New best Validation CRPS: {current_val_metric:.4f} (Previous: {best_val_crps:.4f})! Saving best model...")
-                best_val_crps = current_val_metric
-                is_new_best = True
+            # 2. Check for Top 4 Model Buffer
+            is_in_top4 = False
+            worst_top_crps = max([m['crps'] for m in top_models]) if len(top_models) == 4 else float('inf')
+            
+            if current_val_metric < worst_top_crps:
+                print(f"🌟 New Top-4 model found! CRPS: {current_val_metric:.4f}")
+                is_in_top4 = True
                 
-                # Trigger high-quality sampling if we haven't already done it (only if we were in fast mode)
-                if not is_plot_epoch:
-                    print(f"📸 New best found! Triggering high-quality 1000-step sampling for diagnostic plots...")
+                # Absolute Best Check
+                is_new_best = (current_val_metric < best_val_crps)
+                if is_new_best:
+                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_crps:.4f}")
+                    best_val_crps = current_val_metric
+
+                # Trigger high-quality sampling if new BEST (absolute) found
+                if is_new_best and not is_plot_epoch:
+                    print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
                     best_sampled_metric, best_sampled_pred, best_target = run_val_inference(
                         epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
-                    # Save the "Best" plot specifically from the full 1000-step sample
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, output_dir, suffix="BEST_sampled")
 
-            # Save checkoints and logs
-            unwrapped_model = accelerator.unwrap_model(model)
+                # Manage Top 4 Persistence
+                new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
+                new_best_path = os.path.join(output_dir, new_best_name)
+                
+                unwrapped_model = accelerator.unwrap_model(model)
+                best_ckpt = {
+                    'epoch': epoch,
+                    'model': unwrapped_model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_val_crps': best_val_crps,
+                    'top_models': top_models
+                }
+                
+                if len(top_models) == 4:
+                    # Replace worst
+                    worst_model = max(top_models, key=lambda x: x['crps'])
+                    if os.path.exists(worst_model['path']):
+                        os.remove(worst_model['path'])
+                    top_models.remove(worst_model)
+                
+                # Save new and update list
+                torch.save(best_ckpt, new_best_path)
+                top_models.append({"path": new_best_path, "crps": current_val_metric, "epoch": epoch})
+                top_models.sort(key=lambda x: x['crps']) # Best first
+                
+                # Keep a symlink or redundant copy for 'best_diffusion_ckpt_v4.pt'
+                if is_new_best:
+                    torch.save(best_ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
+
+            # Save Latest Checkpoint & Logs
             ckpt = {
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps
+                'best_val_crps': best_val_crps,
+                'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
@@ -623,8 +663,9 @@ def train(args, accelerator):
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, 0.0, current_val_metric])
                     
-            if is_new_best:
-                torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
+            if is_in_top4:
+                top_str = ", ".join([f"E{m['epoch']}({m['crps']:.3f})" for m in top_models])
+                print(f"📍 Top 4 Models: [{top_str}]")
 
 def main():
     parser = argparse.ArgumentParser(description="Train or Test Diffusion Model V4")
