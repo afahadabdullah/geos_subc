@@ -32,8 +32,8 @@ echo "📈 Global Statistics check..."
 # Note: Stats are now forced robustly in the code, but we run the scan just in case
 python ml_model/calculate_global_stats_v4.py
 
-echo "🔥 Launching V4 Diffusion Training [6 Epochs this session]..."
-accelerate launch ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 6
+echo "🔥 Launching V4 Diffusion Training [12 Epochs this session]..."
+accelerate launch ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 12
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
