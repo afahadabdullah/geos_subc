@@ -2,10 +2,10 @@
 #SBATCH -J diff_v4                  # Job name
 #SBATCH -o ml_output_diffusion_v4/diff_v4_%j.out
 #SBATCH -e ml_output_diffusion_v4/diff_v4_%j.err
-#SBATCH -p gh                        # Queue (partition) name
+#SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
-#SBATCH -t 48:00:00                  # Run time (hh:mm:ss)
+#SBATCH -t 02:00:00                  # Run time (hh:mm:ss)
 #SBATCH -A ATM25008                  # Project account
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
