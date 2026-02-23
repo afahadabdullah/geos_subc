@@ -352,8 +352,11 @@ class S2SHybridDataset(Dataset):
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
+        # Save absolute raw target for verification plots [L, H, W]
+        target_raw = target_tensor.clone()
+        
         if self.normalize and self.bounds is not None:
-            # We use a tightened robust range for residuals to prevent outlier-driven instability
+            # Tightened robust range for residuals to prevent outlier-driven instability
             r_min = -30.0
             r_max = 30.0
             
@@ -362,17 +365,12 @@ class S2SHybridDataset(Dataset):
             
             # y_target becomes the purely normalized linear residual [-1, 1]
             target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
-        else:
-            # If not normalizing (e.g. scanning), we just expose the raw GPCP target and do math externally
-            pass
-        
-        # We no longer apply a generic [-20, 20] clamp here because it destroys the true physical values
-        # of variables like SST (300) and Z500 (50000) before they can be globally normalized or scanned.
         
         return {
             "x_geos": geos_cond_tensor, # (1, 1, L, H, W)
             "x_obs": obs_tensor,        # (24, H, W)
             "y_target": target_tensor,  # (L, H, W)
+            "target_raw": target_raw,   # (L, H, W) - Pure GPCP
             "month": meta['date'].month,
             "geos_ens_raw": geos_ens_raw # (M=4, L, H, W)
         }

@@ -47,15 +47,16 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map * area_weights).mean()
     return weighted_crps.item()
 
-def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, suffix=""):
+def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, true_raw_target=None, suffix=""):
     """
-    Standardizes plotting logic for validation results (4-column layout).
+    Standardizes plotting logic for validation results (5-column layout).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
     g_img = geos_pred[0].cpu().numpy()
+    r_img = true_raw_target[0].cpu().numpy() if true_raw_target is not None else None
     
-    fig, axes = plt.subplots(4, 4, figsize=(20, 16))
+    fig, axes = plt.subplots(4, 5, figsize=(25, 16))
     for l in range(4):
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
@@ -82,6 +83,14 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
         fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
         if l == 0:
             axes[l, 3].set_title(f"GEOS Baseline Diff\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+
+        # Col 5: Pure Raw Target (Verification)
+        if r_img is not None:
+            im4 = axes[l, 4].imshow(r_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+            fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
+            if l == 0: axes[l, 4].set_title("Pure Target (GPCP Raw)")
+        else:
+            axes[l, 4].axis('off')
     
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plt.tight_layout()
@@ -98,6 +107,7 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     # We'll evaluate on the first batch of the val_loader for consistent plotting/metrics
     batch = next(iter(val_loader))
     fb_target = batch['y_target'].to(device)
+    true_raw_target = batch['target_raw'].to(device)
     vB, _, H, W = fb_target.shape
     
     fx_geos = batch['x_geos'].to(device) 
@@ -201,7 +211,7 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         metric_name = "CRPS" if "CRPS" in recon_type else "RMSE"
         print(f"Epoch {epoch} | Val {metric_name} [{recon_type}]: {val_metric:.4f}")
         
-    return val_metric, full_pred, true_target_precip, model_rmse, geos_mean_raw, geos_crps, geos_rmse
+    return val_metric, full_pred, true_target_precip, model_rmse, geos_mean_raw, geos_crps, geos_rmse, true_raw_target
 
 def train(args, accelerator):
     device = accelerator.device
@@ -374,10 +384,10 @@ def train(args, accelerator):
             residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False
         )
-        v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse = val_outputs
+        v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_raw = val_outputs
         
         if accelerator.is_main_process:
-            save_val_plot(start_epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, suffix="test_mode")
+            save_val_plot(start_epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, true_raw_target=v_raw, suffix="test_mode")
         return
 
     # ---------------------------------------------------------
@@ -505,7 +515,10 @@ def train(args, accelerator):
                 u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
                 u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
 
-                fig, axes = plt.subplots(8, 2, figsize=(14, 32))
+                # 5. Raw GPCP (from dataset)
+                gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
+
+                fig, axes = plt.subplots(9, 2, figsize=(14, 36))
                 # Row 1: GEOS
                 im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
                 axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -578,6 +591,16 @@ def train(args, accelerator):
                 axes[7, 1].set_title("Normalized U250 [-1, 1]")
                 fig.colorbar(im16, ax=axes[7, 1])
 
+                # Row 9: GPCP Absolute (The "Real" Target)
+                im17 = axes[8, 0].imshow(gpcp_raw_sample, cmap='Blues')
+                axes[8, 0].set_title("Raw GPCP (Pure Target)")
+                fig.colorbar(im17, ax=axes[8, 0])
+                
+                # Plot something neutral for normalized GPCP (since we only normalize residual)
+                axes[8, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.\nWe normalize the\nresidual [GPCP - GEOS].", 
+                             ha='center', va='center', transform=axes[8, 1].transAxes)
+                axes[8, 1].axis('off')
+
                 plt.tight_layout()
                 diag_path = os.path.join(output_dir, "normalization_check.png")
                 plt.savefig(diag_path)
@@ -632,13 +655,13 @@ def train(args, accelerator):
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse = val_outputs
+        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, true_raw = val_outputs
         
         if accelerator.is_main_process:
             # 1. Always plot the results from the first validation pass (usually fast ensemble)
             plot_suffix = "fast" if not is_plot_epoch else "full"
             save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
-                          geos_mean, geos_crps, geos_rmse, output_dir, suffix=plot_suffix)
+                          geos_mean, geos_crps, geos_rmse, output_dir, true_raw_target=true_raw, suffix=plot_suffix)
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
@@ -657,13 +680,13 @@ def train(args, accelerator):
                 # Trigger high-quality sampling if new BEST (absolute) found
                 if is_new_best and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_raw = run_val_inference(
                         epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
-                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, suffix="BEST_sampled")
+                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, true_raw_target=b_raw, suffix="BEST_sampled")
 
                 # Manage Top 4 Persistence
                 new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
