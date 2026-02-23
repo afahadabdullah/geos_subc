@@ -70,6 +70,8 @@ class CustomDiffusionScheduler:
             beta_end=beta_end,
             beta_schedule="linear",
             clip_sample=True, # MANDATORY for physical stability
+            thresholding=True, # Prevent drift by clipping predicted x0
+            dynamic_thresholding_ratio=0.995,
             prediction_type="epsilon"
         )
         
