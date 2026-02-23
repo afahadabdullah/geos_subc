@@ -92,6 +92,13 @@ class CustomDiffusionScheduler:
         Calculates the x0 estimate (denoised image) from the noise prediction.
         """
         t = timestep
+        # If t is a tensor and all values are the same, use a scalar to avoid
+        # RuntimeError: Boolean value of Tensor with more than one value is ambiguous
+        # in some diffusers scheduler versions.
         if torch.is_tensor(t):
-            t = t.to("cpu")
+            if t.dim() > 0 and torch.all(t == t[0]):
+                t = t[0].item()
+            else:
+                t = t.to("cpu")
+                
         return self.scheduler.step(model_output, t, sample).pred_original_sample
