@@ -518,7 +518,7 @@ def train(args, accelerator):
                 # 5. Raw GPCP (from dataset)
                 gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
 
-                fig, axes = plt.subplots(9, 2, figsize=(14, 36))
+                fig, axes = plt.subplots(10, 2, figsize=(14, 40))
                 # Row 1: GEOS
                 im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
                 axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -601,11 +601,37 @@ def train(args, accelerator):
                              ha='center', va='center', transform=axes[8, 1].transAxes)
                 axes[8, 1].axis('off')
 
+                # Row 10: GEOS vs GPCP Orientation Check
+                # Calculate Spatial Correlation
+                flat_geos = geos_raw_sample.flatten()
+                flat_gpcp = gpcp_raw_sample.flatten()
+                
+                # Pearson Correlation
+                if np.std(flat_geos) > 1e-6 and np.std(flat_gpcp) > 1e-6:
+                    cc = np.corrcoef(flat_geos, flat_gpcp)[0, 1]
+                else:
+                    cc = 0.0
+                
+                im18 = axes[9, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
+                axes[9, 0].set_title(f"Spatial Alignment: GEOS - GPCP\nCorrelation: {cc:.4f}")
+                fig.colorbar(im18, ax=axes[9, 0])
+                
+                # Show a scatter plot for orientation verification
+                axes[9, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
+                axes[9, 1].set_xlabel("GEOS Rainfall")
+                axes[9, 1].set_ylabel("GPCP Rainfall")
+                axes[9, 1].set_title("Orientation Scatter (Subsampled)")
+
                 plt.tight_layout()
                 diag_path = os.path.join(output_dir, "normalization_check.png")
                 plt.savefig(diag_path)
                 plt.close()
                 print(f"✅ Normalization diagnostic plot saved to {diag_path}!")
+                print(f"✅ Spatial Orientation Check: Correlation = {cc:.4f}")
+                if cc < 0:
+                    print(f"🚨 CRITICAL WARNING: Negative spatial correlation detected! Data might be flipped (Lat/Lon).")
+                elif cc < 0.2:
+                    print(f"⚠️ WARNING: Low spatial correlation detected. Check for shifts or misalignment.")
 
             # Forward Diffusion (Noise injection)
             timesteps = torch.randint(0, scheduler.num_timesteps, (B,), device=device).long()
