@@ -18,6 +18,7 @@ conda activate geossub_env
 
 # Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export PYTHONUNBUFFERED=1
 
 # Move to Scratch storage
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
