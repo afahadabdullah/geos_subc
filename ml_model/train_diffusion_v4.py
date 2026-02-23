@@ -243,9 +243,6 @@ def train(args, accelerator):
         num_workers=config.get("num_workers", 4), pin_memory=True
     )
 
-    if accelerator.is_main_process:
-        print("📍 (Heartbeat 1) Accelerator initialized. Loading Dataset (Lead Times, etc)...")
-    
     train_dataset = None
     loader = None
     if not args.test:
@@ -271,9 +268,6 @@ def train(args, accelerator):
     residual_min = -30.0
     residual_max = 30.0
     
-    if accelerator.is_main_process:
-        print(f"📍 (Heartbeat 2) Stats and Dataset initialized. Instantiating UNet2DModel backbone...")
-    
     geos_min = global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_raw"]["max"]
     
@@ -295,8 +289,6 @@ def train(args, accelerator):
         lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=epochs * len(loader), eta_min=1e-6
         )
-        if accelerator.is_main_process:
-            print(f"📍 (Heartbeat 3) Model and Optimizers ready. Preparing with Accelerator...")
         model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
             model, optimizer, loader, val_loader, lr_scheduler
         )
@@ -335,11 +327,7 @@ def train(args, accelerator):
             writer.writerow(["Epoch", "Train_Loss", "Val_Noise", "Val_CRPS"])
 
     # Fixed Val Batch for continuous plotting
-    if accelerator.is_main_process:
-        print(f"📍 (Heartbeat 4) Preparation complete. Fetching fixed_val_batch (Dataloader test)...")
     fixed_val_batch = next(iter(val_loader))
-    if accelerator.is_main_process:
-        print(f"📍 (Heartbeat 5) fixed_val_batch fetched successfully. Loading checkpoints...")
 
     start_epoch = 0
     best_val_crps = float('inf')
@@ -798,9 +786,7 @@ def main():
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")
     args = parser.parse_args()
 
-    print("🚀 Entering train_diffusion_v4.py main()...")
     accelerator = Accelerator(split_batches=True)
-    print("✅ Accelerator object created.")
     train(args, accelerator)
 
 if __name__ == "__main__":
