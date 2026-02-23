@@ -157,8 +157,8 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         
         recon_type = f"FastEnsembleCRPS (n={num_ensemble}, t=500)"
     else:
-        # Full Reverse Sampling (1000 steps) with Mini-Ensemble (n=4)
-        num_ens_full = 4
+        # Full Reverse Sampling (1000 steps) with Mini-Ensemble (n=2)
+        num_ens_full = 2
         ensemble_preds_full_norm = []
         
         for eidx in range(num_ens_full):
