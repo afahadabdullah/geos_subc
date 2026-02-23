@@ -47,7 +47,7 @@ class S2SHybridDataset(Dataset):
         if self.normalize:
             stats_file = os.path.join(os.path.dirname(__file__), "v4_global_stats.pt")
             if os.path.exists(stats_file):
-                self.bounds = torch.load(stats_file)
+                self.bounds = torch.load(stats_file, weights_only=True)
                 print(f"Loaded strict global bounds from {stats_file}")
             else:
                 print(f"CRITICAL WARNING: {stats_file} not found. Normalization enabled but no bounds available!")
