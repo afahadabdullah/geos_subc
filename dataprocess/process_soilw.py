@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import os
 import glob
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
 
@@ -140,6 +141,23 @@ def process_year(year, output_dir=OUTPUT_DIR):
     except Exception as e:
         print(f"  Error loading SoilW files: {e}")
         return
+
+def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.png"):
+    """Plot the first lead of a sample to verify coverage."""
+    try:
+        plt.figure(figsize=(10, 5))
+        # sample is (L, Y, X)
+        data = sample.isel(L=3).values # Most recent week
+        plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto')
+        plt.colorbar(label='Soil Moisture')
+        plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Verifying 0-360 Longitude Alignment)")
+        plt.xlabel("Longitude")
+        plt.ylabel("Latitude")
+        plt.savefig(out_name)
+        plt.close()
+        print(f"  ✅ Saved verification plot to {out_name}")
+    except Exception as e:
+        print(f"  Warning: Could not save verification plot: {e}")
     
     # Detect variable and coordinate names
     soil_var = detect_soil_variable(ds_soil)
@@ -172,6 +190,7 @@ def process_year(year, output_dir=OUTPUT_DIR):
     
     processed_data = []
     skipped = 0
+    plot_done = False
     
     for init_date in tqdm(init_dates, desc=f"  SoilW {year}"):
         weeks = []
@@ -200,6 +219,11 @@ def process_year(year, output_dir=OUTPUT_DIR):
             sample = xr.concat(weeks, dim='L')
             sample = sample.assign_coords(L=np.arange(4))
             processed_data.append(sample)
+            
+            # Diagnostic Plot for the very first valid sample
+            if not plot_done:
+                plot_verification(sample, target_lon.name, target_lat.name)
+                plot_done = True
         else:
             skipped += 1
             # Fill with NaN
