@@ -24,6 +24,29 @@ def get_area_weights(lats, device):
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
 
+def compute_crps(ensemble_preds, target, area_weights):
+    """
+    Computes CRPS for a small ensemble.
+    ensemble_preds: [E, B, C, H, W]
+    target: [B, C, H, W]
+    area_weights: [1, 1, H, 1]
+    """
+    E = ensemble_preds.shape[0]
+    
+    # 1. Mean Absolute Error Term: 1/E sum |x_i - y|
+    mae_term = torch.abs(ensemble_preds - target.unsqueeze(0)).mean(dim=0) # [B, C, H, W]
+    
+    # 2. Ensemble Spread Term: 1/(2E^2) sum sum |x_i - x_j|
+    spread_term = torch.zeros_like(mae_term)
+    for i in range(E):
+        for j in range(E):
+            spread_term += torch.abs(ensemble_preds[i] - ensemble_preds[j])
+    spread_term = spread_term / (2 * E * E)
+    
+    crps_map = mae_term - spread_term
+    weighted_crps = (crps_map * area_weights).mean()
+    return weighted_crps.item()
+
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
                       residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True):
@@ -46,22 +69,43 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
     
     if is_fast_recon and not is_test:
-        # Ensemble-based Fast Reconstruction at t=500
-        num_ensemble = 3
+        # Ensemble-based Fast Reconstruction at t=500 for CRPS
+        num_ensemble = 5
         t_recon = 500
         t_batched = torch.full((vB,), t_recon, device=device, dtype=torch.long)
         
-        ensemble_preds = []
+        ensemble_preds_norm = []
         for _ in range(num_ensemble):
             noise = torch.randn_like(fb_target)
             x_t = scheduler.add_noise(fb_target, noise, t_batched)
             pred_noise = unwrapped_model(x_t, fx_cond, t_batched)
             pred_x0 = scheduler.reconstruct_x0(pred_noise, t_batched, x_t)
-            ensemble_preds.append(pred_x0)
+            ensemble_preds_norm.append(pred_x0)
             
-        # Average the ensemble members in the latent space
-        pred_target_norm = torch.stack(ensemble_preds).mean(dim=0)
-        recon_type = f"FastEnsemble (n={num_ensemble}, t={500})"
+        # ensemble_preds_norm: [E, B, 4, H, W]
+        ensemble_preds_norm = torch.stack(ensemble_preds_norm)
+        
+        # Calculate CRPS in normalized space (or physical, user didn't specify, but RMSE was physical)
+        # Let's convert ensemble to physical units for physical CRPS
+        ensemble_residuals_raw = ((ensemble_preds_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+        
+        fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
+        fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+        
+        ensemble_full_raw = fx_geos_raw.unsqueeze(0) + ensemble_residuals_raw
+        ensemble_full_precip = torch.clamp(ensemble_full_raw, min=0.0)
+        
+        # Ground truth in physical units
+        demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+        true_target_raw = fx_geos_raw + demap_target_residual_raw
+        true_target_precip = torch.clamp(true_target_raw, min=0.0)
+        
+        # Calculate CRPS
+        val_metric = compute_crps(ensemble_full_precip, true_target_precip, area_weights)
+        
+        # For plotting, use the ensemble mean
+        full_pred = ensemble_full_precip.mean(dim=0)
+        recon_type = f"FastEnsembleCRPS (n={num_ensemble}, t=500)"
     else:
         # Full Reverse Sampling (1000 steps)
         latents = torch.randn((vB, 4, H, W), device=device)
@@ -71,29 +115,29 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
             latents = scheduler.step(pred_noise, t, latents)
             
         pred_target_norm = latents
-        recon_type = "FullSampling"
-    
-    # Denormalization
-    denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-    fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
-    fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
-    
-    pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
-    full_pred = torch.clamp(pred_gpcp_raw, min=0.0)
-    
-    demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-    true_target_raw = fx_geos_raw + demap_target_residual_raw
-    true_target_precip = torch.clamp(true_target_raw, min=0.0)
-    
-    # Metrics
-    v_diff_sq = (full_pred - true_target_precip)**2
-    v_weighted_mse = (v_diff_sq * area_weights).mean()
-    fb_rmse = torch.sqrt(v_weighted_mse).item()
-    
-    if accelerator.is_main_process:
-        print(f"Epoch {epoch} | Val FB Physical RMSE [{recon_type}]: {fb_rmse:.4f}")
         
-    return fb_rmse, full_pred, true_target_precip
+        # Denormalization for full pred
+        denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+        fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
+        fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
+        
+        pred_gpcp_raw = fx_geos_raw + denorm_residual_raw
+        full_pred = torch.clamp(pred_gpcp_raw, min=0.0)
+        
+        demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+        true_target_raw = fx_geos_raw + demap_target_residual_raw
+        true_target_precip = torch.clamp(true_target_raw, min=0.0)
+        
+        # RMSE for full sampling (or just use consistency)
+        v_diff_sq = (full_pred - true_target_precip)**2
+        val_metric = torch.sqrt((v_diff_sq * area_weights).mean()).item()
+        recon_type = "FullSampling (RMSE)"
+
+    if accelerator.is_main_process:
+        metric_name = "CRPS" if "CRPS" in recon_type else "RMSE"
+        print(f"Epoch {epoch} | Val {metric_name} [{recon_type}]: {val_metric:.4f}")
+        
+    return val_metric, full_pred, true_target_precip
 
 def train(args, accelerator):
     device = accelerator.device
@@ -205,13 +249,13 @@ def train(args, accelerator):
     if accelerator.is_main_process and not os.path.exists(log_file):
         with open(log_file, "w") as f:
             writer = csv.writer(f)
-            writer.writerow(["Epoch", "Train_Loss", "Val_Noise", "Val_RMSE"])
+            writer.writerow(["Epoch", "Train_Loss", "Val_Noise", "Val_CRPS"])
 
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
     start_epoch = 0
-    best_val_rmse = float('inf')
+    best_val_crps = float('inf')
     
     # Load latest checkpoint if it exists
     if args.test:
@@ -229,8 +273,10 @@ def train(args, accelerator):
             if not args.test:
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 start_epoch = checkpoint['epoch'] + 1
-                if 'best_val_rmse' in checkpoint:
-                    best_val_rmse = checkpoint['best_val_rmse']
+                if 'best_val_crps' in checkpoint:
+                    best_val_crps = checkpoint['best_val_crps']
+                elif 'best_val_rmse' in checkpoint:
+                    best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
@@ -494,47 +540,58 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_rmse': best_val_rmse
+                'best_val_crps': best_val_crps
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
         # ---------------------------------------------------------
-        # 4. Validation & Checkpointing (Fast Reconstruction RMSE)
+        # 4. Validation & Checkpointing (Fast CRPS Ensemble)
         # ---------------------------------------------------------
-        # Use fast reconstruction for the RMSE check to keep epochs moving quickly
+        # Use fast reconstruction for the CRPS check to keep epochs moving quickly
         is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0) or args.full_val
         
-        fb_rmse, full_pred, true_target_precip = run_val_inference(
+        current_val_metric, full_pred, true_target_precip = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
             residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
         
-        if is_plot_epoch and accelerator.is_main_process:
-            print(f"📊 Full Sampling Validation complete for Epoch {epoch}. Plotting results...")
-        
         if accelerator.is_main_process:
+            # Check for new best CRPS
+            is_new_best = False
+            if current_val_metric < best_val_crps:
+                print(f"🌟 New best Validation CRPS: {current_val_metric:.4f} (Previous: {best_val_crps:.4f})! Saving best model...")
+                best_val_crps = current_val_metric
+                is_new_best = True
+                
+                # Trigger high-quality sampling if we haven't already done it for this epoch
+                if not is_plot_epoch:
+                    print(f"📸 New best found! Triggering high-quality 1000-step sampling for diagnostic plots...")
+                    _, full_pred, true_target_precip = run_val_inference(
+                        epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
+                        residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
+                        is_test=True, is_fast_recon=False
+                    )
+
+            # Save checkoints and logs
             unwrapped_model = accelerator.unwrap_model(model)
             ckpt = {
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_rmse': best_val_rmse
+                'best_val_crps': best_val_crps
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
-                writer.writerow([epoch, avg_train_loss, 0.0, fb_rmse])
+                writer.writerow([epoch, avg_train_loss, 0.0, current_val_metric])
                     
-            if fb_rmse < best_val_rmse:
-                best_val_rmse = fb_rmse
-                print(f"🌟 New best Validation RMSE: {best_val_rmse:.4f}! Saving best model...")
-                ckpt['best_val_rmse'] = best_val_rmse
+            if is_new_best:
                 torch.save(ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v4.pt"))
                 
-                # Plot
+                # Plot high-quality results
                 t_img = true_target_precip[0].cpu().numpy()
                 p_img = full_pred[0].cpu().numpy()
                 fig, axes = plt.subplots(4, 3, figsize=(15, 16))
@@ -556,7 +613,7 @@ def train(args, accelerator):
                 
                 os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
                 plt.tight_layout()
-                plt.savefig(os.path.join(output_dir, f"plots/epoch_{epoch}_rmse_{fb_rmse:.2f}.png"))
+                plt.savefig(os.path.join(output_dir, f"plots/epoch_{epoch}_crps_{current_val_metric:.4f}.png"))
                 plt.close()
 
 def main():
