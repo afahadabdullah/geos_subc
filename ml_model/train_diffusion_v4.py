@@ -478,12 +478,19 @@ def train(args, accelerator):
             target_norm = batch['y_target'].to(device) # [B, 4, H, W]
 
             if epoch == start_epoch and i == 0 and accelerator.is_main_process:
-                print(f"\n--- DEBUG | Train Batch 0 Diagnostics ---")
-                print(f"x_obs bounds         : {x_obs.min().item():.2f} to {x_obs.max().item():.2f}")
-                print(f"x_geos bounds        : {x_geos.min().item():.2f} to {x_geos.max().item():.2f}")
-                print(f"Final x_cond shape   : {x_cond.shape}")
-                print(f"Final x_cond bounds  : {x_cond.min().item():.2f} to {x_cond.max().item():.2f}")
-                print(f"Pure DataLoader Target Bounds: {target_norm.min().item():.2f} to {target_norm.max().item():.2f}")
+                print(f"\n--- DEBUG | Train Batch 0 Exhaustive Diagnostics ---")
+                # 1. Observational States
+                vars = ["SST", "SSS", "SM", "IVT", "Z500", "U250"]
+                for idx, vname in enumerate(vars):
+                    v_ch = idx * 4
+                    v_raw = x_obs[0, v_ch : v_ch + 4].min().item()
+                    v_max = x_obs[0, v_ch : v_ch + 4].max().item()
+                    print(f"  {vname:<4} Bounds (Norm) : {v_raw:>6.2f} to {v_max:>6.2f}")
+                
+                print(f"  GEOS Bounds (Norm) : {x_geos.min().item():>6.2f} to {x_geos.max().item():>6.2f}")
+                print(f"  Final x_cond shape : {x_cond.shape}")
+                print(f"  Final x_cond bounds: {x_cond.min().item():>6.2f} to {x_cond.max().item():>6.2f}")
+                print(f"  Target Bounds (Norm): {target_norm.min().item():>6.2f} to {target_norm.max().item():>6.2f}")
                 print(f"-----------------------------------------\n")
 
                 # --- Create Before/After Normalization Diagnostic Plot ---
