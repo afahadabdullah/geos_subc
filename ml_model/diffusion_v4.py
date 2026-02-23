@@ -20,16 +20,16 @@ class DiffusionModelV4(nn.Module):
             layers_per_block=2,
             block_out_channels=(128, 256, 512, 512),
             down_block_types=(
-                "DownBlock2D",       # H,W
-                "AttnDownBlock2D",   # H/2, W/2
-                "AttnDownBlock2D",   # H/4, W/4
-                "AttnDownBlock2D",   # H/8, W/8
+                "DownBlock2D",       # 181x360
+                "DownBlock2D",       # 90x180 (Optimized: Removed expensive high-res attention)
+                "AttnDownBlock2D",   # 45x90
+                "AttnDownBlock2D",   # 22x45
             ),
             up_block_types=(
-                "AttnUpBlock2D",     # H/8
-                "AttnUpBlock2D",     # H/4
-                "AttnUpBlock2D",     # H/2
-                "UpBlock2D",         # H
+                "AttnUpBlock2D",     # 22x45
+                "AttnUpBlock2D",     # 45x90
+                "UpBlock2D",         # 90x180
+                "UpBlock2D",         # 181x360
             ),
         )
 
