@@ -70,7 +70,7 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     
     if is_fast_recon and not is_test:
         # Ensemble-based Fast Reconstruction at t=500 for CRPS
-        num_ensemble = 5
+        num_ensemble = 10
         t_recon = 500
         t_batched = torch.full((vB,), t_recon, device=device, dtype=torch.long)
         
