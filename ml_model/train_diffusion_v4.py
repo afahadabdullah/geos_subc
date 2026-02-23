@@ -441,7 +441,15 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 3. Training Loop
     # ---------------------------------------------------------
+    epochs_done_this_run = 0
+    max_epochs_this_run = getattr(args, "epochs_per_run", float('inf'))
+
     for epoch in range(start_epoch, epochs):
+        if epochs_done_this_run >= max_epochs_this_run:
+            if accelerator.is_main_process:
+                print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
+            break
+        
         model.train()
         train_loss = 0.0
         pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
@@ -761,6 +769,9 @@ def train(args, accelerator):
                 top_str = ", ".join([f"E{m['epoch']}({m['crps']:.3f})" for m in top_models])
                 print(f"📍 Top 4 Models: [{top_str}]")
 
+        # Track progress for this execution session
+        epochs_done_this_run += 1
+
 def main():
     parser = argparse.ArgumentParser(description="Train or Test Diffusion Model V4")
     parser.add_argument("--config", type=str, default="ml_model/config_diffusion_v4.yaml")
@@ -768,6 +779,8 @@ def main():
     parser.add_argument("--ckpt", type=str, default="best_diffusion_ckpt_v4.pt", 
                         help="Checkpoint filename in output_dir to load for testing (default: best_diffusion_ckpt_v4.pt)")
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
+    parser.add_argument("--epochs-per-run", type=int, default=10000, 
+                        help="Number of epochs to run before exiting gracefully (useful for job chaining)")
     args = parser.parse_args()
 
     accelerator = Accelerator(split_batches=True)
