@@ -28,9 +28,14 @@ git pull
 # Ensure output directory exists
 mkdir -p ml_output_diffusion_v4
 
-echo "📈 Global Statistics check..."
-# Note: Stats are now forced robustly in the code, but we run the scan just in case
-python ml_model/calculate_global_stats_v4.py
+# Run Global Stats calculation (OVERRIDE: only if stats file doesn't exist)
+STATS_PATH="ml_model/v4_global_stats.pt"
+if [ ! -f "$STATS_PATH" ]; then
+    echo "📊 Stats file not found. Computing global statistics..."
+    python ml_model/calculate_global_stats_v4.py
+else
+    echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
+fi
 
 echo "🔥 Launching V4 Diffusion Training [12 Epochs this session]..."
 accelerate launch ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 12
