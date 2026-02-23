@@ -91,14 +91,6 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 1. Dataset Initialization & Global Stats Calculation
     # ---------------------------------------------------------
-    train_dataset = S2SHybridDataset(
-        data_root=config["data_dir"],
-        start_year=config["train_start_year"],
-        end_year=config["train_end_year"],
-        normalize=True,
-        preload=config.get("preload", False)
-    )
-    
     val_dataset = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=config["val_start_year"],
@@ -108,14 +100,25 @@ def train(args, accelerator):
     )
 
     from torch.utils.data import DataLoader
-    loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, 
-        num_workers=config.get("num_workers", 4), pin_memory=True
-    )
     val_loader = DataLoader(
         val_dataset, batch_size=batch_size, shuffle=False, 
         num_workers=config.get("num_workers", 4), pin_memory=True
     )
+
+    train_dataset = None
+    loader = None
+    if not args.test:
+        train_dataset = S2SHybridDataset(
+            data_root=config["data_dir"],
+            start_year=config["train_start_year"],
+            end_year=config["train_end_year"],
+            normalize=True,
+            preload=config.get("preload", False)
+        )
+        loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, 
+            num_workers=config.get("num_workers", 4), pin_memory=True
+        )
 
     # Calculate Global Min-Max for Target GPCP Precipitation
     stats_file = "ml_model/v4_global_stats.pt"
@@ -143,13 +146,18 @@ def train(args, accelerator):
     scheduler = CustomDiffusionScheduler(num_timesteps=1000, device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs * len(loader), eta_min=1e-6
-    )
-
-    model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
-        model, optimizer, loader, val_loader, lr_scheduler
-    )
+    if not args.test:
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs * len(loader), eta_min=1e-6
+        )
+        model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
+            model, optimizer, loader, val_loader, lr_scheduler
+        )
+    else:
+        # Test mode: only prepare model and val_loader
+        model, val_loader = accelerator.prepare(model, val_loader)
+        optimizer = None
+        lr_scheduler = None
 
     # Area weights
     lats = np.linspace(-90, 90, 181)
