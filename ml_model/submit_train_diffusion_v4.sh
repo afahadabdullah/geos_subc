@@ -6,7 +6,7 @@
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
 #SBATCH -t 48:00:00                  # Run time (hh:mm:ss)
-#SBATCH -A EAR24005                  # Project account
+#SBATCH -A ATM25008                  # Project account
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
 
