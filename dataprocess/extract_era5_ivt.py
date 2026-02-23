@@ -166,6 +166,13 @@ def process_era5_ivt(start_year=1999, end_year=2022, output_base_dir="/home1/113
             
             # 4. Interpolation to GEOS 1-degree grid
             print(f"Interpolating to GEOS 1-degree grid (181x360)...")
+            
+            # Robust coordinate alignment: convert -180/180 to 0/360 range if needed
+            if 'longitude' in ds_daily.coords:
+                print("  Aligning longitude convention...")
+                ds_daily = ds_daily.assign_coords(longitude=(ds_daily.longitude % 360))
+                ds_daily = ds_daily.sortby('longitude')
+                
             ds_interp = ds_daily.interp(latitude=target_lat, longitude=target_lon, method='linear')
             
             # 5. Save to Zarr

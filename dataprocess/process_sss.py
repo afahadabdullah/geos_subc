@@ -153,6 +153,12 @@ def process_year(year, output_dir=OUTPUT_DIR):
     if rename_dict:
         da_sss = da_sss.rename(rename_dict)
     
+    # Robust coordinate alignment: convert -180/180 to 0/360 range
+    if target_lon.name in da_sss.coords:
+        print(f"  Aligning longitude convention for {target_lon.name}...")
+        da_sss = da_sss.assign_coords({target_lon.name: (da_sss[target_lon.name] % 360)})
+        da_sss = da_sss.sortby(target_lon.name)
+    
     # Interpolate to GEOS grid
     da_sss_interp = da_sss.interp(
         {target_lat.name: target_lat, target_lon.name: target_lon},

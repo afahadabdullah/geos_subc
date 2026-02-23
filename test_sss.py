@@ -1,0 +1,10 @@
+import xarray as xr
+print("Loading SSS Zarr...")
+ds = xr.open_zarr("dataprocess/sss_weekly_1999.zarr", consolidated=False)
+print("--- DATASET INFO ---")
+print(ds)
+print("\n--- VARIABLE INFO ---")
+print(list(ds.data_vars))
+print(ds['sss'].values.shape)
+print("Min:", ds['sss'].min().item())
+print("Max:", ds['sss'].max().item())

@@ -148,22 +148,18 @@ def process_year(year, output_dir=OUTPUT_DIR):
     
     da_soil = ds_soil[soil_var]
     
-    # 3. Regrid to GEOS grid
-    print(f"  Regridding SoilW to GEOS 1° grid...")
-    
-    # Rename coords to match GEOS target for interpolation
-    rename_dict = {}
-    if s_lat != target_lat.name:
-        rename_dict[s_lat] = target_lat.name
-    if s_lon != target_lon.name:
-        rename_dict[s_lon] = target_lon.name
-    
     if rename_dict:
         da_soil = da_soil.rename(rename_dict)
     
-    # Check if we need to enforce 0-360 or -180-180 match
-    # Usually interp handles it if coordinates are aligned, but sometimes need rolling
-    # For now assume standard linear interp works
+    # 3. Regrid to GEOS grid
+    print(f"  Regridding SoilW to GEOS 1° grid...")
+    
+    # Robust coordinate alignment: convert -180/180 to 0/360 range
+    # This prevents the "half-world" NaN issue during interpolation.
+    if target_lon.name in da_soil.coords:
+        print(f"  Aligning longitude convention for {target_lon.name}...")
+        da_soil = da_soil.assign_coords({target_lon.name: (da_soil[target_lon.name] % 360)})
+        da_soil = da_soil.sortby(target_lon.name)
     
     # Interpolate to GEOS grid
     da_soil_interp = da_soil.interp(
