@@ -125,7 +125,7 @@ def train(args, accelerator):
     if not os.path.exists(stats_file):
         raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v4.py first!")
     
-    global_bounds = torch.load(stats_file)
+    global_bounds = torch.load(stats_file, weights_only=True)
     residual_min = global_bounds["residual_raw"]["min"]
     residual_max = global_bounds["residual_raw"]["max"]
     
@@ -187,7 +187,7 @@ def train(args, accelerator):
 
     if os.path.exists(ckpt_path):
         try:
-            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+            checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             # Unwrap for loading
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.load_state_dict(checkpoint['model'])
