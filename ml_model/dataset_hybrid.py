@@ -85,6 +85,18 @@ class S2SHybridDataset(Dataset):
                 has_ivt = os.path.exists(ivt_path)
                 has_z500u250 = os.path.exists(z500u250_path)
                 
+                # DIAGNOSTIC: Print once per data_root if files are missing
+                if year == self.years[0]:
+                    print(f"--- PATH CHECK: {self.data_root} ---")
+                    print(f"  GEOS: {'OK' if os.path.exists(geos_path) else 'MISSING'}")
+                    print(f"  GPCP: {'OK' if os.path.exists(gpcp_path) else 'MISSING'}")
+                    print(f"  SST : {'OK' if has_sst else 'MISSING'} ({os.path.basename(sst_path)})")
+                    print(f"  SSS : {'OK' if has_sss else 'MISSING'} ({os.path.basename(sss_path)})")
+                    print(f"  SM  : {'OK' if has_sm else 'MISSING'} ({os.path.basename(sm_path)})")
+                    print(f"  IVT : {'OK' if has_ivt else 'MISSING'} ({os.path.basename(ivt_path)})")
+                    print(f"  Z500: {'OK' if has_z500u250 else 'MISSING'} ({os.path.basename(z500u250_path)})")
+                    print("-----------------------------")
+                
                 n_samples = ds_geos.sizes['S']
                 init_dates = pd.to_datetime(ds_geos['S'].values)
                 
@@ -181,7 +193,10 @@ class S2SHybridDataset(Dataset):
         
         # 1. Load GEOS (Dynamic) -> (M, L, H, W)
         ds_geos = xr.open_zarr(meta["geos_path"], consolidated=False)
-        geos_data = ds_geos['pr'].isel(S=meta['s_idx']).values 
+        
+        # Robust Variable Detection: pr, precip, or PRECTOT
+        geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
+        geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
         ds_geos.close()
         
         geos_tensor = torch.from_numpy(geos_data).float()
