@@ -157,30 +157,37 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         
         recon_type = f"FastEnsembleCRPS (n={num_ensemble}, t=500)"
     else:
-        # Full Reverse Sampling (1000 steps)
-        latents = torch.randn((vB, 4, H, W), device=device)
-        for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Reverse Sampling", leave=False, disable=not accelerator.is_main_process):
-            t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
-            pred_noise = unwrapped_model(latents, fx_cond, t_batched)
-            latents = scheduler.step(pred_noise, t, latents)
-            
-        pred_target_norm = latents
+        # Full Reverse Sampling (1000 steps) with Mini-Ensemble (n=4)
+        num_ens_full = 4
+        ensemble_preds_full_norm = []
         
-        # Denormalization for full pred
-        denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+        for eidx in range(num_ens_full):
+            latents = torch.randn((vB, 4, H, W), device=device)
+            for t in tqdm(reversed(range(0, scheduler.num_timesteps)), 
+                          desc=f"Reverse Sampling [Member {eidx+1}/{num_ens_full}]", 
+                          leave=False, disable=not accelerator.is_main_process):
+                t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
+                pred_noise = unwrapped_model(latents, fx_cond, t_batched)
+                latents = scheduler.step(pred_noise, t, latents)
+            ensemble_preds_full_norm.append(latents)
+            
+        ensemble_preds_full_norm = torch.stack(ensemble_preds_full_norm) # [E, B, 4, H, W]
+        
+        # Denormalization
+        denorm_res_full_raw = ((ensemble_preds_full_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
         fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
         fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
         
-        full_pred = torch.clamp(fx_geos_raw + denorm_residual_raw, min=0.0)
+        ensemble_full_precip = torch.clamp(fx_geos_raw.unsqueeze(0) + denorm_res_full_raw, min=0.0)
         
         # Ground truth in physical units
         demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
         true_target_precip = torch.clamp(fx_geos_raw + demap_target_residual_raw, min=0.0)
         
-        # For full sampling, we use the single prediction for RMSE/CRPS
-        # (Though CRPS needs ensemble, we treat this as a 1-member ensemble for the metric score if needed)
-        val_metric = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item() # Use RMSE for full sample metric if needed
-        model_rmse = val_metric
+        # CRPS for full sampling (if n=4)
+        val_metric = compute_crps(ensemble_full_precip, true_target_precip, area_weights)
+        full_pred = ensemble_full_precip.mean(dim=0)
+        model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
         
         # Calculate GEOS Baseline Metrics
         geos_ens_raw = batch['geos_ens_raw'].to(device)
@@ -188,7 +195,7 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         geos_mean_raw = geos_ens_raw.mean(dim=1)
         geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
         
-        recon_type = "FullSampling"
+        recon_type = f"FullSampling (n={num_ens_full})"
 
     if accelerator.is_main_process:
         metric_name = "CRPS" if "CRPS" in recon_type else "RMSE"
