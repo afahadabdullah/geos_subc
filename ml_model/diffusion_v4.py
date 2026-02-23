@@ -85,3 +85,13 @@ class CustomDiffusionScheduler:
             t = t.to("cpu")
             
         return self.scheduler.step(model_output, t, sample).prev_sample
+
+    @torch.no_grad()
+    def reconstruct_x0(self, model_output, timestep, sample):
+        """
+        Calculates the x0 estimate (denoised image) from the noise prediction.
+        """
+        t = timestep
+        if torch.is_tensor(t):
+            t = t.to("cpu")
+        return self.scheduler.step(model_output, t, sample).pred_original_sample

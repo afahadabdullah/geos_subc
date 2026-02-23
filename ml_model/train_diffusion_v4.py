@@ -26,7 +26,7 @@ def get_area_weights(lats, device):
 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-                      residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=False):
+                      residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -45,14 +45,30 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     
     fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
     
-    # Sampling
-    latents = torch.randn((vB, 4, H, W), device=device)
-    for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Reverse Sampling", leave=False, disable=not accelerator.is_main_process):
-        t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
-        pred_noise = unwrapped_model(latents, fx_cond, t_batched)
-        latents = scheduler.step(pred_noise, t, latents)
+    if is_fast_recon and not is_test:
+        # 1-Step Reconstruction at t=500 (Representative middle of noise schedule)
+        t_recon = 500
+        noise = torch.randn_like(fb_target)
+        t_batched = torch.full((vB,), t_recon, device=device, dtype=torch.long)
         
-    pred_target_norm = latents
+        # Noise the ground truth target
+        x_t = scheduler.add_noise(fb_target, noise, t_batched)
+        
+        # Predict noise and reconstruct x0
+        pred_noise = unwrapped_model(x_t, fx_cond, t_batched)
+        pred_target_norm = scheduler.reconstruct_x0(pred_noise, t_batched, x_t)
+        
+        recon_type = "FastRecon (t=500)"
+    else:
+        # Full Reverse Sampling (1000 steps)
+        latents = torch.randn((vB, 4, H, W), device=device)
+        for t in tqdm(reversed(range(0, scheduler.num_timesteps)), desc="Reverse Sampling", leave=False, disable=not accelerator.is_main_process):
+            t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
+            pred_noise = unwrapped_model(latents, fx_cond, t_batched)
+            latents = scheduler.step(pred_noise, t, latents)
+            
+        pred_target_norm = latents
+        recon_type = "FullSampling"
     
     # Denormalization
     denorm_residual_raw = ((pred_target_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
@@ -72,7 +88,7 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     fb_rmse = torch.sqrt(v_weighted_mse).item()
     
     if accelerator.is_main_process:
-        print(f"Epoch {epoch} | Val FB Physical RMSE: {fb_rmse:.4f}")
+        print(f"Epoch {epoch} | Val FB Physical RMSE [{recon_type}]: {fb_rmse:.4f}")
         
     return fb_rmse, full_pred, true_target_precip
 
@@ -236,7 +252,8 @@ def train(args, accelerator):
         
         # Test mode runs a single full-range validation inference
         run_val_inference(start_epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, is_test=True)
+                         residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds, 
+                         is_test=True, is_fast_recon=False)
         return
 
     # ---------------------------------------------------------
@@ -479,12 +496,20 @@ def train(args, accelerator):
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v4.pt"))
 
         # ---------------------------------------------------------
-        # 4. Validation & Checkpointing
+        # 4. Validation & Checkpointing (Fast Reconstruction RMSE)
         # ---------------------------------------------------------
+        # Use fast reconstruction for the RMSE check to keep epochs moving quickly
+        is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0) or args.full_val
+        
         fb_rmse, full_pred, true_target_precip = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-            residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds
+            residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
+            is_test=is_plot_epoch, 
+            is_fast_recon=not is_plot_epoch
         )
+        
+        if is_plot_epoch and accelerator.is_main_process:
+            print(f"📊 Full Sampling Validation complete for Epoch {epoch}. Plotting results...")
         
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
@@ -537,6 +562,7 @@ def main():
     parser.add_argument("--test", action="store_true", help="Run in inference/test mode only")
     parser.add_argument("--ckpt", type=str, default="best_diffusion_ckpt_v4.pt", 
                         help="Checkpoint filename in output_dir to load for testing (default: best_diffusion_ckpt_v4.pt)")
+    parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     args = parser.parse_args()
 
     accelerator = Accelerator(split_batches=True)
