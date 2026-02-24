@@ -52,7 +52,7 @@ class S2SHybridDataset(Dataset):
                 self.bounds = torch.load(full_stats_path, weights_only=True)
                 print(f"Loaded strict global bounds from {full_stats_path}")
             else:
-                print(f"CRITICAL WARNING: {stats_file} not found. Normalization enabled but no bounds available!")
+                print(f"CRITICAL WARNING: {self.stats_file} not found. Normalization enabled but no bounds available!")
                 self.bounds = None
     def prepare_samples(self):
         """Indexing all available samples (aggregated by Init Date)."""

@@ -31,20 +31,30 @@ def compute_crps(ensemble_preds, target, area_weights):
     target: [B, C, H, W]
     area_weights: [1, 1, H, 1]
     """
-    E = ensemble_preds.shape[0]
+    # Mask NaNs to avoid CRPS:nan
+    # ensemble_preds: [E, B, C, H, W], target: [B, C, H, W]
+    mask = ~torch.isnan(target) # [B, C, H, W]
+    if not mask.any():
+        return 0.0
     
     # 1. Mean Absolute Error Term: 1/E sum |x_i - y|
-    mae_term = torch.abs(ensemble_preds - target.unsqueeze(0)).mean(dim=0) # [B, C, H, W]
+    diff = torch.abs(ensemble_preds - target.unsqueeze(0)) # [E, B, C, H, W]
+    mae_term = diff.mean(dim=0) # [B, C, H, W]
     
     # 2. Ensemble Spread Term: 1/(2E^2) sum sum |x_i - x_j|
     spread_term = torch.zeros_like(mae_term)
-    for i in range(E):
-        for j in range(E):
-            spread_term += torch.abs(ensemble_preds[i] - ensemble_preds[j])
-    spread_term = spread_term / (2 * E * E)
+    if E > 1:
+        for i in range(E):
+            for j in range(E):
+                spread_term += torch.abs(ensemble_preds[i] - ensemble_preds[j])
+        spread_term = spread_term / (2 * E * E)
     
     crps_map = mae_term - spread_term
-    weighted_crps = (crps_map * area_weights).mean()
+    # Zero out NaNs in map for weighted mean
+    crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
+    weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
+    
+    weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix=""):
@@ -182,17 +192,25 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
     full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
     
+    # Metric calculations with NaN handling
     # Calculate CRPS
-    # compute_crps expects [E, B, C, H, W] and [B, C, H, W]
     val_metric = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
     
-    # Calculate Model RMSE
-    model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
+    # Model RMSE (NaN-aware)
+    mse_map = (full_pred - true_target_precip)**2
+    mask = ~torch.isnan(mse_map)
+    if mask.any():
+        model_rmse = torch.sqrt((mse_map[mask] * area_weights.expand_as(mse_map)[mask]).sum() / (area_weights.expand_as(mse_map)[mask].sum() + 1e-8)).item()
+    else:
+        model_rmse = 0.0
     
-    # Calculate GEOS Baseline Metrics
-    # geos_ens_sample: [M=4, L=4, H, W]
+    # GEOS Baseline Metrics (NaN-aware)
     geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
-    geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
+    geos_mse_map = (geos_mean_raw - true_target_precip)**2
+    if mask.any():
+        geos_rmse = torch.sqrt((geos_mse_map[mask] * area_weights.expand_as(geos_mse_map)[mask]).sum() / (area_weights.expand_as(geos_mse_map)[mask].sum() + 1e-8)).item()
+    else:
+        geos_rmse = 0.0
     
     recon_type = f"SingleLead-Ensemble (n={num_ensemble})"
     if accelerator.is_main_process:
@@ -200,8 +218,10 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
         
     ai_residual = full_pred - geos_mean_raw
     
-    # We return them unsqueezed as [1, 4, H, W] for save_val_plot's [0] indexing
-    return val_metric, full_pred.unsqueeze(0), true_target_precip.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
+    # Clean up true_target_precip for save_val_plot (replace NaNs with 0 for imshow)
+    true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
+    
+    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
 
 def train(args, accelerator):
     device = accelerator.device
