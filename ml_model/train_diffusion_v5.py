@@ -38,6 +38,7 @@ def compute_crps(ensemble_preds, target, area_weights):
         return 0.0
     
     # 1. Mean Absolute Error Term: 1/E sum |x_i - y|
+    E = ensemble_preds.shape[0]
     diff = torch.abs(ensemble_preds - target.unsqueeze(0)) # [E, B, C, H, W]
     mae_term = diff.mean(dim=0) # [B, C, H, W]
     
