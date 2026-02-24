@@ -96,15 +96,22 @@ def detect_coords(ds):
 def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.png"):
     """Plot the lead 3 (Week -1) of a sample to verify coverage."""
     try:
-        plt.figure(figsize=(10, 5))
-        # sample is (L, Y, X)
         data = sample.isel(L=3).values # Most recent week
-        plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto')
+        v_min, v_max = np.nanmin(data), np.nanmax(data)
+        nan_count = np.isnan(data).sum()
+        total_pixels = data.size
+        nan_perc = (nan_count / total_pixels) * 100
+        
+        print(f"  📊 Diagnostic Plot Stats: Min={v_min:.4f}, Max={v_max:.4f}, NaNs={nan_count} ({nan_perc:.1f}%)")
+        
+        plt.figure(figsize=(12, 6))
+        # Use a colormap that makes NaNs visible (e.g., grey background)
+        plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto', cmap='viridis')
         plt.colorbar(label='Soil Moisture')
-        plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Verifying 0-360 Longitude Alignment)")
+        plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Min={v_min:.3f}, Max={v_max:.3f}, NaNs={nan_perc:.1f}%)")
         plt.xlabel("Longitude")
         plt.ylabel("Latitude")
-        plt.savefig(out_name)
+        plt.savefig(out_name, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  ✅ Saved verification plot to {out_name}")
     except Exception as e:
@@ -187,6 +194,13 @@ def process_year(year, output_dir=OUTPUT_DIR):
     
     da_soil = ds_soil[soil_var]
     
+    # 3. Regrid to GEOS grid
+    print(f"  Regridding SoilW to GEOS 1° grid...")
+    
+    # Check coords before regridding
+    print(f"  Source Lats: {da_soil[s_lat].values.min():.2f} to {da_soil[s_lat].values.max():.2f}")
+    print(f"  Source Lons: {da_soil[s_lon].values.min():.2f} to {da_soil[s_lon].values.max():.2f}")
+
     # Rename coords to match GEOS target for interpolation
     rename_dict = {}
     if s_lat != target_lat.name:
@@ -197,21 +211,26 @@ def process_year(year, output_dir=OUTPUT_DIR):
     if rename_dict:
         da_soil = da_soil.rename(rename_dict)
     
-    # 3. Regrid to GEOS grid
-    print(f"  Regridding SoilW to GEOS 1° grid...")
-    
     # Robust coordinate alignment: convert -180/180 -> 0/360 or vice versa to align exactly with target
     # This prevents the "half-world" NaN issue.
     if target_lon.name in da_soil.coords:
         print(f"  Aligning longitude convention to 0-360 range...")
         da_soil = da_soil.assign_coords({target_lon.name: (da_soil[target_lon.name] % 360)})
         da_soil = da_soil.sortby(target_lon.name)
+        print(f"  Aligned Source Lons: {da_soil[target_lon.name].values.min():.2f} to {da_soil[target_lon.name].values.max():.2f}")
     
     # Interpolate to GEOS grid
+    print(f"  Interpolating to Target Lat ({target_lat.values.min()}..{target_lat.values.max()}) and Lon ({target_lon.values.min()}..{target_lon.values.max()})...")
     da_soil_interp = da_soil.interp(
         {target_lat.name: target_lat, target_lon.name: target_lon},
         method='linear'
     )
+    
+    # Quick check after interpolation
+    # Note: Use a small sample to avoid full compute here, but since it's already daily, it's okay.
+    print(f"  Post-Interp Check (Lead week 0):")
+    sample_check = da_soil_interp.isel(time=0).values
+    print(f"    Min: {np.nanmin(sample_check):.4f}, Max: {np.nanmax(sample_check):.4f}, NaNs: {np.isnan(sample_check).sum()}")
     
     # 4. Compute 4 weekly means BEFORE each init date
     print(f"  Computing 4-weekly observed means for {len(init_dates)} init dates...")
