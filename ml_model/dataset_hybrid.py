@@ -160,32 +160,38 @@ class S2SHybridDataset(Dataset):
         for year in sorted(year_to_indices.keys()):
             indices = year_to_indices[year]
             
+            # Group these indices by initialization (s_idx)
+            init_to_indices = defaultdict(list)
+            for idx in indices:
+                init_to_indices[self.samples[idx]['s_idx']].append(idx)
+            
             # Open handles for this year
             handles = {}
-            # We use first sample of the year to get paths (they are uniform per year)
             m = self.samples[indices[0]]
-            
-            # Core files
             if m["geos_path"]: handles["geos"] = xr.open_zarr(m["geos_path"], consolidated=False)
             if m["gpcp_path"]: handles["gpcp"] = xr.open_zarr(m["gpcp_path"], consolidated=False)
-            
-            # Condition files
-            if m["sst_path"]: handles["sst"] = xr.open_zarr(m["sst_path"], consolidated=False)
-            if m["sss_path"]: handles["sss"] = xr.open_zarr(m["sss_path"], consolidated=False)
-            if m["sm_path"]:  handles["sm"]  = xr.open_zarr(m["sm_path"], consolidated=False)
-            if m["ivt_path"]: handles["ivt"] = xr.open_zarr(m["ivt_path"], consolidated=False)
+            if m["sst_path"]:  handles["sst"]  = xr.open_zarr(m["sst_path"], consolidated=False)
+            if m["sss_path"]:  handles["sss"]  = xr.open_zarr(m["sss_path"], consolidated=False)
+            if m["sm_path"]:   handles["sm"]   = xr.open_zarr(m["sm_path"], consolidated=False)
+            if m["ivt_path"]:  handles["ivt"]  = xr.open_zarr(m["ivt_path"], consolidated=False)
             if m["z500u250_path"]: handles["z500"] = xr.open_zarr(m["z500u250_path"], consolidated=False)
             
-            # Load all samples for this year
-            for idx in indices:
-                self.data_cache[idx] = self._load_sample(idx, handles=handles)
-                loaded_count += 1
-                if loaded_count % 100 == 0:
-                    print(f"Loaded {loaded_count}/{len(self.samples)}")
+            # Load all inits for this year
+            for s_idx in sorted(init_to_indices.keys()):
+                s_indices = init_to_indices[s_idx]
+                
+                # Load common features ONCE for all 4 leads
+                # We use the first lead sample to trigger the 'common' load
+                common_data = self._load_sample(s_indices[0], handles=handles, return_common_only=True)
+                
+                for idx in s_indices:
+                    self.data_cache[idx] = self._load_sample(idx, handles=handles, cached_common=common_data)
+                    loaded_count += 1
+                    if loaded_count % 100 == 0:
+                        print(f"Loaded {loaded_count}/{len(self.samples)}")
             
-            # Close handles for this year
-            for h in handles.values():
-                h.close()
+            # Close handles
+            for h in handles.values(): h.close()
                 
         print("Preloading complete.")
 
@@ -229,245 +235,231 @@ class S2SHybridDataset(Dataset):
         
         return self._load_sample(idx)
 
-    def _load_sample(self, idx, handles=None):
+    def _load_sample(self, idx, handles=None, cached_common=None, return_common_only=False):
         meta = self.samples[idx]
         
-        # Helper to get dataset (either from handles or by opening)
-        def get_ds(path, key):
-            if handles and key in handles:
-                return handles[key], False # Return handle, don't close
-            if path and os.path.exists(path):
-                return xr.open_zarr(path, consolidated=False), True # Return fresh ds, do close
-            return None, False
+        # If we have cached_common, we skip the heavy lifting
+        if cached_common is not None:
+            # We still need lead-specific parts
+            pass # Continue below to lead-specific part
+        else:
+            # Helper to get dataset (either from handles or by opening)
+            def get_ds(path, key):
+                if handles and key in handles:
+                    return handles[key], False # Return handle, don't close
+                if path and os.path.exists(path):
+                    return xr.open_zarr(path, consolidated=False), True # Return fresh ds, do close
+                return None, False
 
-        # 1. Load GEOS (Dynamic) -> (M, L, H, W)
-        ds_geos, close_geos = get_ds(meta["geos_path"], "geos")
-        if ds_geos is None: return None # Safety
-        
-        # Robust Variable Detection: pr, precip, or PRECTOT
-        geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
-        geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
-        if close_geos: ds_geos.close()
-        
-        geos_tensor = torch.from_numpy(geos_data).float()
-        if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
-            geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
+            # 1. Load GEOS (Dynamic) -> (M, L, H, W)
+            ds_geos, close_geos = get_ds(meta["geos_path"], "geos")
+            if ds_geos is None: return None # Safety
             
-        if geos_tensor.ndim == 3: 
-             geos_tensor = geos_tensor.unsqueeze(0)
-             
-        # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
-        geos_tensor = torch.clamp(geos_tensor, min=0.0)
-        
-        # Save raw ensemble for baseline metrics (M, L, H, W)
-        geos_ens_raw = geos_tensor.clone() 
-             
-        # Take the ensemble mean across the members for model conditioning
-        geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
-             
-        # Add Channel Dim for conditioning: (1, L, H, W) -> (1, 1, L, H, W)
-        geos_cond_tensor = geos_mean_tensor.unsqueeze(1) # [1, 1, L, H, W]
-        
-        # Standard pure copy of the mean for residual mapping (L, H, W)
-        pure_geos_mean_raw = geos_mean_tensor.squeeze(0) 
-        
-        if self.normalize and self.bounds is not None:
-            g_min = self.bounds["geos_raw"]["min"]
-            g_max = self.bounds["geos_raw"]["max"]
-            geos_cond_tensor = 2.0 * (torch.clamp(geos_cond_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
+            # Robust Variable Detection: pr, precip, or PRECTOT
+            geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
+            geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
+            if close_geos: ds_geos.close()
+            
+            geos_tensor = torch.from_numpy(geos_data).float()
+            if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
+                geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
+                
+            if geos_tensor.ndim == 3: 
+                 geos_tensor = geos_tensor.unsqueeze(0)
+                 
+            # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
+            geos_tensor = torch.clamp(geos_tensor, min=0.0)
+            
+            # Save raw ensemble for baseline metrics (M, L, H, W)
+            geos_ens_raw = geos_tensor.clone() 
+                 
+            # Take the ensemble mean across the members for model conditioning
+            geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
+                 
+            # Add Channel Dim for conditioning: (1, L, H, W) -> (1, 1, L, H, W)
+            geos_cond_tensor = geos_mean_tensor.unsqueeze(1) # [1, 1, L, H, W]
+            
+            # Standard pure copy of the mean for residual mapping (L, H, W)
+            pure_geos_mean_raw = geos_mean_tensor.squeeze(0) 
+            
+            if self.normalize and self.bounds is not None:
+                g_min = self.bounds["geos_raw"]["min"]
+                g_max = self.bounds["geos_raw"]["max"]
+                geos_cond_tensor = 2.0 * (torch.clamp(geos_cond_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
 
-        # 2. Load Obs (Static/State)
-        # SST (4, H, W)
-        # SST (4, H, W) - Ocean Data, Land Masked
-        sst_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
-        if meta["sst_path"]:
-            ds_sst, close_sst = get_ds(meta["sst_path"], "sst")
-            if ds_sst:
-                var_name = next((c for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature'] if c in ds_sst), None)
-                if var_name:
-                    v = ds_sst[var_name].isel(S=meta['s_idx']).values
-                    v = np.squeeze(v)
-                    if v.ndim == 3: sst_val = v
-                    elif v.ndim == 2: sst_val[:] = v 
-                if close_sst: ds_sst.close()
-        # Fill Land mask with 0.0 for SST
-        sst_val = np.nan_to_num(sst_val, nan=0.0)
+            # 2. Load Obs (Static/State)
+            # SST (4, H, W)
+            # SST (4, H, W) - Ocean Data, Land Masked
+            sst_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
+            if meta["sst_path"]:
+                ds_sst, close_sst = get_ds(meta["sst_path"], "sst")
+                if ds_sst:
+                    var_name = next((c for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature'] if c in ds_sst), None)
+                    if var_name:
+                        v = ds_sst[var_name].isel(S=meta['s_idx']).values
+                        v = np.squeeze(v)
+                        if v.ndim == 3: sst_val = v
+                        elif v.ndim == 2: sst_val[:] = v 
+                    if close_sst: ds_sst.close()
+            # Fill Land mask with 0.0 for SST
+            sst_val = np.nan_to_num(sst_val, nan=0.0)
+                
+            # SSS (4, H, W)
+            # SSS (4, H, W) - Ocean Data, Land Masked
+            sss_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
+            if meta["sss_path"]:
+                ds_sss, close_sss = get_ds(meta["sss_path"], "sss")
+                if ds_sss:
+                    var_name = next((c for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface'] if c in ds_sss), None)
+                    if var_name:
+                        v = ds_sss[var_name].isel(S=meta['s_idx']).values
+                        v = np.squeeze(v)
+                        if v.ndim == 3: sss_val = v
+                        elif v.ndim == 2: sss_val[:] = v
+                    if close_sss: ds_sss.close()
+            # Fill Land mask with 25.0 (min SSS)
+            sss_val = np.nan_to_num(sss_val, nan=25.0)
+            sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
+                
+            # Soil Moisture (4, H, W)
+            # Soil Moisture (4, H, W) - Land Data, Ocean Masked
+            sm_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
+            if meta["sm_path"]:
+                ds_sm, close_sm = get_ds(meta["sm_path"], "sm")
+                if ds_sm:
+                    var_name = next((c for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40'] if c in ds_sm), None)
+                    if var_name:
+                        v = ds_sm[var_name].isel(S=meta['s_idx']).values
+                        v = np.squeeze(v)
+                        if v.ndim == 3: sm_val = v
+                        elif v.ndim == 2: sm_val[:] = v
+                    if close_sm: ds_sm.close()
+            # Fill Ocean mask with 0.0 (Dry)
+            sm_val = np.nan_to_num(sm_val, nan=0.0)
+                
             
-        # SSS (4, H, W)
-        # SSS (4, H, W) - Ocean Data, Land Masked
-        sss_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
-        if meta["sss_path"]:
-            ds_sss, close_sss = get_ds(meta["sss_path"], "sss")
-            if ds_sss:
-                var_name = next((c for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface'] if c in ds_sss), None)
-                if var_name:
-                    v = ds_sss[var_name].isel(S=meta['s_idx']).values
-                    v = np.squeeze(v)
-                    if v.ndim == 3: sss_val = v
-                    elif v.ndim == 2: sss_val[:] = v
-                if close_sss: ds_sss.close()
-        # Fill Land mask with 25.0 (min SSS)
-        sss_val = np.nan_to_num(sss_val, nan=25.0)
-        sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
-            
-        # Soil Moisture (4, H, W)
-        # Soil Moisture (4, H, W) - Land Data, Ocean Masked
-        sm_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
-        if meta["sm_path"]:
-            ds_sm, close_sm = get_ds(meta["sm_path"], "sm")
-            if ds_sm:
-                var_name = next((c for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40'] if c in ds_sm), None)
-                if var_name:
-                    v = ds_sm[var_name].isel(S=meta['s_idx']).values
-                    v = np.squeeze(v)
-                    if v.ndim == 3: sm_val = v
-                    elif v.ndim == 2: sm_val[:] = v
-                if close_sm: ds_sm.close()
-        # Fill Ocean mask with 0.0 (Dry)
-        sm_val = np.nan_to_num(sm_val, nan=0.0)
-            
-        
-        # IVT (4, H, W)  — H=181(lat), W=360(lon)
-        ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
-        if meta.get("ivt_path"):
-            ds_ivt, close_ivt = get_ds(meta["ivt_path"], "ivt")
-            if ds_ivt:
-                v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
-                if v.ndim == 3:
-                    if v.shape[1] == 360 and v.shape[2] == 181:
-                        v = np.transpose(v, (0, 2, 1))
-                    ivt_val = v
-                elif v.ndim == 2:
-                    if v.shape[0] == 360 and v.shape[1] == 181:
-                        v = v.T
-                    ivt_val[:] = v
-                if close_ivt: ds_ivt.close()
-
-        # Z500 (4, H, W) & U250 (4, H, W)
-        z500_val = np.zeros((4, 181, 360), dtype=np.float32)
-        u250_val = np.zeros((4, 181, 360), dtype=np.float32)
-        if meta.get("z500u250_path"):
-            ds_zu, close_zu = get_ds(meta["z500u250_path"], "z500")
-            if ds_zu:
-                # Z500
-                z_var = next((c for c in ['z500', 'z', 'geopotential'] if c in ds_zu), None)
-                if z_var:
-                    v = ds_zu[z_var].isel(S=meta['s_idx']).values
+            # IVT (4, H, W)  — H=181(lat), W=360(lon)
+            ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
+            if meta.get("ivt_path"):
+                ds_ivt, close_ivt = get_ds(meta["ivt_path"], "ivt")
+                if ds_ivt:
+                    v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
                     if v.ndim == 3:
                         if v.shape[1] == 360 and v.shape[2] == 181:
                             v = np.transpose(v, (0, 2, 1))
-                        z500_val = v
+                        ivt_val = v
                     elif v.ndim == 2:
                         if v.shape[0] == 360 and v.shape[1] == 181:
                             v = v.T
-                        z500_val[:] = v
-                # Z500 clip: ERA5 geopotential is ~50,000 m2/s2, but if stored as meters it's ~5,000
-                # Clip at 0 to avoid land masks without destroying meter-scale data
-                z500_val = np.clip(z500_val, a_min=0.0, a_max=None)
-                # U250
-                u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
-                if u_var:
-                    v = ds_zu[u_var].isel(S=meta['s_idx']).values
-                    if v.ndim == 3:
-                        if v.shape[1] == 360 and v.shape[2] == 181:
-                            v = np.transpose(v, (0, 2, 1))
-                        u250_val = v
-                    elif v.ndim == 2:
-                        if v.shape[0] == 360 and v.shape[1] == 181:
-                            v = v.T
-                        u250_val[:] = v
-                if close_zu: ds_zu.close()
+                        ivt_val[:] = v
+                    if close_ivt: ds_ivt.close()
 
-        # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
-        # Mathematical Definition: Z* = Z - [Z], where [Z] is the Zonal Mean (mean over Longitude)
-        # zonal_mean: Average over Axis 2 (360 Longitude points) -> Result: (4, 181, 1)
-        zonal_mean = z500_val.mean(axis=2, keepdims=True) 
-        zonal_dev_val = z500_val - zonal_mean # (4, 181, 360)
+            # Z500 (4, H, W) & U250 (4, H, W)
+            z500_val = np.zeros((4, 181, 360), dtype=np.float32)
+            u250_val = np.zeros((4, 181, 360), dtype=np.float32)
+            if meta.get("z500u250_path"):
+                ds_zu, close_zu = get_ds(meta["z500u250_path"], "z500")
+                if ds_zu:
+                    # Z500
+                    z_var = next((c for c in ['z500', 'z', 'geopotential'] if c in ds_zu), None)
+                    if z_var:
+                        v = ds_zu[z_var].isel(S=meta['s_idx']).values
+                        if v.ndim == 3:
+                            if v.shape[1] == 360 and v.shape[2] == 181:
+                                v = np.transpose(v, (0, 2, 1))
+                            z500_val = v
+                        elif v.ndim == 2:
+                            if v.shape[0] == 360 and v.shape[1] == 181:
+                                v = v.T
+                            z500_val[:] = v
+                    # Z500 clip: ERA5 geopotential is ~50,000 m2/s2, but if stored as meters it's ~5,000
+                    # Clip at 0 to avoid land masks without destroying meter-scale data
+                    z500_val = np.clip(z500_val, a_min=0.0, a_max=None)
+                    # U250
+                    u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
+                    if u_var:
+                        v = ds_zu[u_var].isel(S=meta['s_idx']).values
+                        if v.ndim == 3:
+                            if v.shape[1] == 360 and v.shape[2] == 181:
+                                v = np.transpose(v, (0, 2, 1))
+                            u250_val = v
+                        elif v.ndim == 2:
+                            if v.shape[0] == 360 and v.shape[1] == 181:
+                                v = v.T
+                            u250_val[:] = v
+                    if close_zu: ds_zu.close()
 
-        # Fallback check: if Zonal Dev is all zeros but source Z500 was not, we have a math bug
-        if np.all(zonal_dev_val == 0) and np.any(z500_val != 0):
-             # This shouldn't happen with numpy, but good for stability
-             pass
+            # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
+            zonal_mean = z500_val.mean(axis=2, keepdims=True) 
+            zonal_dev_val = z500_val - zonal_mean # (4, 181, 360)
 
-        # Stack Obs along Channel dimension
-        # Obs: [SST(4), SSS(4), SM(4), IVT(4), ZonalDev(4), U250(4)] -> 24 channels
-        obs_stack = np.concatenate([sst_val, sss_val, sm_val,
-                                    ivt_val, zonal_dev_val, u250_val], axis=0) 
-        
-        if self.normalize and self.bounds is not None:
-            # Normalize Obs using Min-Max scaling to [-1, 1] range
-            def min_max_scale(val, vmin, vmax):
-                return 2.0 * (np.clip(val, vmin, vmax) - vmin) / (vmax - vmin + 1e-6) - 1.0
+            # Stack Obs along Channel dimension
+            obs_stack = np.concatenate([sst_val, sss_val, sm_val,
+                                        ivt_val, zonal_dev_val, u250_val], axis=0) 
+            
+            if self.normalize and self.bounds is not None:
+                def min_max_scale(val, vmin, vmax):
+                    return 2.0 * (np.clip(val, vmin, vmax) - vmin) / (vmax - vmin + 1e-6) - 1.0
 
-            obs_stack[0:4]   = min_max_scale(obs_stack[0:4],   self.bounds["sst"]["min"],  self.bounds["sst"]["max"])
-            obs_stack[4:8]   = min_max_scale(obs_stack[4:8],   self.bounds["sss"]["min"],  self.bounds["sss"]["max"])
-            obs_stack[8:12]  = min_max_scale(obs_stack[8:12],  self.bounds["sm"]["min"],   self.bounds["sm"]["max"])
-            obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.bounds["ivt"]["min"],  self.bounds["ivt"]["max"])
-            # Indices 16-20 are now Zonal Deviation instead of raw Z500
-            if "z500_zonal_dev" in self.bounds:
-                obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500_zonal_dev"]["min"], self.bounds["z500_zonal_dev"]["max"])
-            else:
-                # Fallback to absolute Z500 bounds if stats aren't updated yet (safety)
-                obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
-            obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
-        
-        obs_tensor = torch.from_numpy(obs_stack).float()
-        
-        if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
-            obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
-        
+                obs_stack[0:4]   = min_max_scale(obs_stack[0:4],   self.bounds["sst"]["min"],  self.bounds["sst"]["max"])
+                obs_stack[4:8]   = min_max_scale(obs_stack[4:8],   self.bounds["sss"]["min"],  self.bounds["sss"]["max"])
+                obs_stack[8:12]  = min_max_scale(obs_stack[8:12],  self.bounds["sm"]["min"],   self.bounds["sm"]["max"])
+                obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.bounds["ivt"]["min"],  self.bounds["ivt"]["max"])
+                if "z500_zonal_dev" in self.bounds:
+                    obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500_zonal_dev"]["min"], self.bounds["z500_zonal_dev"]["max"])
+                else:
+                    obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
+                obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
+            
+            obs_tensor = torch.from_numpy(obs_stack).float()
+            if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
+                obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
+
+            # Package common features
+            cached_common = {
+                "geos_cond": geos_cond_tensor,
+                "obs_tensor": obs_tensor,
+                "geos_ens_raw": geos_ens_raw,
+                "pure_geos_mean_raw": pure_geos_mean_raw
+            }
+            
+            if return_common_only:
+                return cached_common
+
+        # --- LEAD-SPECIFIC PART ---
         # 3. Load Target (GPCP)
         ds_gpcp, close_gpcp = get_ds(meta["gpcp_path"], "gpcp")
         if ds_gpcp:
-            # Robust GPCP detection
             gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
-            # Load the specific lead week (Y_target is now single channel)
             target_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
-            # Also load full 4-week raw for consistency in validation loops if needed (optional optimization)
             target_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
             if close_gpcp: ds_gpcp.close()
             
         target_tensor = torch.from_numpy(target_val_lead).float() # (H, W)
         target_raw_full = torch.from_numpy(target_val_raw_full).float() # (L=4, H, W)
         
-        # Handle NaNs and Fill Values in Target (both single and full)
-        if torch.isnan(target_tensor).any() or torch.isinf(target_tensor).any():
-             target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=100.0, neginf=0.0)
-        
-        if torch.isnan(target_raw_full).any() or torch.isinf(target_raw_full).any():
-             target_raw_full = torch.nan_to_num(target_raw_full, nan=0.0, posinf=100.0, neginf=0.0)
-             
-        # Clamp negative values to 0 (Handle interpolated fill values like -9999)
+        target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=100.0, neginf=0.0)
+        target_raw_full = torch.nan_to_num(target_raw_full, nan=0.0, posinf=100.0, neginf=0.0)
         target_tensor = torch.clamp(target_tensor, min=0.0)
         target_raw_full = torch.clamp(target_raw_full, min=0.0)
         
-        # Save absolute raw target for verification plots [H, W]
         target_raw_lead = target_tensor.clone()
         
         if self.normalize and self.bounds is not None:
-            # Tightened robust range for residuals to prevent outlier-driven instability
-            r_min = -30.0
-            r_max = 30.0
-            
-            # Extract mathematically sound linear residual for THE SPECIFIC LEAD
-            # pure_geos_mean_raw is (L, H, W)
-            residual_raw = target_tensor - pure_geos_mean_raw[meta['lead_idx']]
-            
-            # y_target becomes the purely normalized linear residual [-1, 1] for 1 channel
+            r_min, r_max = -30.0, 30.0
+            residual_raw = target_tensor - cached_common["pure_geos_mean_raw"][meta['lead_idx']]
             target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
         
-        # Add singleton channel dimension to target: (H, W) -> (1, H, W)
-        # This makes it compatible with UNet outputs of (B, 1, H, W)
         target_tensor = target_tensor.unsqueeze(0)
         target_raw_lead = target_raw_lead.unsqueeze(0)
 
         return {
-            "x_geos": geos_cond_tensor, # (1, 1, L, H, W) -> Contains weeks 1-4 context
-            "x_obs": obs_tensor,        # (24, H, W) -> Contains weeks 1-4 context (Rossby waves inside)
-            "y_target": target_tensor,  # (1, H, W) -> Single channel residual
-            "target_raw": target_raw_lead,   # (1, H, W) - Pure GPCP single week
-            "target_raw_full": target_raw_full, # (4, H, W)- Pure GPCP all weeks (useful for val plots)
+            "x_geos": cached_common["geos_cond"], 
+            "x_obs": cached_common["obs_tensor"],
+            "y_target": target_tensor,
+            "target_raw": target_raw_lead,
+            "target_raw_full": target_raw_full,
             "month": meta['date'].month,
-            "lead_idx": meta['lead_idx'], # (0, 1, 2, or 3)
-            "geos_ens_raw": geos_ens_raw # (M=4, L, H, W)
+            "lead_idx": meta['lead_idx'],
+            "geos_ens_raw": cached_common["geos_ens_raw"]
         }
