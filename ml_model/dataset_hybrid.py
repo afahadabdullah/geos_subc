@@ -21,12 +21,13 @@ class S2SHybridDataset(Dataset):
         
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
-                 transform=None, preload=False, normalize=True):
+                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt"):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
         self.preload = preload
         self.normalize = normalize
+        self.stats_file = stats_file
         
         # Load Stats
         if self.normalize:
@@ -45,10 +46,11 @@ class S2SHybridDataset(Dataset):
         # Load Z-Score stats for Precip
         self.bounds = None
         if self.normalize:
-            stats_file = os.path.join(os.path.dirname(__file__), "v4_global_stats.pt")
-            if os.path.exists(stats_file):
-                self.bounds = torch.load(stats_file, weights_only=True)
-                print(f"Loaded strict global bounds from {stats_file}")
+            # Look for stats relative to the file location
+            full_stats_path = os.path.join(os.path.dirname(__file__), self.stats_file)
+            if os.path.exists(full_stats_path):
+                self.bounds = torch.load(full_stats_path, weights_only=True)
+                print(f"Loaded strict global bounds from {full_stats_path}")
             else:
                 print(f"CRITICAL WARNING: {stats_file} not found. Normalization enabled but no bounds available!")
                 self.bounds = None

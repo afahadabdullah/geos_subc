@@ -224,7 +224,8 @@ def train(args, accelerator):
         start_year=config["val_start_year"],
         end_year=config["val_end_year"],
         normalize=True,
-        preload=config.get("preload", False)
+        preload=config.get("preload", False),
+        stats_file="v5_global_stats.pt"
     )
 
     from torch.utils.data import DataLoader
@@ -241,7 +242,8 @@ def train(args, accelerator):
             start_year=config["train_start_year"],
             end_year=config["train_end_year"],
             normalize=True,
-            preload=config.get("preload", False)
+            preload=config.get("preload", False),
+            stats_file="v5_global_stats.pt"
         )
         loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
