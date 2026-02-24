@@ -807,9 +807,8 @@ def train(args, accelerator):
             print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
         
         # Validate every epoch, but only do expensive plotting/sampling every 20 epochs.
-        # Validate every epoch, but only do expensive plotting/sampling every 20 epochs.
-        # Epoch 0 is skipped for "full" sampling to allow the user to see training progress immediately.
-        is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0 and epoch > 0) or args.full_val
+        # User requested: After epoch 6, do full validation (1000 steps). Before that, fast validation (1 step).
+        is_plot_epoch = (epoch > 6) or (epoch % config.get("plot_epochs", 20) == 0 and epoch > 0) or args.full_val
         
         val_outputs = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
