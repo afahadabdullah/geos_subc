@@ -806,9 +806,9 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
         
-        # Validate every epoch, but only do expensive plotting/sampling every 20 epochs.
-        # User requested: After epoch 6, do full validation (1000 steps). Before that, fast validation (1 step).
-        is_plot_epoch = (epoch > 6) or (epoch % config.get("plot_epochs", 20) == 0 and epoch > 0) or args.full_val
+        # Validate every epoch, but only do expensive plotting/sampling on new best or if forced.
+        # User requested: Fast validation first. After epoch 6, if new best, do full validation.
+        is_plot_epoch = args.full_val
         
         val_outputs = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
@@ -838,8 +838,8 @@ def train(args, accelerator):
                     print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_crps:.4f}")
                     best_val_crps = current_val_metric
 
-                # Trigger high-quality sampling if new BEST (absolute) found
-                if is_new_best and not is_plot_epoch:
+                # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
+                if is_new_best and epoch > 6 and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
                     best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res = run_val_inference(
                         epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
