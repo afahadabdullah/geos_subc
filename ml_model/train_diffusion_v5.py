@@ -141,6 +141,9 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
             
             # Lead Embedding (Match training logic)
             fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
+            f_lead_val = (fl_idx.float() / 1.5) - 1.0 # Scale [0, 3] to [-1, 1]
+            f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
+            
             fx_cat_geos = fx_geos.view(1, -1, H, W)             # [1, 4, H, W]
             
             fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel], dim=1) # [1, 31, H, W]

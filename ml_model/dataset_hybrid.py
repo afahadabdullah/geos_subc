@@ -309,7 +309,9 @@ class S2SHybridDataset(Dataset):
                     if v.shape[0] == 360 and v.shape[1] == 181:
                         v = v.T
                     z500_val[:] = v
-            z500_val = np.clip(z500_val, a_min=30000.0, a_max=None)
+            # Z500 clip: ERA5 geopotential is ~50,000 m2/s2, but if stored as meters it's ~5,000
+            # Clip at 0 to avoid land masks without destroying meter-scale data
+            z500_val = np.clip(z500_val, a_min=0.0, a_max=None)
             # U250
             u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
             if u_var:
