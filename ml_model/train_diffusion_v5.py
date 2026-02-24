@@ -911,7 +911,15 @@ def main():
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")
     args = parser.parse_args()
 
-    accelerator = Accelerator(split_batches=True)
+    # Load config to get mixed_precision setting
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+    mixed_precision = config.get("mixed_precision", "no")
+
+    accelerator = Accelerator(
+        split_batches=True,
+        mixed_precision=mixed_precision
+    )
     train(args, accelerator)
 
 if __name__ == "__main__":
