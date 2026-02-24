@@ -29,8 +29,14 @@ def calculate_global_stats(data_root, out_path="v4_global_stats.pt", batch_size=
     }
 
     def update_bounds(key, tensor):
-        b_min = tensor.min().item()
-        b_max = tensor.max().item()
+        # Flatten and remove NaNs to get true physical bounds
+        valid_data = tensor[~torch.isnan(tensor)]
+        if valid_data.numel() == 0:
+            return
+            
+        b_min = valid_data.min().item()
+        b_max = valid_data.max().item()
+        
         if b_min < bounds[key]["min"]: bounds[key]["min"] = b_min
         if b_max > bounds[key]["max"]: bounds[key]["max"] = b_max
 

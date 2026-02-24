@@ -228,60 +228,50 @@ class S2SHybridDataset(Dataset):
 
         # 2. Load Obs (Static/State)
         # SST (4, H, W)
-        sst_val = np.zeros((4, 181, 360), dtype=np.float32)
+        # SST (4, H, W) - Ocean Data, Land Masked
+        sst_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sst_path"]:
             ds_sst = xr.open_zarr(meta["sst_path"], consolidated=False)
-            
-            # Auto-detect target variable name
-            var_name = None
-            for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature', 'var']:
-                if c in ds_sst:
-                    var_name = c
-                    break
-                    
+            var_name = next((c for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature'] if c in ds_sst), None)
             if var_name:
                 v = ds_sst[var_name].isel(S=meta['s_idx']).values
                 v = np.squeeze(v)
                 if v.ndim == 3: sst_val = v
                 elif v.ndim == 2: sst_val[:] = v 
             ds_sst.close()
+        # Fill Land mask with 0.0 for SST
+        sst_val = np.nan_to_num(sst_val, nan=0.0)
             
         # SSS (4, H, W)
-        sss_val = np.zeros((4, 181, 360), dtype=np.float32)
+        # SSS (4, H, W) - Ocean Data, Land Masked
+        sss_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sss_path"]:
             ds_sss = xr.open_zarr(meta["sss_path"], consolidated=False)
-            
-            # Auto-detect target variable name 
-            var_name = None
-            for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface', 'var']:
-                if c in ds_sss:
-                    var_name = c
-                    break
-                    
+            var_name = next((c for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface'] if c in ds_sss), None)
             if var_name:
                 v = ds_sss[var_name].isel(S=meta['s_idx']).values
                 v = np.squeeze(v)
                 if v.ndim == 3: sss_val = v
                 elif v.ndim == 2: sss_val[:] = v
-            sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
             ds_sss.close()
+        # Fill Land mask with 25.0 (min SSS)
+        sss_val = np.nan_to_num(sss_val, nan=25.0)
+        sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
             
         # Soil Moisture (4, H, W)
-        sm_val = np.zeros((4, 181, 360), dtype=np.float32)
+        # Soil Moisture (4, H, W) - Land Data, Ocean Masked
+        sm_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sm_path"]:
             ds_sm = xr.open_zarr(meta["sm_path"], consolidated=False)
-            var_name = None
-            for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40']:
-                if c in ds_sm:
-                    var_name = c
-                    break
-                    
+            var_name = next((c for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40'] if c in ds_sm), None)
             if var_name:
                 v = ds_sm[var_name].isel(S=meta['s_idx']).values
                 v = np.squeeze(v)
                 if v.ndim == 3: sm_val = v
                 elif v.ndim == 2: sm_val[:] = v
             ds_sm.close()
+        # Fill Ocean mask with 0.0 (Dry)
+        sm_val = np.nan_to_num(sm_val, nan=0.0)
             
         
         # IVT (4, H, W)  — H=181(lat), W=360(lon)
