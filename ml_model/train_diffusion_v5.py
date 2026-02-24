@@ -136,7 +136,9 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     num_ensemble = 10 if is_fast_recon and not is_test else (5 if is_test else 1)
     ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
-    for eidx in range(num_ensemble):
+    # Progress bar for internal status during long samplings
+    ens_pbar = tqdm(range(num_ensemble), desc="  [Inference Ensemble]", disable=not accelerator.is_main_process, leave=False)
+    for eidx in ens_pbar:
         sample_weeks = []
         for lead_idx in range(4):
             # Extract lead-specific conditioning from the batch
@@ -796,11 +798,13 @@ def train(args, accelerator):
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v5.pt"))
 
-        # ---------------------------------------------------------
-        # 4. Validation & Checkpointing (Fast CRPS Ensemble)
-        # ---------------------------------------------------------
-        # Use fast reconstruction for the CRPS check to keep epochs moving quickly
-        is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0) or args.full_val
+        if accelerator.is_main_process:
+            print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
+        
+        # Validate every epoch, but only do expensive plotting/sampling every 20 epochs.
+        # Validate every epoch, but only do expensive plotting/sampling every 20 epochs.
+        # Epoch 0 is skipped for "full" sampling to allow the user to see training progress immediately.
+        is_plot_epoch = (epoch % config.get("plot_epochs", 20) == 0 and epoch > 0) or args.full_val
         
         val_outputs = run_val_inference(
             epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
