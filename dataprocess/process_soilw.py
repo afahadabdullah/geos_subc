@@ -12,6 +12,8 @@ import glob
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
+import dask
+import warnings
 
 # --- Configuration ---
 SOIL_BASE_DIR = "dataprocess/soil"
@@ -138,8 +140,9 @@ def process_year(year, output_dir=OUTPUT_DIR):
     
     # Diagnostic: Count valid data points in hemispheres
     # Americas/Western Hemisphere is roughly 180-360
-    v_east = (da_soil_padded.sel({lon_dim: slice(0, 180)}) > 0).sum().compute().item()
-    v_west = (da_soil_padded.sel({lon_dim: slice(180, 360)}) > 0).sum().compute().item()
+    with dask.config.set(scheduler='synchronous'):
+        v_east = (da_soil_padded.sel({lon_dim: slice(0, 180)}) > 0).sum().compute().item()
+        v_west = (da_soil_padded.sel({lon_dim: slice(180, 360)}) > 0).sum().compute().item()
     print(f"      Source Check: Valid points in East (0-180): {v_east}, West (180-360): {v_west}")
 
     # 4. Interpolation to GEOS Grid
@@ -150,7 +153,8 @@ def process_year(year, output_dir=OUTPUT_DIR):
     )
     
     # Quick check after interpolation
-    interp_check = da_soil_interp.isel(time=0).compute().values
+    with dask.config.set(scheduler='synchronous'):
+        interp_check = da_soil_interp.isel(time=0).compute().values
     print(f"      Post-Interp Check (Day 0): Min={np.nanmin(interp_check):.4f}, Max={np.nanmax(interp_check):.4f}, NaNs={np.isnan(interp_check).sum()}")
     
     if np.isnan(interp_check).all():
@@ -173,7 +177,8 @@ def process_year(year, output_dir=OUTPUT_DIR):
                 chunk = da_soil_interp.sel(time=slice(w_start, w_end))
                 if len(chunk.time) == 0:
                     valid = False; break
-                w_mean = chunk.mean(dim='time', skipna=True).squeeze().compute()
+                with dask.config.set(scheduler='synchronous'):
+                    w_mean = chunk.mean(dim='time', skipna=True).squeeze().compute()
                 weeks.append(w_mean)
             except Exception:
                 valid = False; break
@@ -195,7 +200,6 @@ def process_year(year, output_dir=OUTPUT_DIR):
     ds_out = xr.concat(processed_data, dim='S').assign_coords(S=init_dates)
     out_path = os.path.join(output_dir, f"soilw_weekly_{year}.zarr")
     print(f"  [5] Saving to {out_path}...")
-    import dask
     with dask.config.set(scheduler='synchronous'):
         ds_out.to_dataset(name='soilw').to_zarr(out_path, mode='w', zarr_format=3)
     
