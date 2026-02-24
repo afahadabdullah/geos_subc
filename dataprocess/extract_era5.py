@@ -63,9 +63,14 @@ def process_era5_yearly(start_year=1999, end_year=2022, output_base_dir="/home1/
             
             # 3. Interpolation to GEOS 1-degree grid
             print(f"Interpolating to GEOS 1-degree grid (181x360)...")
-            # Rename coordinates to match target if needed (ERA5: latitude/longitude)
-            # ds_daily already has latitude/longitude from ARCO-ERA5
-            ds_interp = ds_daily.interp(latitude=target_lat, longitude=target_lon, method='linear')
+            # Circular padding for longitude to bridge 0/360 seam
+            lon_dim = 'longitude'
+            ds_daily = ds_daily.sortby(lon_dim)
+            left_pad = ds_daily.isel({lon_dim: slice(-5, None)}).assign_coords({lon_dim: ds_daily[lon_dim].isel({lon_dim: slice(-5, None)}) - 360})
+            right_pad = ds_daily.isel({lon_dim: slice(0, 5)}).assign_coords({lon_dim: ds_daily[lon_dim].isel({lon_dim: slice(0, 5)}) + 360})
+            ds_padded = xr.concat([left_pad, ds_daily, right_pad], dim=lon_dim).sortby(lon_dim)
+
+            ds_interp = ds_padded.interp(latitude=target_lat, longitude=target_lon, method='linear')
             
             # 4. Save to Zarr
             print(f"Saving to {output_path}...")
