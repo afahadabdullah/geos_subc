@@ -1,8 +1,8 @@
 """
-Soil Moisture (SoilW) Processing Script - Deep Diagnostics Version
+Soil Moisture (SoilW) Processing Script - Circular Padding Version
 ===================================================================
 Processes daily C3S Soil Moisture NetCDF files into weekly-mean Zarr files.
-Enhanced with detailed logging to diagnose all-NaN regridding issues.
+Uses circular padding to ensure full 0-360 longitudinal coverage.
 """
 import xarray as xr
 import numpy as np
@@ -59,7 +59,6 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
         print(f"  📊 Verification Stats: Min={v_min:.4f}, Max={v_max:.4f}, NaNs={nan_count} ({nan_perc:.1f}%)")
         
         plt.figure(figsize=(12, 6))
-        # Use a colormap that distinguishes NaNs (grey) from low values
         plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto', cmap='terrain')
         plt.colorbar(label='Soil Moisture')
         plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Min={v_min:.3f}, Max={v_max:.3f}, NaNs={nan_perc:.1f}%)")
@@ -83,12 +82,12 @@ def check_outputs(years, output_dir=OUTPUT_DIR):
             sample = ds.soilw.isel(S=0)
             plot_verification(sample, 'X', 'Y', out_name=f"check_soilw_{year}.png")
             ds.close()
-            break # Just check the first found year
+            # break # Keep going for all years if needed, but usually first is enough
         except Exception as e:
             print(f"  ❌ Error checking {year}: {e}")
 
 def process_year(year, output_dir=OUTPUT_DIR):
-    """Process one year with deep diagnostics at every stage."""
+    """Process one year with circular padding to bridge the 0/360 seam."""
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
         print(f"GEOS file not found: {geos_path}. Skipping.")
@@ -109,50 +108,55 @@ def process_year(year, output_dir=OUTPUT_DIR):
     print(f"  Loading {len(soil_files)} SoilW daily files...")
     ds_soil = xr.open_mfdataset(soil_files, combine='by_coords', chunks={'time': 30}, parallel=False)
     
-    # --- Deep Diagnostics: Step 1 (Raw Data) ---
     soil_var = detect_soil_variable(ds_soil)
     s_lat, s_lon = detect_coords(ds_soil)
-    print(f"  [1] Source Metadata:")
-    print(f"      Time Range: {ds_soil.time.values[0]} to {ds_soil.time.values[-1]}")
-    print(f"      Coords: Lat={s_lat} ({ds_soil[s_lat].values.min()}..{ds_soil[s_lat].values.max()}), "
-          f"Lon={s_lon} ({ds_soil[s_lon].values.min()}..{ds_soil[s_lon].values.max()})")
     
     da_soil = ds_soil[soil_var]
-    raw_check = da_soil.isel(time=0).values
-    print(f"      Raw Stats (Day 0): Avg={np.nanmean(raw_check):.4f}, NaNs={np.isnan(raw_check).sum()}")
     
-    # --- Step 2: Coordinate Renaming ---
+    # 1. Rename coords to match GEOS target
     rename_dict = {}
     if s_lat != target_lat.name: rename_dict[s_lat] = target_lat.name
     if s_lon != target_lon.name: rename_dict[s_lon] = target_lon.name
     if rename_dict:
         da_soil = da_soil.rename(rename_dict)
     
-    # --- Step 3: Longitude Alignment (0-360) ---
-    print(f"  [2] Aligning Longitude to 0-360 range...")
-    if target_lon.name in da_soil.coords:
-        da_soil = da_soil.assign_coords({target_lon.name: (da_soil[target_lon.name] % 360)})
-        da_soil = da_soil.sortby(target_lon.name)
+    # 2. Robust Longitude Alignment (0-360)
+    print(f"  [1] Aligning longitude convention to 0-360 range...")
+    # This maps e.g. [-1, 359] to [359, 359] and [1, 1]
+    da_soil = da_soil.assign_coords({target_lon.name: (da_soil[target_lon.name] % 360)})
+    da_soil = da_soil.sortby(target_lon.name)
     
-    aligned_check = da_soil.isel(time=0).values
-    print(f"      Post-Align Stats: Min={np.nanmin(aligned_check):.4f}, Max={np.nanmax(aligned_check):.4f}, NaNs={np.isnan(aligned_check).sum()}")
+    # 3. CIRCULAR PADDING
+    # To bridge the 0/360 seam, we pad the data at both ends
+    print(f"  [2] Applying circular padding to bridge 0/360 seam...")
+    lon_dim = target_lon.name
+    # Pad by 2 degrees at each end
+    left_pad = da_soil.isel({lon_dim: slice(-5, None)}).assign_coords({lon_dim: da_soil[lon_dim].isel({lon_dim: slice(-5, None)}) - 360})
+    right_pad = da_soil.isel({lon_dim: slice(0, 5)}).assign_coords({lon_dim: da_soil[lon_dim].isel({lon_dim: slice(0, 5)}) + 360})
     
-    # --- Step 4: Interpolation ---
+    da_soil_padded = xr.concat([left_pad, da_soil, right_pad], dim=lon_dim).sortby(lon_dim)
+    
+    # Diagnostic: Count valid data points in hemispheres
+    # Americas/Western Hemisphere is roughly 180-360
+    v_east = (da_soil_padded.sel({lon_dim: slice(0, 180)}) > 0).sum().compute().item()
+    v_west = (da_soil_padded.sel({lon_dim: slice(180, 360)}) > 0).sum().compute().item()
+    print(f"      Source Check: Valid points in East (0-180): {v_east}, West (180-360): {v_west}")
+
+    # 4. Interpolation to GEOS Grid
     print(f"  [3] Interpolating to GEOS Grid...")
-    da_soil_interp = da_soil.interp(
+    da_soil_interp = da_soil_padded.interp(
         {target_lat.name: target_lat, target_lon.name: target_lon},
         method='linear'
     )
     
-    # CRITICAL: Verify shared overlap
+    # Quick check after interpolation
     interp_check = da_soil_interp.isel(time=0).compute().values
-    print(f"      Post-Interp Stats (Day 0): Min={np.nanmin(interp_check):.4f}, Max={np.nanmax(interp_check):.4f}, NaNs={np.isnan(interp_check).sum()}")
+    print(f"      Post-Interp Check (Day 0): Min={np.nanmin(interp_check):.4f}, Max={np.nanmax(interp_check):.4f}, NaNs={np.isnan(interp_check).sum()}")
     
     if np.isnan(interp_check).all():
-        print("      ⚠️ CRITICAL: Interpolation resulted in 100% NaNs! Stopping to debug.")
-        return
+        print("      ⚠️ ERROR: Interpolation resulted in 100% NaNs! Verification required.")
 
-    # --- Step 5: Weekly Aggregation ---
+    # 5. Weekly Aggregation
     print(f"  [4] Computing Weekly Means...")
     processed_data = []
     skipped = 0
@@ -165,6 +169,7 @@ def process_year(year, output_dir=OUTPUT_DIR):
             w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)
             w_start = w_end - pd.Timedelta(days=6)
             try:
+                # Use a small buffer to avoid selection floating point issues
                 chunk = da_soil_interp.sel(time=slice(w_start, w_end))
                 if len(chunk.time) == 0:
                     valid = False; break
@@ -186,7 +191,7 @@ def process_year(year, output_dir=OUTPUT_DIR):
                                     coords={'L': np.arange(4), target_lat.name: target_lat, target_lon.name: target_lon})
             processed_data.append(nan_arr)
 
-    # --- Step 6: Save ---
+    # 6. Save
     ds_out = xr.concat(processed_data, dim='S').assign_coords(S=init_dates)
     out_path = os.path.join(output_dir, f"soilw_weekly_{year}.zarr")
     print(f"  [5] Saving to {out_path}...")

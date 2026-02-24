@@ -140,16 +140,24 @@ def process_year(year, sst_dir=SST_DIR, output_dir=OUTPUT_DIR):
     
     # Rename coords to match GEOS target for interpolation
     rename_dict = {}
-    if sst_lat != target_lat.name:
-        rename_dict[sst_lat] = target_lat.name
-    if sst_lon != target_lon.name:
-        rename_dict[sst_lon] = target_lon.name
-    
+    if sst_lat != target_lat.name: rename_dict[sst_lat] = target_lat.name
+    if sst_lon != target_lon.name: rename_dict[sst_lon] = target_lon.name
     if rename_dict:
         da_sst = da_sst.rename(rename_dict)
     
+    # Robust Longitude Alignment (0-360)
+    lon_dim = target_lon.name
+    da_sst = da_sst.assign_coords({lon_dim: (da_sst[lon_dim] % 360)})
+    da_sst = da_sst.sortby(lon_dim)
+    
+    # CIRCULAR PADDING to bridge 0/360 seam
+    print(f"  Applying circular padding to bridge 0/360 seam...")
+    left_pad = da_sst.isel({lon_dim: slice(-5, None)}).assign_coords({lon_dim: da_sst[lon_dim].isel({lon_dim: slice(-5, None)}) - 360})
+    right_pad = da_sst.isel({lon_dim: slice(0, 5)}).assign_coords({lon_dim: da_sst[lon_dim].isel({lon_dim: slice(0, 5)}) + 360})
+    da_sst_padded = xr.concat([left_pad, da_sst, right_pad], dim=lon_dim).sortby(lon_dim)
+
     # Interpolate to GEOS grid
-    da_sst_interp = da_sst.interp(
+    da_sst_interp = da_sst_padded.interp(
         {target_lat.name: target_lat, target_lon.name: target_lon},
         method='linear'
     )
