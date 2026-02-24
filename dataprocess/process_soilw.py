@@ -93,6 +93,24 @@ def detect_coords(ds):
     return lat_name, lon_name
 
 
+def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.png"):
+    """Plot the lead 3 (Week -1) of a sample to verify coverage."""
+    try:
+        plt.figure(figsize=(10, 5))
+        # sample is (L, Y, X)
+        data = sample.isel(L=3).values # Most recent week
+        plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto')
+        plt.colorbar(label='Soil Moisture')
+        plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Verifying 0-360 Longitude Alignment)")
+        plt.xlabel("Longitude")
+        plt.ylabel("Latitude")
+        plt.savefig(out_name)
+        plt.close()
+        print(f"  ✅ Saved verification plot to {out_name}")
+    except Exception as e:
+        print(f"  Warning: Could not save verification plot: {e}")
+
+
 def process_year(year, output_dir=OUTPUT_DIR):
     """
     Process SoilW data for one year:
@@ -134,31 +152,11 @@ def process_year(year, output_dir=OUTPUT_DIR):
     # Load all into single dataset
     print(f"  Loading SoilW data...")
     try:
-        # Check time encoding issues, sometimes need decode_times=False manually if units weird
-        # But usually standard
-        # Disable parallel loading to avoid "can't start new thread" error
         ds_soil = xr.open_mfdataset(soil_files, combine='by_coords', chunks={'time': 30}, parallel=False)
     except Exception as e:
         print(f"  Error loading SoilW files: {e}")
         return
 
-def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.png"):
-    """Plot the first lead of a sample to verify coverage."""
-    try:
-        plt.figure(figsize=(10, 5))
-        # sample is (L, Y, X)
-        data = sample.isel(L=3).values # Most recent week
-        plt.imshow(data, origin='lower', extent=[0, 360, -90, 90], aspect='auto')
-        plt.colorbar(label='Soil Moisture')
-        plt.title(f"Diagnostic Plot: Week -1 Coverage\n(Verifying 0-360 Longitude Alignment)")
-        plt.xlabel("Longitude")
-        plt.ylabel("Latitude")
-        plt.savefig(out_name)
-        plt.close()
-        print(f"  ✅ Saved verification plot to {out_name}")
-    except Exception as e:
-        print(f"  Warning: Could not save verification plot: {e}")
-    
     # Detect variable and coordinate names
     soil_var = detect_soil_variable(ds_soil)
     s_lat, s_lon = detect_coords(ds_soil)
@@ -166,16 +164,23 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
     
     da_soil = ds_soil[soil_var]
     
+    # Rename coords to match GEOS target for interpolation
+    rename_dict = {}
+    if s_lat != target_lat.name:
+        rename_dict[s_lat] = target_lat.name
+    if s_lon != target_lon.name:
+        rename_dict[s_lon] = target_lon.name
+    
     if rename_dict:
         da_soil = da_soil.rename(rename_dict)
     
     # 3. Regrid to GEOS grid
     print(f"  Regridding SoilW to GEOS 1° grid...")
     
-    # Robust coordinate alignment: convert -180/180 to 0/360 range
-    # This prevents the "half-world" NaN issue during interpolation.
+    # Robust coordinate alignment: convert -180/180 -> 0/360 or vice versa to align exactly with target
+    # This prevents the "half-world" NaN issue.
     if target_lon.name in da_soil.coords:
-        print(f"  Aligning longitude convention for {target_lon.name}...")
+        print(f"  Aligning longitude convention to 0-360 range...")
         da_soil = da_soil.assign_coords({target_lon.name: (da_soil[target_lon.name] % 360)})
         da_soil = da_soil.sortby(target_lon.name)
     
@@ -198,8 +203,8 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
         
         for w in range(4):
             # Week offset from init date (going backwards)
-            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)  # End of this week
-            w_start = w_end - pd.Timedelta(days=6)                    # Start of this week
+            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)
+            w_start = w_end - pd.Timedelta(days=6)
             
             try:
                 chunk = da_soil_interp.sel(time=slice(w_start, w_end))
@@ -208,7 +213,6 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
                     break
                     
                 # Soil Moisture often has NaNs (oceans/mask). 
-                # Use mean(skipna=True), which is default for xarray
                 w_mean = chunk.mean(dim='time', skipna=True).squeeze().compute()
                 weeks.append(w_mean)
             except Exception:
@@ -220,7 +224,7 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
             sample = sample.assign_coords(L=np.arange(4))
             processed_data.append(sample)
             
-            # Diagnostic Plot for the very first valid sample
+            # Print success once
             if not plot_done:
                 plot_verification(sample, target_lon.name, target_lat.name)
                 plot_done = True
