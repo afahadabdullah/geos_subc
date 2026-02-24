@@ -521,9 +521,9 @@ def train(args, accelerator):
                 ivt_norm_sample = x_obs[sample_idx, 12].cpu().numpy()
                 ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
                 
-                # Channel 16: Z500
-                z500_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
-                z500_raw_sample = ((z500_norm_sample + 1.0) / 2.0) * (global_bounds["z500"]["max"] - global_bounds["z500"]["min"]) + global_bounds["z500"]["min"]
+                # Channel 16: Zonal Deviation (Rossby Waves)
+                zdev_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
+                zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
                 
                 # Channel 20: U250
                 u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
@@ -587,13 +587,13 @@ def train(args, accelerator):
                 axes[5, 1].set_title("Normalized IVT [-1, 1]")
                 fig.colorbar(im12, ax=axes[5, 1])
 
-                # Row 7: Z500
-                im13 = axes[6, 0].imshow(z500_raw_sample, cmap='magma')
-                axes[6, 0].set_title("Raw Z500")
+                # Row 7: Zonal Deviation (Rossby Waves)
+                im13 = axes[6, 0].imshow(zdev_raw_sample, cmap='RdBu_r', vmin=-3000, vmax=3000)
+                axes[6, 0].set_title("Raw Z500 Zonal Dev")
                 fig.colorbar(im13, ax=axes[6, 0])
                 
-                im14 = axes[6, 1].imshow(z500_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[6, 1].set_title("Normalized Z500 [-1, 1]")
+                im14 = axes[6, 1].imshow(zdev_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[6, 1].set_title("Normalized Z500 Zonal Dev [-1, 1]")
                 fig.colorbar(im14, ax=axes[6, 1])
 
                 # Row 8: U250
