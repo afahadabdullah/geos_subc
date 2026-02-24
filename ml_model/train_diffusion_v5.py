@@ -203,7 +203,10 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     mse_map = (full_pred - true_target_precip)**2
     mask = ~torch.isnan(mse_map)
     if mask.any():
-        model_rmse = torch.sqrt((mse_map[mask] * area_weights.expand_as(mse_map)[mask]).sum() / (area_weights.expand_as(mse_map)[mask].sum() + 1e-8)).item()
+        # area_weights is [1, 1, 181, 1], mse_map is [4, 181, 360]
+        # We need to provide a 3D view of area_weights to match mse_map for expand_as
+        aw_expanded = area_weights.view(1, 181, 1).expand_as(mse_map)
+        model_rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
     else:
         model_rmse = 0.0
     
@@ -211,7 +214,8 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
     geos_mse_map = (geos_mean_raw - true_target_precip)**2
     if mask.any():
-        geos_rmse = torch.sqrt((geos_mse_map[mask] * area_weights.expand_as(geos_mse_map)[mask]).sum() / (area_weights.expand_as(geos_mse_map)[mask].sum() + 1e-8)).item()
+        aw_expanded = area_weights.view(1, 181, 1).expand_as(geos_mse_map)
+        geos_rmse = torch.sqrt((geos_mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
     else:
         geos_rmse = 0.0
     
