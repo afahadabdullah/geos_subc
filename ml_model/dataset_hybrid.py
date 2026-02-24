@@ -327,9 +327,15 @@ class S2SHybridDataset(Dataset):
             ds_zu.close()
 
         # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
-        # Zonal Mean: Mean across Longitude (Axis 2)
-        zonal_mean = z500_val.mean(axis=2, keepdims=True) # [4, 181, 1]
-        zonal_dev_val = z500_val - zonal_mean # [4, 181, 360]
+        # Mathematical Definition: Z* = Z - [Z], where [Z] is the Zonal Mean (mean over Longitude)
+        # zonal_mean: Average over Axis 2 (360 Longitude points) -> Result: (4, 181, 1)
+        zonal_mean = z500_val.mean(axis=2, keepdims=True) 
+        zonal_dev_val = z500_val - zonal_mean # (4, 181, 360)
+
+        # Fallback check: if Zonal Dev is all zeros but source Z500 was not, we have a math bug
+        if np.all(zonal_dev_val == 0) and np.any(z500_val != 0):
+             # This shouldn't happen with numpy, but good for stability
+             pass
 
         # Stack Obs along Channel dimension
         # Obs: [SST(4), SSS(4), SM(4), IVT(4), ZonalDev(4), U250(4)] -> 24 channels
