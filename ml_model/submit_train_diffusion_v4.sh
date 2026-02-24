@@ -38,8 +38,8 @@ else
     echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
 fi
 
-echo "🔥 Launching V4 Diffusion Training [50 Epochs this session]..."
-accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 50
+echo "🔥 Launching V4 Diffusion Training [15 Epochs this session]..."
+accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_diffusion_v4.py --config ml_model/config_diffusion_v4.yaml --epochs-per-run 15
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
