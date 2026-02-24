@@ -386,23 +386,111 @@ def train(args, accelerator):
     # Pre-Training Diagnostics (Raw vs Normalized Bounds)
     # ---------------------------------------------------------
     if accelerator.is_main_process:
-        print("\n--- PRE-TRAINING DIAGNOSTICS: RAW vs NORMALIZED ---")
+        print("\n--- PRE-TRAINING VISUAL DIAGNOSTICS (Normalization Check) ---")
+        # Fetch one batch for diagnostics
+        batch = fixed_val_batch
+        x_geos = batch['x_geos'].to(device)
+        x_obs = batch['x_obs'].to(device)
+        target_norm = batch['y_target'].to(device)
+        lead_idx_tensor = batch['lead_idx'].to(device)
         
-        # Disable normalization briefly to fetch pure values
-        train_dataset.normalize = False
-        raw_sample = train_dataset[0]
+        # Take index 0, lead 1 for visualization
+        sample_idx = 0
+        lead_idx = 0
         
-        # Re-enable normalization to fetch mapped values
-        train_dataset.normalize = True
-        norm_sample = train_dataset[0]
+        # 1. Reverse Normalize GEOS
+        geos_norm_sample = x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy()
+        geos_raw_sample = ((geos_norm_sample + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
         
-        def print_bounds(name, raw_t, norm_t):
-            print(f"{name:<12} | RAW: [{raw_t.min():>8.4f}, {raw_t.max():>8.4f}] --> NORM: [{norm_t.min():>8.4f}, {norm_t.max():>8.4f}]")
-            
-        print_bounds("OBS Arrays", raw_sample['x_obs'], norm_sample['x_obs'])
-        print_bounds("GEOS Raw", raw_sample['x_geos'], norm_sample['x_geos'])
-        print_bounds("Target Raw", raw_sample['y_target'], norm_sample['y_target'])
-        print("---------------------------------------------------\n")
+        # 2. Reverse Normalize SST (Channel 0 of x_obs)
+        sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
+        sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
+        
+        # 3. Reverse Normalize Target Residual (Lead 0)
+        res_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
+        res_raw_sample = ((res_norm_sample + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+
+        # 4. Reverse Normalize Observational States
+        # SST(0-3), SSS(4-7), SM(8-11), IVT(12-15), ZDEV(16-19), U250(20-23)
+        sss_norm_sample = x_obs[sample_idx, 4].cpu().numpy()
+        sss_raw_sample = ((sss_norm_sample + 1.0) / 2.0) * (global_bounds["sss"]["max"] - global_bounds["sss"]["min"]) + global_bounds["sss"]["min"]
+        
+        sm_norm_sample = x_obs[sample_idx, 8].cpu().numpy()
+        sm_raw_sample = ((sm_norm_sample + 1.0) / 2.0) * (global_bounds["sm"]["max"] - global_bounds["sm"]["min"]) + global_bounds["sm"]["min"]
+        
+        ivt_norm_sample = x_obs[sample_idx, 12].cpu().numpy()
+        ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
+        
+        zdev_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
+        zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
+        
+        u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
+        u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
+
+        # 5. Raw GPCP (from dataset)
+        gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
+
+        fig, axes = plt.subplots(10, 2, figsize=(14, 40))
+        # Row 1-8 logic remains same...
+        im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
+        axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
+        fig.colorbar(im1, ax=axes[0, 0])
+        im2 = axes[0, 1].imshow(geos_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[0, 1].set_title("Normalized GEOS [-1, 1]")
+        fig.colorbar(im2, ax=axes[0, 1])
+        
+        im3 = axes[1, 0].imshow(res_raw_sample, cmap='RdBu_r')
+        axes[1, 0].set_title("Raw Residual (GPCP - GEOS)")
+        fig.colorbar(im3, ax=axes[1, 0])
+        im4 = axes[1, 1].imshow(res_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[1, 1].set_title("Normalized Residual [-1, 1]")
+        fig.colorbar(im4, ax=axes[1, 1])
+        
+        axes[2, 0].imshow(sst_raw_sample, cmap='viridis')
+        axes[2, 0].set_title("Raw SST")
+        axes[2, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[2, 1].set_title("Normalized SST [-1, 1]")
+        
+        axes[3, 0].imshow(sss_raw_sample, cmap='YlGnBu')
+        axes[3, 0].set_title("Raw SSS")
+        axes[3, 1].imshow(sss_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[3, 1].set_title("Normalized SSS [-1, 1]")
+        
+        axes[4, 0].imshow(sm_raw_sample, cmap='YlOrBr')
+        axes[4, 0].set_title("Raw SM")
+        axes[4, 1].imshow(sm_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[4, 1].set_title("Normalized SM [-1, 1]")
+        
+        axes[5, 0].imshow(ivt_raw_sample, cmap='cubehelix')
+        axes[5, 1].imshow(ivt_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        
+        im13 = axes[6, 0].imshow(zdev_raw_sample, cmap='RdBu_r', vmin=-3000, vmax=3000)
+        axes[6, 0].set_title("Raw Z500 Zonal Dev")
+        im14 = axes[6, 1].imshow(zdev_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[6, 1].set_title("Normalized Z500 Zonal Dev [-1, 1]")
+        
+        axes[7, 0].imshow(u250_raw_sample, cmap='coolwarm')
+        axes[7, 1].imshow(u250_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+
+        im17 = axes[8, 0].imshow(gpcp_raw_sample, cmap='Blues')
+        axes[8, 0].set_title("Raw GPCP (Pure Target)")
+        axes[8, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.", ha='center', va='center', transform=axes[8, 1].transAxes)
+        axes[8, 1].axis('off')
+
+        flat_geos = geos_raw_sample.flatten()
+        flat_gpcp = gpcp_raw_sample.flatten()
+        cc = np.corrcoef(flat_geos, flat_gpcp)[0, 1] if np.std(flat_geos) > 1e-6 else 0.0
+        
+        axes[9, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
+        axes[9, 0].set_title(f"Spatial Alignment | CC: {cc:.4f}")
+        axes[9, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
+        
+        plt.tight_layout()
+        diag_path = os.path.join(output_dir, "normalization_check.png")
+        plt.savefig(diag_path)
+        plt.close()
+        print(f"✅ Normalization diagnostic plot saved to {diag_path}!")
+        print(f"---------------------------------------------------\n")
     
     # ---------------------------------------------------------
     # Pre-Flight NaN Integrity Scan (SKIP IF RESUMING)
@@ -474,7 +562,7 @@ def train(args, accelerator):
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 1, H, W]
 
-            if epoch == start_epoch and i == 0 and accelerator.is_main_process:
+            if False: # [REDUNDANT: Moved to Pre-Training Section]
                 print(f"\n--- DEBUG | Train Batch 0 Exhaustive Diagnostics ---")
                 # 1. Observational States
                 # SST(0-3), SSS(4-7), SM(8-11), IVT(12-15), ZonalDev(16-19), U250(20-23)
