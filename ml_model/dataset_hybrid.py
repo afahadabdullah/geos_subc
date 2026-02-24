@@ -148,11 +148,45 @@ class S2SHybridDataset(Dataset):
 
     def _preload_data(self):
         print(f"Preloading {len(self.samples)} samples into RAM...")
-        self.data_cache = []
-        for i in range(len(self.samples)):
-            self.data_cache.append(self._load_sample(i))
-            if (i+1) % 100 == 0:
-                print(f"Loaded {i+1}/{len(self.samples)}")
+        self.data_cache = [None] * len(self.samples)
+        
+        # Group samples by year to reuse handles
+        from collections import defaultdict
+        year_to_indices = defaultdict(list)
+        for i, meta in enumerate(self.samples):
+            year_to_indices[meta['year']].append(i)
+            
+        loaded_count = 0
+        for year in sorted(year_to_indices.keys()):
+            indices = year_to_indices[year]
+            
+            # Open handles for this year
+            handles = {}
+            # We use first sample of the year to get paths (they are uniform per year)
+            m = self.samples[indices[0]]
+            
+            # Core files
+            if m["geos_path"]: handles["geos"] = xr.open_zarr(m["geos_path"], consolidated=False)
+            if m["gpcp_path"]: handles["gpcp"] = xr.open_zarr(m["gpcp_path"], consolidated=False)
+            
+            # Condition files
+            if m["sst_path"]: handles["sst"] = xr.open_zarr(m["sst_path"], consolidated=False)
+            if m["sss_path"]: handles["sss"] = xr.open_zarr(m["sss_path"], consolidated=False)
+            if m["sm_path"]:  handles["sm"]  = xr.open_zarr(m["sm_path"], consolidated=False)
+            if m["ivt_path"]: handles["ivt"] = xr.open_zarr(m["ivt_path"], consolidated=False)
+            if m["z500u250_path"]: handles["z500"] = xr.open_zarr(m["z500u250_path"], consolidated=False)
+            
+            # Load all samples for this year
+            for idx in indices:
+                self.data_cache[idx] = self._load_sample(idx, handles=handles)
+                loaded_count += 1
+                if loaded_count % 100 == 0:
+                    print(f"Loaded {loaded_count}/{len(self.samples)}")
+            
+            # Close handles for this year
+            for h in handles.values():
+                h.close()
+                
         print("Preloading complete.")
 
     def __len__(self):
@@ -174,7 +208,9 @@ class S2SHybridDataset(Dataset):
                      if prev_date in dates:
                          idx = list(dates).index(prev_date)
                          # Load 4 weeks of precip
-                         val = ds['precip'].isel(S=idx).values # (L, H, W)
+                         # Robust GPCP detection
+                         gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds), list(ds.data_vars)[0])
+                         val = ds[gpcp_var].isel(S=idx).values # (L, H, W)
                          ds.close()
                          return val
                  ds.close()
@@ -193,16 +229,25 @@ class S2SHybridDataset(Dataset):
         
         return self._load_sample(idx)
 
-    def _load_sample(self, idx):
+    def _load_sample(self, idx, handles=None):
         meta = self.samples[idx]
         
+        # Helper to get dataset (either from handles or by opening)
+        def get_ds(path, key):
+            if handles and key in handles:
+                return handles[key], False # Return handle, don't close
+            if path and os.path.exists(path):
+                return xr.open_zarr(path, consolidated=False), True # Return fresh ds, do close
+            return None, False
+
         # 1. Load GEOS (Dynamic) -> (M, L, H, W)
-        ds_geos = xr.open_zarr(meta["geos_path"], consolidated=False)
+        ds_geos, close_geos = get_ds(meta["geos_path"], "geos")
+        if ds_geos is None: return None # Safety
         
         # Robust Variable Detection: pr, precip, or PRECTOT
         geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
         geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
-        ds_geos.close()
+        if close_geos: ds_geos.close()
         
         geos_tensor = torch.from_numpy(geos_data).float()
         if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
@@ -236,14 +281,15 @@ class S2SHybridDataset(Dataset):
         # SST (4, H, W) - Ocean Data, Land Masked
         sst_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sst_path"]:
-            ds_sst = xr.open_zarr(meta["sst_path"], consolidated=False)
-            var_name = next((c for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature'] if c in ds_sst), None)
-            if var_name:
-                v = ds_sst[var_name].isel(S=meta['s_idx']).values
-                v = np.squeeze(v)
-                if v.ndim == 3: sst_val = v
-                elif v.ndim == 2: sst_val[:] = v 
-            ds_sst.close()
+            ds_sst, close_sst = get_ds(meta["sst_path"], "sst")
+            if ds_sst:
+                var_name = next((c for c in ['sst', 'SST', 'analysed_sst', 'sea_surface_temperature'] if c in ds_sst), None)
+                if var_name:
+                    v = ds_sst[var_name].isel(S=meta['s_idx']).values
+                    v = np.squeeze(v)
+                    if v.ndim == 3: sst_val = v
+                    elif v.ndim == 2: sst_val[:] = v 
+                if close_sst: ds_sst.close()
         # Fill Land mask with 0.0 for SST
         sst_val = np.nan_to_num(sst_val, nan=0.0)
             
@@ -251,14 +297,15 @@ class S2SHybridDataset(Dataset):
         # SSS (4, H, W) - Ocean Data, Land Masked
         sss_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sss_path"]:
-            ds_sss = xr.open_zarr(meta["sss_path"], consolidated=False)
-            var_name = next((c for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface'] if c in ds_sss), None)
-            if var_name:
-                v = ds_sss[var_name].isel(S=meta['s_idx']).values
-                v = np.squeeze(v)
-                if v.ndim == 3: sss_val = v
-                elif v.ndim == 2: sss_val[:] = v
-            ds_sss.close()
+            ds_sss, close_sss = get_ds(meta["sss_path"], "sss")
+            if ds_sss:
+                var_name = next((c for c in ['sss', 'SSS', 'sos', 'SOS', 'sea_surface_salinity', 's_surface'] if c in ds_sss), None)
+                if var_name:
+                    v = ds_sss[var_name].isel(S=meta['s_idx']).values
+                    v = np.squeeze(v)
+                    if v.ndim == 3: sss_val = v
+                    elif v.ndim == 2: sss_val[:] = v
+                if close_sss: ds_sss.close()
         # Fill Land mask with 25.0 (min SSS)
         sss_val = np.nan_to_num(sss_val, nan=25.0)
         sss_val = np.clip(sss_val, a_min=25.0, a_max=None)
@@ -267,14 +314,15 @@ class S2SHybridDataset(Dataset):
         # Soil Moisture (4, H, W) - Land Data, Ocean Masked
         sm_val = np.full((4, 181, 360), np.nan, dtype=np.float32)
         if meta["sm_path"]:
-            ds_sm = xr.open_zarr(meta["sm_path"], consolidated=False)
-            var_name = next((c for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40'] if c in ds_sm), None)
-            if var_name:
-                v = ds_sm[var_name].isel(S=meta['s_idx']).values
-                v = np.squeeze(v)
-                if v.ndim == 3: sm_val = v
-                elif v.ndim == 2: sm_val[:] = v
-            ds_sm.close()
+            ds_sm, close_sm = get_ds(meta["sm_path"], "sm")
+            if ds_sm:
+                var_name = next((c for c in ['sm', 'soil_moisture', 'soilw', 'swvl1', 'var40'] if c in ds_sm), None)
+                if var_name:
+                    v = ds_sm[var_name].isel(S=meta['s_idx']).values
+                    v = np.squeeze(v)
+                    if v.ndim == 3: sm_val = v
+                    elif v.ndim == 2: sm_val[:] = v
+                if close_sm: ds_sm.close()
         # Fill Ocean mask with 0.0 (Dry)
         sm_val = np.nan_to_num(sm_val, nan=0.0)
             
@@ -282,51 +330,53 @@ class S2SHybridDataset(Dataset):
         # IVT (4, H, W)  — H=181(lat), W=360(lon)
         ivt_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta.get("ivt_path"):
-            ds_ivt = xr.open_zarr(meta["ivt_path"], consolidated=False)
-            v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
-            if v.ndim == 3:
-                if v.shape[1] == 360 and v.shape[2] == 181:
-                    v = np.transpose(v, (0, 2, 1))
-                ivt_val = v
-            elif v.ndim == 2:
-                if v.shape[0] == 360 and v.shape[1] == 181:
-                    v = v.T
-                ivt_val[:] = v
-            ds_ivt.close()
+            ds_ivt, close_ivt = get_ds(meta["ivt_path"], "ivt")
+            if ds_ivt:
+                v = ds_ivt['ivt'].isel(S=meta['s_idx']).values
+                if v.ndim == 3:
+                    if v.shape[1] == 360 and v.shape[2] == 181:
+                        v = np.transpose(v, (0, 2, 1))
+                    ivt_val = v
+                elif v.ndim == 2:
+                    if v.shape[0] == 360 and v.shape[1] == 181:
+                        v = v.T
+                    ivt_val[:] = v
+                if close_ivt: ds_ivt.close()
 
         # Z500 (4, H, W) & U250 (4, H, W)
         z500_val = np.zeros((4, 181, 360), dtype=np.float32)
         u250_val = np.zeros((4, 181, 360), dtype=np.float32)
         if meta.get("z500u250_path"):
-            ds_zu = xr.open_zarr(meta["z500u250_path"], consolidated=False)
-            # Z500
-            z_var = next((c for c in ['z500', 'z', 'geopotential'] if c in ds_zu), None)
-            if z_var:
-                v = ds_zu[z_var].isel(S=meta['s_idx']).values
-                if v.ndim == 3:
-                    if v.shape[1] == 360 and v.shape[2] == 181:
-                        v = np.transpose(v, (0, 2, 1))
-                    z500_val = v
-                elif v.ndim == 2:
-                    if v.shape[0] == 360 and v.shape[1] == 181:
-                        v = v.T
-                    z500_val[:] = v
-            # Z500 clip: ERA5 geopotential is ~50,000 m2/s2, but if stored as meters it's ~5,000
-            # Clip at 0 to avoid land masks without destroying meter-scale data
-            z500_val = np.clip(z500_val, a_min=0.0, a_max=None)
-            # U250
-            u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
-            if u_var:
-                v = ds_zu[u_var].isel(S=meta['s_idx']).values
-                if v.ndim == 3:
-                    if v.shape[1] == 360 and v.shape[2] == 181:
-                        v = np.transpose(v, (0, 2, 1))
-                    u250_val = v
-                elif v.ndim == 2:
-                    if v.shape[0] == 360 and v.shape[1] == 181:
-                        v = v.T
-                    u250_val[:] = v
-            ds_zu.close()
+            ds_zu, close_zu = get_ds(meta["z500u250_path"], "z500")
+            if ds_zu:
+                # Z500
+                z_var = next((c for c in ['z500', 'z', 'geopotential'] if c in ds_zu), None)
+                if z_var:
+                    v = ds_zu[z_var].isel(S=meta['s_idx']).values
+                    if v.ndim == 3:
+                        if v.shape[1] == 360 and v.shape[2] == 181:
+                            v = np.transpose(v, (0, 2, 1))
+                        z500_val = v
+                    elif v.ndim == 2:
+                        if v.shape[0] == 360 and v.shape[1] == 181:
+                            v = v.T
+                        z500_val[:] = v
+                # Z500 clip: ERA5 geopotential is ~50,000 m2/s2, but if stored as meters it's ~5,000
+                # Clip at 0 to avoid land masks without destroying meter-scale data
+                z500_val = np.clip(z500_val, a_min=0.0, a_max=None)
+                # U250
+                u_var = next((c for c in ['u250', 'u', 'u_component_of_wind'] if c in ds_zu), None)
+                if u_var:
+                    v = ds_zu[u_var].isel(S=meta['s_idx']).values
+                    if v.ndim == 3:
+                        if v.shape[1] == 360 and v.shape[2] == 181:
+                            v = np.transpose(v, (0, 2, 1))
+                        u250_val = v
+                    elif v.ndim == 2:
+                        if v.shape[0] == 360 and v.shape[1] == 181:
+                            v = v.T
+                        u250_val[:] = v
+                if close_zu: ds_zu.close()
 
         # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
         # Mathematical Definition: Z* = Z - [Z], where [Z] is the Zonal Mean (mean over Longitude)
@@ -367,24 +417,29 @@ class S2SHybridDataset(Dataset):
             obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
         
         # 3. Load Target (GPCP)
-        ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)
-        # Robust GPCP detection
-        gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
-        # Load the specific lead week (Y_target is now single channel)
-        target_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
-        # Also load full 4-week raw for consistency in validation loops if needed (optional optimization)
-        target_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
-        ds_gpcp.close()
+        ds_gpcp, close_gpcp = get_ds(meta["gpcp_path"], "gpcp")
+        if ds_gpcp:
+            # Robust GPCP detection
+            gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
+            # Load the specific lead week (Y_target is now single channel)
+            target_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+            # Also load full 4-week raw for consistency in validation loops if needed (optional optimization)
+            target_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
+            if close_gpcp: ds_gpcp.close()
             
         target_tensor = torch.from_numpy(target_val_lead).float() # (H, W)
         target_raw_full = torch.from_numpy(target_val_raw_full).float() # (L=4, H, W)
         
-        # Handle NaNs and Fill Values in Target
+        # Handle NaNs and Fill Values in Target (both single and full)
         if torch.isnan(target_tensor).any() or torch.isinf(target_tensor).any():
              target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=100.0, neginf=0.0)
+        
+        if torch.isnan(target_raw_full).any() or torch.isinf(target_raw_full).any():
+             target_raw_full = torch.nan_to_num(target_raw_full, nan=0.0, posinf=100.0, neginf=0.0)
              
-        # Clamp negative values to 0
+        # Clamp negative values to 0 (Handle interpolated fill values like -9999)
         target_tensor = torch.clamp(target_tensor, min=0.0)
+        target_raw_full = torch.clamp(target_raw_full, min=0.0)
         
         # Save absolute raw target for verification plots [H, W]
         target_raw_lead = target_tensor.clone()
