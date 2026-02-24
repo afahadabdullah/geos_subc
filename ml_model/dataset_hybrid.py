@@ -238,19 +238,19 @@ class S2SHybridDataset(Dataset):
     def _load_sample(self, idx, handles=None, cached_common=None, return_common_only=False):
         meta = self.samples[idx]
         
+        # Helper to get dataset (either from handles or by opening)
+        def get_ds(path, key):
+            if handles and key in handles:
+                return handles[key], False # Return handle, don't close
+            if path and os.path.exists(path):
+                return xr.open_zarr(path, consolidated=False), True # Return fresh ds, do close
+            return None, False
+
         # If we have cached_common, we skip the heavy lifting
         if cached_common is not None:
             # We still need lead-specific parts
             pass # Continue below to lead-specific part
         else:
-            # Helper to get dataset (either from handles or by opening)
-            def get_ds(path, key):
-                if handles and key in handles:
-                    return handles[key], False # Return handle, don't close
-                if path and os.path.exists(path):
-                    return xr.open_zarr(path, consolidated=False), True # Return fresh ds, do close
-                return None, False
-
             # 1. Load GEOS (Dynamic) -> (M, L, H, W)
             ds_geos, close_geos = get_ds(meta["geos_path"], "geos")
             if ds_geos is None: return None # Safety
