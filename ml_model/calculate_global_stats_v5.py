@@ -22,11 +22,10 @@ def calculate_global_stats(data_root, out_path="v5_global_stats.pt", batch_size=
         "sss": {"min": float('inf'), "max": float('-inf')},
         "sm": {"min": float('inf'), "max": float('-inf')},
         "ivt": {"min": float('inf'), "max": float('-inf')},
-        "z500": {"min": float('inf'), "max": float('-inf')},
         "u250": {"min": float('inf'), "max": float('-inf')},
+        "z500_zonal_dev": {"min": float('inf'), "max": float('-inf')},
         "geos_raw": {"min": float('inf'), "max": float('-inf')},
-        "residual_raw": {"min": float('inf'), "max": float('-inf')},
-        "z500_zonal_dev": {"min": float('inf'), "max": float('-inf')}
+        "residual_raw": {"min": float('inf'), "max": float('-inf')}
     }
 
     def update_bounds(key, tensor):
@@ -51,14 +50,14 @@ def calculate_global_stats(data_root, out_path="v5_global_stats.pt", batch_size=
             sss_b = x_obs[:, 4:8, :, :].clamp(min=25.0) # Physical baseline to avoid Land Masks
             sm_b = x_obs[:, 8:12, :, :]
             ivt_b = x_obs[:, 12:16, :, :]
-            z500_b = x_obs[:, 16:20, :, :].clamp(min=30000.0) # Physical baseline to avoid 0.0 masks
+            zdev_b = x_obs[:, 16:20, :, :] # V5.1 Swap: Z500 replaced by Zonal Deviation
             u250_b = x_obs[:, 20:24, :, :]
             
             update_bounds("sst", sst_b)
             update_bounds("sss", sss_b)
             update_bounds("sm", sm_b)
             update_bounds("ivt", ivt_b)
-            update_bounds("z500", z500_b)
+            update_bounds("z500_zonal_dev", zdev_b)
             update_bounds("u250", u250_b)
 
             # 2. GEOS Forecast [B, 1, 1, L, H, W]
@@ -72,10 +71,6 @@ def calculate_global_stats(data_root, out_path="v5_global_stats.pt", batch_size=
             geos_raw = x_geos.squeeze(1).squeeze(1) # [B, L, H, W]
             residual_raw = y_target - geos_raw
             update_bounds("residual_raw", residual_raw)
-
-            # 4. Zonal Deviation (Rossby Waves)
-            z_dev = batch['x_zonal_dev']
-            update_bounds("z500_zonal_dev", z_dev)
             
             if i == 0:
                 print(f"\n--- BATCH 0 DIAGNOSTICS ---")
@@ -83,16 +78,15 @@ def calculate_global_stats(data_root, out_path="v5_global_stats.pt", batch_size=
                 print(f"SSS  Raw  : Min {sss_b.min().item():.4f} | Max {sss_b.max().item():.4f}")
                 print(f"SM   Raw  : Min {sm_b.min().item():.4f} | Max {sm_b.max().item():.4f}")
                 print(f"IVT  Raw  : Min {ivt_b.min().item():.4f} | Max {ivt_b.max().item():.4f}")
-                print(f"Z500 Raw  : Min {z500_b.min().item():.4f} | Max {z500_b.max().item():.4f}")
+                print(f"ZDEV Raw  : Min {zdev_b.min().item():.4f} | Max {zdev_b.max().item():.4f}")
                 print(f"U250 Raw  : Min {u250_b.min().item():.4f} | Max {u250_b.max().item():.4f}")
                 print(f"GEOS Raw  : Min {x_geos.min().item():.4f} | Max {x_geos.max().item():.4f}")
                 print(f"RESID Raw : Min {residual_raw.min().item():.4f} | Max {residual_raw.max().item():.4f}")
-                print(f"ZDEV Raw  : Min {z_dev.min().item():.4f} | Max {z_dev.max().item():.4f}")
                 print(f"---------------------------\n")
             
             # Force Memory Cleanup to prevent OOM
-            del x_obs, x_geos, y_target, geos_raw, residual_raw, z_dev, batch
-            del sst_b, sss_b, sm_b, ivt_b, z500_b, u250_b
+            del x_obs, x_geos, y_target, geos_raw, residual_raw, zdev_b, batch
+            del sst_b, sss_b, sm_b, ivt_b, u250_b
             gc.collect()
 
     print("\n==================================")
