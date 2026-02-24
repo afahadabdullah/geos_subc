@@ -17,7 +17,9 @@ def check_val_nans(data_root="dataprocess"):
         
         if os.path.exists(geos_path):
             ds_geos = xr.open_zarr(geos_path, consolidated=False)
-            precip_geos = ds_geos['precip'].values
+            # Match robust detection in dataset_hybrid.py
+            geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
+            precip_geos = ds_geos[geos_var].values
             nan_count = np.isnan(precip_geos).sum()
             total = precip_geos.size
             print(f"  GEOS: NaNs = {nan_count} / {total} ({100*nan_count/total:.2f}%)")
@@ -27,9 +29,9 @@ def check_val_nans(data_root="dataprocess"):
 
         if os.path.exists(gpcp_path):
             ds_gpcp = xr.open_zarr(gpcp_path, consolidated=False)
-            # Use data variable 'precip'
-            var_name = 'precip' if 'precip' in ds_gpcp else list(ds_gpcp.data_vars)[0]
-            precip_gpcp = ds_gpcp[var_name].values
+            # Robust GPCP detection
+            gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
+            precip_gpcp = ds_gpcp[gpcp_var].values
             nan_count = np.isnan(precip_gpcp).sum()
             total = precip_gpcp.size
             print(f"  GPCP: NaNs = {nan_count} / {total} ({100*nan_count/total:.2f}%)")

@@ -368,10 +368,12 @@ class S2SHybridDataset(Dataset):
         
         # 3. Load Target (GPCP)
         ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)
+        # Robust GPCP detection
+        gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
         # Load the specific lead week (Y_target is now single channel)
-        target_val_lead = ds_gpcp['precip'].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+        target_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
         # Also load full 4-week raw for consistency in validation loops if needed (optional optimization)
-        target_val_raw_full = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
+        target_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
         ds_gpcp.close()
             
         target_tensor = torch.from_numpy(target_val_lead).float() # (H, W)
