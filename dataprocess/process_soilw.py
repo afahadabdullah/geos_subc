@@ -111,6 +111,29 @@ def plot_verification(sample, lon_name, lat_name, out_name="sample_soilw_check.p
         print(f"  Warning: Could not save verification plot: {e}")
 
 
+def check_outputs(years, output_dir=OUTPUT_DIR):
+    """Read processed Zarr files and plot the first sample for verification."""
+    print(f"\nVerifying SoilW Zarr files in {output_dir}...")
+    for year in years:
+        out_path = os.path.join(output_dir, f"soilw_weekly_{year}.zarr")
+        if not os.path.exists(out_path):
+            print(f"  ❌ File not found: {out_path}")
+            continue
+        
+        try:
+            ds = xr.open_zarr(out_path, consolidated=False)
+            print(f"  Checking {year}: {out_path} (Shape: {ds.soilw.shape})")
+            
+            # Use the first sample for plotting
+            sample = ds.soilw.isel(S=0)
+            plot_verification(sample, 'X', 'Y', out_name=f"check_soilw_{year}.png")
+            ds.close()
+            # We only need to check one file/sample typically to verify convention
+            break 
+        except Exception as e:
+            print(f"  ❌ Error checking {year}: {e}")
+
+
 def process_year(year, output_dir=OUTPUT_DIR):
     """
     Process SoilW data for one year:
@@ -264,12 +287,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process C3S SoilW → weekly Zarr")
     parser.add_argument("--years", type=int, nargs="+", default=None,
                         help="Specific years to process. Default: 1999-2016")
+    parser.add_argument("--check", action="store_true", help="Check existing Zarr files without reprocessing")
     args = parser.parse_args()
     
     years = args.years if args.years else list(range(1999, 2017))
     
-    print(f"Processing Soil Moisture for years: {years}")
-    for year in years:
-        process_year(year)
+    if args.check:
+        check_outputs(years)
+    else:
+        print(f"Processing Soil Moisture for years: {years}")
+        for year in years:
+            process_year(year)
     
-    print(f"\nAll done! SoilW weekly files saved to {OUTPUT_DIR}/")
+    print(f"\nAll done!")
