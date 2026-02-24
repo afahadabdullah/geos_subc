@@ -102,19 +102,22 @@ class S2SHybridDataset(Dataset):
                 
                 for s_idx, s_date in enumerate(init_dates):
                     all_init_dates.append(s_date)
-                    samples_tmp.append({
-                        "year": year,
-                        "s_idx": s_idx,
-                        "date": s_date,
-                        "s_key": str(s_date),
-                        "geos_path": geos_path,
-                        "gpcp_path": gpcp_path,
-                        "sst_path": sst_path if has_sst else None,
-                        "sss_path": sss_path if has_sss else None,
-                        "sm_path": sm_path if has_sm else None,
-                        "ivt_path": ivt_path if has_ivt else None,
-                        "z500u250_path": z500u250_path if has_z500u250 else None
-                    })
+                    # Every initialization has 4 leads (weeks 1-4)
+                    for lead_idx in range(4):
+                        samples_tmp.append({
+                            "year": year,
+                            "s_idx": s_idx,
+                            "lead_idx": lead_idx, # NEW: Track specific lead
+                            "date": s_date,
+                            "s_key": str(s_date),
+                            "geos_path": geos_path,
+                            "gpcp_path": gpcp_path,
+                            "sst_path": sst_path if has_sst else None,
+                            "sss_path": sss_path if has_sss else None,
+                            "sm_path": sm_path if has_sm else None,
+                            "ivt_path": ivt_path if has_ivt else None,
+                            "z500u250_path": z500u250_path if has_z500u250 else None
+                        })
                 
                 ds_geos.close()
                 
@@ -321,10 +324,15 @@ class S2SHybridDataset(Dataset):
                     u250_val[:] = v
             ds_zu.close()
 
+        # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
+        # Zonal Mean: Mean across Longitude (Axis 2)
+        zonal_mean = z500_val.mean(axis=2, keepdims=True) # [4, 181, 1]
+        zonal_dev_val = z500_val - zonal_mean # [4, 181, 360]
+
         # Stack Obs along Channel dimension
-        # Obs: [SST(4), SSS(4), SM(4), IVT(4), Z500(4), U250(4)] -> 24 channels
+        # Obs: [SST(4), SSS(4), SM(4), IVT(4), ZonalDev(4), U250(4)] -> 24 channels
         obs_stack = np.concatenate([sst_val, sss_val, sm_val,
-                                    ivt_val, z500_val, u250_val], axis=0) 
+                                    ivt_val, zonal_dev_val, u250_val], axis=0) 
         
         if self.normalize and self.bounds is not None:
             # Normalize Obs using Min-Max scaling to [-1, 1] range
@@ -335,7 +343,12 @@ class S2SHybridDataset(Dataset):
             obs_stack[4:8]   = min_max_scale(obs_stack[4:8],   self.bounds["sss"]["min"],  self.bounds["sss"]["max"])
             obs_stack[8:12]  = min_max_scale(obs_stack[8:12],  self.bounds["sm"]["min"],   self.bounds["sm"]["max"])
             obs_stack[12:16] = min_max_scale(obs_stack[12:16], self.bounds["ivt"]["min"],  self.bounds["ivt"]["max"])
-            obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
+            # Indices 16-20 are now Zonal Deviation instead of raw Z500
+            if "z500_zonal_dev" in self.bounds:
+                obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500_zonal_dev"]["min"], self.bounds["z500_zonal_dev"]["max"])
+            else:
+                # Fallback to absolute Z500 bounds if stats aren't updated yet (safety)
+                obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
             obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
         
         obs_tensor = torch.from_numpy(obs_stack).float()
@@ -345,10 +358,14 @@ class S2SHybridDataset(Dataset):
         
         # 3. Load Target (GPCP)
         ds_gpcp = xr.open_zarr(meta["gpcp_path"], consolidated=False)
-        target_val = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
+        # Load the specific lead week (Y_target is now single channel)
+        target_val_lead = ds_gpcp['precip'].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+        # Also load full 4-week raw for consistency in validation loops if needed (optional optimization)
+        target_val_raw_full = ds_gpcp['precip'].isel(S=meta['s_idx']).values 
         ds_gpcp.close()
             
-        target_tensor = torch.from_numpy(target_val).float()
+        target_tensor = torch.from_numpy(target_val_lead).float() # (H, W)
+        target_raw_full = torch.from_numpy(target_val_raw_full).float() # (L=4, H, W)
         
         # Handle NaNs and Fill Values in Target
         if torch.isnan(target_tensor).any() or torch.isinf(target_tensor).any():
@@ -357,25 +374,33 @@ class S2SHybridDataset(Dataset):
         # Clamp negative values to 0
         target_tensor = torch.clamp(target_tensor, min=0.0)
         
-        # Save absolute raw target for verification plots [L, H, W]
-        target_raw = target_tensor.clone()
+        # Save absolute raw target for verification plots [H, W]
+        target_raw_lead = target_tensor.clone()
         
         if self.normalize and self.bounds is not None:
             # Tightened robust range for residuals to prevent outlier-driven instability
             r_min = -30.0
             r_max = 30.0
             
-            # Extract mathematically sound linear residual
-            residual_raw = target_tensor - pure_geos_mean_raw
+            # Extract mathematically sound linear residual for THE SPECIFIC LEAD
+            # pure_geos_mean_raw is (L, H, W)
+            residual_raw = target_tensor - pure_geos_mean_raw[meta['lead_idx']]
             
-            # y_target becomes the purely normalized linear residual [-1, 1]
+            # y_target becomes the purely normalized linear residual [-1, 1] for 1 channel
             target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
         
+        # Add singleton channel dimension to target: (H, W) -> (1, H, W)
+        # This makes it compatible with UNet outputs of (B, 1, H, W)
+        target_tensor = target_tensor.unsqueeze(0)
+        target_raw_lead = target_raw_lead.unsqueeze(0)
+
         return {
-            "x_geos": geos_cond_tensor, # (1, 1, L, H, W)
-            "x_obs": obs_tensor,        # (24, H, W)
-            "y_target": target_tensor,  # (L, H, W)
-            "target_raw": target_raw,   # (L, H, W) - Pure GPCP
+            "x_geos": geos_cond_tensor, # (1, 1, L, H, W) -> Contains weeks 1-4 context
+            "x_obs": obs_tensor,        # (24, H, W) -> Contains weeks 1-4 context (Rossby waves inside)
+            "y_target": target_tensor,  # (1, H, W) -> Single channel residual
+            "target_raw": target_raw_lead,   # (1, H, W) - Pure GPCP single week
+            "target_raw_full": target_raw_full, # (4, H, W)- Pure GPCP all weeks (useful for val plots)
             "month": meta['date'].month,
+            "lead_idx": meta['lead_idx'], # (0, 1, 2, or 3)
             "geos_ens_raw": geos_ens_raw # (M=4, L, H, W)
         }
