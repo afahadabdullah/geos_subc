@@ -121,7 +121,8 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
+                      cached_geos_crps=None, cached_geos_rmse=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -215,20 +216,22 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             b_rmse = 0.0
         
         # GEOS Baseline Metrics (NaN-aware)
-        g_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
-        geos_mse_map = (geos_mean_raw - true_target_precip)**2
-        mask_2d = ~torch.isnan(geos_mse_map)
-    
-        if mask_2d.any():
-            aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
-            g_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
-        else:
-            g_rmse = 0.0
+        if cached_geos_crps is None:
+            g_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+            geos_mse_map = (geos_mean_raw - true_target_precip)**2
+            mask_2d = ~torch.isnan(geos_mse_map)
+        
+            if mask_2d.any():
+                aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
+                g_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
+            else:
+                g_rmse = 0.0
+                
+            total_geos_crps += g_crps
+            total_geos_rmse += g_rmse
             
         total_crps += b_crps
         total_rmse += b_rmse
-        total_geos_crps += g_crps
-        total_geos_rmse += g_rmse
         count += 1
         
         # Save only the first season (Winter) for visual plotting consistency
@@ -248,8 +251,12 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Compute Averages
     avg_crps = total_crps / count
     avg_rmse = total_rmse / count
-    avg_geos_crps = total_geos_crps / count
-    avg_geos_rmse = total_geos_rmse / count
+    if cached_geos_crps is None:
+        avg_geos_crps = total_geos_crps / count
+        avg_geos_rmse = total_geos_rmse / count
+    else:
+        avg_geos_crps = cached_geos_crps
+        avg_geos_rmse = cached_geos_rmse
     
     recon_type = f"Seasonal (N=4x{num_ensemble})"
     if accelerator.is_main_process:
@@ -582,6 +589,9 @@ def train(args, accelerator):
     epochs_done_this_run = 0
     max_epochs_this_run = getattr(args, "epochs_per_run", float('inf'))
 
+    global_cached_geos_crps = None
+    global_cached_geos_rmse = None
+    
     for epoch in range(start_epoch, epochs):
         if epochs_done_this_run >= max_epochs_this_run:
             if accelerator.is_main_process:
@@ -843,10 +853,16 @@ def train(args, accelerator):
             epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
             is_test=is_plot_epoch, 
-            is_fast_recon=not is_plot_epoch
+            is_fast_recon=not is_plot_epoch,
+            cached_geos_crps=global_cached_geos_crps,
+            cached_geos_rmse=global_cached_geos_rmse
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
         
+        if global_cached_geos_crps is None:
+            global_cached_geos_crps = geos_crps
+            global_cached_geos_rmse = geos_rmse
+            
         if accelerator.is_main_process:
             # 1. Always plot the results from the first validation pass (usually fast ensemble)
             plot_suffix = "fast" if not is_plot_epoch else "full"
