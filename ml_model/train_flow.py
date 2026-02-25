@@ -222,7 +222,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Clean up true_target_precip for save_val_plot (replace NaNs with 0 for imshow)
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
-    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
+    return val_metric, full_pred, true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual
 
 def train(args, accelerator):
     device = accelerator.device
