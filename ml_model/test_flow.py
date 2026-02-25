@@ -1,0 +1,308 @@
+import os
+import torch
+import torch.nn as nn
+import numpy as np
+import random
+import yaml
+import csv
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
+import argparse
+from datetime import datetime
+
+# Local Modules
+from dataset_flow import S2SHybridDataset
+from flow_matching import FlowMatchingModel, CustomFlowMatcher
+
+def get_area_weights(lats, device):
+    lats_rad = np.deg2rad(lats)
+    weights = np.cos(lats_rad)
+    weights = weights / np.mean(weights)
+    weights_tensor = torch.from_numpy(weights).float().to(device)
+    weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
+    return weights_tensor
+
+def compute_crps(ensemble_preds, target, area_weights):
+    """
+    Computes CRPS for a small ensemble.
+    ensemble_preds: [E, B, C, H, W]
+    target: [B, C, H, W]
+    """
+    mask = ~torch.isnan(target) # [B, C, H, W]
+    if not mask.any():
+        return 0.0
+    
+    E = ensemble_preds.shape[0]
+    diff = torch.abs(ensemble_preds - target.unsqueeze(0))
+    mae_term = diff.mean(dim=0)
+    
+    spread_term = torch.zeros_like(mae_term)
+    if E > 1:
+        for i in range(E):
+            for j in range(E):
+                spread_term += torch.abs(ensemble_preds[i] - ensemble_preds[j])
+        spread_term = spread_term / (2 * E * E)
+    
+    crps_map = mae_term - spread_term
+    crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
+    weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
+    
+    weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
+    return weighted_crps.item()
+
+def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, geos_single, model_single):
+    """
+    Standardizes plotting logic for testing results (6-column layout, similar to validation but saved in test_plots).
+    """
+    t_img = true_target_precip[0].cpu().numpy()
+    p_img = full_pred[0].cpu().numpy()
+    g_img = geos_pred[0].cpu().numpy()
+    g_sing_img = geos_single[0].cpu().numpy()
+    m_sing_img = model_single[0].cpu().numpy()
+    
+    fig, axes = plt.subplots(4, 6, figsize=(30, 16))
+    for l in range(4):
+        t_min, t_max = t_img[l].min(), t_img[l].max()
+        
+        # Col 1: Target
+        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 0].set_title("Target GPCP")
+        
+        # Col 2: Single GEOS Ens Member
+        im1 = axes[l, 1].imshow(g_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 1].set_title("GEOS (Single Ens Member)")
+        
+        # Col 3: Single Model Ens Member
+        im2 = axes[l, 2].imshow(m_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 2].set_title("Model (Single Ens Member)")
+        
+        # Col 4: GEOS ens mean - Target
+        diff_geos = g_img[l] - t_img[l]
+        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-30, vmax=30)
+        fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 3].set_title(f"GEOS Bias (GEOS Mean - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+        
+        # Col 5: Model ens mean - Target
+        diff_model = p_img[l] - t_img[l]
+        im4 = axes[l, 4].imshow(diff_model, cmap='RdBu_r', vmin=-30, vmax=30)
+        fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 4].set_title(f"Model Bias (Model Mean - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        
+        # Col 6: Closeness plot: abs(GEOS Bias) - abs(Model Bias)
+        closeness = np.abs(diff_geos) - np.abs(diff_model)
+        im5 = axes[l, 5].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
+        fig.colorbar(im5, ax=axes[l, 5], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 5].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
+
+    os.makedirs(os.path.join(output_dir, "test_plots"), exist_ok=True)
+    plt.tight_layout()
+    filename = f"test_2015_idx{batch_idx}_score_{model_crps:.4f}.png"
+    plt.savefig(os.path.join(output_dir, "test_plots", filename))
+    plt.close()
+
+@torch.no_grad()
+def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, num_ensemble=20):
+    model.eval()
+    
+    fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
+    _, _, H, W = fb_target_norm.shape
+    
+    true_target_precip = batch['target_raw_full'][0].to(device) # [4, H, W]
+    
+    geos_ens_raw = batch['geos_ens_raw'].to(device) # [4, M=4, L=4, H, W]
+    geos_ens_sample = geos_ens_raw[0] # [M=4, L=4, H, W]
+    geos_mean_raw = geos_ens_sample.mean(dim=0) # [4, H, W]
+    
+    # ---------------------------------------------------------------------------------
+    # STRATEGY 3: GEOS-INFORMED COVARIANCE NOISE SCALING
+    # Instead of drawing pure N(0,1) noise, we scale the noise by the spatial variance
+    # of the GEOS ensemble to force the model to explore uncertainty exactly where
+    # the physics model is uncertain.
+    # ---------------------------------------------------------------------------------
+    # Calculate GEOS structural variance across the 4 members, for all leads [4, H, W]
+    geos_struct_var = geos_ens_sample.var(dim=0) # [4, H, W]
+    
+    ensemble_preds_precip = [] # Will be [E, 4, H, W]
+
+    ens_pbar = tqdm(range(num_ensemble), desc=f"  [Testing Batch {batch_idx}]", leave=False)
+    for eidx in ens_pbar:
+        sample_weeks = []
+        for lead_idx in range(4):
+            fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)  # [1, 24, H, W]
+            fx_geos = batch['x_geos'][lead_idx].to(device)              # [1, 1, 4, H, W]
+            fx_geos_flat = fx_geos.view(1, -1, H, W)                    # [1, 4, H, W]
+            
+            f_month = batch['month'][lead_idx].to(device).view(1)
+            fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
+            f_lead_val = (fl_idx.float() / 1.5) - 1.0 
+            f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            fx_cat_geos = fx_geos.view(1, -1, H, W)             
+            
+            fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel], dim=1) # [1, 31, H, W]
+            
+            # Smart Noise Injection for current lead week
+            lead_var = geos_struct_var[lead_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+            
+            # Normalize GEOS variance so it averages to ~1.0 globally, ensuring we don't 
+            # silence or explode the noise. Clamp it firmly between 0.5 (confident regions) 
+            # and 2.0 (highly chaotic regions like tropical cyclones).
+            var_norm = lead_var / (lead_var.mean() + 1e-6)
+            var_scaled = torch.clamp(var_norm, min=0.5, max=2.0)
+            
+            base_noise = torch.randn((1, 1, H, W), device=device)
+            smart_noise = base_noise * var_scaled
+            
+            # Explicit Euler Solver (50 steps for highest structural quality)
+            num_steps = 50
+            p_x1 = flow_matcher.euler_solve(model, smart_noise, fx_cond, num_steps=num_steps)
+            week_pred_norm = p_x1[0, 0] # [H, W]
+            
+            # Inverse Transform
+            week_sqrt = ((week_pred_norm + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
+            week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
+            sample_weeks.append(week_precip)
+            
+        ensemble_preds_precip.append(torch.stack(sample_weeks)) # [4, H, W]
+
+    ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
+    full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
+    
+    val_metric = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    
+    mse_map = (full_pred - true_target_precip)**2
+    mask = ~torch.isnan(mse_map)
+    if mask.any():
+        aw_expanded = area_weights.view(1, 181, 1).expand_as(mse_map)
+        model_rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
+    else:
+        model_rmse = 0.0
+    
+    geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    geos_mse_map = (geos_mean_raw - true_target_precip)**2
+    mask_2d = ~torch.isnan(geos_mse_map)
+
+    if mask_2d.any():
+        aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
+        geos_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
+    else:
+        geos_rmse = 0.0
+    
+    true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
+    
+    # Generate diagnostic plot for this batch
+    save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, model_rmse, 
+                   geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, output_dir, 
+                   geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0))
+                   
+    return val_metric, model_rmse, geos_crps, geos_rmse
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml", help="Path to config file")
+    parser.add_argument("--ckpt", type=str, required=True, help="Path to best model checkpoint to test")
+    parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
+    parser.add_argument("--ensemble-size", type=int, default=20, help="Number of members in smart noise ensemble")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Testing Flow Matcher on {device} using Test Year {args.year}")
+
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+
+    # Force dataset to only load the test year
+    test_dataset = S2SHybridDataset(
+        data_root=config["data_dir"],
+        start_year=args.year,
+        end_year=args.year,
+        normalize=True,
+        preload=config.get("preload", False),
+        stats_file="v5_global_stats.pt"
+    )
+
+    from torch.utils.data import DataLoader
+    test_loader = DataLoader(
+        test_dataset, batch_size=4, shuffle=False, 
+        num_workers=2, pin_memory=True
+    )
+
+    stats_file = "ml_model/v5_global_stats.pt"
+    global_bounds = torch.load(stats_file, weights_only=True)
+    target_sqrt_min = 0.0
+    target_sqrt_max = 7.071
+    geos_min = global_bounds["geos_raw"]["min"]
+    geos_max = global_bounds["geos_raw"]["max"]
+
+    model = FlowMatchingModel(in_channels=32, out_channels=1).to(device)
+    
+    print(f"Loading checkpoint: {args.ckpt}")
+    ckpt = torch.load(args.ckpt, map_location=device, weights_only=True)
+    model.load_state_dict(ckpt['model'])
+    model.eval()
+    
+    flow_matcher = CustomFlowMatcher(device=device)
+
+    output_dir = config.get("output_dir", "ml_output_flow")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
+    with open(csv_file, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Batch_Idx", "Model_CRPS", "Model_RMSE", "GEOS_CRPS", "GEOS_RMSE"])
+
+    # Load lat values for area weights
+    import xarray as xr
+    geos_sample_path = os.path.join(config["data_dir"], "geos_weekly_gpcp_aligned.zarr")
+    ds_geos = xr.open_zarr(geos_sample_path)
+    lats = ds_geos.lat.values
+    area_weights = get_area_weights(lats, device)
+    
+    # ------------------ TESTING LOOP ------------------
+    all_model_crps, all_model_rmse = [], []
+    all_geos_crps, all_geos_rmse = [], []
+    
+    pbar = tqdm(test_loader, desc=f"Testing {args.year}", leave=True)
+    for batch_idx, batch in enumerate(pbar):
+        # We process tests sample by sample for accurate ensemble aggregation
+        # Ensure we only pass one distinct init date (which is flattened into 4 leads by the dataset batcher)
+        if batch['y_target'].shape[0] != 4:
+            continue
+            
+        m_crps, m_rmse, g_crps, g_rmse = run_test_inference(
+            batch_idx, batch, model, flow_matcher, device, output_dir, None,
+            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, num_ensemble=args.ensemble_size
+        )
+        
+        all_model_crps.append(m_crps)
+        all_model_rmse.append(m_rmse)
+        all_geos_crps.append(g_crps)
+        all_geos_rmse.append(g_rmse)
+        
+        with open(csv_file, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([batch_idx, m_crps, m_rmse, g_crps, g_rmse])
+            
+        pbar.set_postfix({
+            "M_CRPS": f"{np.mean(all_model_crps):.3f}",
+            "G_CRPS": f"{np.mean(all_geos_crps):.3f}"
+        })
+
+    print("\n==================================")
+    print(f"      TEST YEAR {args.year} RESULTS      ")
+    print("==================================")
+    print(f"GEOS Baseline Average CRPS: {np.mean(all_geos_crps):.4f}")
+    print(f"Model Smart-Ens Average CRPS: {np.mean(all_model_crps):.4f}")
+    print(f"GEOS Baseline Average RMSE: {np.mean(all_geos_rmse):.4f}")
+    print(f"Model Smart-Ens Average RMSE: {np.mean(all_model_rmse):.4f}")
+    print("==================================")
+
+if __name__ == "__main__":
+    main()
