@@ -20,7 +20,7 @@ export PYTHONUNBUFFERED=1
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
 # The argument points to the best Flow Matcher checkpoint and the year to test
-python3 ml_model/test_flow.py --config ml_model/config_flow.yaml --ckpt ml_output_flow/top1_flow_ckpt.pt --year 2015 --ensemble-size 20
+python3 ml_model/test_flow.py --config ml_model/config_flow.yaml --ckpt /home1/11353/afahad/geos_subc/ml_output_flow/best_model_epoch_208_crps_0.6159.pt --year 2015 --ensemble-size 20
 
 echo "Testing finished!"
 date
