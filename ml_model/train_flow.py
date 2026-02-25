@@ -170,7 +170,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 
             noise = torch.randn((1, 1, H, W), device=device)
             p_x1 = flow_matcher.euler_solve(unwrapped_model, noise, fx_cond, num_steps=num_steps)
-            week_pred_norm = p_x1.squeeze(0) # [1, H, W]
+            week_pred_norm = p_x1[0, 0] # [H, W]
             
             # Convert direct GPCP back to physical units
             # Mapping: Y = 2.0 * (sqrt_val - s_min) / (s_max - s_min) - 1.0 => sqrt_val = (Y + 1.0)/2.0 * (s_max - s_min) + s_min
@@ -222,7 +222,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Clean up true_target_precip for save_val_plot (replace NaNs with 0 for imshow)
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
-    return val_metric, full_pred, true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual
+    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
 
 def train(args, accelerator):
     device = accelerator.device
