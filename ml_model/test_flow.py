@@ -291,8 +291,8 @@ def main():
 
     # Load lat values for area weights
     import xarray as xr
-    geos_sample_path = os.path.join(config["data_dir"], "geos_weekly_gpcp_aligned.zarr")
-    ds_geos = xr.open_zarr(geos_sample_path)
+    geos_sample_path = os.path.join(config["data_dir"], f"geos_subc_{args.year}.zarr")
+    ds_geos = xr.open_zarr(geos_sample_path, consolidated=False)
     lats = ds_geos.lat.values
     lons = ds_geos.lon.values
     area_weights = get_area_weights(lats, device)
