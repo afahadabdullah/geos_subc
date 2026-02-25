@@ -1,12 +1,10 @@
 #!/bin/bash
 #SBATCH -J test_flow        # Job name
-#SBATCH -o test_flow_%j.out # Output file name
-#SBATCH -e test_flow_%j.err # Error file name
-#SBATCH -p gh               # partition
+#SBATCH -o test_flow_%j.o   # Combined Output and Error file name
+#SBATCH -p gh-dev           # partition
 #SBATCH -N 1                # Total number of nodes
 #SBATCH -n 1                # Number of tasks per node
-#SBATCH -c 115               # Number of cores per task
-#SBATCH -t 12:00:00         # Run time (d-hh:mm:ss)
+#SBATCH -t 02:00:00         # Run time (d-hh:mm:ss)
 
 echo "Starting testing script..."
 date
