@@ -202,9 +202,14 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # GEOS Baseline Metrics (NaN-aware)
     geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
     geos_mse_map = (geos_mean_raw - true_target_precip)**2
-    if mask.any():
-        aw_expanded = area_weights.view(1, 181, 1).expand_as(geos_mse_map)
-        geos_rmse = torch.sqrt((geos_mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
+    
+    # We must use a 2D mask for Geos (since geos_mean is 2D and target is 2D)
+    # The mask from above is 3D because full_pred has the ensemble dimension [4, H, W]
+    mask_2d = ~torch.isnan(geos_mse_map)
+
+    if mask_2d.any():
+        aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
+        geos_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
     else:
         geos_rmse = 0.0
     
