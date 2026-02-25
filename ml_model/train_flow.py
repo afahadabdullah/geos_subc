@@ -397,12 +397,12 @@ def train(args, accelerator):
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 start_epoch = checkpoint['epoch'] + 1
                 if 'best_val_crps' in checkpoint:
-                    best_val_crps = checkpoint['best_val_crps']
+                    best_val_crps = 1.3000 # Reset for new seasonal validation metric
                 elif 'best_val_rmse' in checkpoint:
-                    best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
+                    best_val_crps = 1.3000 # Migration fallback
                 
                 if 'top_models' in checkpoint:
-                    top_models = checkpoint['top_models']
+                    top_models = [] # Clear history to prevent old January-focused models blocking saves
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
