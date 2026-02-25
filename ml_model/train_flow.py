@@ -792,7 +792,7 @@ def train(args, accelerator):
                 'best_val_crps': best_val_crps,
                 'top_models': top_models
             }
-            torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v5.pt"))
+            torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
         if accelerator.is_main_process:
             print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
@@ -802,8 +802,8 @@ def train(args, accelerator):
         is_plot_epoch = args.full_val
         
         val_outputs = run_val_inference(
-            epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-            residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
+            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
@@ -833,8 +833,8 @@ def train(args, accelerator):
                 if is_new_best and epoch > 6 and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
                     best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res = run_val_inference(
-                        epoch, model, val_loader, scheduler, device, accelerator, output_dir, log_file, 
-                        residual_min, residual_max, geos_min, geos_max, area_weights, global_bounds,
+                        epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
