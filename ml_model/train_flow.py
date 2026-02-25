@@ -58,17 +58,18 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
-def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None):
+def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None):
     """
-    Standardizes plotting logic for validation results (6-column layout).
+    Standardizes plotting logic for validation results (7-column layout).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
     g_img = geos_pred[0].cpu().numpy()
     g_sing_img = geos_single[0].cpu().numpy() if geos_single is not None else g_img
     m_sing_img = model_single[0].cpu().numpy() if model_single is not None else p_img
+    m_var_img = model_var[0].cpu().numpy() if model_var is not None else np.zeros_like(p_img)
     
-    fig, axes = plt.subplots(4, 6, figsize=(30, 16))
+    fig, axes = plt.subplots(4, 7, figsize=(35, 16))
     for l in range(4):
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
@@ -89,13 +90,13 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
         
         # Col 4: GEOS ens mean - Target
         diff_geos = g_img[l] - t_img[l]
-        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
+        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-30, vmax=30)
         fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 3].set_title(f"GEOS Bias (GEOS Mean - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
         
         # Col 5: Model ens mean - Target
         diff_model = p_img[l] - t_img[l]
-        im4 = axes[l, 4].imshow(diff_model, cmap='RdBu_r', vmin=-50, vmax=50)
+        im4 = axes[l, 4].imshow(diff_model, cmap='RdBu_r', vmin=-30, vmax=30)
         fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 4].set_title(f"Model Bias (Model Mean - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
         
@@ -104,6 +105,13 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
         im5 = axes[l, 5].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
         fig.colorbar(im5, ax=axes[l, 5], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 5].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
+        
+        # Col 7: Model Ensemble Variance
+        # We cap variance visualization at the 99th percentile across all leads to keep colors readable
+        var_vmax = np.percentile(m_var_img, 99) if model_var is not None and m_var_img.max() > 0 else 1.0
+        im6 = axes[l, 6].imshow(m_var_img[l], cmap='YlGn', vmin=0, vmax=var_vmax)
+        fig.colorbar(im6, ax=axes[l, 6], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 6].set_title("Model Ens Variance")
 
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plt.tight_layout()
@@ -185,6 +193,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
 
     ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
     full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
+    # Variance of the predicted un-scaled precipitation across the ensemble
+    model_var = ensemble_preds_precip.var(dim=0) # [4, H, W]
     
     # Metric calculations with NaN handling
     # Calculate CRPS
@@ -224,7 +234,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Clean up true_target_precip for save_val_plot (replace NaNs with 0 for imshow)
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
-    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0), geos_ens_sample[0].unsqueeze(0), ensemble_preds_precip[0].unsqueeze(0)
+    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0), geos_ens_sample[0].unsqueeze(0), ensemble_preds_precip[0].unsqueeze(0), model_var.unsqueeze(0)
 
 def train(args, accelerator):
     device = accelerator.device
@@ -814,14 +824,14 @@ def train(args, accelerator):
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single = val_outputs
+        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
         
         if accelerator.is_main_process:
             # 1. Always plot the results from the first validation pass (usually fast ensemble)
             plot_suffix = "fast" if not is_plot_epoch else "full"
             save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
                           geos_mean, geos_crps, geos_rmse, output_dir, ai_residual=current_ai_res, suffix=plot_suffix,
-                          geos_single=geos_single, model_single=model_single)
+                          geos_single=geos_single, model_single=model_single, model_var=model_var)
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
@@ -840,14 +850,14 @@ def train(args, accelerator):
                 # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
                 if is_new_best and epoch > 6 and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
                                   b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
-                                  geos_single=b_gs, model_single=b_ms)
+                                  geos_single=b_gs, model_single=b_ms, model_var=b_mv)
 
                 # Manage Top 4 Persistence
                 new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
