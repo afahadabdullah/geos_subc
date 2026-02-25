@@ -135,7 +135,7 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
 
 @torch.no_grad()
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, save_plot=True):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
@@ -227,13 +227,21 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
-    # Generate diagnostic plot for this batch
-    save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), val_metric, model_rmse, 
-                   geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, output_dir, 
-                   geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0),
-                   lats=lats, lons=lons)
+    if save_plot:
+        # Generate diagnostic plot for this batch
+        save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), val_metric, model_rmse, 
+                       geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, output_dir, 
+                       geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0),
+                       lats=lats, lons=lons)
                    
-    return val_metric, model_rmse, geos_crps, geos_rmse
+    tensors = {
+        'full_pred': full_pred,
+        'true_target_precip': true_target_precip_plot,
+        'geos_mean': geos_mean_raw,
+        'geos_single': geos_ens_sample[0],
+        'model_single': ensemble_preds_precip[0]
+    }
+    return val_metric, model_rmse, geos_crps, geos_rmse, tensors
 
 def main():
     parser = argparse.ArgumentParser()
@@ -301,6 +309,9 @@ def main():
     all_model_crps, all_model_rmse = [], []
     all_geos_crps, all_geos_rmse = [], []
     
+    output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
+    os.makedirs(output_data_dir, exist_ok=True)
+    
     pbar = tqdm(test_loader, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
         # We process tests sample by sample for accurate ensemble aggregation
@@ -308,10 +319,49 @@ def main():
         if batch['y_target'].shape[0] != 4:
             continue
             
-        m_crps, m_rmse, g_crps, g_rmse = run_test_inference(
-            batch_idx, batch, model, flow_matcher, device, output_dir, None,
-            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size
-        )
+        data_file = os.path.join(output_data_dir, f"batch_{batch_idx}.npz")
+        
+        # Check if we already ran this batch
+        if os.path.exists(data_file):
+            # Load from disk
+            data = np.load(data_file)
+            m_crps = float(data['model_crps'])
+            m_rmse = float(data['model_rmse'])
+            g_crps = float(data['geos_crps'])
+            g_rmse = float(data['geos_rmse'])
+            
+            # Reconstruct tensors for plotting first few batches
+            if batch_idx < 5:
+                full_pred = torch.from_numpy(data['full_pred'])
+                true_target_precip_plot = torch.from_numpy(data['true_target_precip'])
+                geos_mean_raw = torch.from_numpy(data['geos_mean'])
+                geos_single = torch.from_numpy(data['geos_single'])
+                model_single = torch.from_numpy(data['model_single'])
+                
+                save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), m_crps, m_rmse, 
+                               geos_mean_raw.unsqueeze(0), g_crps, g_rmse, output_dir, 
+                               geos_single=geos_single.unsqueeze(0), model_single=model_single.unsqueeze(0),
+                               lats=lats, lons=lons)
+        else:
+            # Run inference
+            m_crps, m_rmse, g_crps, g_rmse, tensors = run_test_inference(
+                batch_idx, batch, model, flow_matcher, device, output_dir, None,
+                target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size, save_plot=(batch_idx < 5)
+            )
+            
+            # Save to disk to avoid rerunning
+            np.savez_compressed(
+                data_file,
+                model_crps=m_crps,
+                model_rmse=m_rmse,
+                geos_crps=g_crps,
+                geos_rmse=g_rmse,
+                full_pred=tensors['full_pred'].cpu().numpy(),
+                true_target_precip=tensors['true_target_precip'].cpu().numpy(),
+                geos_mean=tensors['geos_mean'].cpu().numpy(),
+                geos_single=tensors['geos_single'].cpu().numpy(),
+                model_single=tensors['model_single'].cpu().numpy()
+            )
         
         all_model_crps.append(m_crps)
         all_model_rmse.append(m_rmse)
