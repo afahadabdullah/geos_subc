@@ -301,8 +301,8 @@ def main():
     import xarray as xr
     geos_sample_path = os.path.join(config["data_dir"], f"geos_subc_{args.year}.zarr")
     ds_geos = xr.open_zarr(geos_sample_path, consolidated=False)
-    lats = ds_geos.lat.values
-    lons = ds_geos.lon.values
+    lats = ds_geos.Y.values
+    lons = ds_geos.X.values
     area_weights = get_area_weights(lats, device)
     
     # ------------------ TESTING LOOP ------------------
