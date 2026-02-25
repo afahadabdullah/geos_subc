@@ -2,10 +2,10 @@
 #SBATCH -J diff_v5                  # Job name
 #SBATCH -o ml_output_flow/flow_%j.out
 #SBATCH -e ml_output_flow/flow_%j.err
-#SBATCH -p gh                      # Queue (partition) name
+#SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
-#SBATCH -t 12:00:00                  # Run time (hh:mm:ss)
+#SBATCH -t 02:00:00                  # Run time (hh:mm:ss)
 #SBATCH -A ATM25008                  # Project account
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
@@ -40,7 +40,7 @@ fi
 
 echo "🔥 Launching Flow Matching Training..."
 accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow.py --config ml_model/config_flow.yaml \
-    --epochs-per-run 1000
+    --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
