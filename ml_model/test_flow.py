@@ -7,6 +7,8 @@ import yaml
 import csv
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import argparse
 from datetime import datetime
 
@@ -50,9 +52,9 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
-def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, geos_single, model_single):
+def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, geos_single, model_single, lats, lons):
     """
-    Standardizes plotting logic for testing results (6-column layout, similar to validation but saved in test_plots).
+    Standardizes plotting logic for testing results (6-column layout with Cartopy).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
@@ -60,52 +62,80 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
     g_sing_img = geos_single[0].cpu().numpy()
     m_sing_img = model_single[0].cpu().numpy()
     
-    fig, axes = plt.subplots(4, 6, figsize=(30, 16))
+    # We use PlateCarree for flat equirectangular projection, or use Robinson for something fancy
+    proj = ccrs.PlateCarree()
+    
+    fig, axes = plt.subplots(4, 6, figsize=(32, 18), subplot_kw={'projection': proj})
+    
+    # Pre-calculate extent to keep things bounded [lon_min, lon_max, lat_min, lat_max]
+    extent = [lons.min(), lons.max(), lats.min(), lats.max()]
+
     for l in range(4):
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
+        # Helper to style the axes
+        def style_ax(ax, title):
+            ax.set_title(title, fontsize=10)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=':')
+            ax.set_extent(extent, crs=ccrs.PlateCarree())
+            gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
+            gl.top_labels = False
+            gl.right_labels = False
+            if ax.get_subplotspec().colspan.start > 0:
+                gl.left_labels = False # Only show y-axis on far left
+        
         # Col 1: Target
-        im0 = axes[l, 0].imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-        fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 0].set_title("Target GPCP")
+        ax0 = axes[l, 0]
+        im0 = ax0.imshow(t_img[l], cmap='Blues', vmin=t_min, vmax=t_max, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im0, ax=ax0, fraction=0.046, pad=0.04)
+        style_ax(ax0, "Target GPCP" if l == 0 else "")
+        if l == 0: ax0.set_title("Target GPCP")
         
         # Col 2: Single GEOS Ens Member
-        im1 = axes[l, 1].imshow(g_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-        fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 1].set_title("GEOS (Single Ens Member)")
+        ax1 = axes[l, 1]
+        im1 = ax1.imshow(g_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        style_ax(ax1, "GEOS (Single Ens Member)" if l == 0 else "")
         
         # Col 3: Single Model Ens Member
-        im2 = axes[l, 2].imshow(m_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
-        fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 2].set_title("Model (Single Ens Member)")
+        ax2 = axes[l, 2]
+        im2 = ax2.imshow(m_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+        style_ax(ax2, "Model (Single Ens Member)" if l == 0 else "")
         
         # Col 4: GEOS ens mean - Target
+        ax3 = axes[l, 3]
         diff_geos = g_img[l] - t_img[l]
-        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-30, vmax=30)
-        fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 3].set_title(f"GEOS Bias (GEOS Mean - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+        im3 = ax3.imshow(diff_geos, cmap='RdBu_r', vmin=-30, vmax=30, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+        style_ax(ax3, f"GEOS Bias (GEOS Mean - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}" if l == 0 else "")
         
         # Col 5: Model ens mean - Target
+        ax4 = axes[l, 4]
         diff_model = p_img[l] - t_img[l]
-        im4 = axes[l, 4].imshow(diff_model, cmap='RdBu_r', vmin=-30, vmax=30)
-        fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 4].set_title(f"Model Bias (Model Mean - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        im4 = ax4.imshow(diff_model, cmap='RdBu_r', vmin=-30, vmax=30, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+        style_ax(ax4, f"Model Bias (Model Mean - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}" if l == 0 else "")
         
         # Col 6: Closeness plot: abs(GEOS Bias) - abs(Model Bias)
+        ax5 = axes[l, 5]
         closeness = np.abs(diff_geos) - np.abs(diff_model)
-        im5 = axes[l, 5].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
-        fig.colorbar(im5, ax=axes[l, 5], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 5].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
+        im5 = ax5.imshow(closeness, cmap='PiYG', vmin=-25, vmax=25, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
+        style_ax(ax5, "Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better" if l == 0 else "")
 
     os.makedirs(os.path.join(output_dir, "test_plots"), exist_ok=True)
     plt.tight_layout()
-    filename = f"test_2015_idx{batch_idx}_score_{model_crps:.4f}.png"
-    plt.savefig(os.path.join(output_dir, "test_plots", filename))
+    # Cartopy gridlines can complain if layout is excessively tight
+    fig.subplots_adjust(hspace=0.1, wspace=0.1) 
+    filename = f"test_M3_2015_idx{batch_idx}_score_{model_crps:.4f}.png"
+    plt.savefig(os.path.join(output_dir, "test_plots", filename), bbox_inches='tight', dpi=150)
     plt.close()
 
 @torch.no_grad()
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, num_ensemble=20):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
@@ -198,9 +228,10 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
     # Generate diagnostic plot for this batch
-    save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, model_rmse, 
+    save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), val_metric, model_rmse, 
                    geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, output_dir, 
-                   geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0))
+                   geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0),
+                   lats=lats, lons=lons)
                    
     return val_metric, model_rmse, geos_crps, geos_rmse
 
@@ -263,6 +294,7 @@ def main():
     geos_sample_path = os.path.join(config["data_dir"], "geos_weekly_gpcp_aligned.zarr")
     ds_geos = xr.open_zarr(geos_sample_path)
     lats = ds_geos.lat.values
+    lons = ds_geos.lon.values
     area_weights = get_area_weights(lats, device)
     
     # ------------------ TESTING LOOP ------------------
@@ -278,7 +310,7 @@ def main():
             
         m_crps, m_rmse, g_crps, g_rmse = run_test_inference(
             batch_idx, batch, model, flow_matcher, device, output_dir, None,
-            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, num_ensemble=args.ensemble_size
+            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size
         )
         
         all_model_crps.append(m_crps)
