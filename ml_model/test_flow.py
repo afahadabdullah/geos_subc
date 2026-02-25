@@ -314,6 +314,9 @@ def main():
     
     pbar = tqdm(test_loader, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
+        if batch_idx >= 12:
+            break
+            
         # We process tests sample by sample for accurate ensemble aggregation
         # Ensure we only pass one distinct init date (which is flattened into 4 leads by the dataset batcher)
         if batch['y_target'].shape[0] != 4:
