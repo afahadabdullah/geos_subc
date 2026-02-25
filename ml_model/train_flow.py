@@ -404,12 +404,20 @@ def train(args, accelerator):
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 start_epoch = checkpoint['epoch'] + 1
                 if 'best_val_crps' in checkpoint:
-                    best_val_crps = 1.3000 # Reset for new seasonal validation metric
+                    best_val_crps = checkpoint['best_val_crps']
                 elif 'best_val_rmse' in checkpoint:
-                    best_val_crps = 1.3000 # Migration fallback
+                    best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
                 
                 if 'top_models' in checkpoint:
-                    top_models = [] # Clear history to prevent old January-focused models blocking saves
+                    top_models = checkpoint['top_models']
+                    
+                # Intelligent Reset: If the loaded CRPS is suspiciously low (< 0.8), it likely came from the old 
+                # single-batch (January-only) validation logic. We must reset it to allow the new 4-season metric to save.
+                if best_val_crps < 0.8:
+                    if accelerator.is_main_process:
+                        print(f"⚠️ Detected suspiciously low CRPS ({best_val_crps:.4f}) from old validation logic. Resetting to 1.3000.")
+                    best_val_crps = 1.3000
+                    top_models = []
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
