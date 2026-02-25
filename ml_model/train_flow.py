@@ -58,15 +58,17 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
-def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix=""):
+def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None):
     """
-    Standardizes plotting logic for validation results (4-column layout).
+    Standardizes plotting logic for validation results (6-column layout).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
     g_img = geos_pred[0].cpu().numpy()
+    g_sing_img = geos_single[0].cpu().numpy() if geos_single is not None else g_img
+    m_sing_img = model_single[0].cpu().numpy() if model_single is not None else p_img
     
-    fig, axes = plt.subplots(4, 4, figsize=(20, 16))
+    fig, axes = plt.subplots(4, 6, figsize=(30, 16))
     for l in range(4):
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
@@ -75,25 +77,33 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
         fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 0].set_title("Target GPCP")
         
-        # Col 2: GEOS ens mean - Target
-        diff_geos = g_img[l] - t_img[l]
-        im1 = axes[l, 1].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
+        # Col 2: Single GEOS Ens Member
+        im1 = axes[l, 1].imshow(g_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
         fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 1].set_title(f"GEOS Bias (GEOS - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+        if l == 0: axes[l, 1].set_title("GEOS (Single Ens Member)")
         
-        # Col 3: Model ens mean - Target
-        diff_model = p_img[l] - t_img[l]
-        im2 = axes[l, 2].imshow(diff_model, cmap='RdBu_r', vmin=-50, vmax=50)
+        # Col 3: Single Model Ens Member
+        im2 = axes[l, 2].imshow(m_sing_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
         fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 2].set_title(f"Model Bias (Model - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        if l == 0: axes[l, 2].set_title("Model (Single Ens Member)")
         
-        # Col 4: Closeness plot: abs(GEOS Bias) - abs(Model Bias)
-        # Positive values -> Model has smaller bias (Model is better)
-        # Negative values -> GEOS has smaller bias (GEOS is better)
-        closeness = np.abs(diff_geos) - np.abs(diff_model)
-        im3 = axes[l, 3].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
+        # Col 4: GEOS ens mean - Target
+        diff_geos = g_img[l] - t_img[l]
+        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
         fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 3].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
+        if l == 0: axes[l, 3].set_title(f"GEOS Bias (GEOS Mean - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+        
+        # Col 5: Model ens mean - Target
+        diff_model = p_img[l] - t_img[l]
+        im4 = axes[l, 4].imshow(diff_model, cmap='RdBu_r', vmin=-50, vmax=50)
+        fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 4].set_title(f"Model Bias (Model Mean - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        
+        # Col 6: Closeness plot: abs(GEOS Bias) - abs(Model Bias)
+        closeness = np.abs(diff_geos) - np.abs(diff_model)
+        im5 = axes[l, 5].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
+        fig.colorbar(im5, ax=axes[l, 5], fraction=0.046, pad=0.04)
+        if l == 0: axes[l, 5].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
 
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plt.tight_layout()
@@ -214,7 +224,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Clean up true_target_precip for save_val_plot (replace NaNs with 0 for imshow)
     true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
     
-    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
+    return val_metric, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0), geos_ens_sample[0].unsqueeze(0), ensemble_preds_precip[0].unsqueeze(0)
 
 def train(args, accelerator):
     device = accelerator.device
@@ -804,13 +814,14 @@ def train(args, accelerator):
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch
         )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res = val_outputs
+        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single = val_outputs
         
         if accelerator.is_main_process:
             # 1. Always plot the results from the first validation pass (usually fast ensemble)
             plot_suffix = "fast" if not is_plot_epoch else "full"
             save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
-                          geos_mean, geos_crps, geos_rmse, output_dir, ai_residual=current_ai_res, suffix=plot_suffix)
+                          geos_mean, geos_crps, geos_rmse, output_dir, ai_residual=current_ai_res, suffix=plot_suffix,
+                          geos_single=geos_single, model_single=model_single)
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
@@ -829,13 +840,14 @@ def train(args, accelerator):
                 # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
                 if is_new_best and epoch > 6 and not is_plot_epoch:
                     print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms = run_val_inference(
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
-                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled")
+                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
+                                  geos_single=b_gs, model_single=b_ms)
 
                 # Manage Top 4 Persistence
                 new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
