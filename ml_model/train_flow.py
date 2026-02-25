@@ -60,14 +60,13 @@ def compute_crps(ensemble_preds, target, area_weights):
 
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix=""):
     """
-    Standardizes plotting logic for validation results (5-column layout).
+    Standardizes plotting logic for validation results (4-column layout).
     """
     t_img = true_target_precip[0].cpu().numpy()
     p_img = full_pred[0].cpu().numpy()
     g_img = geos_pred[0].cpu().numpy()
-    res_img = ai_residual[0].cpu().numpy() if ai_residual is not None else None
     
-    fig, axes = plt.subplots(4, 5, figsize=(25, 16))
+    fig, axes = plt.subplots(4, 4, figsize=(20, 16))
     for l in range(4):
         t_min, t_max = t_img[l].min(), t_img[l].max()
         
@@ -76,33 +75,26 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
         fig.colorbar(im0, ax=axes[l, 0], fraction=0.046, pad=0.04)
         if l == 0: axes[l, 0].set_title("Target GPCP")
         
-        # Col 2: Model Pred
-        im1 = axes[l, 1].imshow(p_img[l], cmap='Blues', vmin=t_min, vmax=t_max)
+        # Col 2: GEOS ens mean - Target
+        diff_geos = g_img[l] - t_img[l]
+        im1 = axes[l, 1].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
         fig.colorbar(im1, ax=axes[l, 1], fraction=0.046, pad=0.04)
-        if l == 0: axes[l, 1].set_title("Model Pred (Mean)")
+        if l == 0: axes[l, 1].set_title(f"GEOS Bias (GEOS - Target)\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
         
-        # Col 3: Model Diff
+        # Col 3: Model ens mean - Target
         diff_model = p_img[l] - t_img[l]
         im2 = axes[l, 2].imshow(diff_model, cmap='RdBu_r', vmin=-50, vmax=50)
         fig.colorbar(im2, ax=axes[l, 2], fraction=0.046, pad=0.04)
-        if l == 0: 
-            axes[l, 2].set_title(f"Model Diff (Skill vs GEOS)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
+        if l == 0: axes[l, 2].set_title(f"Model Bias (Model - Target)\nCRPS:{model_crps:.2f}, RMSE:{model_rmse:.2f}")
         
-        # Col 4: GEOS Diff
-        diff_geos = g_img[l] - t_img[l]
-        im3 = axes[l, 3].imshow(diff_geos, cmap='RdBu_r', vmin=-50, vmax=50)
+        # Col 4: Closeness plot: abs(GEOS Bias) - abs(Model Bias)
+        # Positive values -> Model has smaller bias (Model is better)
+        # Negative values -> GEOS has smaller bias (GEOS is better)
+        closeness = np.abs(diff_geos) - np.abs(diff_model)
+        im3 = axes[l, 3].imshow(closeness, cmap='PiYG', vmin=-25, vmax=25)
         fig.colorbar(im3, ax=axes[l, 3], fraction=0.046, pad=0.04)
-        if l == 0:
-            axes[l, 3].set_title(f"GEOS Baseline Diff\nCRPS:{geos_crps:.2f}, RMSE:{geos_rmse:.2f}")
+        if l == 0: axes[l, 3].set_title("Closeness: |GEOS Bias| - |Model Bias|\nGreen (>0) = Model Better, Pink (<0) = GEOS Better")
 
-        # Col 5: AI Predicted Residual (Innovation)
-        if res_img is not None:
-            im4 = axes[l, 4].imshow(res_img[l], cmap='RdBu_r', vmin=-30, vmax=30)
-            fig.colorbar(im4, ax=axes[l, 4], fraction=0.046, pad=0.04)
-            if l == 0: axes[l, 4].set_title("AI Predicted Residual\n(Model - GEOS)")
-        else:
-            axes[l, 4].axis('off')
-    
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plt.tight_layout()
     filename = f"epoch_{epoch}_{suffix}_score_{model_crps:.4f}.png" if suffix else f"epoch_{epoch}_score_{model_crps:.4f}.png"
@@ -134,7 +126,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     pred_res_norm_agg = torch.zeros((4, H, W), device=device)
     
     # We collect ensemble members for CRPS if fast_recon
-    num_ensemble = 10 if is_fast_recon and not is_test else (5 if is_test else 1)
+    num_ensemble = 10 if is_fast_recon and not is_test else (10 if is_test else 1)
     ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
     # Progress bar for internal status during long samplings
