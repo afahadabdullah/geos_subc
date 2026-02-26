@@ -350,10 +350,26 @@ def main():
     all_geos_crps_maps = []
     all_geos_mse_maps = []
     
+    # Provide 12 uniformly distributed random batches (1 per calendar month, assuming ~52 total batches per year)
+    # We fix the random seed to 42 so that the evaluation is consistent across runs
+    rng = random.Random(42)
+    target_batches = set()
+    total_expected_batches = 52 # 1 year = 52 weeks
+    chunk_size = total_expected_batches / 12.0
+    
+    for m in range(12):
+        start_idx = int(m * chunk_size)
+        end_idx = int((m + 1) * chunk_size) - 1
+        # Pick one random initialization batch from this month's window
+        target_batches.add(rng.randint(start_idx, end_idx))
+        
     pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
-        if batch_idx >= 12:
+        if len(all_model_crps) >= 12:
             break
+            
+        if batch_idx not in target_batches:
+            continue
             
         if not all_cached:
             # We process tests sample by sample for accurate ensemble aggregation
