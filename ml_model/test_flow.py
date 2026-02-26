@@ -448,13 +448,23 @@ def main():
     plt.savefig(corr_filename, bbox_inches='tight', dpi=150)
     plt.close()
 
+    avg_geos_crps_test = np.mean(all_geos_crps)
+    avg_model_crps_test = np.mean(all_model_crps)
+    avg_geos_rmse_test = np.mean(all_geos_rmse)
+    avg_model_rmse_test = np.mean(all_model_rmse)
+    
+    crps_skill = (1.0 - (avg_model_crps_test / avg_geos_crps_test)) * 100.0
+    rmse_skill = (1.0 - (avg_model_rmse_test / avg_geos_rmse_test)) * 100.0
+
     print("\n==================================")
     print(f"      TEST YEAR {args.year} RESULTS      ")
     print("==================================")
-    print(f"GEOS Baseline Average CRPS: {np.mean(all_geos_crps):.4f}")
-    print(f"Model Smart-Ens Average CRPS: {np.mean(all_model_crps):.4f}")
-    print(f"GEOS Baseline Average RMSE: {np.mean(all_geos_rmse):.4f}")
-    print(f"Model Smart-Ens Average RMSE: {np.mean(all_model_rmse):.4f}")
+    print(f"GEOS Baseline Average CRPS: {avg_geos_crps_test:.4f}")
+    print(f"Model Smart-Ens Average CRPS: {avg_model_crps_test:.4f}")
+    print(f"--> CRPS Skill Score: {crps_skill:.2f}% improvement")
+    print(f"GEOS Baseline Average RMSE: {avg_geos_rmse_test:.4f}")
+    print(f"Model Smart-Ens Average RMSE: {avg_model_rmse_test:.4f}")
+    print(f"--> RMSE Skill Score: {rmse_skill:.2f}% improvement")
     print(f"GEOS Baseline Average Corr: {geos_avg_corr:.4f}")
     print(f"Model Smart-Ens Average Corr: {model_avg_corr:.4f}")
     print("==================================")
