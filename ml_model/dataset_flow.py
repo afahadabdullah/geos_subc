@@ -33,8 +33,15 @@ class S2SHybridDataset(Dataset):
         if self.normalize:
             self.load_stats()
         
-        # MJO is deliberately removed for V4 architecture as we are isolating atmospheric spatial mechanics.
+        # Load MJO Data
+        mjo_path = os.path.join(self.data_root, "mjo", "mjo_processed.csv")
         self.df_mjo = None
+        if os.path.exists(mjo_path):
+            self.df_mjo = pd.read_csv(mjo_path, parse_dates=['date'])
+            self.df_mjo.set_index('date', inplace=True)
+            print(f"Loaded MJO processing table with {len(self.df_mjo)} daily records.")
+        else:
+            print(f"Warning: No valid mjo_processed.csv found at {mjo_path}. MJO Tokens will default to zero.")
         
         # Index samples
         self.prepare_samples()
@@ -415,12 +422,21 @@ class S2SHybridDataset(Dataset):
             if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
                 obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
 
+            # --- MJO Features (Conditioning) ---
+            s_date = meta['date']
+            if self.df_mjo is not None and s_date in self.df_mjo.index:
+                mjo = self.df_mjo.loc[s_date]
+                rmm_vals = np.array([mjo['RMM1_lagged'], mjo['RMM2_lagged']], dtype=np.float32)
+            else:
+                rmm_vals = np.zeros(2, dtype=np.float32)
+
             # Package common features
             cached_common = {
                 "geos_cond": geos_cond_tensor,
                 "obs_tensor": obs_tensor,
                 "geos_ens_raw": geos_ens_raw,
-                "pure_geos_mean_raw": pure_geos_mean_raw
+                "pure_geos_mean_raw": pure_geos_mean_raw,
+                "mjo": torch.tensor(rmm_vals, dtype=torch.float32)
             }
             
             if return_common_only:
@@ -463,5 +479,6 @@ class S2SHybridDataset(Dataset):
             "target_raw_full": target_raw_full,
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
-            "geos_ens_raw": cached_common["geos_ens_raw"]
+            "geos_ens_raw": cached_common["geos_ens_raw"],
+            "mjo": cached_common["mjo"]
         }
