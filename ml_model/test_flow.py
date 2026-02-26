@@ -486,8 +486,15 @@ def main():
     model_corr_map = temporal_correlation(all_full_preds_arr, all_targets_arr)
     geos_corr_map = temporal_correlation(all_geos_means_arr, all_targets_arr)
     
-    model_avg_corr = np.nanmean(model_corr_map)
-    geos_avg_corr = np.nanmean(geos_corr_map)
+    # Area-Weighted Correlation Averages
+    aw_np = area_weights.squeeze().cpu().numpy() # [H]
+    aw_2d = np.broadcast_to(aw_np[:, np.newaxis], model_corr_map.shape) # [H, W]
+    
+    mask_model = ~np.isnan(model_corr_map)
+    model_avg_corr = np.nansum(model_corr_map[mask_model] * aw_2d[mask_model]) / (np.nansum(aw_2d[mask_model]) + 1e-8)
+    
+    mask_geos = ~np.isnan(geos_corr_map)
+    geos_avg_corr = np.nansum(geos_corr_map[mask_geos] * aw_2d[mask_geos]) / (np.nansum(aw_2d[mask_geos]) + 1e-8)
     
     # Save Correlation Plot
     proj = ccrs.PlateCarree()
@@ -553,10 +560,18 @@ def main():
     plot_error_map(avg_geos_crps_map, avg_model_crps_map, "CRPS", 0, 8, 3, f"crps_map_{args.year}_N{args.ensemble_size}.png")
     plot_error_map(avg_geos_rmse_map, avg_model_rmse_map, "RMSE", 0, 15, 5, f"rmse_map_{args.year}_N{args.ensemble_size}.png")
 
-    avg_geos_crps_test = np.mean(all_geos_crps)
-    avg_model_crps_test = np.mean(all_model_crps)
-    avg_geos_rmse_test = np.mean(all_geos_rmse)
-    avg_model_rmse_test = np.mean(all_model_rmse)
+    # Final Area-Weighted Global Error Scorings from the Spatial Maps
+    m_crps_mask = ~np.isnan(avg_model_crps_map)
+    avg_model_crps_test = np.nansum(avg_model_crps_map[m_crps_mask] * aw_2d[m_crps_mask]) / (np.nansum(aw_2d[m_crps_mask]) + 1e-8)
+    
+    g_crps_mask = ~np.isnan(avg_geos_crps_map)
+    avg_geos_crps_test = np.nansum(avg_geos_crps_map[g_crps_mask] * aw_2d[g_crps_mask]) / (np.nansum(aw_2d[g_crps_mask]) + 1e-8)
+    
+    m_rmse_mask = ~np.isnan(avg_model_rmse_map)
+    avg_model_rmse_test = np.nansum(avg_model_rmse_map[m_rmse_mask] * aw_2d[m_rmse_mask]) / (np.nansum(aw_2d[m_rmse_mask]) + 1e-8)
+    
+    g_rmse_mask = ~np.isnan(avg_geos_rmse_map)
+    avg_geos_rmse_test = np.nansum(avg_geos_rmse_map[g_rmse_mask] * aw_2d[g_rmse_mask]) / (np.nansum(aw_2d[g_rmse_mask]) + 1e-8)
     
     crps_skill = (1.0 - (avg_model_crps_test / avg_geos_crps_test)) * 100.0
     rmse_skill = (1.0 - (avg_model_rmse_test / avg_geos_rmse_test)) * 100.0
