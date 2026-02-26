@@ -477,5 +477,6 @@ class S2SHybridDataset(Dataset):
             "target_raw_full": target_raw_full,
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
-            "geos_ens_raw": cached_common["geos_ens_raw"]
+            "geos_ens_raw": cached_common["geos_ens_raw"],
+            "mjo": cached_common["mjo"]
         }
