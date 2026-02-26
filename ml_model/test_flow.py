@@ -197,7 +197,9 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         
         # Explicit Euler Solver (50 steps for highest structural quality)
         num_steps = 50
-        p_x1_batch = flow_matcher.euler_solve(model, smart_noise_batch, fx_cond_batch, num_steps=num_steps)
+        # Pass lead_idx so euler_solve routes through the correct per-week output head
+        lead_idx_batch = torch.full((num_ensemble,), lead_idx, device=device, dtype=torch.long)
+        p_x1_batch = flow_matcher.euler_solve(model, smart_noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch)
         
         # Inverse Transform
         for eidx in range(num_ensemble):

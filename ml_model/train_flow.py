@@ -195,7 +195,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             # --- VRAM GPU BATCHING: Solve entire ensemble simultaneously ---
             fx_cond_batch = fx_cond.expand(num_ensemble, -1, -1, -1)
             noise_batch = torch.randn((num_ensemble, 1, H, W), device=device)
-            p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps)
+            # Pass lead_idx so euler_solve routes through the correct per-week output head
+            lead_idx_batch = torch.full((num_ensemble,), lead_idx, device=device, dtype=torch.long)
+            p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch)
             
             for eidx in range(num_ensemble):
                 week_pred_norm = p_x1_batch[eidx, 0] 
@@ -394,6 +396,12 @@ def train(args, accelerator):
         print(f"     [    33] x_t: Pure Noise Vector (Solver Substrate)")
         print(f"   --- Optimization Target ---")
         print(f"     Velocity Target (v_theta): SQRT(GPCP) Precipitation, Normalized to [-1, 1]")
+        print(f"   --- Dedicated Output Heads (Multi-Task Architecture) ---")
+        print(f"     Head 0: Week 1 (Conv2d 64→1)")
+        print(f"     Head 1: Week 2 (Conv2d 64→1)")
+        print(f"     Head 2: Week 3 (Conv2d 64→1)")
+        print(f"     Head 3: Week 4 (Conv2d 64→1)")
+        print(f"     Shared UNet features: 64 intermediate channels")
         print(f"-------------------------------------\n")
 
     # Area weights
@@ -853,8 +861,8 @@ def train(args, accelerator):
             noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
-            # Predict the velocity
-            v_pred = model(x_t, x_cond, t)
+            # Predict the velocity (routed through the correct per-week output head)
+            v_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Temporal Loss Weighting (NEW) ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)

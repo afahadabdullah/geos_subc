@@ -2,7 +2,7 @@
 batch_size: 4
 learning_rate: 5e-5
 epochs: 1000
-output_dir: ml_output_flow2
+output_dir: ml_output_flow3
 mixed_precision: fp16
 num_workers: 1
 data_dir: /home1/11353/afahad/geos_subc/dataprocess
