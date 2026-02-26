@@ -50,7 +50,7 @@ def compute_crps(ensemble_preds, target, area_weights):
     weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
     
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
-    return weighted_crps.item()
+    return weighted_crps.item(), crps_map_clean
 
 def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, geos_single, model_single, lats, lons):
     """
@@ -205,7 +205,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
     full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
     
-    val_metric = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    val_metric, model_crps_map = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
     
     mse_map = (full_pred - true_target_precip)**2
     mask = ~torch.isnan(mse_map)
@@ -215,7 +215,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     else:
         model_rmse = 0.0
     
-    geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    geos_crps, geos_crps_map = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
     geos_mse_map = (geos_mean_raw - true_target_precip)**2
     mask_2d = ~torch.isnan(geos_mse_map)
 
@@ -239,7 +239,11 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         'true_target_precip': true_target_precip_plot,
         'geos_mean': geos_mean_raw,
         'geos_single': geos_ens_sample[0],
-        'model_single': ensemble_preds_precip[0]
+        'model_single': ensemble_preds_precip[0],
+        'model_crps_map': model_crps_map[0],
+        'model_mse_map': mse_map,
+        'geos_crps_map': geos_crps_map[0],
+        'geos_mse_map': geos_mse_map
     }
     return val_metric, model_rmse, geos_crps, geos_rmse, tensors
 
@@ -325,10 +329,15 @@ def main():
     all_model_crps, all_model_rmse = [], []
     all_geos_crps, all_geos_rmse = [], []
     
-    # Storage for temporal correlation
+    # Storage for temporal correlation & spatial error maps
     all_full_preds = []
     all_targets = []
     all_geos_means = []
+    
+    all_model_crps_maps = []
+    all_model_mse_maps = []
+    all_geos_crps_maps = []
+    all_geos_mse_maps = []
     
     pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
@@ -356,8 +365,14 @@ def main():
             t_target = data['true_target_precip']
             g_mean = data['geos_mean']
             
+            m_crps_map = data['model_crps_map']
+            m_mse_map = data['model_mse_map']
+            g_crps_map = data['geos_crps_map']
+            g_mse_map = data['geos_mse_map']
+            
             # Reconstruct tensors for plotting first few batches
             if batch_idx < 5:
+                # Need spatial maps for debugging if desired, but plotting tests mostly need images
                 full_pred = torch.from_numpy(f_pred)
                 true_target_precip_plot = torch.from_numpy(t_target)
                 geos_mean_raw = torch.from_numpy(g_mean)
@@ -379,6 +394,11 @@ def main():
             t_target = tensors['true_target_precip'].cpu().numpy()
             g_mean = tensors['geos_mean'].cpu().numpy()
             
+            m_crps_map = tensors['model_crps_map'].cpu().numpy()
+            m_mse_map = tensors['model_mse_map'].cpu().numpy()
+            g_crps_map = tensors['geos_crps_map'].cpu().numpy()
+            g_mse_map = tensors['geos_mse_map'].cpu().numpy()
+            
             # Save to disk to avoid rerunning
             np.savez_compressed(
                 data_file,
@@ -390,12 +410,21 @@ def main():
                 true_target_precip=t_target,
                 geos_mean=g_mean,
                 geos_single=tensors['geos_single'].cpu().numpy(),
-                model_single=tensors['model_single'].cpu().numpy()
+                model_single=tensors['model_single'].cpu().numpy(),
+                model_crps_map=m_crps_map,
+                model_mse_map=m_mse_map,
+                geos_crps_map=g_crps_map,
+                geos_mse_map=g_mse_map
             )
             
         all_full_preds.append(f_pred)
         all_targets.append(t_target)
         all_geos_means.append(g_mean)
+        
+        all_model_crps_maps.append(m_crps_map)
+        all_model_mse_maps.append(m_mse_map)
+        all_geos_crps_maps.append(g_crps_map)
+        all_geos_mse_maps.append(g_mse_map)
         
         all_model_crps.append(m_crps)
         all_model_rmse.append(m_rmse)
@@ -461,6 +490,41 @@ def main():
     corr_filename = os.path.join(output_dir, "test_plots", f"correlation_map_{args.year}_N{args.ensemble_size}.png")
     plt.savefig(corr_filename, bbox_inches='tight', dpi=150)
     plt.close()
+    
+    # --- Generate CRPS Map Plot --- #
+    print("Calculating and Plotting Spatial CRPS and RMSE Maps...")
+    avg_model_crps_map = np.mean(all_model_crps_maps, axis=0) # [H, W]
+    avg_geos_crps_map = np.mean(all_geos_crps_maps, axis=0) 
+    
+    avg_model_rmse_map = np.sqrt(np.mean(all_model_mse_maps, axis=0))
+    avg_geos_rmse_map = np.sqrt(np.mean(all_geos_mse_maps, axis=0))
+    
+    # Helper to plot 3-panel error maps
+    def plot_error_map(geos_map, model_map, metric_name, vmin, vmax, diff_vmax, filename):
+        fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={'projection': proj})
+        
+        # GEOS
+        im0 = axes[0].imshow(geos_map, cmap='OrRd', vmin=vmin, vmax=vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[0], f"GEOS {metric_name} Error")
+        
+        # Model
+        im1 = axes[1].imshow(model_map, cmap='OrRd', vmin=vmin, vmax=vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[1], f"Model {metric_name} Error")
+        
+        # Difference (GEOS - Model : Positive means GEOS error > Model error => Green = Model Better)
+        diff_err = geos_map - model_map
+        im2 = axes[2].imshow(diff_err, cmap='PiYG', vmin=-diff_vmax, vmax=diff_vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[2], f"{metric_name} Improvement: GEOS - Model\n(Green > 0 = Model Better, Pink < 0 = GEOS Better)")
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "test_plots", filename), bbox_inches='tight', dpi=150)
+        plt.close()
+        
+    plot_error_map(avg_geos_crps_map, avg_model_crps_map, "CRPS", 0, 8, 3, f"crps_map_{args.year}_N{args.ensemble_size}.png")
+    plot_error_map(avg_geos_rmse_map, avg_model_rmse_map, "RMSE", 0, 15, 5, f"rmse_map_{args.year}_N{args.ensemble_size}.png")
 
     avg_geos_crps_test = np.mean(all_geos_crps)
     avg_model_crps_test = np.mean(all_model_crps)
