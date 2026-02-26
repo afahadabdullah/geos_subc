@@ -257,45 +257,13 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    # Force dataset to only load the test year
-    test_dataset = S2SHybridDataset(
-        data_root=config["data_dir"],
-        start_year=args.year,
-        end_year=args.year,
-        normalize=True,
-        preload=config.get("preload", False),
-        stats_file="v5_global_stats.pt"
-    )
-
-    from torch.utils.data import DataLoader
-    test_loader = DataLoader(
-        test_dataset, batch_size=4, shuffle=False, 
-        num_workers=2, pin_memory=True
-    )
-
-    stats_file = "ml_model/v5_global_stats.pt"
-    global_bounds = torch.load(stats_file, weights_only=True)
-    target_sqrt_min = 0.0
-    target_sqrt_max = 7.071
-    geos_min = global_bounds["geos_raw"]["min"]
-    geos_max = global_bounds["geos_raw"]["max"]
-
-    model = FlowMatchingModel(in_channels=32, out_channels=1).to(device)
-    
-    print(f"Loading checkpoint: {args.ckpt}")
-    ckpt = torch.load(args.ckpt, map_location=device, weights_only=True)
-    model.load_state_dict(ckpt['model'])
-    model.eval()
-    
-    flow_matcher = CustomFlowMatcher(device=device)
-
     output_dir = config.get("output_dir", "ml_output_flow")
     os.makedirs(output_dir, exist_ok=True)
     
-    csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
-    with open(csv_file, mode='w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["Batch_Idx", "Model_CRPS", "Model_RMSE", "GEOS_CRPS", "GEOS_RMSE"])
+    output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
+    os.makedirs(output_data_dir, exist_ok=True)
+    
+    all_cached = all([os.path.exists(os.path.join(output_data_dir, f"batch_{i}.npz")) for i in range(12)])
 
     # Load lat values for area weights
     import xarray as xr
@@ -304,7 +272,55 @@ def main():
     lats = ds_geos.Y.values
     lons = ds_geos.X.values
     area_weights = get_area_weights(lats, device)
+
+    if all_cached:
+        print(f"\n✅ Found all 12 pre-computed test batches in {output_data_dir}.")
+        print("Skipping dataset load and model weights. Proceeding directly to analysis!")
+        test_iterator = range(12)
+        model = None
+        flow_matcher = None
+        target_sqrt_min = 0.0
+        target_sqrt_max = 7.071
+        geos_min = 0.0
+        geos_max = 0.0
+    else:
+        # Force dataset to only load the test year
+        test_dataset = S2SHybridDataset(
+            data_root=config["data_dir"],
+            start_year=args.year,
+            end_year=args.year,
+            normalize=True,
+            preload=config.get("preload", False),
+            stats_file="v5_global_stats.pt"
+        )
     
+        from torch.utils.data import DataLoader
+        test_loader = DataLoader(
+            test_dataset, batch_size=4, shuffle=False, 
+            num_workers=2, pin_memory=True
+        )
+        test_iterator = test_loader
+    
+        stats_file = "ml_model/v5_global_stats.pt"
+        global_bounds = torch.load(stats_file, weights_only=True)
+        target_sqrt_min = 0.0
+        target_sqrt_max = 7.071
+        geos_min = global_bounds["geos_raw"]["min"]
+        geos_max = global_bounds["geos_raw"]["max"]
+    
+        model = FlowMatchingModel(in_channels=32, out_channels=1).to(device)
+        print(f"Loading checkpoint: {args.ckpt}")
+        ckpt = torch.load(args.ckpt, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt['model'])
+        model.eval()
+        
+        flow_matcher = CustomFlowMatcher(device=device)
+
+    csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
+    with open(csv_file, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Batch_Idx", "Model_CRPS", "Model_RMSE", "GEOS_CRPS", "GEOS_RMSE"])
+        
     # ------------------ TESTING LOOP ------------------
     all_model_crps, all_model_rmse = [], []
     all_geos_crps, all_geos_rmse = [], []
@@ -314,18 +330,16 @@ def main():
     all_targets = []
     all_geos_means = []
     
-    output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
-    os.makedirs(output_data_dir, exist_ok=True)
-    
-    pbar = tqdm(test_loader, desc=f"Testing {args.year}", leave=True)
+    pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
         if batch_idx >= 12:
             break
             
-        # We process tests sample by sample for accurate ensemble aggregation
-        # Ensure we only pass one distinct init date (which is flattened into 4 leads by the dataset batcher)
-        if batch['y_target'].shape[0] != 4:
-            continue
+        if not all_cached:
+            # We process tests sample by sample for accurate ensemble aggregation
+            # Ensure we only pass one distinct init date (which is flattened into 4 leads by the dataset batcher)
+            if batch['y_target'].shape[0] != 4:
+                continue
             
         data_file = os.path.join(output_data_dir, f"batch_{batch_idx}.npz")
         
