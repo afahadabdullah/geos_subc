@@ -162,45 +162,50 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
-        ens_pbar = tqdm(range(num_ensemble), desc=f"  [Inference B{b_idx}]", disable=not accelerator.is_main_process, leave=False)
-        for eidx in ens_pbar:
-            sample_weeks = []
-            for lead_idx in range(4):
-                fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)
-                fx_geos = batch['x_geos'][lead_idx].to(device)
-                fx_geos_flat = fx_geos.view(1, -1, H, W)
+        sample_weeks_ensemble = [[] for _ in range(num_ensemble)]
+        
+        lead_pbar = tqdm(range(4), desc=f"  [Inference B{b_idx}] Leads", disable=not accelerator.is_main_process, leave=False)
+        for lead_idx in lead_pbar:
+            fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)
+            fx_geos = batch['x_geos'][lead_idx].to(device)
+            fx_geos_flat = fx_geos.view(1, -1, H, W)
+            
+            f_month = batch['month'][lead_idx].to(device).view(1)
+            fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
+            f_lead_val = (fl_idx.float() / 1.5) - 1.0 
+            f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
+            fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
+            
+            fx_cat_geos = fx_geos.view(1, -1, H, W)             
+            
+            fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) 
+            
+            target_norm_week = fb_target_norm[lead_idx].unsqueeze(0) 
+            
+            if is_fast_recon and not is_test:
+                num_steps = 10
+            else:
+                num_steps = 50
                 
-                f_month = batch['month'][lead_idx].to(device).view(1)
-                fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
-                fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
-                
-                fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
-                f_lead_val = (fl_idx.float() / 1.5) - 1.0 
-                f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
-                
-                fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
-                fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
-                
-                fx_cat_geos = fx_geos.view(1, -1, H, W)             
-                
-                fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) 
-                
-                target_norm_week = fb_target_norm[lead_idx].unsqueeze(0) 
-                
-                if is_fast_recon and not is_test:
-                    num_steps = 10
-                else:
-                    num_steps = 50
-                    
-                noise = torch.randn((1, 1, H, W), device=device)
-                p_x1 = flow_matcher.euler_solve(unwrapped_model, noise, fx_cond, num_steps=num_steps)
-                week_pred_norm = p_x1[0, 0] 
+            # --- VRAM GPU BATCHING: Solve entire ensemble simultaneously ---
+            fx_cond_batch = fx_cond.expand(num_ensemble, -1, -1, -1)
+            noise_batch = torch.randn((num_ensemble, 1, H, W), device=device)
+            p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps)
+            
+            for eidx in range(num_ensemble):
+                week_pred_norm = p_x1_batch[eidx, 0] 
                 
                 week_sqrt = ((week_pred_norm + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
                 week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
-                sample_weeks.append(week_precip)
+                sample_weeks_ensemble[eidx].append(week_precip)
                 
-            ensemble_preds_precip.append(torch.stack(sample_weeks))
+        for eidx in range(num_ensemble):
+            ensemble_preds_precip.append(torch.stack(sample_weeks_ensemble[eidx]))
 
         ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
         full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]

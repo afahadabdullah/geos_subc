@@ -158,52 +158,56 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     
     ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
-    ens_pbar = tqdm(range(num_ensemble), desc=f"  [Testing Batch {batch_idx}]", leave=False)
-    for eidx in ens_pbar:
-        sample_weeks = []
-        for lead_idx in range(4):
-            fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)  # [1, 24, H, W]
-            fx_geos = batch['x_geos'][lead_idx].to(device)              # [1, 1, 4, H, W]
-            fx_geos_flat = fx_geos.view(1, -1, H, W)                    # [1, 4, H, W]
-            
-            f_month = batch['month'][lead_idx].to(device).view(1)
-            fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
-            fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
-            
-            fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
-            f_lead_val = (fl_idx.float() / 1.5) - 1.0 
-            f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
-            
-            fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
-            fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
-            
-            fx_cat_geos = fx_geos.view(1, -1, H, W)             
-            
-            fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) # [1, 33, H, W]
-            
-            # Smart Noise Injection for current lead week
-            lead_var = geos_struct_var[lead_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
-            
-            # Normalize GEOS variance so it averages to ~1.0 globally, ensuring we don't 
-            # silence or explode the noise. Clamp it firmly between 0.5 (confident regions) 
-            # and 2.0 (highly chaotic regions like tropical cyclones).
-            var_norm = lead_var / (lead_var.mean() + 1e-6)
-            var_scaled = torch.clamp(var_norm, min=0.5, max=2.0)
-            
-            base_noise = torch.randn((1, 1, H, W), device=device)
-            smart_noise = base_noise * var_scaled
-            
-            # Explicit Euler Solver (50 steps for highest structural quality)
-            num_steps = 50
-            p_x1 = flow_matcher.euler_solve(model, smart_noise, fx_cond, num_steps=num_steps)
-            week_pred_norm = p_x1[0, 0] # [H, W]
-            
-            # Inverse Transform
+    sample_weeks_ensemble = [[] for _ in range(num_ensemble)]
+    
+    lead_pbar = tqdm(range(4), desc=f"  [Testing Batch {batch_idx}] Leads", leave=False)
+    for lead_idx in lead_pbar:
+        fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)  # [1, 24, H, W]
+        fx_geos = batch['x_geos'][lead_idx].to(device)              # [1, 1, 4, H, W]
+        fx_geos_flat = fx_geos.view(1, -1, H, W)                    # [1, 4, H, W]
+        
+        f_month = batch['month'][lead_idx].to(device).view(1)
+        fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+        fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+        
+        fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
+        f_lead_val = (fl_idx.float() / 1.5) - 1.0 
+        f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
+        
+        fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
+        fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
+        
+        fx_cat_geos = fx_geos.view(1, -1, H, W)             
+        
+        fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) # [1, 33, H, W]
+        
+        # Smart Noise Injection for current lead week
+        lead_var = geos_struct_var[lead_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+        
+        # Normalize GEOS variance so it averages to ~1.0 globally, ensuring we don't 
+        # silence or explode the noise. Clamp it firmly between 0.5 (confident regions) 
+        # and 2.0 (highly chaotic regions like tropical cyclones).
+        var_norm = lead_var / (lead_var.mean() + 1e-6)
+        var_scaled = torch.clamp(var_norm, min=0.5, max=2.0)
+        
+        # --- VRAM GPU BATCHING: Solve entire ensemble simultaneously ---
+        fx_cond_batch = fx_cond.expand(num_ensemble, -1, -1, -1)
+        base_noise_batch = torch.randn((num_ensemble, 1, H, W), device=device)
+        smart_noise_batch = base_noise_batch * var_scaled
+        
+        # Explicit Euler Solver (50 steps for highest structural quality)
+        num_steps = 50
+        p_x1_batch = flow_matcher.euler_solve(model, smart_noise_batch, fx_cond_batch, num_steps=num_steps)
+        
+        # Inverse Transform
+        for eidx in range(num_ensemble):
+            week_pred_norm = p_x1_batch[eidx, 0] # [H, W]
             week_sqrt = ((week_pred_norm + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
             week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
-            sample_weeks.append(week_precip)
+            sample_weeks_ensemble[eidx].append(week_precip)
             
-        ensemble_preds_precip.append(torch.stack(sample_weeks)) # [4, H, W]
+    for eidx in range(num_ensemble):
+        ensemble_preds_precip.append(torch.stack(sample_weeks_ensemble[eidx])) # [4, H, W]
 
     ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
     full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
