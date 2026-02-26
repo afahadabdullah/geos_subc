@@ -267,6 +267,17 @@ def main():
     output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
     os.makedirs(output_data_dir, exist_ok=True)
     
+    # Check cache integrity (we just added spatial maps so old caches will crash)
+    for i in range(12):
+        df = os.path.join(output_data_dir, f"batch_{i}.npz")
+        if os.path.exists(df):
+            try:
+                with np.load(df) as f:
+                    _ = f['model_crps_map']
+            except (KeyError, Exception):
+                print(f"Purging outdated cache: {df}")
+                os.remove(df)
+                
     all_cached = all([os.path.exists(os.path.join(output_data_dir, f"batch_{i}.npz")) for i in range(12)])
 
     # Load lat values for area weights
