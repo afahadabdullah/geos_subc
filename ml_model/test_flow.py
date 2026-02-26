@@ -309,6 +309,11 @@ def main():
     all_model_crps, all_model_rmse = [], []
     all_geos_crps, all_geos_rmse = [], []
     
+    # Storage for temporal correlation
+    all_full_preds = []
+    all_targets = []
+    all_geos_means = []
+    
     output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
     os.makedirs(output_data_dir, exist_ok=True)
     
@@ -333,11 +338,15 @@ def main():
             g_crps = float(data['geos_crps'])
             g_rmse = float(data['geos_rmse'])
             
+            f_pred = data['full_pred']
+            t_target = data['true_target_precip']
+            g_mean = data['geos_mean']
+            
             # Reconstruct tensors for plotting first few batches
             if batch_idx < 5:
-                full_pred = torch.from_numpy(data['full_pred'])
-                true_target_precip_plot = torch.from_numpy(data['true_target_precip'])
-                geos_mean_raw = torch.from_numpy(data['geos_mean'])
+                full_pred = torch.from_numpy(f_pred)
+                true_target_precip_plot = torch.from_numpy(t_target)
+                geos_mean_raw = torch.from_numpy(g_mean)
                 geos_single = torch.from_numpy(data['geos_single'])
                 model_single = torch.from_numpy(data['model_single'])
                 
@@ -352,6 +361,10 @@ def main():
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size, save_plot=(batch_idx < 5)
             )
             
+            f_pred = tensors['full_pred'].cpu().numpy()
+            t_target = tensors['true_target_precip'].cpu().numpy()
+            g_mean = tensors['geos_mean'].cpu().numpy()
+            
             # Save to disk to avoid rerunning
             np.savez_compressed(
                 data_file,
@@ -359,12 +372,16 @@ def main():
                 model_rmse=m_rmse,
                 geos_crps=g_crps,
                 geos_rmse=g_rmse,
-                full_pred=tensors['full_pred'].cpu().numpy(),
-                true_target_precip=tensors['true_target_precip'].cpu().numpy(),
-                geos_mean=tensors['geos_mean'].cpu().numpy(),
+                full_pred=f_pred,
+                true_target_precip=t_target,
+                geos_mean=g_mean,
                 geos_single=tensors['geos_single'].cpu().numpy(),
                 model_single=tensors['model_single'].cpu().numpy()
             )
+            
+        all_full_preds.append(f_pred)
+        all_targets.append(t_target)
+        all_geos_means.append(g_mean)
         
         all_model_crps.append(m_crps)
         all_model_rmse.append(m_rmse)
@@ -380,6 +397,57 @@ def main():
             "G_CRPS": f"{np.mean(all_geos_crps):.3f}"
         })
 
+    print("\nCalculating Temporal Correlation Maps...")
+    all_full_preds_arr = np.concatenate(all_full_preds, axis=0) # [T, H, W]
+    all_targets_arr = np.concatenate(all_targets, axis=0)
+    all_geos_means_arr = np.concatenate(all_geos_means, axis=0)
+    
+    def temporal_correlation(x, y):
+        x_mean = np.mean(x, axis=0, keepdims=True)
+        y_mean = np.mean(y, axis=0, keepdims=True)
+        x_anom = x - x_mean
+        y_anom = y - y_mean
+        cov = np.sum(x_anom * y_anom, axis=0)
+        var_x = np.sum(x_anom**2, axis=0)
+        var_y = np.sum(y_anom**2, axis=0)
+        corr = cov / (np.sqrt(var_x * var_y) + 1e-8)
+        return corr
+        
+    model_corr_map = temporal_correlation(all_full_preds_arr, all_targets_arr)
+    geos_corr_map = temporal_correlation(all_geos_means_arr, all_targets_arr)
+    
+    model_avg_corr = np.nanmean(model_corr_map)
+    geos_avg_corr = np.nanmean(geos_corr_map)
+    
+    # Save Correlation Plot
+    proj = ccrs.PlateCarree()
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={'projection': proj})
+    extent = [lons.min(), lons.max(), lats.min(), lats.max()]
+    
+    def style_ax_corr(ax, title):
+        ax.set_title(title, fontsize=12)
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+        ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=':')
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+    
+    im0 = axes[0].imshow(geos_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    style_ax_corr(axes[0], f"GEOS Correlation (Avg: {geos_avg_corr:.3f})")
+    
+    im1 = axes[1].imshow(model_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    style_ax_corr(axes[1], f"Model Correlation (Avg: {model_avg_corr:.3f})")
+    
+    diff_corr = model_corr_map - geos_corr_map
+    im2 = axes[2].imshow(diff_corr, cmap='PuOr', vmin=-0.4, vmax=0.4, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    style_ax_corr(axes[2], "Difference: Model - GEOS\n(Purple > 0 = Model Better, Orange < 0 = GEOS Better)")
+    
+    plt.tight_layout()
+    corr_filename = os.path.join(output_dir, "test_plots", f"correlation_map_{args.year}_N{args.ensemble_size}.png")
+    plt.savefig(corr_filename, bbox_inches='tight', dpi=150)
+    plt.close()
+
     print("\n==================================")
     print(f"      TEST YEAR {args.year} RESULTS      ")
     print("==================================")
@@ -387,6 +455,8 @@ def main():
     print(f"Model Smart-Ens Average CRPS: {np.mean(all_model_crps):.4f}")
     print(f"GEOS Baseline Average RMSE: {np.mean(all_geos_rmse):.4f}")
     print(f"Model Smart-Ens Average RMSE: {np.mean(all_model_rmse):.4f}")
+    print(f"GEOS Baseline Average Corr: {geos_avg_corr:.4f}")
+    print(f"Model Smart-Ens Average Corr: {model_avg_corr:.4f}")
     print("==================================")
 
 if __name__ == "__main__":
