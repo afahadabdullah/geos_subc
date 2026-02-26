@@ -174,6 +174,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
                 fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
                 
+                fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
                 f_lead_val = (fl_idx.float() / 1.5) - 1.0 
                 f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
                 
