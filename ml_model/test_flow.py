@@ -253,7 +253,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml", help="Path to config file")
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to best model checkpoint to test")
+    parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
     parser.add_argument("--ensemble-size", type=int, default=20, help="Number of members in smart noise ensemble")
     args = parser.parse_args()
@@ -327,6 +327,24 @@ def main():
         geos_max = global_bounds["geos_raw"]["max"]
     
         model = FlowMatchingModel(in_channels=34, out_channels=1).to(device)
+        
+        if args.ckpt is None:
+            import glob
+            model_paths = glob.glob(os.path.join(output_dir, "best_model_epoch_*_crps_*.pt"))
+            if not model_paths:
+                raise FileNotFoundError(f"No best models found in {output_dir}")
+            
+            def extract_crps(path):
+                filename = os.path.basename(path).replace('.pt', '')
+                try:
+                    return float(filename.split('_crps_')[-1])
+                except:
+                    return 999.0
+                    
+            best_ckpt = min(model_paths, key=extract_crps)
+            print(f"🔍 Auto-discovered best top model: {os.path.basename(best_ckpt)}")
+            args.ckpt = best_ckpt
+            
         print(f"Loading checkpoint: {args.ckpt}")
         ckpt = torch.load(args.ckpt, map_location=device, weights_only=True)
         model.load_state_dict(ckpt['model'])
