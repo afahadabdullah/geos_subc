@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J diff_v5                  # Job name
-#SBATCH -o ml_output_flow/flow_%j.out
-#SBATCH -e ml_output_flow/flow_%j.err
+#SBATCH -o ml_output_flow2/flow_%j.out
+#SBATCH -e ml_output_flow2/flow_%j.err
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
@@ -27,7 +27,7 @@ echo "🔄 Pulling latest stability fixes from git..."
 git pull
 
 # Ensure output directory exists
-mkdir -p ml_output_flow
+mkdir -p ml_output_flow2
 
 # Run Global Stats calculation (OVERRIDE: only if stats file doesn't exist)
 STATS_PATH="ml_model/v5_global_stats.pt"
@@ -48,7 +48,7 @@ echo "📍 Current Host: $(hostname)"
 echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
 echo "📍 Working Dir: $PWD"
 
-CKPT_FILE="ml_output_flow/latest_flow_ckpt.pt"
+CKPT_FILE="ml_output_flow2/latest_flow_ckpt.pt"
 MAX_EPOCHS=1000
 
 if [ -f "$CKPT_FILE" ]; then
