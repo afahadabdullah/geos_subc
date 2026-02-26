@@ -326,7 +326,7 @@ def main():
         geos_min = global_bounds["geos_raw"]["min"]
         geos_max = global_bounds["geos_raw"]["max"]
     
-        model = FlowMatchingModel(in_channels=33, out_channels=1).to(device)
+        model = FlowMatchingModel(in_channels=34, out_channels=1).to(device)
         print(f"Loading checkpoint: {args.ckpt}")
         ckpt = torch.load(args.ckpt, map_location=device, weights_only=True)
         model.load_state_dict(ckpt['model'])

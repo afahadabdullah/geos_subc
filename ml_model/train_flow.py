@@ -337,7 +337,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=33, out_channels=1).to(device)
+    model = FlowMatchingModel(in_channels=34, out_channels=1).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
