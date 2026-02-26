@@ -859,7 +859,7 @@ def train(args, accelerator):
             # --- Temporal Loss Weighting (NEW) ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
             # 0=Week1, 1=Week2, 2=Week3, 3=Week4
-            w_escalation = torch.tensor([1.0, 1.25, 1.5, 2.0], device=device)
+            w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
             # Loss scaling with spatial priority AND temporal priority
