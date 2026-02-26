@@ -822,8 +822,14 @@ def train(args, accelerator):
             # Predict the velocity
             v_pred = model(x_t, x_cond, t)
 
-            # Loss scaling with spatial priority
-            loss = (area_weights * (v_pred - v_target)**2).mean()
+            # --- Temporal Loss Weighting (NEW) ---
+            # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
+            # 0=Week1, 1=Week2, 2=Week3, 3=Week4
+            w_escalation = torch.tensor([1.0, 1.25, 1.5, 2.0], device=device)
+            temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+
+            # Loss scaling with spatial priority AND temporal priority
+            loss = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
