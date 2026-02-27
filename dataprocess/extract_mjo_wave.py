@@ -165,9 +165,16 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
     da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
     
-    # 1. Compute Climatology using the entire record on native 2.5° grid
+    # 1. Compute or Load Climatology using the entire record on native 2.5° grid
     # This is MUCH faster and uses much less memory than interpolating 48 years first
-    climatology = compute_climatology(da_olr).compute()
+    clim_path = os.path.join(output_dir, "olr_climatology.nc")
+    if os.path.exists(clim_path):
+        print(f"  Loading cached climatology from {clim_path}...")
+        climatology = xr.open_dataarray(clim_path).compute()
+    else:
+        climatology = compute_climatology(da_olr).compute()
+        print(f"  Saving climatology cache to {clim_path}...")
+        climatology.to_netcdf(clim_path)
     
     # 2. We need a buffer around the target year for the 30-90 day FFT
     # Standard practice is to pad by at least 90 days on either side
