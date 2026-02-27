@@ -775,7 +775,8 @@ def train(args, accelerator):
 
         if not should_validate(epoch):
             if accelerator.is_main_process:
-                print(f"⏭️  Epoch {epoch}: Skipping validation (schedule: next at {next(e for e in range(epoch+1, epoch+10) if should_validate(e))}).")
+                next_val = next((e for e in range(epoch+1, epoch+200) if should_validate(e)), epoch+1)
+                print(f"⏭️  Epoch {epoch}: Skipping validation (schedule: next at {next_val}).")
             epochs_done_this_run += 1
             continue
 
