@@ -8,42 +8,40 @@ import os
 def get_base_dataset():
     """
     Connects to ArrayLake and returns the FIMR forecast dataset.
-    Bypasses group-level loading to avoid conflicting dimension sizes (e.g., 'S').
+    Uses low-level zarr to find keys and drop misaligned variables that break Xarray.
     """
+    import zarr
     print("Connecting to ArrayLake...")
     client = Client()
     repo = client.get_repo("umd/subc")
     print("Creating session for branch 'main'...")
     session = repo.writable_session(branch="main")
     
-    needed_vars = ['pr', 'tas', 'zg']
-    ds_list = []
-    
-    for var in needed_vars:
-        print(f"Opening variable: {var} ...")
-        try:
-            # Open each variable as its own dataset from the subgroup
-            var_ds = xr.open_zarr(session.store, zarr_format=3, group=f"esrl-fimr1p1-forecast/{var}")
-            ds_list.append(var_ds)
-        except Exception as e:
-            print(f"Warning: Could not open {var} directly: {e}")
-            # Fallback: try opening the group with consolidated=False and dropping others
-            print(f"Attempting fallback for {var}...")
-            try:
-                # We drop all other variables to avoid merge conflicts
-                full_ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-forecast", consolidated=False)
-                ds_list.append(full_ds[[var]])
-            except Exception as e2:
-                print(f"Error: Failed to load {var}: {e2}")
-
-    if not ds_list:
-        print("Fatal Error: Could not load any variables.")
+    print("Inspecting group keys for 'esrl-fimr1p1-forecast'...")
+    try:
+        # Open group with zarr directly to see what's inside
+        z = zarr.open(session.store, mode='r', zarr_format=3)
+        group_path = "esrl-fimr1p1-forecast"
+        
+        # Get all sub-keys (arrays and groups)
+        all_keys = list(z[group_path].keys())
+        needed_vars = ['pr', 'tas', 'zg']
+        to_drop = [k for k in all_keys if k not in needed_vars]
+        
+        print(f"Found {len(all_keys)} keys. Dropping {len(to_drop)} variables to avoid alignment conflicts.")
+        
+        # Open with Xarray while dropping everything else
+        ds = xr.open_zarr(
+            session.store, 
+            zarr_format=3, 
+            group=group_path, 
+            drop_variables=to_drop,
+            consolidated=False
+        )
+    except Exception as e:
+        print(f"Fatal Error opening group '{group_path}': {e}")
         return None
 
-    print("Merging variables into single dataset...")
-    # 'override' assumes dimension coordinates match even if indices vary slightly
-    ds = xr.merge(ds_list, compat='override')
-    
     # 1. Identify pressure level dimension for ZG
     level_dim = None
     if 'zg' in ds:
@@ -65,14 +63,14 @@ def get_base_dataset():
             print("Warning: No level dimension found for 'zg'. Using raw 'zg'.")
             zg_850 = ds.zg
     else:
-        print("Error: 'zg' not found in dataset after merge.")
+        print("Error: 'zg' not found in dataset.")
         return None
 
-    # 3. Assemble final subset
+    # 3. Assemble final subset and rename zg to zg850 as requested
     subset = xr.Dataset({
         'pr': ds['pr'],
         'tas': ds['tas'],
-        'zg': zg_850
+        'zg850': zg_850
     })
     
     return subset
