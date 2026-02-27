@@ -22,6 +22,7 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 import os
+import glob
 from tqdm import tqdm
 import argparse
 
@@ -79,6 +80,11 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
     print(f"  Loading 13-month slice into RAM for fast access...")
     da_mjo = ds_mjo_slice['mjo_wave'].compute()
     
+    # Ensure dimensions match GEOS target names immediately to prevent concat errors
+    lat_name_mjo = 'lat' if 'lat' in da_mjo.coords else 'latitude'
+    lon_name_mjo = 'lon' if 'lon' in da_mjo.coords else 'longitude'
+    da_mjo = da_mjo.rename({lat_name_mjo: target_lat.name, lon_name_mjo: target_lon.name})
+    
     # 3. Compute 4 weekly means BEFORE each init date
     print(f"  Computing 4-weekly observed means for {len(init_dates)} init dates...")
     
@@ -126,12 +132,6 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
         sample = xr.concat(weeks, dim='L')
         sample = sample.assign_coords(L=np.arange(4))
         
-        # Ensure coordinates match target exactly so concat works cleanly later
-        lat_name_mjo = 'lat' if 'lat' in sample.coords else 'latitude'
-        lon_name_mjo = 'lon' if 'lon' in sample.coords else 'longitude'
-        
-        # Strip extra coordinates matching GEOS format
-        sample = sample.rename({lat_name_mjo: target_lat.name, lon_name_mjo: target_lon.name})
         processed_data.append(sample)
     
     if skipped > 0:
@@ -170,13 +170,16 @@ if __name__ == "__main__":
                         help="Specific years to process. Default: 1999-2016")
     args = parser.parse_args()
     
-    if not os.path.exists(MJO_FILE):
-        print(f"ERROR: Base MJO file not found at {MJO_FILE}")
+    mjo_files = sorted(glob.glob("dataprocess/mjo_wave_spatial_*.zarr"))
+    if not mjo_files:
+        print("ERROR: No base MJO files found (dataprocess/mjo_wave_spatial_*.zarr)")
         print("Please run `python dataprocess/extract_mjo_wave.py` first to generate the daily spatial maps.")
         exit(1)
         
-    print(f"Loading continuous MJO wave dataset from {MJO_FILE}...")
-    ds_mjo_full = xr.open_zarr(MJO_FILE, consolidated=False)
+    print(f"Loading {len(mjo_files)} continuous MJO wave datasets...")
+    ds_list = [xr.open_zarr(f, consolidated=False) for f in mjo_files]
+    ds_mjo_full = xr.concat(ds_list, dim='time').sortby('time')
+    
     print(f"  Time range: {ds_mjo_full.time.values[0]} to {ds_mjo_full.time.values[-1]}")
     
     years = args.years if args.years else list(range(1999, 2017))
