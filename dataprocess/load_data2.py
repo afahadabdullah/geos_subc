@@ -8,13 +8,41 @@ import os
 def get_base_dataset():
     """
     Connects to ArrayLake and returns the FIMR forecast dataset.
+    Bypasses group-level loading to avoid conflicting dimension sizes (e.g., 'S').
     """
     print("Connecting to ArrayLake...")
     client = Client()
     repo = client.get_repo("umd/subc")
-    print("Opening Zarr store via Xarray (group: esrl-fimr1p1-forecast)...")
+    print("Creating session for branch 'main'...")
     session = repo.writable_session(branch="main")
-    ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-forecast")
+    
+    needed_vars = ['pr', 'tas', 'zg']
+    ds_list = []
+    
+    for var in needed_vars:
+        print(f"Opening variable: {var} ...")
+        try:
+            # Open each variable as its own dataset from the subgroup
+            var_ds = xr.open_zarr(session.store, zarr_format=3, group=f"esrl-fimr1p1-forecast/{var}")
+            ds_list.append(var_ds)
+        except Exception as e:
+            print(f"Warning: Could not open {var} directly: {e}")
+            # Fallback: try opening the group with consolidated=False and dropping others
+            print(f"Attempting fallback for {var}...")
+            try:
+                # We drop all other variables to avoid merge conflicts
+                full_ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-forecast", consolidated=False)
+                ds_list.append(full_ds[[var]])
+            except Exception as e2:
+                print(f"Error: Failed to load {var}: {e2}")
+
+    if not ds_list:
+        print("Fatal Error: Could not load any variables.")
+        return None
+
+    print("Merging variables into single dataset...")
+    # 'override' assumes dimension coordinates match even if indices vary slightly
+    ds = xr.merge(ds_list, compat='override')
     
     # 1. Identify pressure level dimension for ZG
     level_dim = None
@@ -29,22 +57,18 @@ def get_base_dataset():
         if level_dim:
             print(f"Selecting 'zg' at 850hPa using level dimension: {level_dim}")
             try:
-                # Try selecting by coordinate value
                 zg_850 = ds.zg.sel({level_dim: 850})
             except Exception:
-                # Fallback: if 850 is not an exact value, try nearest or indexing
                 print("Exact level 850 not found, attempting nearest match...")
                 zg_850 = ds.zg.sel({level_dim: 850}, method='nearest')
         else:
             print("Warning: No level dimension found for 'zg'. Using raw 'zg'.")
             zg_850 = ds.zg
     else:
-        print("Error: 'zg' not found in dataset.")
+        print("Error: 'zg' not found in dataset after merge.")
         return None
 
-    # 3. Assemble subset (pr, tas, zg_850)
-    # We rename zg_850 to 'zg850' or keep as 'zg'? User said zg at 850.
-    # I'll keep it as 'zg' to match downstream expectations if any, or 'zg' for clarity.
+    # 3. Assemble final subset
     subset = xr.Dataset({
         'pr': ds['pr'],
         'tas': ds['tas'],
