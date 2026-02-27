@@ -138,14 +138,15 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, save_plot=True):
     model.eval()
     
-    fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
-    _, _, H, W = fb_target_norm.shape
+    fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
+    vB, _, H, W = fb_target_norm.shape
+    num_inits = vB // 4
     
-    true_target_precip = batch['target_raw_full'][0].to(device) # [4, H, W]
+    true_target_precip = batch['target_raw_full'][0::4].to(device) # [num_inits, 4, H, W]
     
-    geos_ens_raw = batch['geos_ens_raw'].to(device) # [4, M=4, L=4, H, W]
-    geos_ens_sample = geos_ens_raw[0] # [M=4, L=4, H, W]
-    geos_mean_raw = geos_ens_sample.mean(dim=0) # [4, H, W]
+    geos_ens_raw = batch['geos_ens_raw'].to(device) # [vB, M, L, H, W]
+    geos_ens_sample = geos_ens_raw[0::4] # [num_inits, M, L, H, W]
+    geos_mean_raw = geos_ens_sample.mean(dim=1) # [num_inits, 4, H, W]
     
     # ---------------------------------------------------------------------------------
     # STRATEGY 3: GEOS-INFORMED COVARIANCE NOISE SCALING
@@ -211,9 +212,12 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
     
     ensemble_preds_precip = week_precip.transpose(0, 1) # [num_ensemble, vB, H, W]
-    full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
     
-    val_metric, model_crps_map = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    # Reshape to separate initialization dates and lead weeks
+    ensemble_preds_precip = ensemble_preds_precip.view(num_ensemble, num_inits, 4, H, W)
+    full_pred = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
+    
+    val_metric, model_crps_map = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
     
     mse_map = (full_pred - true_target_precip)**2
     mask = ~torch.isnan(mse_map)
@@ -223,12 +227,12 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     else:
         model_rmse = 0.0
     
-    geos_crps, geos_crps_map = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    geos_crps, geos_crps_map = compute_crps(geos_ens_sample.transpose(0, 1), true_target_precip, area_weights)
     geos_mse_map = (geos_mean_raw - true_target_precip)**2
     mask_2d = ~torch.isnan(geos_mse_map)
 
     if mask_2d.any():
-        aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
+        aw_expanded_2d = area_weights.view(1, 1, 181, 1).expand_as(geos_mse_map)
         geos_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
     else:
         geos_rmse = 0.0
@@ -246,14 +250,14 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         'full_pred': full_pred,
         'true_target_precip': true_target_precip_plot,
         'geos_mean': geos_mean_raw,
-        'geos_single': geos_ens_sample[0],
-        'model_single': ensemble_preds_precip[0],
-        'model_crps_map': model_crps_map[0],
+        'geos_single': geos_ens_sample[:, 0], # [num_inits, L, H, W]
+        'model_single': ensemble_preds_precip[0], # [num_inits, L, H, W]
+        'model_crps_map': model_crps_map,
         'model_mse_map': mse_map,
-        'geos_crps_map': geos_crps_map[0],
+        'geos_crps_map': geos_crps_map,
         'geos_mse_map': geos_mse_map
     }
-    return val_metric, model_rmse, geos_crps, geos_rmse, tensors
+    return val_metric, model_rmse, geos_crps, geos_rmse, tensors, num_inits
 
 def main():
     parser = argparse.ArgumentParser()

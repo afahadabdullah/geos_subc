@@ -238,7 +238,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # GEOS Baseline Metrics (NaN-aware)
         if cached_geos_crps is None:
-            g_crps = compute_crps(geos_ens_sample, true_target_precip, area_weights)
+            # Transpose to [Member, Init, Lead, H, W] to match compute_crps standard [E, B, C, H, W]
+            g_crps = compute_crps(geos_ens_sample.transpose(0, 1), true_target_precip, area_weights)
             geos_mse_map = (geos_mean_raw - true_target_precip)**2
             mask_2d = ~torch.isnan(geos_mse_map)
         
