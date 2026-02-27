@@ -538,13 +538,22 @@ def train(args, accelerator):
         zdev_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
         zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
         
+        # Channel 20: U250
         u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
         u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
+
+        # Channel 24: MJO Wave Spatial Map
+        mjo_norm_sample = x_obs[sample_idx, 24].cpu().numpy()
+        if "mjo" in global_bounds:
+            m_min, m_max = global_bounds["mjo"]["min"], global_bounds["mjo"]["max"]
+        else:
+            m_min, m_max = -100.0, 100.0
+        mjo_raw_sample = ((mjo_norm_sample + 1.0) / 2.0) * (m_max - m_min) + m_min
 
         # 5. Raw GPCP (from dataset)
         gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
 
-        fig, axes = plt.subplots(10, 2, figsize=(14, 40))
+        fig, axes = plt.subplots(11, 2, figsize=(14, 44))
         # Row 1-8 logic remains same...
         im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
         axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -586,18 +595,33 @@ def train(args, accelerator):
         axes[7, 0].imshow(u250_raw_sample, cmap='coolwarm')
         axes[7, 1].imshow(u250_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
 
-        im17 = axes[8, 0].imshow(gpcp_raw_sample, cmap='Blues')
-        axes[8, 0].set_title("Raw GPCP (Pure Target)")
-        axes[8, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.", ha='center', va='center', transform=axes[8, 1].transAxes)
-        axes[8, 1].axis('off')
+        im17 = axes[8, 0].imshow(mjo_raw_sample, cmap='PiYG', vmin=-30, vmax=30)
+        axes[8, 0].set_title("Raw MJO Wave Anomaly")
+        fig.colorbar(im17, ax=axes[8, 0])
+        
+        im18 = axes[8, 1].imshow(mjo_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+        axes[8, 1].set_title("Normalized MJO Wave [-1, 1]")
+        fig.colorbar(im18, ax=axes[8, 1])
+
+        im19 = axes[9, 0].imshow(gpcp_raw_sample, cmap='Blues')
+        axes[9, 0].set_title("Raw GPCP (Pure Target)")
+        fig.colorbar(im19, ax=axes[9, 0])
+        
+        axes[9, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.", ha='center', va='center', transform=axes[9, 1].transAxes)
+        axes[9, 1].axis('off')
 
         flat_geos = geos_raw_sample.flatten()
         flat_gpcp = gpcp_raw_sample.flatten()
         cc = np.corrcoef(flat_geos, flat_gpcp)[0, 1] if np.std(flat_geos) > 1e-6 else 0.0
         
-        axes[9, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
-        axes[9, 0].set_title(f"Spatial Alignment | CC: {cc:.4f}")
-        axes[9, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
+        im20 = axes[10, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
+        axes[10, 0].set_title(f"Spatial Alignment | CC: {cc:.4f}")
+        fig.colorbar(im20, ax=axes[10, 0])
+        
+        axes[10, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
+        axes[10, 1].set_xlabel("GEOS Rainfall")
+        axes[10, 1].set_ylabel("GPCP Rainfall")
+        axes[10, 1].set_title("Orientation Scatter (Subsampled)")
         
         plt.tight_layout()
         diag_path = os.path.join(output_dir, "normalization_check.png")
@@ -678,202 +702,6 @@ def train(args, accelerator):
 
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 1, H, W]
-
-            if False: # [REDUNDANT: Moved to Pre-Training Section]
-                print(f"\n--- DEBUG | Train Batch 0 Exhaustive Diagnostics ---")
-                # 1. Observational States
-                # SST(0-3), SSS(4-7), SM(8-11), IVT(12-15), ZonalDev(16-19), U250(20-23)
-                vars = ["SST", "SSS", "SM", "IVT", "ZDEV", "U250"]
-                for idx, vname in enumerate(vars):
-                    v_ch = idx * 4
-                    v_raw = x_obs[0, v_ch : v_ch + 4].min().item()
-                    v_max = x_obs[0, v_ch : v_ch + 4].max().item()
-                    print(f"  {vname:<4} Bounds (Norm) : {v_raw:>6.2f} to {v_max:>6.2f}")
-                
-                print(f"  GEOS Bounds (Norm) : {x_geos.min().item():>6.2f} to {x_geos.max().item():>6.2f}")
-                print(f"  Lead Index         : {lead_idx[0].item()} (Val: {lead_val[0].item():.2f})")
-                print(f"  Final x_cond shape : {x_cond.shape}")
-                print(f"  Final x_cond bounds: {x_cond.min().item():>6.2f} to {x_cond.max().item():>6.2f}")
-                print(f"  Target Bounds (Norm): {target_norm.min().item():>6.2f} to {target_norm.max().item():>6.2f}")
-                print(f"-----------------------------------------\n")
-
-                # --- Create Before/After Normalization Diagnostic Plot ---
-                # Take index 0, lead 1 for visualization
-                sample_idx = 0
-                lead_idx = 0
-                
-                # 1. Reverse Normalize GEOS
-                geos_norm_sample = x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy()
-                geos_raw_sample = ((geos_norm_sample + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
-                
-                # 2. Reverse Normalize SST (Channel 0 of x_obs)
-                sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
-                sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
-                
-                # 3. Reverse Normalize Target SQRT (Lead 0)
-                sqrt_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
-                sqrt_raw_sample = ((sqrt_norm_sample + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
-                res_raw_sample = np.square(sqrt_raw_sample) - geos_raw_sample
-
-                # 4. Reverse Normalize Observational States
-                # Channel 0: SST
-                sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
-                sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
-                
-                # Channel 4: SSS
-                sss_norm_sample = x_obs[sample_idx, 4].cpu().numpy()
-                sss_raw_sample = ((sss_norm_sample + 1.0) / 2.0) * (global_bounds["sss"]["max"] - global_bounds["sss"]["min"]) + global_bounds["sss"]["min"]
-                
-                # Channel 8: Soil Moisture
-                sm_norm_sample = x_obs[sample_idx, 8].cpu().numpy()
-                sm_raw_sample = ((sm_norm_sample + 1.0) / 2.0) * (global_bounds["sm"]["max"] - global_bounds["sm"]["min"]) + global_bounds["sm"]["min"]
-                
-                # Channel 12: IVT
-                ivt_norm_sample = x_obs[sample_idx, 12].cpu().numpy()
-                ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
-                
-                # Channel 16: Zonal Deviation (Rossby Waves)
-                zdev_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
-                zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
-                
-                # Channel 20: U250
-                u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
-                u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
-
-                # Channel 24: MJO Wave Spatial Map
-                mjo_norm_sample = x_obs[sample_idx, 24].cpu().numpy()
-                if "mjo" in global_bounds:
-                    m_min, m_max = global_bounds["mjo"]["min"], global_bounds["mjo"]["max"]
-                else:
-                    m_min, m_max = -100.0, 100.0
-                mjo_raw_sample = ((mjo_norm_sample + 1.0) / 2.0) * (m_max - m_min) + m_min
-
-                # 5. Raw GPCP (from dataset)
-                gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
-
-                fig, axes = plt.subplots(11, 2, figsize=(14, 44))
-                # Row 1: GEOS
-                im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
-                axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
-                fig.colorbar(im1, ax=axes[0, 0])
-                
-                im2 = axes[0, 1].imshow(geos_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[0, 1].set_title("Normalized GEOS [-1, 1]")
-                fig.colorbar(im2, ax=axes[0, 1])
-                
-                # Row 2: Target
-                im3 = axes[1, 0].imshow(np.square(sqrt_raw_sample), cmap='Blues')
-                axes[1, 0].set_title("Reconstructed GPCP (Un-SQRT)")
-                fig.colorbar(im3, ax=axes[1, 0])
-                
-                im4 = axes[1, 1].imshow(sqrt_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[1, 1].set_title("Normalized SQRT Target [-1, 1]")
-                fig.colorbar(im4, ax=axes[1, 1])
-                
-                # Row 3: SST
-                im5 = axes[2, 0].imshow(sst_raw_sample, cmap='viridis')
-                axes[2, 0].set_title("Raw SST")
-                fig.colorbar(im5, ax=axes[2, 0])
-                
-                im6 = axes[2, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[2, 1].set_title("Normalized SST [-1, 1]")
-                fig.colorbar(im6, ax=axes[2, 1])
-
-                # Row 4: SSS
-                im7 = axes[3, 0].imshow(sss_raw_sample, cmap='YlGnBu')
-                axes[3, 0].set_title("Raw SSS")
-                fig.colorbar(im7, ax=axes[3, 0])
-                
-                im8 = axes[3, 1].imshow(sss_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[3, 1].set_title("Normalized SSS [-1, 1]")
-                fig.colorbar(im8, ax=axes[3, 1])
-
-                # Row 5: Soil Moisture
-                im9 = axes[4, 0].imshow(sm_raw_sample, cmap='YlOrBr')
-                axes[4, 0].set_title("Raw SM")
-                fig.colorbar(im9, ax=axes[4, 0])
-                
-                im10 = axes[4, 1].imshow(sm_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[4, 1].set_title("Normalized SM [-1, 1]")
-                fig.colorbar(im10, ax=axes[4, 1])
-
-                # Row 6: IVT
-                im11 = axes[5, 0].imshow(ivt_raw_sample, cmap='cubehelix')
-                axes[5, 0].set_title("Raw IVT")
-                fig.colorbar(im11, ax=axes[5, 0])
-                
-                im12 = axes[5, 1].imshow(ivt_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[5, 1].set_title("Normalized IVT [-1, 1]")
-                fig.colorbar(im12, ax=axes[5, 1])
-
-                # Row 7: Zonal Deviation (Rossby Waves)
-                im13 = axes[6, 0].imshow(zdev_raw_sample, cmap='RdBu_r', vmin=-3000, vmax=3000)
-                axes[6, 0].set_title("Raw Z500 Zonal Dev")
-                fig.colorbar(im13, ax=axes[6, 0])
-                
-                im14 = axes[6, 1].imshow(zdev_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[6, 1].set_title("Normalized Z500 Zonal Dev [-1, 1]")
-                fig.colorbar(im14, ax=axes[6, 1])
-
-                # Row 8: U250
-                im15 = axes[7, 0].imshow(u250_raw_sample, cmap='coolwarm')
-                axes[7, 0].set_title("Raw U250")
-                fig.colorbar(im15, ax=axes[7, 0])
-                
-                im16 = axes[7, 1].imshow(u250_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[7, 1].set_title("Normalized U250 [-1, 1]")
-                fig.colorbar(im16, ax=axes[7, 1])
-
-                # Row 9: MJO Wave Envelope
-                im17 = axes[8, 0].imshow(mjo_raw_sample, cmap='PiYG', vmin=-30, vmax=30)
-                axes[8, 0].set_title("Raw MJO Wave Anomaly")
-                fig.colorbar(im17, ax=axes[8, 0])
-                
-                im18 = axes[8, 1].imshow(mjo_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-                axes[8, 1].set_title("Normalized MJO Wave [-1, 1]")
-                fig.colorbar(im18, ax=axes[8, 1])
-
-                # Row 10: GPCP Absolute (The "Real" Target)
-                im19 = axes[9, 0].imshow(gpcp_raw_sample, cmap='Blues')
-                axes[9, 0].set_title("Raw GPCP (Pure Target)")
-                fig.colorbar(im19, ax=axes[9, 0])
-                
-                # Plot something neutral for normalized GPCP (since we only normalize residual)
-                axes[9, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.\nWe normalize the\nresidual [GPCP - GEOS].", 
-                             ha='center', va='center', transform=axes[9, 1].transAxes)
-                axes[9, 1].axis('off')
-
-                # Row 11: GEOS vs GPCP Orientation Check
-                # Calculate Spatial Correlation
-                flat_geos = geos_raw_sample.flatten()
-                flat_gpcp = gpcp_raw_sample.flatten()
-                
-                # Pearson Correlation
-                if np.std(flat_geos) > 1e-6 and np.std(flat_gpcp) > 1e-6:
-                    cc = np.corrcoef(flat_geos, flat_gpcp)[0, 1]
-                else:
-                    cc = 0.0
-                
-                im20 = axes[10, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
-                axes[10, 0].set_title(f"Spatial Alignment: GEOS - GPCP\nCorrelation: {cc:.4f}")
-                fig.colorbar(im20, ax=axes[10, 0])
-                
-                # Show a scatter plot for orientation verification
-                axes[10, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
-                axes[10, 1].set_xlabel("GEOS Rainfall")
-                axes[10, 1].set_ylabel("GPCP Rainfall")
-                axes[10, 1].set_title("Orientation Scatter (Subsampled)")
-
-                plt.tight_layout()
-                diag_path = os.path.join(output_dir, "normalization_check.png")
-                plt.savefig(diag_path)
-                plt.close()
-                print(f"✅ Normalization diagnostic plot saved to {diag_path}!")
-                print(f"✅ Spatial Orientation Check: Correlation = {cc:.4f}")
-                if cc < 0:
-                    print(f"🚨 CRITICAL WARNING: Negative spatial correlation detected! Data might be flipped (Lat/Lon).")
-                elif cc < 0.2:
-                    print(f"⚠️ WARNING: Low spatial correlation detected. Check for shifts or misalignment.")
 
             # Flow Matching Interpolation
             t = flow_matcher.sample_time_batch(B)
