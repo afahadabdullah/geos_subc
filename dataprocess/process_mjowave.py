@@ -76,7 +76,8 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
         print(f"  No MJO data found for {year} in the archive file. Skipping.")
         return
         
-    da_mjo = ds_mjo_slice['mjo_wave']
+    print(f"  Loading 13-month slice into RAM for fast access...")
+    da_mjo = ds_mjo_slice['mjo_wave'].compute()
     
     # 3. Compute 4 weekly means BEFORE each init date
     print(f"  Computing 4-weekly observed means for {len(init_dates)} init dates...")
@@ -85,61 +86,53 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
     skipped = 0
     
     for init_date in tqdm(init_dates, desc=f"  MJO Output {year}"):
-        # 4 weeks BEFORE init date:
-        #   L=0 → [S-28, S-22]  oldest observed week
-        #   L=1 → [S-21, S-15]
-        #   L=2 → [S-14, S-8]
-        #   L=3 → [S-7,  S-1]   most recent observed week
         weeks = []
         valid = True
         
         for w in range(4):
-            # Week offset from init date (going backwards)
-            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)  # End of this week
-            w_start = w_end - pd.Timedelta(days=6)                    # Start of this week
+            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)
+            w_start = w_end - pd.Timedelta(days=6)
             
             try:
                 # Need to use inclusive slicing for xarray datetime
                 chunk = da_mjo.sel(time=slice(w_start, w_end))
                 # For daily data, a full week should have 7 days
                 if len(chunk.time) < 1:
-                    valid = False
-                    break
-                # Compute mean over the available days in the week
-                w_mean = chunk.mean(dim='time').squeeze()
-                
-                # Use standard compute if chunk is dask array, otherwise just keep as is
-                if hasattr(w_mean, 'compute'):
-                    w_mean = w_mean.compute()
-                    
-                weeks.append(w_mean)
+                    # Missing data for this week (e.g. 1998 data requested but we only have 1999+)
+                    # Append NaN block so the shape is maintained
+                    nan_week = xr.DataArray(
+                        np.full((len(target_lat), len(target_lon)), np.nan, dtype=np.float32),
+                        dims=[target_lat.name, target_lon.name],
+                        coords={target_lat.name: target_lat, target_lon.name: target_lon}
+                    )
+                    weeks.append(nan_week)
+                else:
+                    # Compute mean over the available days in the week
+                    w_mean = chunk.mean(dim='time').squeeze()
+                    weeks.append(w_mean)
             except Exception:
-                valid = False
-                break
+                # Fallback NaN block if slicing completely fails
+                nan_week = xr.DataArray(
+                    np.full((len(target_lat), len(target_lon)), np.nan, dtype=np.float32),
+                    dims=[target_lat.name, target_lon.name],
+                    coords={target_lat.name: target_lat, target_lon.name: target_lon}
+                )
+                weeks.append(nan_week)
         
-        if valid and len(weeks) == 4:
-            # Stack the 4 weeks along a new 'L' dimension
-            sample = xr.concat(weeks, dim='L')
-            sample = sample.assign_coords(L=np.arange(4))
-            
-            # Ensure coordinates match target exactly so concat works cleanly later
-            # (mjo_wave should already be on 1° grid, but renaming prevents coordinate conflicts)
-            lat_name_mjo = 'lat' if 'lat' in sample.coords else 'latitude'
-            lon_name_mjo = 'lon' if 'lon' in sample.coords else 'longitude'
-            
-            # Strip extra coordinates matching GEOS format
-            sample = sample.rename({lat_name_mjo: target_lat.name, lon_name_mjo: target_lon.name})
-            processed_data.append(sample)
-        else:
-            skipped += 1
-            # Fill with NaN if missing data
-            nan_shape = (4, len(target_lat), len(target_lon))
-            nan_data = xr.DataArray(
-                np.full(nan_shape, np.nan, dtype=np.float32),
-                dims=['L', target_lat.name, target_lon.name],
-                coords={'L': np.arange(4), target_lat.name: target_lat, target_lon.name: target_lon}
-            )
-            processed_data.append(nan_data)
+        # We always have 4 elements in weeks now (some might be NaN)
+        # We don't skip the init date just because 1 week is missing. GEOS handles NaNs.
+        
+        # Stack the 4 weeks along a new 'L' dimension
+        sample = xr.concat(weeks, dim='L')
+        sample = sample.assign_coords(L=np.arange(4))
+        
+        # Ensure coordinates match target exactly so concat works cleanly later
+        lat_name_mjo = 'lat' if 'lat' in sample.coords else 'latitude'
+        lon_name_mjo = 'lon' if 'lon' in sample.coords else 'longitude'
+        
+        # Strip extra coordinates matching GEOS format
+        sample = sample.rename({lat_name_mjo: target_lat.name, lon_name_mjo: target_lon.name})
+        processed_data.append(sample)
     
     if skipped > 0:
         print(f"  Warning: {skipped}/{len(init_dates)} dates had missing MJO data (filled NaN)")
