@@ -154,7 +154,8 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Loading NOAA OLR dataset from {olr_path}...")
-    ds = xr.open_dataset(olr_path)
+    # Chunk by time to prevent memory exhaustion
+    ds = xr.open_dataset(olr_path, chunks={'time': 365 * 10})
     
     # NOAA uses 'olr' variable
     da_olr = ds['olr']
@@ -162,23 +163,17 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     # Ensure lat/lon are standard
     lat_name = 'lat' if 'lat' in da_olr.coords else 'latitude'
     lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
-    
-    # 1. Regrid to GEOS 1-degree grid
-    print("Interpolating full dataset to GEOS 1° grid...")
-    target_lat = np.linspace(-90, 90, 181)
-    target_lon = np.linspace(0, 359, 360)
-    
-    da_olr = da_olr.interp({lat_name: target_lat, lon_name: target_lon}, method='linear')
     da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
     
-    # 2. Compute Climatology using the entire record (crucial for MJO analysis)
+    # 1. Compute Climatology using the entire record on native 2.5° grid
+    # This is MUCH faster and uses much less memory than interpolating 48 years first
     climatology = compute_climatology(da_olr)
     
-    # 3. Compute Anomalies
-    print("  Calculating OLR Anomalies...")
+    # 2. Compute Anomalies
+    print("  Calculating OLR Anomalies on native 2.5° grid...")
     da_anom = da_olr - climatology
     
-    # 4. We need a buffer around the target year for the 30-90 day FFT
+    # 3. We need a buffer around the target year for the 30-90 day FFT
     # Standard practice is to pad by at least 90 days on either side
     start_time = f"{target_year-1}-09-01"
     end_time = f"{target_year+1}-03-31"
@@ -186,18 +181,30 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     print(f"Extracting padded window ({start_time} to {end_time}) for FFT stability...")
     da_anom_padded = da_anom.sel(time=slice(start_time, end_time))
     
-    # 5. Apply Space-Time Wavenumber-Frequency Filter
+    # Compute the chunk before FFT since scipy.fft expects numpy arrays
+    print("  Loading padded anomalies into memory for FFT...")
+    da_anom_padded = da_anom_padded.compute()
+    
+    # 4. Apply Space-Time Wavenumber-Frequency Filter (on native 2.5° grid)
     da_mjo_padded = spacetime_filter(da_anom_padded)
     
-    # 6. Slice back to target year only
+    # 5. Slice back to target year only
     target_start = f"{target_year}-01-01"
     target_end = f"{target_year}-12-31"
-    da_mjo_year = da_mjo_padded.sel(time=slice(target_start, target_end))
-    da_raw_year = da_olr.sel(time=slice(target_start, target_end))
+    da_mjo_year_native = da_mjo_padded.sel(time=slice(target_start, target_end))
+    da_raw_year_native = da_olr.sel(time=slice(target_start, target_end)).compute()
+    
+    # 6. Interpolate just the 1-target-year maps to GEOS 1-degree grid
+    print("\nInterpolating filtered MJO wave and raw data to GEOS 1° grid (181x360)...")
+    target_lat = np.linspace(-90, 90, 181)
+    target_lon = np.linspace(0, 359, 360)
+    
+    da_mjo_year = da_mjo_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
+    da_raw_year = da_raw_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
     
     # 7. Save to Zarr
     out_file = os.path.join(output_dir, f"mjo_wave_spatial_{target_year}.zarr")
-    print(f"\nSaving MJO Wave map to {out_file}...")
+    print(f"Saving MJO Wave map to {out_file}...")
     
     ds_out = da_mjo_year.to_dataset(name='mjo_wave')
     ds_out['mjo_wave'].attrs = {
@@ -207,7 +214,9 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     }
     
     ds_out = ds_out.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
-    ds_out.to_zarr(out_file, mode='w')
+    import dask
+    with dask.config.set(scheduler='synchronous'):
+        ds_out.to_zarr(out_file, mode='w')
     print("✅ Zarr save complete.")
     
     # 8. Diagnostic Plot
