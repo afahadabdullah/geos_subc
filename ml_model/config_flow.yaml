@@ -10,5 +10,5 @@ train_start_year: 1999
 train_end_year: 2000
 val_start_year: 2015
 val_end_year: 2016
-preload: False
+preload: True
 save_top_k: 4

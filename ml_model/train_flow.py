@@ -759,16 +759,16 @@ def train(args, accelerator):
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
         # Phase 1 (epoch < 20):  No validation (model still warming up)
-        # Phase 2 (20-99):       Every 5 epochs (20, 25, 30, ...)
-        # Phase 3 (100-149):     Every 2 epochs (100, 102, 104, ...)
-        # Phase 4 (150+):        Every epoch (150, 151, 152, ...)
+        # Phase 2 (20-49):       Every 3 epochs (20, 23, 26, ...)
+        # Phase 3 (50-99):       Every 2 epochs (50, 52, 54, ...)
+        # Phase 4 (100+):        Every epoch (100, 101, 102, ...)
         # Full 50-step val only fires if fast val finds a new absolute best.
         def should_validate(ep):
             if ep < 20:
                 return False
+            elif ep < 50:
+                return (ep % 3 == 0)
             elif ep < 100:
-                return (ep % 5 == 0)
-            elif ep < 150:
                 return (ep % 2 == 0)
             else:
                 return True
