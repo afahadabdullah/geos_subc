@@ -196,7 +196,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Solve ensemble in chunks
         all_ens_preds = []
-        for ens_start in range(0, num_ensemble, ens_chunk_size):
+        ens_pbar = tqdm(range(0, num_ensemble, ens_chunk_size), desc="Ensemble Chunks", leave=False)
+        for ens_start in ens_pbar:
             curr_ens_size = min(ens_chunk_size, num_ensemble - ens_start)
             
             # Expand condition to [vB * curr_ens_size, ...]
@@ -808,7 +809,8 @@ def train(args, accelerator):
 
                 # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
                 if is_new_best and epoch > 6 and not is_plot_epoch:
-                    print(f"📸 Breakthrough! Triggering high-quality 1000-step sampling for diagnostic plots...")
+                    num_steps = 50 
+                    print(f"📸 Breakthrough! Triggering high-quality {num_steps}-step sampling for diagnostic plots...")
                     best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,

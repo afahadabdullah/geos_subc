@@ -182,7 +182,8 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
 
     # Solve ensemble in chunks
     all_ens_preds = []
-    for ens_start in range(0, num_ensemble, ens_chunk_size):
+    ens_pbar = tqdm(range(0, num_ensemble, ens_chunk_size), desc="Ensemble Chunks", leave=False)
+    for ens_start in ens_pbar:
         curr_ens_size = min(ens_chunk_size, num_ensemble - ens_start)
         
         # Expand condition to [vB * curr_ens_size, ...]

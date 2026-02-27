@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import UNet2DModel
+from tqdm.auto import tqdm
 
 # Number of intermediate feature channels between shared UNet and per-week heads
 HEAD_FEATURES = 64
@@ -148,7 +149,9 @@ class CustomFlowMatcher:
             
         dt = 1.0 / num_steps
         
-        for step in range(num_steps):
+        # Only show inner progress bar for very long samplings
+        pbar = tqdm(range(num_steps), desc="ODE Solve", leave=False, disable=num_steps < 20)
+        for step in pbar:
             # Current time t
             t_val = step * dt
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
