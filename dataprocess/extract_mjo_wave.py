@@ -150,7 +150,7 @@ def spacetime_filter(da_anom, time_dim='time', lon_dim='longitude'):
     return da_mjo
 
 
-def process_mjo_wave(olr_path, target_year, output_dir):
+def process_mjo_wave(olr_path, years, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Loading NOAA OLR dataset from {olr_path}...")
@@ -161,9 +161,7 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     da_olr = ds['olr']
     
     # 0. Slice the global dataset to the relevant training period to drastically speed up Climatology
-    # GEOS training starts in 1999, so we don't need to compute 121-day rolling means back to 1974
     print("Slicing base dataset to 1998-01-01 onwards for faster computation...")
-    # Start in 1998 to provide the 90-day padding needed for 1999 FFT calculations
     da_olr = da_olr.sel(time=slice('1998-01-01', None))
     
     # Ensure lat/lon are standard
@@ -172,7 +170,6 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
     
     # 1. Compute or Load Climatology using the entire record on native 2.5° grid
-    # This is MUCH faster and uses much less memory than interpolating 48 years first
     clim_path = os.path.join(output_dir, "olr_climatology.nc")
     if os.path.exists(clim_path):
         print(f"  Loading cached climatology from {clim_path}...")
@@ -182,128 +179,118 @@ def process_mjo_wave(olr_path, target_year, output_dir):
         print(f"  Saving climatology cache to {clim_path}...")
         climatology.to_netcdf(clim_path)
     
-    # 2. We need a buffer around the target year for the 30-90 day FFT
-    # Standard practice is to pad by at least 90 days on either side
-    start_time = f"{target_year-1}-09-01"
-    end_time = f"{target_year+1}-03-31"
+    all_years_mjo = []
     
-    print(f"Extracting padded window ({start_time} to {end_time}) for FFT stability...")
-    da_padded = da_olr.sel(time=slice(start_time, end_time)).compute()
-    
-    # 3. Compute Anomalies FOR THE SLICE ONLY
-    # This avoids a massive global broadcast and bypasses xarray alignment errors on leap years
-    print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
-    
-    # We must explicitly match each day in the padded array to its day-of-year in climatology
-    padded_days = da_padded.time.dt.dayofyear.values.astype(int)
-    
-    # Extract the numpy arrays to avoid xarray coordinate alignment nightmare
-    padded_vals = da_padded.values
-    clim_vals = climatology.values
-    
-    # The climatology's dayofyear coordinate is guaranteed to be 1 to 365 (or 366).
-    # We need to map `padded_days` to indices in `clim_vals`
-    clim_days = climatology.dayofyear.values.astype(int)
-    
-    # Pre-allocate anomaly array
-    anom_vals = np.zeros_like(padded_vals)
-    
-    for i, doy in enumerate(padded_days):
-        # Find the index in climatology (handle leap year edge case if clim is 365)
-        if doy not in clim_days:
-            # If doy 366 occurs but climatology only has 365, use day 365
-            idx = np.where(clim_days == 365)[0][0]
-        else:
-            idx = np.where(clim_days == doy)[0][0]
-            
-        anom_vals[i, :, :] = padded_vals[i, :, :] - clim_vals[idx, :, :]
-        
-    # Reconstruct the DataArray
-    da_anom_padded = xr.DataArray(
-        anom_vals,
-        coords=da_padded.coords,
-        dims=da_padded.dims,
-        name='olr_anomaly'
-    )
-    
-    # 4. Apply Space-Time Wavenumber-Frequency Filter (on native 2.5° grid)
-    da_mjo_padded = spacetime_filter(da_anom_padded)
-    
-    # 5. Slice back to target year only
-    target_start = f"{target_year}-01-01"
-    target_end = f"{target_year}-12-31"
-    da_mjo_year_native = da_mjo_padded.sel(time=slice(target_start, target_end))
-    da_raw_year_native = da_olr.sel(time=slice(target_start, target_end)).compute()
-    
-    # 6. Interpolate just the 1-target-year maps to GEOS 1-degree grid
-    print("\nInterpolating filtered MJO wave and raw data to GEOS 1° grid (181x360)...")
     target_lat = np.linspace(-90, 90, 181)
     target_lon = np.linspace(0, 359, 360)
     
-    da_mjo_year = da_mjo_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
-    da_raw_year = da_raw_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
+    for target_year in years:
+        print(f"\n--- Processing Year: {target_year} ---")
+        
+        # 2. We need a buffer around the target year for the 30-90 day FFT
+        start_time = f"{target_year-1}-09-01"
+        end_time = f"{target_year+1}-03-31"
+        
+        print(f"Extracting padded window ({start_time} to {end_time}) for FFT stability...")
+        da_padded = da_olr.sel(time=slice(start_time, end_time)).compute()
+        
+        # 3. Compute Anomalies FOR THE SLICE ONLY
+        print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
+        padded_days = da_padded.time.dt.dayofyear.values.astype(int)
+        padded_vals = da_padded.values
+        clim_vals = climatology.values
+        clim_days = climatology.dayofyear.values.astype(int)
+        anom_vals = np.zeros_like(padded_vals)
+        
+        for i, doy in enumerate(padded_days):
+            if doy not in clim_days:
+                idx = np.where(clim_days == 365)[0][0]
+            else:
+                idx = np.where(clim_days == doy)[0][0]
+            anom_vals[i, :, :] = padded_vals[i, :, :] - clim_vals[idx, :, :]
+            
+        da_anom_padded = xr.DataArray(
+            anom_vals, coords=da_padded.coords, dims=da_padded.dims, name='olr_anomaly'
+        )
+        
+        # 4. Apply Space-Time Wavenumber-Frequency Filter
+        da_mjo_padded = spacetime_filter(da_anom_padded)
+        
+        # 5. Slice back to target year only
+        target_start = f"{target_year}-01-01"
+        target_end = f"{target_year}-12-31"
+        da_mjo_year_native = da_mjo_padded.sel(time=slice(target_start, target_end))
+        da_raw_year_native = da_olr.sel(time=slice(target_start, target_end)).compute()
+        
+        # 6. Interpolate just the 1-target-year maps to GEOS 1-degree grid
+        print(f"  Interpolating filtered MJO wave to GEOS 1° grid (181x360)...")
+        da_mjo_year = da_mjo_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
+        all_years_mjo.append(da_mjo_year)
+        
+        # Diagnostic Plot (only for the first year processed to prevent spam)
+        if PLOT_AVAILABLE and target_year == years[0]:
+            print("  Generating sample diagnostic plot for the first year...")
+            plot_date = f"{target_year}-11-15"
+            try:
+                raw_scale = da_raw_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
+                raw_slice = raw_scale.sel(time=plot_date).squeeze()
+                mjo_slice = da_mjo_year.sel(time=plot_date).squeeze()
+                
+                fig = plt.figure(figsize=(12, 8))
+                
+                ax1 = fig.add_subplot(2, 1, 1, projection=ccrs.PlateCarree(central_longitude=180))
+                ax1.set_title(f"Raw NOAA Interpolated OLR ({plot_date})", fontsize=14)
+                ax1.coastlines(color='white')
+                p1 = ax1.contourf(target_lon, target_lat, raw_slice, transform=ccrs.PlateCarree(),
+                                  levels=np.linspace(150, 300, 20), cmap='Blues_r', extend='both')
+                fig.colorbar(p1, ax=ax1, orientation='vertical', pad=0.02, label='W/m²')
+                
+                ax2 = fig.add_subplot(2, 1, 2, projection=ccrs.PlateCarree(central_longitude=180))
+                ax2.set_title(f"Isolated MJO Wave (30-90 Day, Wavenumber 1-5) - {plot_date}", fontsize=14)
+                ax2.coastlines()
+                max_val = max(10, float(np.abs(mjo_slice).max() * 0.8))
+                p2 = ax2.contourf(target_lon, target_lat, mjo_slice, transform=ccrs.PlateCarree(),
+                                  levels=np.linspace(-max_val, max_val, 21), cmap='RdBu_r', extend='both')
+                fig.colorbar(p2, ax=ax2, orientation='vertical', pad=0.02, label='W/m² Anomaly')
+                
+                plt.tight_layout()
+                plot_file = os.path.join(output_dir, f"mjo_wave_diagnostic.png")
+                plt.savefig(plot_file, dpi=150, bbox_inches='tight')
+                print(f"  ✅ Diagnostic plot saved: {plot_file}")
+                plt.close()
+            except Exception as e:
+                print(f"  Failed to generate diagnostic plot: {e}")
+
+    # 7. Concatenate and Save all years to a single Zarr
+    print("\n==================================")
+    print("Concatenating all years...")
+    da_mjo_all = xr.concat(all_years_mjo, dim='time')
     
-    # 7. Save to Zarr
-    out_file = os.path.join(output_dir, f"mjo_wave_spatial_{target_year}.zarr")
-    print(f"Saving MJO Wave map to {out_file}...")
-    
-    ds_out = da_mjo_year.to_dataset(name='mjo_wave')
+    ds_out = da_mjo_all.to_dataset(name='mjo_wave')
     ds_out['mjo_wave'].attrs = {
         'units': 'W/m2',
         'long_name': 'MJO Wave (Wavenumber-Frequency Filtered OLR)',
         'description': 'Eastward propagating, Wavenumbers 1-5, Periods 30-90 days'
     }
     
+    min_year, max_year = min(years), max(years)
+    out_file = os.path.join(output_dir, f"mjo_wave_spatial_{min_year}_{max_year}.zarr")
+    print(f"Saving merged MJO Wave map to {out_file}...")
+    
     ds_out = ds_out.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
     import dask
     with dask.config.set(scheduler='synchronous'):
         ds_out.to_zarr(out_file, mode='w')
-    print("✅ Zarr save complete.")
-    
-    # 8. Diagnostic Plot
-    if PLOT_AVAILABLE:
-        # Pick a random day in the middle of a strong MJO season (e.g., Nov-Dec)
-        plot_date = f"{target_year}-11-15"
-        try:
-            raw_slice = da_raw_year.sel(time=plot_date).squeeze()
-            mjo_slice = da_mjo_year.sel(time=plot_date).squeeze()
-            
-            fig = plt.figure(figsize=(12, 8))
-            
-            # Raw OLR
-            ax1 = fig.add_subplot(2, 1, 1, projection=ccrs.PlateCarree(central_longitude=180))
-            ax1.set_title(f"Raw NOAA Interpolated OLR ({plot_date})", fontsize=14)
-            ax1.coastlines(color='white')
-            # OLR is usually plotted reversed (blues for low OLR/high clouds)
-            p1 = ax1.contourf(target_lon, target_lat, raw_slice, transform=ccrs.PlateCarree(),
-                              levels=np.linspace(150, 300, 20), cmap='Blues_r', extend='both')
-            fig.colorbar(p1, ax=ax1, orientation='vertical', pad=0.02, label='W/m²')
-            
-            # MJO Filtered Wave
-            ax2 = fig.add_subplot(2, 1, 2, projection=ccrs.PlateCarree(central_longitude=180))
-            ax2.set_title(f"Isolated MJO Wave (30-90 Day, Wavenumber 1-5) - {plot_date}", fontsize=14)
-            ax2.coastlines()
-            # Anomalies: red positive (suppressed), blue negative (enhanced convection)
-            max_val = max(10, float(np.abs(mjo_slice).max() * 0.8)) # Scale nicely
-            p2 = ax2.contourf(target_lon, target_lat, mjo_slice, transform=ccrs.PlateCarree(),
-                              levels=np.linspace(-max_val, max_val, 21), cmap='RdBu_r', extend='both')
-            fig.colorbar(p2, ax=ax2, orientation='vertical', pad=0.02, label='W/m² Anomaly')
-            
-            plt.tight_layout()
-            plot_file = os.path.join(output_dir, f"mjo_wave_diagnostic_{target_year}.png")
-            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
-            print(f"✅ Diagnostic plot saved: {plot_file}")
-            plt.close()
-        except Exception as e:
-            print(f"Failed to generate diagnostic plot: {e}")
+    print("✅ Full pipeline complete.")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--olr_path", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/olr/olr.day.mean.nc")
-    parser.add_argument("--year", type=int, default=1999)
+    parser.add_argument("--years", type=int, nargs='+', default=list(range(1999, 2023)))
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/")
     args = parser.parse_args()
     
     assert os.path.exists(args.olr_path), f"OLR file not found at {args.olr_path}"
     
-    process_mjo_wave(args.olr_path, args.year, args.output_dir)
+    process_mjo_wave(args.olr_path, args.years, args.output_dir)
