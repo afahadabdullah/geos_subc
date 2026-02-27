@@ -438,7 +438,7 @@ def train(args, accelerator):
     if args.test:
         ckpt_path = os.path.join(output_dir, args.ckpt)
     else:
-        ckpt_path = os.path.join(output_dir, "latest_diffusion_ckpt_v5.pt")
+        ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
 
     if os.path.exists(ckpt_path):
         try:
