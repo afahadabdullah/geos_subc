@@ -1,76 +1,70 @@
 
 import xarray as xr
-import gcsfs
 import os
-import pandas as pd
 import numpy as np
-import dask
-import dask.array as da
-from tqdm import tqdm
 import argparse
 
-def process_era5_olr(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_olr"):
+def process_noaa_olr(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_olr"):
     """
-    Extract Outgoing Longwave Radiation (OLR) from ARCO-ERA5.
+    Download and process NOAA PSL Interpolated OLR (Outgoing Longwave Radiation).
     
-    IMPORTANT: OLR (top_net_thermal_radiation / ttr) is a FORECAST ACCUMULATION variable,
-    NOT an analysis variable. It lives in the single-level-forecast Zarr store,
-    NOT the analysis (ar) store used for IVT/temperature/winds.
+    Source: NOAA Physical Sciences Laboratory
+    URL: https://downloads.psl.noaa.gov/Datasets/interp_OLR/olr.day.mean.nc
     
-    ERA5 forecast accumulation convention:
-       ttr is accumulated J/m² over the forecast step (typically 1 hour for ERA5).
-       OLR = -ttr / forecast_step_seconds (sign: OLR positive outward)
+    This is the standard daily OLR product (2.5° grid, 1974-2022) widely used
+    in MJO research. We interpolate to GEOS 1° grid and save yearly Zarr files.
     
     Pipeline:
-       1. Load ttr from ARCO-ERA5 forecast store (GCS Zarr)
-       2. Convert to OLR flux (W/m²)
-       3. Compute daily mean
-       4. Interpolate to GEOS 1-degree grid (181x360)
-       5. Save as yearly Zarr files
+       1. Download/open the single NetCDF file from NOAA PSL
+       2. Select year range
+       3. Interpolate to GEOS 1-degree grid (181x360)
+       4. Save as yearly Zarr files
     """
     
-    # ARCO-ERA5 forecast accumulation variables (radiation, precipitation, etc.)
-    zarr_path = 'gs://gcp-public-data-arco-era5/co/single-level-forecast.zarr'
+    # NOAA PSL Interpolated OLR (single file, ~800 MB)
+    olr_url = "https://downloads.psl.noaa.gov/Datasets/interp_OLR/olr.day.mean.nc"
+    local_cache = os.path.join(output_base_dir, "olr.day.mean.nc")
     
-    print(f"Connecting to {zarr_path}...")
-    print("(This is the FORECAST store, not the analysis store)")
+    os.makedirs(output_base_dir, exist_ok=True)
     
-    # Open the dataset lazily with Dask
-    try:
-        ds = xr.open_zarr(zarr_path, chunks='auto', consolidated=True)
-        print("Dataset opened successfully.")
-        print(f"Available variables: {list(ds.data_vars)}")
-    except Exception as e:
-        print(f"Error opening dataset: {e}")
-        return
-
-    # Try common variable names for OLR in ARCO-ERA5
-    olr_candidates = ['top_net_thermal_radiation', 'ttr']
-    olr_var = None
-    for candidate in olr_candidates:
-        if candidate in ds:
-            olr_var = candidate
-            print(f"Found OLR variable: '{olr_var}'")
-            break
+    # Download if not cached
+    if not os.path.exists(local_cache):
+        print(f"Downloading NOAA OLR from {olr_url}...")
+        print("(~800 MB, this may take a few minutes)")
+        import urllib.request
+        urllib.request.urlretrieve(olr_url, local_cache)
+        print(f"✅ Downloaded to {local_cache}")
+    else:
+        print(f"✅ Using cached OLR file: {local_cache}")
     
-    if olr_var is None:
-        print(f"ERROR: None of {olr_candidates} found in dataset.")
-        print(f"Available variables: {list(ds.data_vars)}")
-        print("Try inspecting the dataset manually to find the correct variable name.")
-        return
+    # Open the dataset
+    print("Opening OLR dataset...")
+    ds = xr.open_dataset(local_cache)
+    print(f"  Variables: {list(ds.data_vars)}")
+    print(f"  Time range: {ds.time.values[0]} to {ds.time.values[-1]}")
+    print(f"  Grid: {ds.dims}")
     
-    # Print variable metadata
-    print(f"  Dims: {ds[olr_var].dims}")
-    print(f"  Shape hint: {dict(zip(ds[olr_var].dims, ds[olr_var].shape))}")
-    if hasattr(ds[olr_var], 'attrs'):
-        print(f"  Attrs: {ds[olr_var].attrs}")
+    # The variable is typically named 'olr'
+    olr_var = 'olr'
+    if olr_var not in ds:
+        # Try alternative names
+        for candidate in ['OLR', 'ulwrf', 'olr']:
+            if candidate in ds:
+                olr_var = candidate
+                break
+        else:
+            print(f"ERROR: OLR variable not found. Available: {list(ds.data_vars)}")
+            return
+    
+    print(f"  Using variable: '{olr_var}' (units: {ds[olr_var].attrs.get('units', 'unknown')})")
     
     # Define GEOS 1-degree target grid
     target_lat = np.linspace(-90, 90, 181)
     target_lon = np.linspace(0, 359, 360)
     
-    # Ensure output directory exists
-    os.makedirs(output_base_dir, exist_ok=True)
+    # Detect coordinate names (NOAA uses 'lat'/'lon', not 'latitude'/'longitude')
+    lat_name = 'lat' if 'lat' in ds.coords else 'latitude'
+    lon_name = 'lon' if 'lon' in ds.coords else 'longitude'
     
     for year in range(start_year, end_year + 1):
         output_path = os.path.join(output_base_dir, f"era5_olr_{year}.zarr")
@@ -82,50 +76,37 @@ def process_era5_olr(start_year=1999, end_year=2022, output_base_dir="/home1/113
         print(f"\n--- Processing Year: {year} ---")
         
         try:
-            # 1. Select year and variable
-            ttr = ds[olr_var].sel(time=str(year))
+            # 1. Select year
+            ds_year = ds[olr_var].sel(time=str(year))
+            print(f"  {len(ds_year.time)} days found for {year}")
             
-            # 2. Convert to OLR flux (W/m²)
-            # ERA5 forecast accumulations: ttr is accumulated J/m² over the forecast step.
-            # For hourly data (ERA5 default): step = 3600 seconds
-            # For 6-hourly: step = 21600 seconds
-            # The ARCO-ERA5 co store typically has hourly forecast data.
-            # We detect the step from the time coordinate spacing.
-            times = ttr.time.values
-            if len(times) > 1:
-                dt_hours = (pd.Timestamp(times[1]) - pd.Timestamp(times[0])).total_seconds() / 3600
-                accum_seconds = dt_hours * 3600
-                print(f"  Detected time step: {dt_hours:.1f} hours ({accum_seconds:.0f} seconds)")
-            else:
-                accum_seconds = 3600  # Default to hourly
-                print(f"  Defaulting to hourly accumulation (3600 seconds)")
+            # 2. Interpolate to GEOS 1-degree grid
+            print(f"  Interpolating from 2.5° to 1° GEOS grid (181x360)...")
+            ds_interp = ds_year.interp({lat_name: target_lat, lon_name: target_lon}, method='linear')
             
-            # OLR = -ttr / accumulation_period
-            # ttr is negative in ERA5 (energy leaving system), OLR is positive outward
-            olr = -1.0 * ttr / accum_seconds
-            olr.name = 'olr'
+            # Rename coordinates to standard names
+            rename_map = {}
+            if lat_name != 'latitude':
+                rename_map[lat_name] = 'latitude'
+            if lon_name != 'longitude':
+                rename_map[lon_name] = 'longitude'
+            if rename_map:
+                ds_interp = ds_interp.rename(rename_map)
             
-            ds_olr = olr.to_dataset(name='olr')
-            ds_olr['olr'].attrs = {
+            # Convert to dataset
+            ds_out = ds_interp.to_dataset(name='olr')
+            ds_out['olr'].attrs = {
                 'units': 'W/m2',
                 'long_name': 'Outgoing Longwave Radiation',
-                'description': f'Derived from ERA5 {olr_var}: OLR = -{olr_var} / {accum_seconds:.0f}'
+                'source': 'NOAA PSL Interpolated OLR (olr.day.mean.nc)',
+                'original_resolution': '2.5 degree',
+                'interpolated_to': '1.0 degree GEOS grid'
             }
             
-            # 3. Daily Mean Calculation
-            print(f"  Calculating daily means for {year}...")
-            ds_daily = ds_olr.resample(time='1D').mean()
-            
-            # 4. Interpolation to GEOS 1-degree grid
-            print(f"  Interpolating to GEOS 1-degree grid (181x360)...")
-            ds_interp = ds_daily.interp(latitude=target_lat, longitude=target_lon, method='linear')
-            
-            # 5. Save to Zarr
+            # 3. Rechunk and save to Zarr
             print(f"  Saving to {output_path}...")
-            ds_interp = ds_interp.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
-            
-            with dask.config.set(scheduler='synchronous'):
-                ds_interp.to_zarr(output_path, mode='w')
+            ds_out = ds_out.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
+            ds_out.to_zarr(output_path, mode='w')
             
             print(f"  ✅ Successfully saved OLR for {year}.")
             
@@ -133,12 +114,14 @@ def process_era5_olr(start_year=1999, end_year=2022, output_base_dir="/home1/113
             print(f"Error processing {year}: {e}")
             import traceback
             traceback.print_exc()
+    
+    print(f"\n🏁 Done! All years saved to {output_base_dir}/")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract ERA5 OLR (Outgoing Longwave Radiation) to daily 1-degree GEOS grid.")
+    parser = argparse.ArgumentParser(description="Download NOAA PSL OLR and interpolate to GEOS 1-degree grid.")
     parser.add_argument("--start_year", type=int, default=1999)
     parser.add_argument("--end_year", type=int, default=2022)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/era5_olr")
     args = parser.parse_args()
     
-    process_era5_olr(start_year=args.start_year, end_year=args.end_year, output_base_dir=args.output_dir)
+    process_noaa_olr(start_year=args.start_year, end_year=args.end_year, output_base_dir=args.output_dir)
