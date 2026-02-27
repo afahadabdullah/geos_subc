@@ -740,10 +740,18 @@ def train(args, accelerator):
                 u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
                 u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
 
+                # Channel 24: MJO Wave Spatial Map
+                mjo_norm_sample = x_obs[sample_idx, 24].cpu().numpy()
+                if "mjo" in global_bounds:
+                    m_min, m_max = global_bounds["mjo"]["min"], global_bounds["mjo"]["max"]
+                else:
+                    m_min, m_max = -100.0, 100.0
+                mjo_raw_sample = ((mjo_norm_sample + 1.0) / 2.0) * (m_max - m_min) + m_min
+
                 # 5. Raw GPCP (from dataset)
                 gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
 
-                fig, axes = plt.subplots(10, 2, figsize=(14, 40))
+                fig, axes = plt.subplots(11, 2, figsize=(14, 44))
                 # Row 1: GEOS
                 im1 = axes[0, 0].imshow(geos_raw_sample, cmap='Blues')
                 axes[0, 0].set_title(f"Raw GEOS (Lead {lead_idx+1})")
@@ -816,17 +824,26 @@ def train(args, accelerator):
                 axes[7, 1].set_title("Normalized U250 [-1, 1]")
                 fig.colorbar(im16, ax=axes[7, 1])
 
-                # Row 9: GPCP Absolute (The "Real" Target)
-                im17 = axes[8, 0].imshow(gpcp_raw_sample, cmap='Blues')
-                axes[8, 0].set_title("Raw GPCP (Pure Target)")
+                # Row 9: MJO Wave Envelope
+                im17 = axes[8, 0].imshow(mjo_raw_sample, cmap='PiYG', vmin=-30, vmax=30)
+                axes[8, 0].set_title("Raw MJO Wave Anomaly")
                 fig.colorbar(im17, ax=axes[8, 0])
                 
-                # Plot something neutral for normalized GPCP (since we only normalize residual)
-                axes[8, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.\nWe normalize the\nresidual [GPCP - GEOS].", 
-                             ha='center', va='center', transform=axes[8, 1].transAxes)
-                axes[8, 1].axis('off')
+                im18 = axes[8, 1].imshow(mjo_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
+                axes[8, 1].set_title("Normalized MJO Wave [-1, 1]")
+                fig.colorbar(im18, ax=axes[8, 1])
 
-                # Row 10: GEOS vs GPCP Orientation Check
+                # Row 10: GPCP Absolute (The "Real" Target)
+                im19 = axes[9, 0].imshow(gpcp_raw_sample, cmap='Blues')
+                axes[9, 0].set_title("Raw GPCP (Pure Target)")
+                fig.colorbar(im19, ax=axes[9, 0])
+                
+                # Plot something neutral for normalized GPCP (since we only normalize residual)
+                axes[9, 1].text(0.5, 0.5, "GPCP is not\nnormalized directly.\nWe normalize the\nresidual [GPCP - GEOS].", 
+                             ha='center', va='center', transform=axes[9, 1].transAxes)
+                axes[9, 1].axis('off')
+
+                # Row 11: GEOS vs GPCP Orientation Check
                 # Calculate Spatial Correlation
                 flat_geos = geos_raw_sample.flatten()
                 flat_gpcp = gpcp_raw_sample.flatten()
@@ -837,15 +854,15 @@ def train(args, accelerator):
                 else:
                     cc = 0.0
                 
-                im18 = axes[9, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
-                axes[9, 0].set_title(f"Spatial Alignment: GEOS - GPCP\nCorrelation: {cc:.4f}")
-                fig.colorbar(im18, ax=axes[9, 0])
+                im20 = axes[10, 0].imshow(geos_raw_sample - gpcp_raw_sample, cmap='RdBu_r', vmin=-20, vmax=20)
+                axes[10, 0].set_title(f"Spatial Alignment: GEOS - GPCP\nCorrelation: {cc:.4f}")
+                fig.colorbar(im20, ax=axes[10, 0])
                 
                 # Show a scatter plot for orientation verification
-                axes[9, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
-                axes[9, 1].set_xlabel("GEOS Rainfall")
-                axes[9, 1].set_ylabel("GPCP Rainfall")
-                axes[9, 1].set_title("Orientation Scatter (Subsampled)")
+                axes[10, 1].scatter(flat_geos[::50], flat_gpcp[::50], alpha=0.3, s=1)
+                axes[10, 1].set_xlabel("GEOS Rainfall")
+                axes[10, 1].set_ylabel("GPCP Rainfall")
+                axes[10, 1].set_title("Orientation Scatter (Subsampled)")
 
                 plt.tight_layout()
                 diag_path = os.path.join(output_dir, "normalization_check.png")
