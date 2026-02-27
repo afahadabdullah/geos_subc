@@ -12,9 +12,9 @@ def get_base_dataset():
     print("Connecting to ArrayLake...")
     client = Client()
     repo = client.get_repo("umd/subc")
-    
     print("Opening Zarr store via Xarray (group: esrl-fimr1p1-forecast)...")
-    ds = xr.open_zarr(repo.store, zarr_format=3, group="esrl-fimr1p1-forecast")
+    session = repo.writable_session(branch="main")
+    ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-forecast")
     
     # 1. Identify pressure level dimension for ZG
     level_dim = None
