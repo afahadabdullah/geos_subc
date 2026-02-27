@@ -166,8 +166,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Standardized: 4 ensemble members for all validation types (requested for speed)
-        num_ensemble = 4
+        # Fast validation: 4 ensemble members (speed). Full validation: 6 members (quality).
+        num_ensemble = 4 if (is_fast_recon and not is_test) else 6
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
