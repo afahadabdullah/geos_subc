@@ -126,9 +126,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # We want to evaluate the model across the 4 seasons to prevent January overfitting
-    # 52 weeks in a year. We'll pick roughly Q1, Q2, Q3, Q4.
-    target_batches = [0, 13, 26, 39]
+    # Sample 12 batches evenly across the validation set for monthly coverage.
+    # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
+    # 12 evenly-spaced batches give us roughly one per calendar month.
+    total_val_batches = len(val_loader)
+    num_val_samples = 12
+    if total_val_batches >= num_val_samples:
+        step = total_val_batches / num_val_samples
+        target_batches = [int(i * step) for i in range(num_val_samples)]
+    else:
+        target_batches = list(range(total_val_batches))
     
     total_crps = 0.0
     total_rmse = 0.0
@@ -142,7 +149,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     for b_idx, batch in enumerate(val_loader):
         if b_idx not in target_batches:
             if b_idx > max(target_batches):
-                break # Stop iterating once we have the 4 batches
+                break # Stop iterating once we have all target batches
             continue
             
         fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
@@ -157,8 +164,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # We collect ensemble members for CRPS if fast_recon
-        num_ensemble = 10 if is_fast_recon and not is_test else (10 if is_test else 1)
+        # Fast validation: 5 ensemble members, 5 Euler steps (rapid CRPS signal)
+        # Full validation (is_test): 10 ensemble members, 50 Euler steps (publication quality)
+        num_ensemble = 5 if is_fast_recon and not is_test else 10
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
@@ -187,8 +195,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             
             target_norm_week = fb_target_norm[lead_idx].unsqueeze(0) 
             
+            # Fast: 5 Euler steps (rapid screening). Full: 50 steps (publication quality)
             if is_fast_recon and not is_test:
-                num_steps = 10
+                num_steps = 5
             else:
                 num_steps = 50
                 
@@ -268,7 +277,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         avg_geos_crps = cached_geos_crps
         avg_geos_rmse = cached_geos_rmse
     
-    recon_type = f"Seasonal (N=4x{num_ensemble})"
+    recon_type = f"Monthly (N={len(target_batches)}x{num_ensemble})"
     if accelerator.is_main_process:
         print(f"Epoch {epoch} | Val CRPS [{recon_type}]: {avg_crps:.4f} (GEOS baseline: {avg_geos_crps:.4f})")
         
