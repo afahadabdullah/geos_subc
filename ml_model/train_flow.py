@@ -171,12 +171,12 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
-        # Fast: 5 Euler steps (rapid screening). Full: 50 steps (publication quality)
-        num_steps = 5 if is_fast_recon and not is_test else 50
+        # Fast: 2 Euler steps (rapid screening). Full: 50 steps (publication quality)
+        num_steps = 2 if is_fast_recon and not is_test else 50
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members ---
         # We chunk the ensemble to avoid OOM when processing multiple init dates
-        ens_chunk_size = 2 # Process 2 ensemble members for all leads at once
+        ens_chunk_size = 6 # Process full 6-member ensemble for all leads at once (VRAM is stable now)
         vB = fb_target_norm.shape[0] 
         
         fx_obs = batch['x_obs'].to(device) 
