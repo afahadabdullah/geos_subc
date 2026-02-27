@@ -45,8 +45,9 @@ def get_base_dataset():
     # 1. Identify pressure level dimension for ZG
     level_dim = None
     if 'zg' in ds:
+        # FIMR often uses 'P' for pressure level
         for dim in ds.zg.dims:
-            if 'lev' in dim.lower() or 'pressure' in dim.lower():
+            if dim.lower() in ['p', 'plev', 'level', 'lev', 'pressure']:
                 level_dim = dim
                 break
     
@@ -127,9 +128,8 @@ def save_yearly_data():
             print(f"Saving {year} data to {output_path} ({ds_year.sizes[time_dim]} timesteps)...")
             
             with ProgressBar(), dask.config.set(scheduler='synchronous'):
-                # We use zarr_format=3 if the source is 3, otherwise default.
-                # ArrayLake usually uses V3 for newer groups.
-                ds_year.to_zarr(output_path, mode='w')
+                # Force Zarr V3 to match source format and avoid metadata interpret errors
+                ds_year.to_zarr(output_path, mode='w', zarr_format=3)
             
             print(f"Successfully saved {year}.")
             
