@@ -196,7 +196,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         num_steps = 50
         # Pass lead_idx so euler_solve routes through the correct per-week output head
         lead_idx_batch = torch.full((num_ensemble,), lead_idx, device=device, dtype=torch.long)
-        p_x1_batch = flow_matcher.euler_solve(model, smart_noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch)
+        p_x1_batch = flow_matcher.euler_solve(model, smart_noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch, apply_flow_variance=True)
         
         # Inverse Transform
         for eidx in range(num_ensemble):

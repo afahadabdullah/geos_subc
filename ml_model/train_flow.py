@@ -203,7 +203,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             noise_batch = torch.randn((num_ensemble, 1, H, W), device=device)
             # Pass lead_idx so euler_solve routes through the correct per-week output head
             lead_idx_batch = torch.full((num_ensemble,), lead_idx, device=device, dtype=torch.long)
-            p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch)
+            p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch, apply_flow_variance=True)
             
             for eidx in range(num_ensemble):
                 week_pred_norm = p_x1_batch[eidx, 0] 
@@ -864,16 +864,25 @@ def train(args, accelerator):
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
             # Predict the velocity (routed through the correct per-week output head)
-            v_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
 
-            # --- Temporal Loss Weighting (NEW) ---
+            # --- Target Variance (Gradient Isolated) ---
+            # We want the variance head to predict the squared error of the mean head,
+            # WITHOUT letting gradients flow backward to disrupt the flow matching trajectory.
+            target_var = (v_target - v_pred.detach())**2
+
+            # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
             # 0=Week1, 1=Week2, 2=Week3, 3=Week4
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss scaling with spatial priority AND temporal priority
-            loss = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
+            # Loss computation (Dual Head)
+            loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
+            loss_var = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
+            
+            # Combine losses
+            loss = loss_v + loss_var
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -882,7 +891,7 @@ def train(args, accelerator):
             optimizer.zero_grad()
 
             train_loss += loss.item()
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}", "loss_var": f"{loss_var.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         

@@ -39,9 +39,14 @@ class FlowMatchingModel(nn.Module):
             ),
         )
         
-        # 4 dedicated output heads (Week 1, Week 2, Week 3, Week 4)
+        # 4 dedicated mean output heads (Week 1, Week 2, Week 3, Week 4)
         # Each is a lightweight 1x1 conv: [B, 64, H, W] -> [B, 1, H, W]
         self.heads = nn.ModuleList([
+            nn.Conv2d(HEAD_FEATURES, 1, kernel_size=1) for _ in range(4)
+        ])
+        
+        # 4 dedicated variance output heads
+        self.var_heads = nn.ModuleList([
             nn.Conv2d(HEAD_FEATURES, 1, kernel_size=1) for _ in range(4)
         ])
 
@@ -77,17 +82,20 @@ class FlowMatchingModel(nn.Module):
         # Route through dedicated per-week output heads
         if lead_idx is None:
             # Backward compatibility: use head 0
-            return self.heads[0](features)
+            return self.heads[0](features), F.softplus(self.var_heads[0](features))
         
         B = features.shape[0]
         output = torch.zeros(B, 1, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        var_output = torch.zeros(B, 1, orig_H, orig_W, device=features.device, dtype=features.dtype)
         
         for week_idx in range(4):
             mask = (lead_idx == week_idx)
             if mask.any():
                 output[mask] = self.heads[week_idx](features[mask])
+                # Softplus ensures strict positive variance predictions
+                var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask]))
         
-        return output
+        return output, var_output
 
 
 class CustomFlowMatcher:
@@ -117,14 +125,26 @@ class CustomFlowMatcher:
         return x_t, v_target
 
     @torch.no_grad()
-    def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None):
+    def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False):
         """
         Inference routine using explicit Euler integration.
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
-        noise is x_0 at t=0.
+        noise is x_0 standard normal initialization.
         lead_idx: integer or [B] tensor indicating which week head to use.
+        apply_flow_variance: If True, queries the model's var_head at t=0 and 
+                             scales the initial noise by sqrt(var_pred).
         """
-        x_t = noise.clone()
+        if apply_flow_variance:
+            # Query variance at t=0
+            t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
+            _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
+            # Standard Deviation = sqrt(Variance). Small epsilon for numerical stability.
+            std_pred = torch.sqrt(var_pred + 1e-6)
+            # Flow-Dependent scaling of initial condition
+            x_t = noise * std_pred
+        else:
+            x_t = noise.clone()
+            
         dt = 1.0 / num_steps
         
         for step in range(num_steps):
@@ -132,8 +152,8 @@ class CustomFlowMatcher:
             t_val = step * dt
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
             
-            # Predict velocity through the correct per-week head
-            v_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+            # Predict velocity through the correct per-week head (we ignore variance during integration)
+            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
             
             # Euler step
             x_t = x_t + v_pred * dt
