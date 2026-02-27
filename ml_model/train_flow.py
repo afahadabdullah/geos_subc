@@ -175,11 +175,13 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Fast: 5 Euler steps (rapid screening). Full: 50 steps (publication quality)
         num_steps = 5 if is_fast_recon and not is_test else 50
         
-        # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members simultaneously ---
-        vB = fb_target_norm.shape[0] # Should be 4
+        # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members ---
+        # We chunk the ensemble to avoid OOM when processing multiple init dates
+        ens_chunk_size = 2 # Process 2 ensemble members for all leads at once
+        vB = fb_target_norm.shape[0] 
         
-        fx_obs = batch['x_obs'].to(device) # [vB, C, H, W]
-        fx_geos = batch['x_geos'].to(device) # [vB, 1, 4, H, W]
+        fx_obs = batch['x_obs'].to(device) 
+        fx_geos = batch['x_geos'].to(device) 
         fx_geos_cat = fx_geos.view(vB, -1, H, W)
         
         f_month = batch['month'].to(device).float()
@@ -192,13 +194,24 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1) # [vB, 35, H, W]
         
-        fx_cond_batch = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        noise_batch = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-        lead_idx_batch = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
-        
-        p_x1_batch = flow_matcher.euler_solve(unwrapped_model, noise_batch, fx_cond_batch, num_steps=num_steps, lead_idx=lead_idx_batch, apply_flow_variance=True)
-        # Reshape Output back to [vB, num_ensemble, H, W]
-        p_x1_batch = p_x1_batch.view(vB, num_ensemble, H, W)
+        # Solve ensemble in chunks
+        all_ens_preds = []
+        for ens_start in range(0, num_ensemble, ens_chunk_size):
+            curr_ens_size = min(ens_chunk_size, num_ensemble - ens_start)
+            
+            # Expand condition to [vB * curr_ens_size, ...]
+            fx_cond_subbatch = fx_cond.unsqueeze(1).expand(vB, curr_ens_size, -1, H, W).reshape(vB * curr_ens_size, -1, H, W)
+            noise_subbatch = torch.randn((vB * curr_ens_size, 1, H, W), device=device)
+            lead_idx_subbatch = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, curr_ens_size).reshape(-1).long()
+            
+            p_x1_subbatch = flow_matcher.euler_solve(
+                unwrapped_model, noise_subbatch, fx_cond_subbatch, 
+                num_steps=num_steps, lead_idx=lead_idx_subbatch, apply_flow_variance=True
+            )
+            # [vB, curr_ens_size, H, W]
+            all_ens_preds.append(p_x1_subbatch.view(vB, curr_ens_size, H, W))
+            
+        p_x1_batch = torch.cat(all_ens_preds, dim=1) # [vB, num_ensemble, H, W]
         
         week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
