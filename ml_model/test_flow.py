@@ -180,34 +180,32 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     var_norm = lead_var / (var_mean + 1e-6)
     var_scaled = torch.clamp(var_norm, min=0.5, max=2.0) 
 
-    # Solve ensemble in chunks
-    all_ens_preds = []
-    ens_pbar = tqdm(range(0, num_ensemble, ens_chunk_size), desc="Ensemble Chunks", leave=False)
-    for ens_start in ens_pbar:
-        curr_ens_size = min(ens_chunk_size, num_ensemble - ens_start)
+    # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
+    # With zombie processes gone, we can fit [vB * num_ensemble] through the UNet at once.
+    
+    # Expand condition to [vB, num_ensemble, 35, H, W] -> [vB * num_ensemble, 35, H, W]
+    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+    
+    # Expand variance scalar for base noise
+    var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, num_ensemble, 1, H, W).reshape(vB * num_ensemble, 1, H, W)
+    
+    # Generate base noise or use pre-allocated
+    if 'base_noise_batch' in locals():
+        smart_noise_expanded = base_noise_batch[:vB * num_ensemble]
+    else:
+        base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        smart_noise_expanded = base_noise_expanded * var_scaled_expanded
         
-        # Expand condition to [vB * curr_ens_size, ...]
-        fx_cond_subbatch = fx_cond.unsqueeze(1).expand(vB, curr_ens_size, -1, H, W).reshape(vB * curr_ens_size, -1, H, W)
-        
-        # Expand variance scalar for base noise
-        var_scaled_subbatch = var_scaled.unsqueeze(1).expand(vB, curr_ens_size, 1, H, W).reshape(vB * curr_ens_size, 1, H, W)
-        base_noise_subbatch = torch.randn((vB * curr_ens_size, 1, H, W), device=device)
-        smart_noise_subbatch = base_noise_batch[ens_start*vB : (ens_start+curr_ens_size)*vB] if 'base_noise_batch' in locals() else base_noise_subbatch * var_scaled_subbatch
-        
-        # Recalculate smart noise locally if needed
-        base_noise_subbatch = torch.randn((vB * curr_ens_size, 1, H, W), device=device)
-        smart_noise_subbatch = base_noise_subbatch * var_scaled_subbatch
-        
-        lead_idx_subbatch = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, curr_ens_size).reshape(-1).long()
-        
-        p_x1_subbatch = flow_matcher.euler_solve(
-            model, smart_noise_subbatch, fx_cond_subbatch, 
-            num_steps=num_steps, lead_idx=lead_idx_subbatch, apply_flow_variance=True
-        )
-        # [vB, curr_ens_size, H, W]
-        all_ens_preds.append(p_x1_subbatch.view(vB, curr_ens_size, H, W))
-        
-    p_x1_batch = torch.cat(all_ens_preds, dim=1) # [vB, num_ensemble, H, W]
+    lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
+    
+    # Single parallel ODE solve for the entire test batch and ensemble
+    p_x1_expanded = flow_matcher.euler_solve(
+        model, smart_noise_expanded, fx_cond_expanded, 
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
+    )
+    
+    # Reshape back to [vB, num_ensemble, H, W]
+    p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
     
     week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
     week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
