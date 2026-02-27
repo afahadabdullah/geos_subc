@@ -757,11 +757,32 @@ def train(args, accelerator):
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
+        # --- ADAPTIVE VALIDATION SCHEDULE ---
+        # Phase 1 (epoch < 20):  No validation (model still warming up)
+        # Phase 2 (20-99):       Every 5 epochs (20, 25, 30, ...)
+        # Phase 3 (100-149):     Every 2 epochs (100, 102, 104, ...)
+        # Phase 4 (150+):        Every epoch (150, 151, 152, ...)
+        # Full 50-step val only fires if fast val finds a new absolute best.
+        def should_validate(ep):
+            if ep < 20:
+                return False
+            elif ep < 100:
+                return (ep % 5 == 0)
+            elif ep < 150:
+                return (ep % 2 == 0)
+            else:
+                return True
+
+        if not should_validate(epoch):
+            if accelerator.is_main_process:
+                print(f"⏭️  Epoch {epoch}: Skipping validation (schedule: next at {next(e for e in range(epoch+1, epoch+10) if should_validate(e))}).")
+            epochs_done_this_run += 1
+            continue
+
         if accelerator.is_main_process:
             print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
         
-        # Validate every epoch, but only do expensive plotting/sampling on new best or if forced.
-        # User requested: Fast validation first. After epoch 6, if new best, do full validation.
+        # Always do fast validation first. Only do expensive full sampling if new best is found.
         is_plot_epoch = args.full_val
         
         val_outputs = run_val_inference(
