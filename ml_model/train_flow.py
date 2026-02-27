@@ -152,14 +152,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 break # Stop iterating once we have all target batches
             continue
             
-        fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
+        fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
         vB, _, H, W = fb_target_norm.shape
+        num_inits = vB // 4
         
-        true_target_precip = batch['target_raw_full'][0].to(device) # [4, H, W]
+        # Extract unique init dates (every 4th element)
+        true_target_precip = batch['target_raw_full'][0::4].to(device) # [num_inits, 4, H, W]
         
-        geos_ens_raw = batch['geos_ens_raw'].to(device) # [4, M=4, L=4, H, W]
-        geos_ens_sample = geos_ens_raw[0] # [M=4, L=4, H, W]
-        geos_mean_raw = geos_ens_sample.mean(dim=0) # [4, H, W]
+        geos_ens_raw = batch['geos_ens_raw'].to(device) 
+        geos_ens_sample = geos_ens_raw[0::4] # [num_inits, M=4, L=4, H, W]
+        geos_mean_raw = geos_ens_sample.mean(dim=1) # [num_inits, 4, H, W]
     
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
@@ -202,52 +204,57 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
         
         ensemble_preds_precip = week_precip.transpose(0, 1) # [num_ensemble, vB, H, W]
-        full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
-        model_var = ensemble_preds_precip.var(dim=0) # [4, H, W]
+        
+        # Reshape to separate initialization dates and lead weeks
+        ensemble_preds_precip = ensemble_preds_precip.view(num_ensemble, num_inits, 4, H, W)
+        
+        full_pred = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
+        model_var = ensemble_preds_precip.var(dim=0) # [num_inits, 4, H, W]
     
-        # Calculate CRPS
-        b_crps = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+        # Calculate CRPS across all inits in this batch natively
+        b_crps = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
         
         # Model RMSE (NaN-aware)
         mse_map = (full_pred - true_target_precip)**2
         mask = ~torch.isnan(mse_map)
         if mask.any():
-            aw_expanded = area_weights.view(1, 181, 1).expand_as(mse_map)
+            aw_expanded = area_weights.view(1, 1, 181, 1).expand_as(mse_map)
             b_rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
         else:
             b_rmse = 0.0
         
         # GEOS Baseline Metrics (NaN-aware)
         if cached_geos_crps is None:
-            g_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+            g_crps = compute_crps(geos_ens_sample, true_target_precip, area_weights)
             geos_mse_map = (geos_mean_raw - true_target_precip)**2
             mask_2d = ~torch.isnan(geos_mse_map)
         
             if mask_2d.any():
-                aw_expanded_2d = area_weights.view(181, 1).expand_as(geos_mse_map)
+                aw_expanded_2d = area_weights.view(1, 1, 181, 1).expand_as(geos_mse_map)
                 g_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
             else:
                 g_rmse = 0.0
                 
-            total_geos_crps += g_crps
-            total_geos_rmse += g_rmse
+            total_geos_crps += g_crps * num_inits # Weight by batch items
+            total_geos_rmse += g_rmse * num_inits
             
-        total_crps += b_crps
-        total_rmse += b_rmse
-        count += 1
+        total_crps += b_crps * num_inits # Weight by batch items
+        total_rmse += b_rmse * num_inits
+        count += num_inits
         
         # Save only the first season (Winter) for visual plotting consistency
         if b_idx == 0:
-            true_target_precip_plot = torch.nan_to_num(true_target_precip, nan=0.0)
-            ai_residual = full_pred - geos_mean_raw
+            # We select the first init date [0] for plotting to keep dims matching matplotlib scripts
+            true_target_precip_plot = torch.nan_to_num(true_target_precip[0], nan=0.0)
+            ai_residual = full_pred[0] - geos_mean_raw[0]
             saved_tensors = {
-                'full_pred': full_pred.unsqueeze(0),
+                'full_pred': full_pred[0].unsqueeze(0),
                 'true_target': true_target_precip_plot.unsqueeze(0),
-                'geos_mean': geos_mean_raw.unsqueeze(0),
+                'geos_mean': geos_mean_raw[0].unsqueeze(0),
                 'ai_res': ai_residual.unsqueeze(0),
-                'geos_single': geos_ens_sample[0].unsqueeze(0),
-                'model_single': ensemble_preds_precip[0].unsqueeze(0),
-                'model_var': model_var.unsqueeze(0)
+                'geos_single': geos_ens_sample[0, 0].unsqueeze(0),
+                'model_single': ensemble_preds_precip[0, 0].unsqueeze(0),
+                'model_var': model_var[0].unsqueeze(0)
             }
             
     # Compute Averages
@@ -291,9 +298,12 @@ def train(args, accelerator):
         stats_file="v5_global_stats.pt"
     )
 
+    # Process multiple init dates per validation batch for speed (batch_size * 2 since we flattened leads)
+    val_batch_size = max(8, batch_size * 2) 
+    
     from torch.utils.data import DataLoader
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, 
+        val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=True,
         num_workers=config.get("num_workers", 4), pin_memory=True
     )
 

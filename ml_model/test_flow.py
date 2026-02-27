@@ -426,7 +426,7 @@ def main():
                                lats=lats, lons=lons)
         else:
             # Run inference
-            m_crps, m_rmse, g_crps, g_rmse, tensors = run_test_inference(
+            m_crps, m_rmse, g_crps, g_rmse, tensors, n_inits = run_test_inference(
                 batch_idx, batch, model, flow_matcher, device, output_dir, None,
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size, save_plot=(batch_idx < 5)
             )
@@ -443,10 +443,11 @@ def main():
             # Save to disk to avoid rerunning
             np.savez_compressed(
                 data_file,
-                model_crps=m_crps,
-                model_rmse=m_rmse,
-                geos_crps=g_crps,
-                geos_rmse=g_rmse,
+                model_crps=m_crps / n_inits,
+                model_rmse=m_rmse / n_inits,
+                geos_crps=g_crps / n_inits,
+                geos_rmse=g_rmse / n_inits,
+                num_inits=n_inits,
                 full_pred=f_pred,
                 true_target_precip=t_target,
                 geos_mean=g_mean,
@@ -461,7 +462,6 @@ def main():
         all_full_preds.append(f_pred)
         all_targets.append(t_target)
         all_geos_means.append(g_mean)
-        
         all_model_crps_maps.append(m_crps_map)
         all_model_mse_maps.append(m_mse_map)
         all_geos_crps_maps.append(g_crps_map)
@@ -472,13 +472,20 @@ def main():
         all_geos_crps.append(g_crps)
         all_geos_rmse.append(g_rmse)
         
+        # Determine current divisor (how many inits we've seen)
+        total_so_far = sum([n_inits if 'n_inits' in locals() else 1 for _ in all_model_crps]) # Approx logic wrapper
+        # Since we just appended sums, we use total inits so far locally
+        # Or simpler for pbar: just sum / total test dataset items seen.
+        seen_inits = batch_idx * test_batch_size // 4 + n_inits if not all_cached else batch_idx * 1 + 1 
+        if all_cached: seen_inits = len(all_model_crps) # Rough
+        
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([batch_idx, m_crps, m_rmse, g_crps, g_rmse])
+            writer.writerow([batch_idx, m_crps / n_inits, m_rmse / n_inits, g_crps / n_inits, g_rmse / n_inits])
             
         pbar.set_postfix({
-            "M_CRPS": f"{np.mean(all_model_crps):.3f}",
-            "G_CRPS": f"{np.mean(all_geos_crps):.3f}"
+            "M_CRPS": f"{sum(all_model_crps) / seen_inits:.3f}",
+            "G_CRPS": f"{sum(all_geos_crps) / seen_inits:.3f}"
         })
 
     print("\nCalculating Temporal Correlation Maps...")
@@ -541,11 +548,18 @@ def main():
     
     # --- Generate CRPS Map Plot --- #
     print("Calculating and Plotting Spatial CRPS and RMSE Maps...")
-    avg_model_crps_map = np.mean(all_model_crps_maps, axis=0) # [H, W]
-    avg_geos_crps_map = np.mean(all_geos_crps_maps, axis=0) 
+    # Concatenate all stored maps of shape [num_inits, 4, H, W] into [Total_inits, 4, H, W]
+    all_model_crps_maps_arr = np.concatenate(all_model_crps_maps, axis=0) 
+    all_geos_crps_maps_arr = np.concatenate(all_geos_crps_maps, axis=0)
+    all_model_mse_maps_arr = np.concatenate(all_model_mse_maps, axis=0)
+    all_geos_mse_maps_arr = np.concatenate(all_geos_mse_maps, axis=0)
+
+    # Average over all initialization dates and 4 lead weeks to create a global spatial map [H, W]
+    avg_model_crps_map = np.mean(all_model_crps_maps_arr, axis=(0, 1)) # [H, W]
+    avg_geos_crps_map = np.mean(all_geos_crps_maps_arr, axis=(0, 1)) 
     
-    avg_model_rmse_map = np.sqrt(np.mean(all_model_mse_maps, axis=0))
-    avg_geos_rmse_map = np.sqrt(np.mean(all_geos_mse_maps, axis=0))
+    avg_model_rmse_map = np.sqrt(np.mean(all_model_mse_maps_arr, axis=(0, 1)))
+    avg_geos_rmse_map = np.sqrt(np.mean(all_geos_mse_maps_arr, axis=(0, 1)))
     
     # Helper to plot 3-panel error maps
     def plot_error_map(geos_map, model_map, metric_name, vmin, vmax, diff_vmax, filename):
