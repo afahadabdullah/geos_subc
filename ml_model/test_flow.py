@@ -263,7 +263,7 @@ def main():
     parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml", help="Path to config file")
     parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
-    parser.add_argument("--ensemble-size", type=int, default=6, help="Number of members in smart noise ensemble")
+    parser.add_argument("--ensemble-size", type=int, default=4, help="Number of members in smart noise ensemble")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
