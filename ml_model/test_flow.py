@@ -265,7 +265,7 @@ def main():
     parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml", help="Path to config file")
     parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
-    parser.add_argument("--ensemble-size", type=int, default=20, help="Number of members in smart noise ensemble")
+    parser.add_argument("--ensemble-size", type=int, default=6, help="Number of members in smart noise ensemble")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -381,22 +381,21 @@ def main():
     all_geos_crps_maps = []
     all_geos_mse_maps = []
     
-    # Provide 12 uniformly distributed random batches (1 per calendar month, assuming ~52 total batches per year)
-    # We fix the random seed to 42 so that the evaluation is consistent across runs
+    # Provide 6 initialization dates (2 months apart)
     rng = random.Random(42)
     target_batches = set()
     total_expected_batches = 52 # 1 year = 52 weeks
-    chunk_size = total_expected_batches / 12.0
+    chunk_size = total_expected_batches / 6.0
     
-    for m in range(12):
+    for m in range(6):
         start_idx = int(m * chunk_size)
         end_idx = int((m + 1) * chunk_size) - 1
-        # Pick one random initialization batch from this month's window
+        # Pick one random initialization batch from this 2-month window
         target_batches.add(rng.randint(start_idx, end_idx))
         
     pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
-        if len(all_model_crps) >= 12:
+        if len(all_model_crps) >= 6:
             break
             
         if batch_idx not in target_batches:
