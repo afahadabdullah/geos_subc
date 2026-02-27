@@ -431,8 +431,12 @@ class S2SHybridDataset(Dataset):
                 else:
                     obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
                 obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
-                # MJO Wave is naturally scaled ~[-60, 60] W/m2 anomaly. Cap comfortably at [-100, 100].
-                obs_stack[24:28] = min_max_scale(obs_stack[24:28], -100.0, 100.0)
+                # MJO Wave spatial array
+                if "mjo" in self.bounds:
+                    obs_stack[24:28] = min_max_scale(obs_stack[24:28], self.bounds["mjo"]["min"], self.bounds["mjo"]["max"])
+                else:
+                    # Fallback min/max anomaly if stats file isn't updated yet
+                    obs_stack[24:28] = min_max_scale(obs_stack[24:28], -100.0, 100.0)
             
             obs_tensor = torch.from_numpy(obs_stack).float()
             if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
