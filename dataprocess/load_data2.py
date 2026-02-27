@@ -51,17 +51,32 @@ def get_base_dataset():
                 level_dim = dim
                 break
     
-    # 2. Select ZG at 850hPa
+    # 2. Fix: Ensure level_dim has an index for .sel(method='nearest')
+    if level_dim and level_dim not in ds.coords:
+        print(f"Dimension '{level_dim}' has no coordinate. Attempting to load from store...")
+        try:
+            # Check for the coordinate array at the group root
+            lev_ds = xr.open_zarr(session.store, zarr_format=3, group=f"{group_path}/{level_dim}")
+            ds = ds.assign_coords({level_dim: lev_ds[level_dim]})
+            print(f"Successfully loaded and assigned coordinate '{level_dim}'.")
+        except Exception as e:
+            print(f"Warning: Could not load coordinate '{level_dim}': {e}")
+
+    # 3. Select ZG at 850hPa
     if 'zg' in ds:
-        if level_dim:
+        if level_dim and level_dim in ds.coords:
             print(f"Selecting 'zg' at 850hPa using level dimension: {level_dim}")
             try:
-                zg_850 = ds.zg.sel({level_dim: 850})
-            except Exception:
-                print("Exact level 850 not found, attempting nearest match...")
-                zg_850 = ds.zg.sel({level_dim: 850}, method='nearest')
+                # Check for Pa vs hPa units
+                max_val = ds[level_dim].max().item()
+                target_val = 85000 if max_val > 5000 else 850
+                zg_850 = ds.zg.sel({level_dim: target_val}, method='nearest')
+            except Exception as e:
+                print(f"Error slicing zg: {e}. Falling back to isel.")
+                # Fallback to a reasonable heuristic (index 10 is often 850hPa)
+                zg_850 = ds.zg.isel({level_dim: min(10, ds.sizes[level_dim]-1)})
         else:
-            print("Warning: No level dimension found for 'zg'. Using raw 'zg'.")
+            print("Warning: No level coordinate for ZG selection. Using raw.")
             zg_850 = ds.zg
     else:
         print("Error: 'zg' not found in dataset.")
