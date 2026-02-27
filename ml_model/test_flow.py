@@ -174,12 +174,9 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         f_lead_val = (fl_idx.float() / 1.5) - 1.0 
         f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
         
-        fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
-        fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
-        
         fx_cat_geos = fx_geos.view(1, -1, H, W)             
         
-        fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) # [1, 33, H, W]
+        fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel], dim=1) # [1, 35, H, W]
         
         # Smart Noise Injection for current lead week
         lead_var = geos_struct_var[lead_idx].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
@@ -332,7 +329,7 @@ def main():
         geos_min = global_bounds["geos_raw"]["min"]
         geos_max = global_bounds["geos_raw"]["max"]
     
-        model = FlowMatchingModel(in_channels=34, out_channels=1).to(device)
+        model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
         
         if args.ckpt is None:
             import glob

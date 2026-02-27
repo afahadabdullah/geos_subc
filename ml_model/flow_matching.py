@@ -15,7 +15,7 @@ class FlowMatchingModel(nn.Module):
       - 4 dedicated Conv2d(HEAD_FEATURES, 1) output heads, one per forecast week.
       - Each head specializes in its own timescale without competing for filter capacity.
     """
-    def __init__(self, in_channels=34, out_channels=1):
+    def __init__(self, in_channels=36, out_channels=1):
         super().__init__()
         
         # Shared UNet backbone (outputs intermediate features, NOT final prediction)
@@ -48,13 +48,13 @@ class FlowMatchingModel(nn.Module):
     def forward(self, x_t, x_cond, t, lead_idx=None):
         """
         x_t:      [B, 1, H, W] - State at time t
-        x_cond:   [B, 33, H, W] - Conditioning variables
+        x_cond:   [B, 35, H, W] - Conditioning variables
         t:        [B] or scalar in [0, 1]. Representing continuous flow time.
         lead_idx: [B] tensor with values in {0, 1, 2, 3} indicating forecast week.
                   If None, defaults to head 0 (backward compat).
         """
         # Spatial concatenation
-        x = torch.cat([x_t, x_cond], dim=1)  # [B, 34, H, W]
+        x = torch.cat([x_t, x_cond], dim=1)  # [B, 36, H, W]
         
         # Pad to multiple of 16 for 4 down-blocks
         orig_H, orig_W = x.shape[2], x.shape[3]

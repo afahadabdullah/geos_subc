@@ -186,12 +186,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             f_lead_val = (fl_idx.float() / 1.5) - 1.0 
             f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
             
-            fmjo = batch['mjo'][lead_idx].to(device).view(1, 2)
-            fmjo_map = fmjo.view(1, 2, 1, 1).expand(1, 2, H, W)
-            
             fx_cat_geos = fx_geos.view(1, -1, H, W)             
             
-            fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel, fmjo_map], dim=1) 
+            fx_cond = torch.cat([fx_obs, fx_cat_geos, fsin_month, fcos_month, f_lead_channel], dim=1) 
             
             target_norm_week = fb_target_norm[lead_idx].unsqueeze(0) 
             
@@ -354,7 +351,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=34, out_channels=1).to(device)
+    model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -676,12 +673,8 @@ def train(args, accelerator):
             lead_val = (lead_idx.float() / 1.5) - 1.0 
             lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
 
-            # --- MJO Embedding ---
-            mjo = batch['mjo'].to(device) # [B, 2]
-            mjo_map = mjo.view(B, 2, 1, 1).expand(B, 2, H, W)
-
-            # Total: 24 (Obs/Dev) + 4 (GEOS) + 2 (Month) + 1 (Lead) + 2 (MJO) = 33 channels
-            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel, mjo_map], dim=1) 
+            # Total: 28 (Obs/Dev/MJO) + 4 (GEOS) + 2 (Month) + 1 (Lead) = 35 channels
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
 
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 1, H, W]
