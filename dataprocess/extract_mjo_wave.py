@@ -160,6 +160,12 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     # NOAA uses 'olr' variable
     da_olr = ds['olr']
     
+    # 0. Slice the global dataset to the relevant training period to drastically speed up Climatology
+    # GEOS training starts in 1999, so we don't need to compute 121-day rolling means back to 1974
+    print("Slicing base dataset to 1998-01-01 onwards for faster computation...")
+    # Start in 1998 to provide the 90-day padding needed for 1999 FFT calculations
+    da_olr = da_olr.sel(time=slice('1998-01-01', None))
+    
     # Ensure lat/lon are standard
     lat_name = 'lat' if 'lat' in da_olr.coords else 'latitude'
     lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
