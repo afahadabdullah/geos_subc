@@ -92,8 +92,9 @@ class FlowMatchingModel(nn.Module):
             mask = (lead_idx == week_idx)
             if mask.any():
                 output[mask] = self.heads[week_idx](features[mask])
-                # Softplus ensures strict positive variance predictions
-                var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask]))
+                # Softplus ensures strict positive variance predictions, but usually upcasts to Float32.
+                # We force cast it back to the original mixed-precision format (fp16) to avoid assignment crashes.
+                var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask])).to(features.dtype)
         
         return output, var_output
 
