@@ -23,6 +23,12 @@ export PYTHONUNBUFFERED=1
 # Move to Scratch storage
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
+# Cleanup zombie processes from previous failed runs (VRAM protection)
+echo "🧹 Cleaning up previous zombie processes..."
+pkill -9 -u $USER python
+pkill -9 -u $USER accelerate
+sleep 2
+
 echo "🔄 Pulling latest stability fixes from git..."
 git pull
 

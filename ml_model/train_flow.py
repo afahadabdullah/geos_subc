@@ -844,9 +844,9 @@ def train(args, accelerator):
                 top_models.append({"path": new_best_path, "crps": current_val_metric, "epoch": epoch})
                 top_models.sort(key=lambda x: x['crps']) # Best first
                 
-                # Keep a symlink or redundant copy for 'best_diffusion_ckpt_v5.pt'
+                # Keep a symlink or redundant copy for 'best_flow_ckpt.pt'
                 if is_new_best:
-                    torch.save(best_ckpt, os.path.join(output_dir, "best_diffusion_ckpt_v5.pt"))
+                    torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
 
             # Save Latest Checkpoint & Logs
             ckpt = {
@@ -856,7 +856,7 @@ def train(args, accelerator):
                 'best_val_crps': best_val_crps,
                 'top_models': top_models
             }
-            torch.save(ckpt, os.path.join(output_dir, "latest_diffusion_ckpt_v5.pt"))
+            torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
@@ -870,11 +870,11 @@ def train(args, accelerator):
         epochs_done_this_run += 1
 
 def main():
-    parser = argparse.ArgumentParser(description="Train or Test Diffusion Model V5")
-    parser.add_argument("--config", type=str, default="ml_model/config_diffusion_v5.yaml")
+    parser = argparse.ArgumentParser(description="Train or Test Flow Matching Model")
+    parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml")
     parser.add_argument("--test", action="store_true", help="Run in inference/test mode only")
-    parser.add_argument("--ckpt", type=str, default="best_diffusion_ckpt_v5.pt", 
-                        help="Checkpoint filename in output_dir to load for testing (default: best_diffusion_ckpt_v5.pt)")
+    parser.add_argument("--ckpt", type=str, default="best_flow_ckpt.pt", 
+                        help="Checkpoint filename in output_dir to load for testing (default: best_flow_ckpt.pt)")
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     parser.add_argument("--epochs-per-run", type=int, default=10000, 
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")
