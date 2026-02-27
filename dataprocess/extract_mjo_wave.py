@@ -167,23 +167,24 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     
     # 1. Compute Climatology using the entire record on native 2.5° grid
     # This is MUCH faster and uses much less memory than interpolating 48 years first
-    climatology = compute_climatology(da_olr)
+    climatology = compute_climatology(da_olr).compute()
     
-    # 2. Compute Anomalies
-    print("  Calculating OLR Anomalies on native 2.5° grid...")
-    da_anom = da_olr - climatology
-    
-    # 3. We need a buffer around the target year for the 30-90 day FFT
+    # 2. We need a buffer around the target year for the 30-90 day FFT
     # Standard practice is to pad by at least 90 days on either side
     start_time = f"{target_year-1}-09-01"
     end_time = f"{target_year+1}-03-31"
     
     print(f"Extracting padded window ({start_time} to {end_time}) for FFT stability...")
-    da_anom_padded = da_anom.sel(time=slice(start_time, end_time))
+    da_padded = da_olr.sel(time=slice(start_time, end_time)).compute()
     
-    # Compute the chunk before FFT since scipy.fft expects numpy arrays
-    print("  Loading padded anomalies into memory for FFT...")
-    da_anom_padded = da_anom_padded.compute()
+    # 3. Compute Anomalies FOR THE SLICE ONLY
+    # This avoids a massive global broadcast that triggers Dask MemoryErrors
+    print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
+    da_anom_padded = da_padded.groupby('time.dayofyear') - climatology
+    
+    # Drop the added dayofyear coordinate if it exists
+    if 'dayofyear' in da_anom_padded.coords:
+        da_anom_padded = da_anom_padded.drop_vars('dayofyear')
     
     # 4. Apply Space-Time Wavenumber-Frequency Filter (on native 2.5° grid)
     da_mjo_padded = spacetime_filter(da_anom_padded)
