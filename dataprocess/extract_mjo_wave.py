@@ -191,13 +191,40 @@ def process_mjo_wave(olr_path, target_year, output_dir):
     da_padded = da_olr.sel(time=slice(start_time, end_time)).compute()
     
     # 3. Compute Anomalies FOR THE SLICE ONLY
-    # This avoids a massive global broadcast that triggers Dask MemoryErrors
+    # This avoids a massive global broadcast and bypasses xarray alignment errors on leap years
     print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
-    da_anom_padded = da_padded.groupby('time.dayofyear') - climatology
     
-    # Drop the added dayofyear coordinate if it exists
-    if 'dayofyear' in da_anom_padded.coords:
-        da_anom_padded = da_anom_padded.drop_vars('dayofyear')
+    # We must explicitly match each day in the padded array to its day-of-year in climatology
+    padded_days = da_padded.time.dt.dayofyear.values.astype(int)
+    
+    # Extract the numpy arrays to avoid xarray coordinate alignment nightmare
+    padded_vals = da_padded.values
+    clim_vals = climatology.values
+    
+    # The climatology's dayofyear coordinate is guaranteed to be 1 to 365 (or 366).
+    # We need to map `padded_days` to indices in `clim_vals`
+    clim_days = climatology.dayofyear.values.astype(int)
+    
+    # Pre-allocate anomaly array
+    anom_vals = np.zeros_like(padded_vals)
+    
+    for i, doy in enumerate(padded_days):
+        # Find the index in climatology (handle leap year edge case if clim is 365)
+        if doy not in clim_days:
+            # If doy 366 occurs but climatology only has 365, use day 365
+            idx = np.where(clim_days == 365)[0][0]
+        else:
+            idx = np.where(clim_days == doy)[0][0]
+            
+        anom_vals[i, :, :] = padded_vals[i, :, :] - clim_vals[idx, :, :]
+        
+    # Reconstruct the DataArray
+    da_anom_padded = xr.DataArray(
+        anom_vals,
+        coords=da_padded.coords,
+        dims=da_padded.dims,
+        name='olr_anomaly'
+    )
     
     # 4. Apply Space-Time Wavenumber-Frequency Filter (on native 2.5° grid)
     da_mjo_padded = spacetime_filter(da_anom_padded)
