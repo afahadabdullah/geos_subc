@@ -743,6 +743,9 @@ def train(args, accelerator):
 
         avg_train_loss = train_loss / len(loader)
         
+        if accelerator.is_main_process:
+            print(f"📈 Epoch {epoch} Training Loss (Noise MSE): {avg_train_loss:.4f}")
+
         # ---------------------------------------------------------
         # Unconditional Epoch-End Resume Checkpoint
         # ---------------------------------------------------------
