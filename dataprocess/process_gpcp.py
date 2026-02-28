@@ -6,6 +6,11 @@ import glob
 from tqdm import tqdm
 
 def process_year(year, output_dir="dataprocess"):
+    out_path = f"{output_dir}/gpcp_weekly_{year}.zarr"
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS Forecast to get Init dates and Grid
     geos_path = f"dataprocess/geos_subc_{year}.zarr"
     if not os.path.exists(geos_path):
@@ -135,5 +140,5 @@ def process_year(year, output_dir="dataprocess"):
     print(f"Finished {year}.")
 
 if __name__ == "__main__":
-    for year in range(1999, 2017):
+    for year in range(1999, 2026):
         process_year(year)

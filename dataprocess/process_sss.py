@@ -95,6 +95,11 @@ def process_year(year, output_dir=OUTPUT_DIR):
     4. Compute 4 weekly means before each init date
     5. Save as Zarr
     """
+    out_path = os.path.join(output_dir, f"sss_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS to get init dates and grid
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
@@ -232,7 +237,7 @@ if __name__ == "__main__":
                         help="Specific years to process. Default: 1999-2016")
     args = parser.parse_args()
     
-    years = args.years if args.years else list(range(1999, 2017))
+    years = args.years if args.years else list(range(1999, 2026))
     
     print(f"Processing SSS for years: {years}")
     for year in years:

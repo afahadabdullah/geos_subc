@@ -90,6 +90,11 @@ def check_outputs(years, output_dir=OUTPUT_DIR):
 
 def process_year(year, output_dir=OUTPUT_DIR):
     """Process one year with circular padding to bridge the 0/360 seam."""
+    out_path = os.path.join(output_dir, f"soilw_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
         print(f"GEOS file not found: {geos_path}. Skipping.")
@@ -211,7 +216,7 @@ if __name__ == "__main__":
     parser.add_argument("--years", type=int, nargs="+", default=None)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    years = args.years if args.years else list(range(1999, 2017))
+    years = args.years if args.years else list(range(1999, 2026))
     if args.check: check_outputs(years)
     else:
         for year in years: process_year(year)

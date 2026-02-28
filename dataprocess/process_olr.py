@@ -42,6 +42,11 @@ def process_year(year, ds_olr_full, output_dir=OUTPUT_DIR):
     4. Compute 4 weekly means before each init date
     5. Save as Zarr
     """
+    out_path = os.path.join(output_dir, f"olr_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS to get init dates and grid
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
@@ -195,7 +200,7 @@ if __name__ == "__main__":
     ds_olr_full = xr.open_dataset(OLR_FILE, chunks={'time': 365})
     print(f"  Time range: {ds_olr_full.time.values[0]} to {ds_olr_full.time.values[-1]}")
     
-    years = args.years if args.years else list(range(1999, 2017))
+    years = args.years if args.years else list(range(1999, 2026))
     
     print(f"Processing OLR for years: {years}")
     for year in years:
