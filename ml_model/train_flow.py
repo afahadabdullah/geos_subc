@@ -516,38 +516,38 @@ def train(args, accelerator):
         lead_idx = 0
         
         # 1. Reverse Normalize GEOS
-        geos_norm_sample = x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy()
+        geos_norm_sample = np.nan_to_num(x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy(), nan=-1.0)
         geos_raw_sample = ((geos_norm_sample + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
         
         # 2. Reverse Normalize SST (Channel 0 of x_obs)
-        sst_norm_sample = x_obs[sample_idx, 0].cpu().numpy()
+        sst_norm_sample = np.nan_to_num(x_obs[sample_idx, 0].cpu().numpy(), nan=0.0)
         sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
         
         # 3. Reverse Normalize Target SQRT (Lead 0)
-        sqrt_norm_sample = target_norm[sample_idx, lead_idx].cpu().numpy()
+        sqrt_norm_sample = np.nan_to_num(target_norm[sample_idx, lead_idx].cpu().numpy(), nan=-1.0)
         sqrt_raw_sample = ((sqrt_norm_sample + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         res_raw_sample = np.square(sqrt_raw_sample) - geos_raw_sample
 
         # 4. Reverse Normalize Observational States
         # SST(0-3), SSS(4-7), SM(8-11), IVT(12-15), ZDEV(16-19), U250(20-23)
-        sss_norm_sample = x_obs[sample_idx, 4].cpu().numpy()
+        sss_norm_sample = np.nan_to_num(x_obs[sample_idx, 4].cpu().numpy(), nan=0.0)
         sss_raw_sample = ((sss_norm_sample + 1.0) / 2.0) * (global_bounds["sss"]["max"] - global_bounds["sss"]["min"]) + global_bounds["sss"]["min"]
         
-        sm_norm_sample = x_obs[sample_idx, 8].cpu().numpy()
+        sm_norm_sample = np.nan_to_num(x_obs[sample_idx, 8].cpu().numpy(), nan=0.0)
         sm_raw_sample = ((sm_norm_sample + 1.0) / 2.0) * (global_bounds["sm"]["max"] - global_bounds["sm"]["min"]) + global_bounds["sm"]["min"]
         
-        ivt_norm_sample = x_obs[sample_idx, 12].cpu().numpy()
+        ivt_norm_sample = np.nan_to_num(x_obs[sample_idx, 12].cpu().numpy(), nan=0.0)
         ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
         
-        zdev_norm_sample = x_obs[sample_idx, 16].cpu().numpy()
+        zdev_norm_sample = np.nan_to_num(x_obs[sample_idx, 16].cpu().numpy(), nan=0.0)
         zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
         
         # Channel 20: U250
-        u250_norm_sample = x_obs[sample_idx, 20].cpu().numpy()
+        u250_norm_sample = np.nan_to_num(x_obs[sample_idx, 20].cpu().numpy(), nan=0.0)
         u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
 
         # Channel 24: MJO Wave Spatial Map
-        mjo_norm_sample = x_obs[sample_idx, 24].cpu().numpy()
+        mjo_norm_sample = np.nan_to_num(x_obs[sample_idx, 24].cpu().numpy(), nan=0.0)
         if "mjo" in global_bounds:
             m_min, m_max = global_bounds["mjo"]["min"], global_bounds["mjo"]["max"]
         else:
