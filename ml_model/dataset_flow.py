@@ -260,6 +260,11 @@ class S2SHybridDataset(Dataset):
             # Robust Variable Detection: pr, precip, or PRECTOT
             geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
             geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
+            
+            # Temporary Debug
+            if meta['date'].year == 2019:
+                print(f"DEBUG GEOS 2019 [{geos_var}]: shape={geos_data.shape}, sum={geos_data.sum()}, s_idx={meta['s_idx']}")
+                
             if close_geos: ds_geos.close()
             
             geos_tensor = torch.from_numpy(geos_data).float()
