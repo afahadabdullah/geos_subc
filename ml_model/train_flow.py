@@ -171,8 +171,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
-        # Fast: 3 Euler steps (rapid screening). Full: 50 steps (publication quality)
-        num_steps = 3 if is_fast_recon and not is_test else 50
+        # Fast: 10 Euler steps (rapid screening). Full: 50 steps (publication quality)
+        num_steps = 10 if is_fast_recon and not is_test else 50
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
         # With zombie processes gone, we can fit [vB * 6] through the UNet at once.
