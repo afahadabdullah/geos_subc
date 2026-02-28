@@ -261,7 +261,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 'geos_mean': geos_mean_raw[0].unsqueeze(0),
                 'ai_res': ai_residual.unsqueeze(0),
                 # If GEOS ensemble has M dimension > 1 (S2S3), take [0, 0]. If deterministic (FIMR), it's [0, 0] thanks to the dataset unsqueeze.
-                'geos_single': geos_ens_sample[0, 0].unsqueeze(0),
+                # Use nan_to_num in case a missing slice causes max/min to be NaN, turning the plot white.
+                'geos_single': torch.nan_to_num(geos_ens_sample[0, 0], nan=0.0).unsqueeze(0),
                 'model_single': ensemble_preds_precip[0, 0].unsqueeze(0),
                 'model_var': model_var[0].unsqueeze(0)
             }
@@ -459,13 +460,12 @@ def train(args, accelerator):
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
                     
-                # Intelligent Reset: If the loaded CRPS is suspiciously low (< 0.8), it likely came from the old 
-                # single-batch (January-only) validation logic. We must reset it to allow the new 4-season metric to save.
-                if best_val_crps < 0.8:
-                    if accelerator.is_main_process:
-                        print(f"⚠️ Detected suspiciously low CRPS ({best_val_crps:.4f}) from old validation logic. Resetting to 1.3000.")
-                    best_val_crps = 1.3000
-                    top_models = []
+                # We are validating on a new year (2019), so we MUST reset the CRPS tracking
+                # otherwise the model will never save if 2019 is harder than the old validation year.
+                if accelerator.is_main_process:
+                    print(f"⚠️ Resetting validation CRPS metrics since we are evaluating a new holdout year.")
+                best_val_crps = float('inf')
+                top_models = []
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
