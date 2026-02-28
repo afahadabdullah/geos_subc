@@ -305,7 +305,8 @@ def train(args, accelerator):
         end_year=config["val_end_year"],
         normalize=True,
         preload=config.get("preload", False),
-        stats_file="v5_global_stats.pt"
+        stats_file="v5_global_stats.pt",
+        subsample_monthly=True
     )
 
     # Process multiple init dates per validation batch for speed (batch_size * 2 since we flattened leads)
@@ -313,7 +314,7 @@ def train(args, accelerator):
     
     from torch.utils.data import DataLoader
     val_loader = DataLoader(
-        val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=True,
+        val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=False,
         num_workers=config.get("num_workers", 4), pin_memory=True
     )
 

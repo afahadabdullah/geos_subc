@@ -21,13 +21,14 @@ class S2SHybridDataset(Dataset):
         
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
-                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt"):
+                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt", subsample_monthly=False):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
         self.preload = preload
         self.normalize = normalize
         self.stats_file = stats_file
+        self.subsample_monthly = subsample_monthly
         
         # Load Stats
         if self.normalize:
@@ -102,7 +103,14 @@ class S2SHybridDataset(Dataset):
                 n_samples = ds_geos.sizes['S']
                 init_dates = pd.to_datetime(ds_geos['S'].values)
                 
+                seen_months_this_year = set()
+                
                 for s_idx, s_date in enumerate(init_dates):
+                    if self.subsample_monthly:
+                        if s_date.month in seen_months_this_year:
+                            continue
+                        seen_months_this_year.add(s_date.month)
+                        
                     all_init_dates.append(s_date)
                     # Every initialization has 4 leads (weeks 1-4)
                     for lead_idx in range(4):
