@@ -130,18 +130,7 @@ class S2SHybridDataset(Dataset):
                 
                 seen_months_this_year = set()
                 
-                # Identify the primary variable to check for NaNs (pr, precip, PRECTOT)
-                pr_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), None)
-                dims_to_select = {d: 0 for d in ds_geos[pr_var].dims if d != 'S'} if pr_var else {}
-                
                 for s_idx, s_date in enumerate(init_dates):
-                    # FAST NaN PROBE: Check if this initialization day is actually empty 
-                    # (Earthmover 2017+ FIMR returns 365 days but 313 are completely NaN placeholders)
-                    if pr_var:
-                        probe_val = ds_geos[pr_var].isel(S=s_idx, **dims_to_select).values
-                        if np.isnan(probe_val):
-                            continue # Skip this initialization date, it has no real forecast data
-                            
                     if self.subsample_monthly:
                         if s_date.month in seen_months_this_year:
                             continue
