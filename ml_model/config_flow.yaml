@@ -12,3 +12,4 @@ val_start_year: 2021
 val_end_year: 2022
 preload: False
 save_top_k: 4
+reset_validation_history: True

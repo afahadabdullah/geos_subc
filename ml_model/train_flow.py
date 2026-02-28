@@ -461,12 +461,13 @@ def train(args, accelerator):
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
                     
-                # We are validating on a new year (2019), so we MUST reset the CRPS tracking
-                # otherwise the model will never save if 2019 is harder than the old validation year.
-                if accelerator.is_main_process:
-                    print(f"⚠️ Resetting validation CRPS metrics since we are evaluating a new holdout year.")
-                best_val_crps = float('inf')
-                top_models = []
+                # We are validating on a new year (2021), so we MUST reset the CRPS tracking
+                # otherwise the model will never save if 2021 is harder than the old validation year.
+                if config.get("reset_validation_history", False):
+                    if accelerator.is_main_process:
+                        print(f"⚠️ Resetting validation CRPS metrics as requested by config (reset_validation_history: True).")
+                    best_val_crps = float('inf')
+                    top_models = []
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
