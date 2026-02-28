@@ -2,7 +2,7 @@ import requests
 import os
 import time
 
-def download_gpcp_data(start_year=1999, end_year=2016, output_dir="dataprocess/gpcp_data"):
+def download_gpcp_data(start_year=1999, end_year=2025, output_dir="dataprocess/gpcp_data"):
     """
     Downloads GPCP Daily Precipitation data from NOAA GCS bucket.
     URL Pattern: https://www.ncei.noaa.gov/data/global-precipitation-climatology-project-gpcp-daily/access/{year}/gpcp_v01r03_daily_d{year}*.nc
