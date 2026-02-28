@@ -135,7 +135,7 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
 
 @torch.no_grad()
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, save_plot=True):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
@@ -264,6 +264,7 @@ def main():
     parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
     parser.add_argument("--ensemble-size", type=int, default=4, help="Number of members in smart noise ensemble")
+    parser.add_argument("--steps", type=int, default=50, help="Number of Euler steps for ODE solve")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -442,7 +443,8 @@ def main():
             # Run inference
             m_crps, m_rmse, g_crps, g_rmse, tensors, n_inits = run_test_inference(
                 batch_idx, batch, model, flow_matcher, device, output_dir, None,
-                target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=args.ensemble_size, save_plot=(batch_idx < 5)
+                target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, 
+                num_ensemble=args.ensemble_size, num_steps=args.steps, save_plot=(batch_idx < 5)
             )
             
             f_pred = tensors['full_pred'].cpu().numpy()
