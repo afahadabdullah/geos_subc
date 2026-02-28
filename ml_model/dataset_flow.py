@@ -60,15 +60,40 @@ class S2SHybridDataset(Dataset):
         samples_tmp = []
         
         for year in self.years:
-            # File paths
-            geos_path = os.path.join(self.data_root, f"geos_subc_{year}.zarr")
-            gpcp_path = os.path.join(self.data_root, f"gpcp_weekly_{year}.zarr")
-            sst_path = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
-            sss_path = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
-            sm_path = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
-            ivt_path = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
-            mjo_path = os.path.join(self.data_root, f"mjowave_weekly_{year}.zarr")
-            z500u250_path = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
+            # GEOS Path (Check both S2S legacy and FIMR new format)
+            geos_path_s2s = os.path.join(self.data_root, "geos_s2s", f"{year}.zarr")
+            geos_path_fimr = os.path.join(self.data_root, f"geos_subc_{year}.zarr")
+            geos_path = geos_path_fimr if os.path.exists(geos_path_fimr) else geos_path_s2s
+            
+            # GPCP Path (Check both formats)
+            gpcp_path_old = os.path.join(self.data_root, "gpcp", f"{year}.zarr")
+            gpcp_path_new = os.path.join(self.data_root, f"gpcp_weekly_{year}.zarr")
+            gpcp_path = gpcp_path_new if os.path.exists(gpcp_path_new) else gpcp_path_old
+            
+            # Observational Paths (Check both formats)
+            sst_path_old = os.path.join(self.data_root, "sst", f"{year}.zarr")
+            sst_path_new = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
+            sst_path = sst_path_new if os.path.exists(sst_path_new) else sst_path_old
+            
+            sss_path_old = os.path.join(self.data_root, "sss", f"{year}.zarr")
+            sss_path_new = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
+            sss_path = sss_path_new if os.path.exists(sss_path_new) else sss_path_old
+            
+            sm_path_old = os.path.join(self.data_root, "soilw", f"{year}.zarr")
+            sm_path_new = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
+            sm_path = sm_path_new if os.path.exists(sm_path_new) else sm_path_old
+            
+            ivt_path_old = os.path.join(self.data_root, "ivt", f"{year}.zarr")
+            ivt_path_new = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
+            ivt_path = ivt_path_new if os.path.exists(ivt_path_new) else ivt_path_old
+            
+            mjo_path_old = os.path.join(self.data_root, "mjo", f"{year}.zarr")
+            mjo_path_new = os.path.join(self.data_root, f"mjowave_weekly_{year}.zarr")
+            mjo_path = mjo_path_new if os.path.exists(mjo_path_new) else mjo_path_old
+            
+            z500u250_path_old = os.path.join(self.data_root, "z500_u250", f"{year}.zarr")
+            z500u250_path_new = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
+            z500u250_path = z500u250_path_new if os.path.exists(z500u250_path_new) else z500u250_path_old
             
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
