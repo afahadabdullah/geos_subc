@@ -3,7 +3,7 @@ import numpy as np
 import sys
 import os
 
-path = '/scratch/11353/afahad/geossub/geos_subc/dataprocess/geos_s2s/2019.zarr'
+path = '/scratch/11353/afahad/geossub/geos_subc/dataprocess/geos_subc_2019.zarr'
 
 print(f"Opening {path}...")
 if not os.path.exists(path):
