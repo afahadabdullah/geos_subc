@@ -260,6 +260,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 'true_target': true_target_precip_plot.unsqueeze(0),
                 'geos_mean': geos_mean_raw[0].unsqueeze(0),
                 'ai_res': ai_residual.unsqueeze(0),
+                # If GEOS ensemble has M dimension > 1 (S2S3), take [0, 0]. If deterministic (FIMR), it's [0, 0] thanks to the dataset unsqueeze.
                 'geos_single': geos_ens_sample[0, 0].unsqueeze(0),
                 'model_single': ensemble_preds_precip[0, 0].unsqueeze(0),
                 'model_var': model_var[0].unsqueeze(0)

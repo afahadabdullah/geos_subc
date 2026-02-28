@@ -265,15 +265,16 @@ class S2SHybridDataset(Dataset):
             geos_tensor = torch.from_numpy(geos_data).float()
             if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
                 geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
-                
-            if geos_tensor.ndim == 3: 
-                 geos_tensor = geos_tensor.unsqueeze(0)
+            # GEOS data from FIMR (2017+) might be deterministic [L, H, W]
+            # while earlier GEOS S2S3 had ensembles [M, L, H, W]
+            if geos_tensor.ndim == 3: # missing M
+                 geos_tensor = geos_tensor.unsqueeze(0) # [1, L, H, W]
                  
             # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
             geos_tensor = torch.clamp(geos_tensor, min=0.0)
             
             # Save raw ensemble for baseline metrics (M, L, H, W)
-            geos_ens_raw = geos_tensor.clone() 
+            geos_ens_raw = geos_tensor.clone()  
                  
             # Take the ensemble mean across the members for model conditioning
             geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
