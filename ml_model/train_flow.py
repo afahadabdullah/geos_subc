@@ -201,7 +201,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Single parallel ODE solve for the entire validation batch and ensemble
         p_x1_expanded = flow_matcher.euler_solve(
             unwrapped_model, noise_expanded, fx_cond_expanded, 
-            num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
+            num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
         )
         
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
@@ -363,17 +363,13 @@ def train(args, accelerator):
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     if not args.test:
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs * len(loader), eta_min=1e-6
-        )
-        model, optimizer, loader, val_loader, lr_scheduler = accelerator.prepare(
-            model, optimizer, loader, val_loader, lr_scheduler
+        model, optimizer, loader, val_loader = accelerator.prepare(
+            model, optimizer, loader, val_loader
         )
     else:
         # Test mode: only prepare model and val_loader
         model, val_loader = accelerator.prepare(model, val_loader)
         optimizer = None
-        lr_scheduler = None
 
     if accelerator.is_main_process:
         print(f"\n--- ACCELERATOR DIAGNOSTICS ---")
@@ -728,21 +724,19 @@ def train(args, accelerator):
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss computation (Dual Head)
+            # Loss computation (Pure Velocity Target)
             loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
-            loss_var = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
             
-            # Combine losses
-            loss = loss_v + loss_var
+            # Use only velocity loss
+            loss = loss_v
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-            lr_scheduler.step()
             optimizer.zero_grad()
 
             train_loss += loss.item()
-            pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}", "loss_var": f"{loss_var.item():.4f}"})
+            pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
