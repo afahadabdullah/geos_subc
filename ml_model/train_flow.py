@@ -122,7 +122,7 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
-                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False):
+                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -195,7 +195,14 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        # Generate noise: use EOF-structured noise if available, otherwise isotropic
+        if eof_bases is not None:
+            mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
+            if not isinstance(mjo_phases, torch.Tensor):
+                mjo_phases = torch.tensor(mjo_phases)
+            noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W)
+        else:
+            noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
         # Single parallel ODE solve for the entire validation batch and ensemble
@@ -432,6 +439,19 @@ def train(args, accelerator):
     # Phase transition constant (must be before checkpoint loading for resume detection)
     VARIANCE_PHASE_EPOCH = 115  # Freeze UNet at this epoch, train only var_heads
     
+    # Load MJO EOF bases for physically structured ensemble noise
+    eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
+    eof_bases = None
+    if os.path.exists(eof_bases_path):
+        eof_data = torch.load(eof_bases_path, map_location='cpu', weights_only=False)
+        eof_bases = eof_data['eof_bases']
+        if accelerator.is_main_process:
+            print(f"✅ Loaded MJO EOF bases from {eof_bases_path}")
+            print(f"   {eof_data['n_eofs']} EOFs per phase, phases: {list(eof_bases.keys())}")
+    else:
+        if accelerator.is_main_process:
+            print(f"⚠️ MJO EOF bases not found at {eof_bases_path}. Using isotropic noise for ensembles.")
+    
     start_epoch = 0
     best_val_crps = float('inf')
     top_models = [] # List of {"path": str, "crps": float, "epoch": int}
@@ -503,7 +523,8 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=(start_epoch >= VARIANCE_PHASE_EPOCH)
+            use_flow_variance=(start_epoch >= VARIANCE_PHASE_EPOCH),
+            eof_bases=eof_bases
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
         
@@ -883,7 +904,8 @@ def train(args, accelerator):
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
             cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=is_variance_phase
+            use_flow_variance=is_variance_phase,
+            eof_bases=eof_bases
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
         
@@ -920,7 +942,8 @@ def train(args, accelerator):
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
-                        use_flow_variance=is_variance_phase
+                        use_flow_variance=is_variance_phase,
+                        eof_bases=eof_bases
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
                                   b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",

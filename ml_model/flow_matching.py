@@ -114,6 +114,47 @@ class CustomFlowMatcher:
         """
         return torch.rand((batch_size,), device=self.device)
 
+    def eof_sample(self, eof_bases, mjo_phases, num_samples, H, W):
+        """
+        Sample physically structured noise from MJO-phase-conditional EOF subspace.
+        
+        Args:
+            eof_bases: dict from mjo_eof_bases.pt, mapping phase -> {eofs: [K, H, W], eigenvalues: [K]}
+            mjo_phases: [B] tensor or list of MJO phases (0-8) for each sample in the batch
+            num_samples: total number of noise fields to generate (B * num_ensemble)
+            H, W: spatial dimensions (181, 360)
+        
+        Returns:
+            noise: [num_samples, 1, H, W] structured noise tensor
+        """
+        noise = torch.zeros((num_samples, 1, H, W), device=self.device)
+        
+        for i in range(num_samples):
+            phase = int(mjo_phases[i % len(mjo_phases)])  # Cycle through phases for ensemble expansion
+            
+            if phase in eof_bases and 'eofs' in eof_bases[phase]:
+                eofs = eof_bases[phase]['eofs'].to(self.device)        # [K, H, W]
+                eigenvals = eof_bases[phase]['eigenvalues'].to(self.device)  # [K]
+                K = eofs.shape[0]
+                
+                # Random coefficients scaled by sqrt(eigenvalue) = std dev of each mode
+                alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
+                
+                # Reconstruct: noise = sum_k(alpha_k * EOF_k)
+                noise_field = torch.einsum('k,khw->hw', alpha, eofs)
+                
+                # Normalize to unit variance (so ODE solver sees similar scale as randn)
+                std = noise_field.std()
+                if std > 1e-6:
+                    noise_field = noise_field / std
+                
+                noise[i, 0] = noise_field
+            else:
+                # Fallback to isotropic noise for unknown phases
+                noise[i, 0] = torch.randn(H, W, device=self.device)
+        
+        return noise
+
     def interpolate(self, target, noise, t):
         """
         Constructs the intermediate state x_t linearly between noise and target.

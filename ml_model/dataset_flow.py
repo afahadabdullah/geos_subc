@@ -37,6 +37,9 @@ class S2SHybridDataset(Dataset):
         # Index samples
         self.prepare_samples()
         
+        # Load MJO phase lookup for EOF-based noise
+        self._load_mjo_phases()
+        
         if self.preload:
             self._preload_data()
         
@@ -179,6 +182,41 @@ class S2SHybridDataset(Dataset):
                  
         self.samples = samples_tmp
         print(f"Found {len(self.samples)} samples. Prev-Init map built.")
+
+    def _load_mjo_phases(self):
+        """Load MJO phase lookup from mjo_processed.csv using lagged RMM indices."""
+        self.mjo_phase_map = {}
+        mjo_csv = os.path.join(self.data_root, "mjo_processed.csv")
+        
+        if not os.path.exists(mjo_csv):
+            print(f"  ⚠️ MJO CSV not found at {mjo_csv}. All phases default to 0 (weak MJO).")
+            return
+        
+        mjo_df = pd.read_csv(mjo_csv, parse_dates=['S'])
+        
+        for _, row in mjo_df.iterrows():
+            rmm1 = row['RMM1_lagged']
+            rmm2 = row['RMM2_lagged']
+            init_date_str = str(row['S'])[:10]  # 'YYYY-MM-DD'
+            
+            if pd.isna(rmm1) or pd.isna(rmm2):
+                self.mjo_phase_map[init_date_str] = 0
+                continue
+            
+            amplitude = np.sqrt(rmm1**2 + rmm2**2)
+            if amplitude < 1.0:
+                self.mjo_phase_map[init_date_str] = 0
+            else:
+                angle = np.arctan2(rmm2, rmm1) % (2 * np.pi)
+                phase = int(angle / (2 * np.pi / 8)) + 1
+                self.mjo_phase_map[init_date_str] = min(phase, 8)
+        
+        # Count distribution
+        phase_dist = {}
+        for p in self.mjo_phase_map.values():
+            phase_dist[p] = phase_dist.get(p, 0) + 1
+        print(f"  MJO Phase Map: {len(self.mjo_phase_map)} dates loaded. Distribution: {phase_dist}")
+
 
     def _preload_data(self):
         print(f"Preloading {len(self.samples)} samples into RAM...")
@@ -529,5 +567,6 @@ class S2SHybridDataset(Dataset):
             "target_raw_full": target_raw_full,
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
-            "geos_ens_raw": cached_common["geos_ens_raw"]
+            "geos_ens_raw": cached_common["geos_ens_raw"],
+            "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)
         }

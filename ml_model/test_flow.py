@@ -135,7 +135,7 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
 
 @torch.no_grad()
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True, eof_bases=None):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
@@ -189,9 +189,12 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # Expand variance scalar for base noise
     var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, num_ensemble, 1, H, W).reshape(vB * num_ensemble, 1, H, W)
     
-    # Generate base noise or use pre-allocated
-    if 'base_noise_batch' in locals():
-        smart_noise_expanded = base_noise_batch[:vB * num_ensemble]
+    # Generate noise: use EOF-structured noise if available, otherwise GEOS-variance-scaled
+    if eof_bases is not None:
+        mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
+        if not isinstance(mjo_phases, torch.Tensor):
+            mjo_phases = torch.tensor(mjo_phases)
+        smart_noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W)
     else:
         base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         smart_noise_expanded = base_noise_expanded * var_scaled_expanded
@@ -360,6 +363,16 @@ def main():
         model.eval()
         
         flow_matcher = CustomFlowMatcher(device=device)
+    
+    # Load MJO EOF bases for physically structured ensemble noise
+    eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
+    eof_bases = None
+    if os.path.exists(eof_bases_path):
+        eof_data = torch.load(eof_bases_path, map_location='cpu', weights_only=False)
+        eof_bases = eof_data['eof_bases']
+        print(f"✅ Loaded MJO EOF bases: {eof_data['n_eofs']} EOFs/phase")
+    else:
+        print(f"⚠️ MJO EOF bases not found. Using GEOS-variance-scaled noise.")
 
     csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
     with open(csv_file, mode='w', newline='') as f:
@@ -444,7 +457,8 @@ def main():
             m_crps, m_rmse, g_crps, g_rmse, tensors, n_inits = run_test_inference(
                 batch_idx, batch, model, flow_matcher, device, output_dir, None,
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, 
-                num_ensemble=args.ensemble_size, num_steps=args.steps, save_plot=(batch_idx < 5)
+                num_ensemble=args.ensemble_size, num_steps=args.steps, save_plot=(batch_idx < 5),
+                eof_bases=eof_bases
             )
             
             f_pred = tensors['full_pred'].cpu().numpy()
