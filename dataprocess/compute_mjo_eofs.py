@@ -107,103 +107,96 @@ def main(args):
     if len(all_precip) == 0:
         raise ValueError("No GPCP data loaded!")
     
-    # 3. Compute climatological mean (for anomaly computation)
+    # 3. Compute climatological mean incrementally (memory-efficient)
     print("\n--- Computing climatological mean ---")
-    precip_stack = np.stack([s['precip'] for s in all_precip], axis=0)  # [N, 181, 360]
-    climatology = precip_stack.mean(axis=0)  # [181, 360]
+    H, W = 181, 360
+    N = len(all_precip)
+    climatology = np.zeros((H, W), dtype=np.float64)
+    for s in all_precip:
+        climatology += s['precip']
+    climatology /= N
+    climatology = climatology.astype(np.float32)
     print(f"    Climatology shape: {climatology.shape}, mean: {climatology.mean():.2f} mm/day")
     
-    # 4. Compute anomalies
-    anomalies = precip_stack - climatology[np.newaxis, :, :]  # [N, 181, 360]
-    
-    # 5. Assign MJO phase to each sample
+    # 4. Assign MJO phase to each sample
     print("\n--- Assigning MJO phases ---")
-    phases = []
-    for s in all_precip:
+    phases = np.zeros(N, dtype=np.int32)
+    for i, s in enumerate(all_precip):
         init_date = s['init_date']
         if init_date in mjo_df.index:
             rmm1 = mjo_df.loc[init_date, 'RMM1_lagged']
             rmm2 = mjo_df.loc[init_date, 'RMM2_lagged']
-            # Handle duplicate init dates (take first)
             if isinstance(rmm1, pd.Series):
                 rmm1 = rmm1.iloc[0]
                 rmm2 = rmm2.iloc[0]
-            phase = compute_mjo_phase(rmm1, rmm2)
+            phases[i] = compute_mjo_phase(rmm1, rmm2)
         else:
-            phase = 0  # Default to weak MJO if no RMM data
-        phases.append(phase)
+            phases[i] = 0
     
-    phases = np.array(phases)
-    
-    # Count samples per phase
     phase_counts = {}
     for p in range(9):
-        count = (phases == p).sum()
-        phase_counts[p] = int(count)
+        count = int((phases == p).sum())
+        phase_counts[p] = count
         print(f"    Phase {p}: {count} samples")
     
-    # 6. Compute EOFs per phase
+    # 5. Compute EOFs per phase (memory-efficient: load only one phase at a time)
     print(f"\n--- Computing EOFs (K={n_eofs}) per MJO phase ---")
     
-    H, W = 181, 360
+    # Pre-compute area weights
+    lats = np.linspace(-90, 90, H)
+    cos_weights = np.cos(np.deg2rad(lats))
+    cos_weights = np.sqrt(np.maximum(cos_weights, 0))
+    area_weight_map = np.tile(cos_weights[:, np.newaxis], (1, W))
+    area_weight_flat = area_weight_map.flatten()
+    
     eof_bases = {}
     
     for phase in range(9):
-        mask = (phases == phase)
-        n_samples = mask.sum()
+        indices = np.where(phases == phase)[0]
+        n_samples = len(indices)
         
         if n_samples < n_eofs + 5:
-            print(f"  Phase {phase}: Only {n_samples} samples. Using climatological EOF basis from all data.")
-            # Fall back to using all data
-            phase_anomalies = anomalies
-        else:
-            phase_anomalies = anomalies[mask]  # [N_phase, 181, 360]
+            print(f"  Phase {phase}: Only {n_samples} samples. Using all data as fallback.")
+            indices = np.arange(N)
+            n_samples = N
         
-        # Flatten spatial dims for SVD
-        X = phase_anomalies.reshape(len(phase_anomalies), -1)  # [N_phase, 181*360]
+        # Build anomaly matrix for this phase only (memory-efficient)
+        X = np.zeros((n_samples, H * W), dtype=np.float32)
+        for j, idx in enumerate(indices):
+            X[j] = (all_precip[idx]['precip'] - climatology).flatten()
         
-        # Center (should already be ~0 from anomaly computation, but ensure)
-        X = X - X.mean(axis=0, keepdims=True)
+        # Center
+        X -= X.mean(axis=0, keepdims=True)
         
-        # Apply area weighting before SVD (cos-latitude weighting)
-        lats = np.linspace(-90, 90, H)
-        cos_weights = np.cos(np.deg2rad(lats))
-        cos_weights = np.sqrt(np.maximum(cos_weights, 0))  # sqrt for weighting in SVD
-        area_weight_map = np.tile(cos_weights[:, np.newaxis], (1, W))  # [H, W]
-        area_weight_flat = area_weight_map.flatten()  # [H*W]
-        
+        # Area-weight
         X_weighted = X * area_weight_flat[np.newaxis, :]
         
-        # Truncated SVD (much faster than full SVD for large matrices)
-        # Only compute top K singular vectors
+        # Truncated SVD
         try:
             from scipy.sparse.linalg import svds
-            # svds computes smallest if k is not specified as largest
             k = min(n_eofs, min(X_weighted.shape) - 1)
             U, S, Vt = svds(X_weighted.astype(np.float64), k=k)
-            # svds returns in ascending order, reverse to descending
-            idx = np.argsort(-S)
-            S = S[idx]
-            Vt = Vt[idx]
+            idx_sort = np.argsort(-S)
+            S = S[idx_sort]
+            Vt = Vt[idx_sort]
         except Exception:
-            # Fallback to full SVD
             print(f"    Phase {phase}: Falling back to full SVD")
             U, S, Vt = np.linalg.svd(X_weighted.astype(np.float64), full_matrices=False)
             S = S[:n_eofs]
             Vt = Vt[:n_eofs]
         
-        # Remove area weighting from the EOFs
-        eofs = Vt / area_weight_flat[np.newaxis, :]  # [K, H*W]
-        eofs = eofs.reshape(-1, H, W)  # [K, 181, 360]
+        # Remove area weighting
+        eofs = Vt / area_weight_flat[np.newaxis, :]
+        eofs = eofs.reshape(-1, H, W)
         
-        # Eigenvalues = S^2 / (N-1)
-        eigenvalues = (S ** 2) / (len(phase_anomalies) - 1)
+        # Eigenvalues
+        eigenvalues = (S ** 2) / (n_samples - 1)
         
-        # Normalize EOFs to unit norm
-        for k in range(len(eofs)):
-            norm = np.sqrt((eofs[k] ** 2).sum())
+        # Normalize EOFs
+        for k_idx in range(len(eofs)):
+            norm = np.sqrt((eofs[k_idx] ** 2).sum())
             if norm > 0:
-                eofs[k] /= norm
+                eofs[k_idx] /= norm
         
         # Variance explained
         total_var = np.var(X, axis=0).sum()
@@ -214,9 +207,12 @@ def main(args):
               f"({', '.join(f'{v:.1f}%' for v in var_explained[:5])})")
         
         eof_bases[phase] = {
-            'eofs': torch.from_numpy(eofs.astype(np.float32)),        # [K, 181, 360]
-            'eigenvalues': torch.from_numpy(eigenvalues.astype(np.float32)),  # [K]
+            'eofs': torch.from_numpy(eofs.astype(np.float32)),
+            'eigenvalues': torch.from_numpy(eigenvalues.astype(np.float32)),
         }
+        
+        # Free memory
+        del X, X_weighted
     
     # 7. Save
     output = {
