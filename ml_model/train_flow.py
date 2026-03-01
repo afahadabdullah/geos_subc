@@ -430,7 +430,7 @@ def train(args, accelerator):
     fixed_val_batch = next(iter(val_loader))
 
     # Phase transition constant (must be before checkpoint loading for resume detection)
-    VARIANCE_PHASE_EPOCH = 220  # Freeze UNet at this epoch, train only var_heads
+    VARIANCE_PHASE_EPOCH = 115  # Freeze UNet at this epoch, train only var_heads
     
     start_epoch = 0
     best_val_crps = float('inf')
