@@ -7,7 +7,7 @@ import glob
 from tqdm import tqdm
 from io import StringIO
 
-def download_and_process_mjo(start_year=1999, end_year=2016, output_dir="dataprocess"):
+def download_and_process_mjo(start_year=1999, end_year=2025, output_dir="dataprocess"):
     # 1. Check for Local RMM Data
     # Automatic download is unreliable due to bot protection.
     local_path = f"{output_dir}/rmm.74toRealtime.txt"
