@@ -689,6 +689,17 @@ def train(args, accelerator):
     if start_epoch >= VARIANCE_PHASE_EPOCH:
         if accelerator.is_main_process:
             print(f"🔒 Resuming in Phase 2 (epoch {start_epoch} >= {VARIANCE_PHASE_EPOCH}). Freezing UNet + mean heads.")
+            # Save milestone checkpoint if it doesn't exist yet
+            milestone_path = os.path.join(output_dir, f"unet_converged_epoch{VARIANCE_PHASE_EPOCH - 1}.pt")
+            if not os.path.exists(milestone_path):
+                unwrapped_save = accelerator.unwrap_model(model)
+                torch.save({
+                    'epoch': VARIANCE_PHASE_EPOCH - 1,
+                    'model': unwrapped_save.state_dict(),
+                    'best_val_crps': best_val_crps,
+                    'top_models': top_models
+                }, milestone_path)
+                print(f"   💾 Saved milestone checkpoint: {milestone_path}")
         unwrapped = accelerator.unwrap_model(model)
         for param in unwrapped.unet.parameters():
             param.requires_grad_(False)
