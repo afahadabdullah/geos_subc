@@ -122,7 +122,7 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
-                      cached_geos_crps=None, cached_geos_rmse=None):
+                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -201,7 +201,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Single parallel ODE solve for the entire validation batch and ensemble
         p_x1_expanded = flow_matcher.euler_solve(
             unwrapped_model, noise_expanded, fx_cond_expanded, 
-            num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
+            num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_flow_variance
         )
         
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
@@ -489,7 +489,8 @@ def train(args, accelerator):
         val_outputs = run_val_inference(
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-            is_test=True, is_fast_recon=False
+            is_test=True, is_fast_recon=False,
+            use_flow_variance=(start_epoch >= VARIANCE_PHASE_EPOCH)
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
         
@@ -664,11 +665,35 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 3. Training Loop
     # ---------------------------------------------------------
+    VARIANCE_PHASE_EPOCH = 220  # Freeze UNet at this epoch, train only var_heads
+    
     epochs_done_this_run = 0
     max_epochs_this_run = getattr(args, "epochs_per_run", float('inf'))
 
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
+    is_variance_phase = False  # Will be set per-epoch
+    
+    # If resuming into Phase 2 (e.g. from epoch 250), freeze immediately
+    if start_epoch >= VARIANCE_PHASE_EPOCH:
+        if accelerator.is_main_process:
+            print(f"🔒 Resuming in Phase 2 (epoch {start_epoch} >= {VARIANCE_PHASE_EPOCH}). Freezing UNet + mean heads.")
+        unwrapped = accelerator.unwrap_model(model)
+        for param in unwrapped.unet.parameters():
+            param.requires_grad_(False)
+        for param in unwrapped.heads.parameters():
+            param.requires_grad_(False)
+        for param in unwrapped.var_heads.parameters():
+            param.requires_grad_(True)
+        # Create variance-only optimizer
+        optimizer = torch.optim.AdamW(
+            [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
+            lr=1e-4
+        )
+        model, optimizer, loader, val_loader = accelerator.prepare(
+            model, optimizer, loader, val_loader
+        )
+        is_variance_phase = True
     
     for epoch in range(start_epoch, epochs):
         if epochs_done_this_run >= max_epochs_this_run:
@@ -676,9 +701,44 @@ def train(args, accelerator):
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
         
+        # --- PHASE TRANSITION at VARIANCE_PHASE_EPOCH ---
+        if epoch == VARIANCE_PHASE_EPOCH and not is_variance_phase:
+            # Save the converged UNet as a milestone
+            if accelerator.is_main_process:
+                unwrapped = accelerator.unwrap_model(model)
+                torch.save({
+                    'epoch': epoch - 1,
+                    'model': unwrapped.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_val_crps': best_val_crps,
+                    'top_models': top_models
+                }, os.path.join(output_dir, f"unet_converged_epoch{epoch-1}.pt"))
+                print(f"\n🔒 Phase 2 START: Saved milestone checkpoint. Freezing UNet backbone + mean heads.")
+                print(f"   Only variance heads will be trained from now on.")
+            
+            # Freeze UNet + mean heads
+            unwrapped = accelerator.unwrap_model(model)
+            for param in unwrapped.unet.parameters():
+                param.requires_grad_(False)
+            for param in unwrapped.heads.parameters():
+                param.requires_grad_(False)
+            for param in unwrapped.var_heads.parameters():
+                param.requires_grad_(True)
+            
+            # Create variance-only optimizer (fresh, higher LR for new heads)
+            optimizer = torch.optim.AdamW(
+                [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
+                lr=1e-4
+            )
+            model, optimizer, loader, val_loader = accelerator.prepare(
+                model, optimizer, loader, val_loader
+            )
+            is_variance_phase = True
+        
         model.train()
         train_loss = 0.0
-        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
+        phase_label = "Phase2-Var" if is_variance_phase else "Phase1-Vel"
+        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch} [{phase_label}]")
 
         for i, batch in enumerate(pbar):    
             # Conditionals: [B, 31, H, W]
@@ -724,11 +784,16 @@ def train(args, accelerator):
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss computation (Pure Velocity Target)
+            # Loss computation
             loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
             
-            # Use only velocity loss
-            loss = loss_v
+            if is_variance_phase:
+                # Phase 2: Only train variance heads (UNet + mean heads are frozen)
+                loss_var = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
+                loss = loss_var
+            else:
+                # Phase 1: Pure velocity training
+                loss = loss_v
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -736,7 +801,10 @@ def train(args, accelerator):
             optimizer.zero_grad()
 
             train_loss += loss.item()
-            pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}"})
+            if is_variance_phase:
+                pbar.set_postfix({"loss_var": f"{loss.item():.4f}", "loss_v(frozen)": f"{loss_v.item():.4f}"})
+            else:
+                pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
@@ -792,7 +860,8 @@ def train(args, accelerator):
             is_test=is_plot_epoch, 
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
-            cached_geos_rmse=global_cached_geos_rmse
+            cached_geos_rmse=global_cached_geos_rmse,
+            use_flow_variance=is_variance_phase
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
         
@@ -828,7 +897,8 @@ def train(args, accelerator):
                     best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
-                        is_test=True, is_fast_recon=False
+                        is_test=True, is_fast_recon=False,
+                        use_flow_variance=is_variance_phase
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
                                   b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
