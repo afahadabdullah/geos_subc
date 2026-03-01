@@ -429,6 +429,9 @@ def train(args, accelerator):
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
+    # Phase transition constant (must be before checkpoint loading for resume detection)
+    VARIANCE_PHASE_EPOCH = 220  # Freeze UNet at this epoch, train only var_heads
+    
     start_epoch = 0
     best_val_crps = float('inf')
     top_models = [] # List of {"path": str, "crps": float, "epoch": int}
@@ -447,8 +450,18 @@ def train(args, accelerator):
             unwrapped_model.load_state_dict(checkpoint['model'])
             
             if not args.test:
-                optimizer.load_state_dict(checkpoint['optimizer'])
                 start_epoch = checkpoint['epoch'] + 1
+                
+                # Detect if we're resuming into Phase 2
+                # If so, DON'T load the optimizer state — it was saved with var_heads-only params
+                # and won't match the full-model optimizer created at line 364.
+                # A fresh var_heads optimizer will be created in the Phase 2 resume block below.
+                if start_epoch >= VARIANCE_PHASE_EPOCH:
+                    if accelerator.is_main_process:
+                        print(f"   ℹ️ Phase 2 resume detected (epoch {start_epoch}). Skipping optimizer state load (will create var-only optimizer).")
+                else:
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                
                 if 'best_val_crps' in checkpoint:
                     best_val_crps = checkpoint['best_val_crps']
                 elif 'best_val_rmse' in checkpoint:
@@ -665,8 +678,6 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 3. Training Loop
     # ---------------------------------------------------------
-    VARIANCE_PHASE_EPOCH = 220  # Freeze UNet at this epoch, train only var_heads
-    
     epochs_done_this_run = 0
     max_epochs_this_run = getattr(args, "epochs_per_run", float('inf'))
 

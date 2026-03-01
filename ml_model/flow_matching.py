@@ -142,6 +142,9 @@ class CustomFlowMatcher:
             _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
             # Standard Deviation = sqrt(Variance). Small epsilon for numerical stability.
             std_pred = torch.sqrt(var_pred + 1e-6)
+            # Clamp to prevent runaway ensemble divergence or collapse
+            # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
+            std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
             # Flow-Dependent scaling of initial condition
             x_t = noise * std_pred
         else:
