@@ -194,7 +194,10 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
         if not isinstance(mjo_phases, torch.Tensor):
             mjo_phases = torch.tensor(mjo_phases)
-        smart_noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W)
+        lead_ids = batch['lead_idx']
+        if not isinstance(lead_ids, torch.Tensor):
+            lead_ids = torch.tensor(lead_ids)
+        smart_noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
     else:
         base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         smart_noise_expanded = base_noise_expanded * var_scaled_expanded

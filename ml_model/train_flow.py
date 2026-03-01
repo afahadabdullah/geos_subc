@@ -200,7 +200,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
             if not isinstance(mjo_phases, torch.Tensor):
                 mjo_phases = torch.tensor(mjo_phases)
-            noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W)
+            lead_ids = batch['lead_idx']
+            if not isinstance(lead_ids, torch.Tensor):
+                lead_ids = torch.tensor(lead_ids)
+            noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
         else:
             noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()

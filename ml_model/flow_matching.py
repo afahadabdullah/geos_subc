@@ -114,15 +114,16 @@ class CustomFlowMatcher:
         """
         return torch.rand((batch_size,), device=self.device)
 
-    def eof_sample(self, eof_bases, mjo_phases, num_samples, H, W):
+    def eof_sample(self, eof_bases, mjo_phases, num_samples, H, W, lead_ids=None):
         """
-        Sample physically structured noise from MJO-phase-conditional EOF subspace.
+        Sample physically structured noise from MJO-phase × lead-week EOF subspace.
         
         Args:
-            eof_bases: dict from mjo_eof_bases.pt, mapping phase -> {eofs: [K, H, W], eigenvalues: [K]}
-            mjo_phases: [B] tensor or list of MJO phases (0-8) for each sample in the batch
-            num_samples: total number of noise fields to generate (B * num_ensemble)
+            eof_bases: dict mapping (phase, lead) or phase -> {eofs, eigenvalues}
+            mjo_phases: [B] tensor/list of MJO phases (0-8)
+            num_samples: total noise fields to generate (B * num_ensemble)
             H, W: spatial dimensions (181, 360)
+            lead_ids: [B] tensor/list of lead indices (0-3). If None, falls back to phase-only.
         
         Returns:
             noise: [num_samples, 1, H, W] structured noise tensor
@@ -130,27 +131,32 @@ class CustomFlowMatcher:
         noise = torch.zeros((num_samples, 1, H, W), device=self.device)
         
         for i in range(num_samples):
-            phase = int(mjo_phases[i % len(mjo_phases)])  # Cycle through phases for ensemble expansion
+            b_idx = i % len(mjo_phases)
+            phase = int(mjo_phases[b_idx])
+            lead = int(lead_ids[b_idx]) if lead_ids is not None else None
             
-            if phase in eof_bases and 'eofs' in eof_bases[phase]:
-                eofs = eof_bases[phase]['eofs'].to(self.device)        # [K, H, W]
-                eigenvals = eof_bases[phase]['eigenvalues'].to(self.device)  # [K]
+            # Try (phase, lead) key first, then phase-only, then fallback
+            key = (phase, lead) if lead is not None else phase
+            if key not in eof_bases:
+                key = phase  # Backward compat with phase-only format
+            if key not in eof_bases:
+                key = (0, lead) if lead is not None else 0  # Weak MJO fallback
+            
+            if key in eof_bases and 'eofs' in eof_bases[key]:
+                eofs = eof_bases[key]['eofs'].to(self.device)
+                eigenvals = eof_bases[key]['eigenvalues'].to(self.device)
                 K = eofs.shape[0]
                 
-                # Random coefficients scaled by sqrt(eigenvalue) = std dev of each mode
                 alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
-                
-                # Reconstruct: noise = sum_k(alpha_k * EOF_k)
                 noise_field = torch.einsum('k,khw->hw', alpha, eofs)
                 
-                # Normalize to unit variance (so ODE solver sees similar scale as randn)
+                # Normalize to unit variance
                 std = noise_field.std()
                 if std > 1e-6:
                     noise_field = noise_field / std
                 
                 noise[i, 0] = noise_field
             else:
-                # Fallback to isotropic noise for unknown phases
                 noise[i, 0] = torch.randn(H, W, device=self.device)
         
         return noise
