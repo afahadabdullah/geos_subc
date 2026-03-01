@@ -483,7 +483,12 @@ def train(args, accelerator):
                     if accelerator.is_main_process:
                         print(f"   ℹ️ Phase 2 resume detected (epoch {start_epoch}). Skipping optimizer state load (will create var-only optimizer).")
                 else:
-                    optimizer.load_state_dict(checkpoint['optimizer'])
+                    try:
+                        optimizer.load_state_dict(checkpoint['optimizer'])
+                    except (ValueError, RuntimeError) as e:
+                        if accelerator.is_main_process:
+                            print(f"   ⚠️ Optimizer state mismatch (likely from Phase 2 checkpoint). Starting with fresh optimizer.")
+                            print(f"      Error: {e}")
                 
                 if 'best_val_crps' in checkpoint:
                     best_val_crps = checkpoint['best_val_crps']
