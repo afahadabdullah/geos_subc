@@ -518,6 +518,20 @@ def train(args, accelerator):
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val CRPS so far: {best_val_crps:.4f}\n")
+                    
+                if getattr(args, 'reset_variance', False):
+                    print("   [ARCHITECTURE FIX] --reset-variance passed! Purging old Variance Head weights.")
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    
+                    for module in unwrapped_model.var_heads:
+                        for layer in module.modules():
+                            if isinstance(layer, torch.nn.Conv2d):
+                                torch.nn.init.orthogonal_(layer.weight, gain=0.01)
+                                if layer.bias is not None:
+                                    torch.nn.init.constant_(layer.bias, 0.0)
+                                    
+                    print("   [ARCHITECTURE FIX] Variance Heads freshly initialized to predict ~0.0 log-variance (1.0x multiplier).")
+                    
         except Exception as e:
             if accelerator.is_main_process:
                 print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
@@ -1055,6 +1069,7 @@ def main():
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     parser.add_argument("--epochs-per-run", type=int, default=10000, 
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")
+    parser.add_argument("--reset-variance", action="store_true", help="Force wipe the Variance Heads back to 0.0 (1.0x multiplier target) on load.")
     args = parser.parse_args()
 
     # Load config to get mixed_precision setting
