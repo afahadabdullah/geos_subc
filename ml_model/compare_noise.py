@@ -159,7 +159,7 @@ def save_strategy_plot(target, results_dict, output_path):
 def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
-    parser.add_argument("--year", type=int, default=2021)
+    parser.add_argument("--year", type=int, default=2022)
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args()
