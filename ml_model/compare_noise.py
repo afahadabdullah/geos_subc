@@ -195,7 +195,8 @@ def main():
     # Noise Functions
     def noise_pure(vB, E, H, W, b, d): return torch.randn((vB*E, 1, H, W), device=d)
     
-    def noise_eof(vB, E, H, W, b, d):
+    def _get_raw_eof(vB, E, H, W, b, d):
+        """Get raw EOF structured noise (unit variance per field)."""
         mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
         if isinstance(mjo, torch.Tensor):
             mjo = mjo.clone().detach()
@@ -203,35 +204,47 @@ def main():
             mjo = torch.tensor(mjo)
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
         return flow_matcher.eof_sample(eof_bases, mjo, vB*E, H, W, lead_ids=lead)
+    
+    def noise_eof(vB, E, H, W, b, d):
+        """Blended EOF: 70% isotropic N(0,1) + 30% EOF structure.
+        
+        The model was TRAINED with pure N(0,1) noise. Raw EOF noise is 
+        out-of-distribution even when normalized to unit variance because 
+        it concentrates energy in correlated spatial patterns.
+        Blending keeps margins close to N(0,1) while adding physical structure.
+        """
+        pure = torch.randn((vB*E, 1, H, W), device=d)
+        eof = _get_raw_eof(vB, E, H, W, b, d)
+        blend = 0.7 * pure + 0.3 * eof
+        # Re-normalize to unit variance after blending
+        std = blend.std(dim=(2, 3), keepdim=True)
+        blend = blend / (std + 1e-6)
+        return blend
         
     def noise_eof_alpha(vB, E, H, W, b, d):
-        raw_eof = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
+        blended = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
         # Scale: Week 1 (lead 0) = 0.7x, Week 4 (lead 3) = 1.3x
         lead_ids = b['lead_idx'].to(d) # [vB]
-        # expanded to [vB, E] -> [vB*E]
         lead_exp = lead_ids.unsqueeze(1).expand(vB, E).reshape(-1)
         scale = 0.7 + (lead_exp.float() * 0.2)
         scale = scale.view(-1, 1, 1, 1)
-        return raw_eof * scale
+        return blended * scale
 
     def noise_eof_geos(vB, E, H, W, b, d):
-        raw_eof = noise_eof(vB, E, H, W, b, d) 
-        x_g = b['geos_ens_raw'].to(d) # [vB, M, L, H, W]  (M=members, L=leads)
-        c_var = x_g.var(dim=1) # [vB, L, H, W] - variance across the 4 members
+        blended = noise_eof(vB, E, H, W, b, d)
+        x_g = b['geos_ens_raw'].to(d) # [vB, M, L, H, W]
+        c_var = x_g.var(dim=1) # [vB, L, H, W]
         
-        lead_ids = b['lead_idx'].to(d) # [vB]
+        lead_ids = b['lead_idx'].to(d)
         bi = torch.arange(vB, device=d)
-        lead_var_map = c_var[bi, lead_ids] # [vB, H, W]
+        lead_var_map = c_var[bi, lead_ids]
         
-        # Normalize to relative scaling (centered around 1.0)
         mean_var = lead_var_map.mean(dim=(1, 2), keepdim=True)
         lead_var_map = lead_var_map / (mean_var + 1e-6)
-        
-        # Clamp the relative scaling factor to prevent explosion in dry/zero-var regions
         lead_var_map = torch.clamp(lead_var_map, min=0.5, max=2.0)
         
         scale_map = lead_var_map.unsqueeze(1).expand(vB, E, H, W).reshape(-1, 1, H, W)
-        return raw_eof * torch.sqrt(scale_map)
+        return blended * torch.sqrt(scale_map)
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
