@@ -839,8 +839,19 @@ def train(args, accelerator):
             loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
             
             if is_variance_phase:
-                # Phase 2: Only train variance heads (UNet + mean heads are frozen)
-                loss_var = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
+                # Phase 2: Only train variance heads
+                # 1. Primary objective: predict squared error
+                loss_mse = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
+                
+                # 2. Regularization: strongly penalize extreme variances, gently pull toward 1.0
+                # Our baseline EOF noise is already very good. We want the head to only apply
+                # conservative fine-tuning (e.g. 0.8 to 1.5), not blow up to 5.0 or drop to 0.01.
+                var_penalty = torch.relu(var_pred - 2.0)**2 + torch.relu(0.2 - var_pred)**2
+                identity_pull = (var_pred - 1.0)**2
+                
+                loss_reg = (var_penalty * 10.0 + identity_pull * 0.1).mean()
+                
+                loss_var = loss_mse + loss_reg
                 loss = loss_var
             else:
                 # Phase 1: Pure velocity training
