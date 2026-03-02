@@ -316,7 +316,27 @@ def main():
             lead_vals = [c[w+1] for c in all_crps_out] # index 1=W1, 2=W2, 3=W3, 4=W4
             label = f"    W{w+1}"
             print(f"  {label:<13} | {lead_vals[0]:>11.4f} {lead_vals[1]:>11.4f} {lead_vals[2]:>11.4f} {lead_vals[3]:>11.4f} {lead_vals[4]:>11.4f} {lead_vals[5]:>11.4f}", flush=True)
+        
+        # Running average across all completed batches
+        n_done = b_idx + 1
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
+        run_avg = [np.mean([x[0] for x in results[nm]]) for nm in all_names]
+        print(f"  {'  RunAvg('+str(n_done)+')':<13} | {run_avg[0]:>11.4f} {run_avg[1]:>11.4f} {run_avg[2]:>11.4f} {run_avg[3]:>11.4f} {run_avg[4]:>11.4f} {run_avg[5]:>11.4f}", flush=True)
         print(f"  {'─'*100}")
+        
+        # Incremental CSV save after each batch
+        import pandas as pd
+        flat_results = {}
+        lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
+        for strat_name, batch_lists in results.items():
+            for i, suffix in enumerate(lead_suffixes):
+                col_name = f"{strat_name}{suffix}"
+                flat_results[col_name] = [batch[i] for batch in batch_lists]
+        df = pd.DataFrame(flat_results)
+        mean_row = {col: np.mean(vals) for col, vals in flat_results.items()}
+        df.loc['MEAN'] = mean_row
+        csv_path = os.path.join(args.output_dir, f"noise_comparison_results_{args.year}.csv")
+        df.to_csv(csv_path, float_format='%.4f')
 
     print(f"{'─'*115}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
@@ -328,28 +348,7 @@ def main():
         strat_mean_total = np.mean([x[0] for x in results[name]])
         print(f"{strat_mean_total:>11.4f} ", end="")
     print("\n")
-    # Save to CSV
-    import pandas as pd
-    
-    # Flatten results into separate columns for Total, W1, W2, W3, W4
-    flat_results = {}
-    lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
-    
-    for strat_name, batch_lists in results.items():
-        # batch_lists is a list of [total, w1, w2, w3, w4] for each batch
-        for i, suffix in enumerate(lead_suffixes):
-            col_name = f"{strat_name}{suffix}"
-            flat_results[col_name] = [batch[i] for batch in batch_lists]
-            
-    df = pd.DataFrame(flat_results)
-    
-    # Add summary row for the mean
-    mean_row = {col: np.mean(vals) for col, vals in flat_results.items()}
-    df.loc['MEAN'] = mean_row
-    
-    csv_path = os.path.join(args.output_dir, f"noise_comparison_results_{args.year}.csv")
-    df.to_csv(csv_path, float_format='%.4f')
-    print(f"  💾 Saved numerical results (incl. leads) to: {csv_path}")
+    print(f"  💾 Final CSV saved to: {csv_path}")
 
 if __name__ == "__main__":
     main()
