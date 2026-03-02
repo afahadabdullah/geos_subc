@@ -197,8 +197,12 @@ def main():
     def noise_tight(vB, E, H, W, b, d): return torch.randn((vB*E, 1, H, W), device=d) * 0.3
     
     def noise_eof(vB, E, H, W, b, d):
-        mjo = torch.tensor(b.get('mjo_phase', torch.zeros(vB, dtype=torch.long)))
-        lead = torch.tensor(b['lead_idx'])
+        mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
+        if isinstance(mjo, torch.Tensor):
+            mjo = mjo.clone().detach()
+        else:
+            mjo = torch.tensor(mjo)
+        lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
         return flow_matcher.eof_sample(eof_bases, mjo, vB*E, H, W, lead_ids=lead)
         
     def noise_eof_alpha(vB, E, H, W, b, d):
@@ -213,15 +217,22 @@ def main():
 
     def noise_eof_geos(vB, E, H, W, b, d):
         raw_eof = noise_eof(vB, E, H, W, b, d) 
-        x_g = b['geos_ens_raw'].to(d) # [vB, 4 (members), 4 (leads), H, W]
-        c_var = x_g.var(dim=1) # [vB, 4 (leads), H, W]
+        x_g = b['geos_ens_raw'].to(d) # [vB, M, L, H, W]  (M=members, L=leads)
+        c_var = x_g.var(dim=1) # [vB, L, H, W] - variance across the 4 members
         
         lead_ids = b['lead_idx'].to(d) # [vB]
-        b_idx = torch.arange(vB, device=d)
-        lead_var_map = c_var[b_idx, lead_ids] # [vB, H, W]
-        lead_var_map = lead_var_map / (lead_var_map.mean(dim=(1, 2), keepdim=True) + 1e-6)
+        bi = torch.arange(vB, device=d)
+        lead_var_map = c_var[bi, lead_ids] # [vB, H, W]
+        
+        # Normalize to relative scaling (centered around 1.0)
+        mean_var = lead_var_map.mean(dim=(1, 2), keepdim=True)
+        lead_var_map = lead_var_map / (mean_var + 1e-6)
+        
+        # Clamp the relative scaling factor to prevent explosion in dry/zero-var regions
+        lead_var_map = torch.clamp(lead_var_map, min=0.5, max=2.0)
+        
         scale_map = lead_var_map.unsqueeze(1).expand(vB, E, H, W).reshape(-1, 1, H, W)
-        return raw_eof * torch.sqrt(scale_map + 1e-6)
+        return raw_eof * torch.sqrt(scale_map)
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
@@ -254,8 +265,8 @@ def main():
         true_tgt = batch['target_raw_full'][0::4].to(device)
         H, W = true_tgt.shape[-2:]
         
-        if 'geos_raw_full' in batch:
-            geos_ens_sample = batch['geos_raw_full'][0::4].to(device) # [num_inits, M=4, 4, H, W]
+        if 'geos_ens_raw' in batch:
+            geos_ens_sample = batch['geos_ens_raw'][0::4].to(device) # [num_inits, M=4, 4, H, W]
             lats = np.linspace(-90, 90, H)
             cos_weights = np.maximum(np.cos(np.deg2rad(lats)), 0)
             area_weights = torch.from_numpy(cos_weights).float().to(device)
