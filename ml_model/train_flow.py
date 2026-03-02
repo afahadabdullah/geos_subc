@@ -863,13 +863,14 @@ def train(args, accelerator):
                 # 1. Primary objective: predict squared error
                 loss_mse = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
                 
-                # 2. Regularization: strongly penalize extreme variances, gently pull toward 1.0
+                # 2. Regularization: strongly penalize extreme variances, aggressively pull toward 1.0
                 # Our baseline EOF noise is already very good. We want the head to only apply
-                # conservative fine-tuning (e.g. 0.8 to 1.5), not blow up to 5.0 or drop to 0.01.
+                # conservative fine-tuning (e.g. 0.8 to 1.5). The `(v_target - v_pred)**2` target 
+                # is unscaled and very noisy, so without a massive anchor, the network blows up.
                 var_penalty = torch.relu(var_pred - 2.0)**2 + torch.relu(0.2 - var_pred)**2
                 identity_pull = (var_pred - 1.0)**2
                 
-                loss_reg = (var_penalty * 10.0 + identity_pull * 0.1).mean()
+                loss_reg = (var_penalty * 20.0 + identity_pull * 10.0).mean()
                 
                 loss_var = loss_mse + loss_reg
                 loss = loss_var
