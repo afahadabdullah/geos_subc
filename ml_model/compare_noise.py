@@ -321,20 +321,37 @@ def main():
 
         # Print the structured table row, overwriting the diagnostic line if on interactive terminal
         sys.stdout.write('\033[F\033[K') # move up 1 line and clear it
-        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f}", flush=True)
+        
+        # Helper: format a row with the best (lowest) value highlighted in blue
+        BLUE = '\033[94m'
+        BOLD = '\033[1m'
+        RESET = '\033[0m'
+        def fmt_row(label, vals):
+            best_idx = int(np.argmin(vals))
+            parts = []
+            for j, v in enumerate(vals):
+                s = f"{v:>11.4f}"
+                if j == best_idx:
+                    s = f"{BLUE}{BOLD}{s}{RESET}"
+                parts.append(s)
+            print(f"  {label:<13} | {' '.join(parts)}", flush=True)
+        
+        fmt_row(f"Batch {b_idx:<2} {month:>4}", crps_vals)
         
         # Print per-lead breakdown underneath
         all_crps_out = [geos_crps_out] + [results[name][-1] for name, _, _ in strategies]
         for w in range(4):
-            lead_vals = [c[w+1] for c in all_crps_out] # index 1=W1, 2=W2, 3=W3, 4=W4
-            label = f"    W{w+1}"
-            print(f"  {label:<13} | {lead_vals[0]:>11.4f} {lead_vals[1]:>11.4f} {lead_vals[2]:>11.4f} {lead_vals[3]:>11.4f} {lead_vals[4]:>11.4f} {lead_vals[5]:>11.4f}", flush=True)
+            lead_vals = [c[w+1] for c in all_crps_out]
+            fmt_row(f"    W{w+1}", lead_vals)
         
-        # Running average across all completed batches
+        # Running average across all completed batches (total + per-lead)
         n_done = b_idx + 1
         all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
-        run_avg = [np.mean([x[0] for x in results[nm]]) for nm in all_names]
-        print(f"  {'  RunAvg('+str(n_done)+')':<13} | {run_avg[0]:>11.4f} {run_avg[1]:>11.4f} {run_avg[2]:>11.4f} {run_avg[3]:>11.4f} {run_avg[4]:>11.4f} {run_avg[5]:>11.4f}", flush=True)
+        run_avg_total = [np.mean([x[0] for x in results[nm]]) for nm in all_names]
+        fmt_row(f"  RunAvg({n_done})", run_avg_total)
+        for w in range(4):
+            run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
+            fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
         print(f"  {'─'*100}")
         
         # Incremental CSV save after each batch
