@@ -440,7 +440,7 @@ def train(args, accelerator):
     fixed_val_batch = next(iter(val_loader))
 
     # Phase transition constant (must be before checkpoint loading for resume detection)
-    VARIANCE_PHASE_EPOCH = 130  # Freeze UNet at this epoch, train only var_heads
+    VARIANCE_PHASE_EPOCH = 115  # Freeze UNet at this epoch, train only var_heads
     
     # Load MJO EOF bases for physically structured ensemble noise
     eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
