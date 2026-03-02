@@ -160,8 +160,8 @@ def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=10)
-    parser.add_argument("--num_steps", type=int, default=50) # FULL 50 STEPS
+    parser.add_argument("--num_ensemble", type=int, default=15)
+    parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -194,7 +194,6 @@ def main():
     
     # Noise Functions
     def noise_pure(vB, E, H, W, b, d): return torch.randn((vB*E, 1, H, W), device=d)
-    def noise_tight(vB, E, H, W, b, d): return torch.randn((vB*E, 1, H, W), device=d) * 0.3
     
     def noise_eof(vB, E, H, W, b, d):
         mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
@@ -236,16 +235,15 @@ def main():
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
-        ("2. Tight Random (0.3)", noise_tight, False),
-        ("3. MJO EOF (PhasexLead)", noise_eof, False),
-        ("4. Alpha-Scaled EOF", noise_eof_alpha, False),
-        ("5. EOF + Variance Head", noise_eof, True),
-        ("6. GEOS Spread-Scaled EOF", noise_eof_geos, False)
+        ("2. MJO EOF (PhasexLead)", noise_eof, False),
+        ("3. Alpha-Scaled EOF", noise_eof_alpha, False),
+        ("4. EOF + Variance Head", noise_eof, True),
+        ("5. GEOS Spread-Scaled EOF", noise_eof_geos, False)
     ]
     
-    print(f"\n{'─'*125}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. Tight':>11} {'3. EOF':>11} {'4. Alpha':>11} {'5. VarHead':>11} {'6. GEOS.Spr':>11}")
-    print(f"{'─'*125}")
+    print(f"\n{'─'*115}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarHead':>11} {'5. GEOS.Spr':>11}")
+    print(f"{'─'*115}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
@@ -291,7 +289,7 @@ def main():
         crps_vals = [geos_crps_out[0]] # Print total CRPS to Terminal
         
         # Diagnostic print before heavy ODE solves
-        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (10 mem × 50 steps)...", flush=True)
+        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (15 mem × 10 steps)...", flush=True)
         
         # Run all ML strategies with a progress bar for this batch
         from tqdm import tqdm
@@ -310,9 +308,9 @@ def main():
 
         # Print the structured table row, overwriting the diagnostic line if on interactive terminal
         sys.stdout.write('\033[F\033[K') # move up 1 line and clear it
-        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f} {crps_vals[6]:>11.4f}", flush=True)
+        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f}", flush=True)
 
-    print(f"{'─'*125}")
+    print(f"{'─'*115}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
     
     # Calculate means (index 0 is total CRPS)
