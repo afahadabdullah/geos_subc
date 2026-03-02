@@ -206,7 +206,7 @@ def main():
         return flow_matcher.eof_sample(eof_bases, mjo, vB*E, H, W, lead_ids=lead)
     
     def noise_eof(vB, E, H, W, b, d):
-        """Blended EOF: 70% isotropic N(0,1) + 30% EOF structure.
+        """Blended EOF: 50% isotropic N(0,1) + 50% EOF structure.
         
         The model was TRAINED with pure N(0,1) noise. Raw EOF noise is 
         out-of-distribution even when normalized to unit variance because 
@@ -215,7 +215,7 @@ def main():
         """
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_raw_eof(vB, E, H, W, b, d)
-        blend = 0.7 * pure + 0.3 * eof
+        blend = 0.5 * pure + 0.5 * eof
         # Re-normalize to unit variance after blending
         std = blend.std(dim=(2, 3), keepdim=True)
         blend = blend / (std + 1e-6)
@@ -268,16 +268,16 @@ def main():
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
-        ("2. MJO EOF (30%)", noise_eof, False),
+        ("2. MJO EOF (50%)", noise_eof, False),
         ("3. Alpha-Scaled EOF", noise_eof_alpha, False),
-        ("4. EOF(30%) + VarHead", noise_eof, True),
+        ("4. EOF(50%) + VarHead", noise_eof, True),
         ("5. EOF(70%) + VarHead", noise_eof_70, True),
         ("6. EOF(90%) + VarHead", noise_eof_90, True),
         ("7. GEOS Spread-Scaled EOF", noise_eof_geos, False)
     ]
     
     print(f"\n{'─'*145}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(30)':>11} {'5. VarH(70)':>11} {'6. VarH(90)':>11} {'7. GEOS.Spr':>11}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(50)':>11} {'5. VarH(70)':>11} {'6. VarH(90)':>11} {'7. GEOS.Spr':>11}")
     print(f"{'─'*145}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
