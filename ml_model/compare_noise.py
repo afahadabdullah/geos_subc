@@ -160,7 +160,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=25)
+    parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args()
     
@@ -324,7 +324,7 @@ def main():
         crps_vals = [geos_crps_out[0]] # Print total CRPS to Terminal
         
         # Diagnostic print before heavy ODE solves
-        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (25 mem × 10 steps)...", flush=True)
+        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (30 mem × 10 steps)...", flush=True)
         
         # Run all ML strategies with a progress bar for this batch
         from tqdm import tqdm
