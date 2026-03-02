@@ -65,6 +65,9 @@ def get_base_dataset():
                 max_val = float(ds[level_dim].max())
                 target = 85000 if max_val > 5000 else 850
                 zg_850 = ds.zg.sel({level_dim: target}, method='nearest')
+                # Drop pressure level coordinate to avoid alignment issues with pr/tas
+                if level_dim in zg_850.coords:
+                    zg_850 = zg_850.drop_vars(level_dim)
             except Exception as e:
                 print(f"Warning: .sel() failed ({e}), using fallback indexing.")
                 zg_850 = ds.zg.isel({level_dim: min(10, ds.sizes[level_dim]-1)})

@@ -44,7 +44,8 @@ def process_year(year, output_dir="dataprocess"):
     # Load with Xarray
     # We use 'precip' variable usually in GPCP
     try:
-        ds_gpcp = xr.open_mfdataset(gpcp_files + next_year_files, combine='by_coords')
+        # coords='minimal' and compat='override' handle slight differences in metadata/coords between daily files
+        ds_gpcp = xr.open_mfdataset(gpcp_files + next_year_files, combine='by_coords', coords='minimal', compat='override')
     except Exception as e:
         print(f"Error loading GPCP netcdfs: {e}")
         return

@@ -5,7 +5,7 @@ epochs: 1000
 output_dir: ml_output_flow4
 mixed_precision: fp16
 num_workers: 1
-data_dir: /home1/11353/afahad/geos_subc/dataprocess
+data_dir: /scratch/11353/afahad/geossub/geos_subc/dataprocess/
 train_start_year: 1999
 train_end_year: 2005
 val_start_year: 2021
