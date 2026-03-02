@@ -160,7 +160,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=25)
+    parser.add_argument("--num_ensemble", type=int, default=35)
     parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args()
     
@@ -230,6 +230,16 @@ def main():
         std = blend.std(dim=(2, 3), keepdim=True)
         blend = blend / (std + 1e-6)
         return blend
+
+    def noise_eof_90(vB, E, H, W, b, d):
+        """Blended EOF: 10% isotropic N(0,1) + 90% EOF structure."""
+        pure = torch.randn((vB*E, 1, H, W), device=d)
+        eof = _get_raw_eof(vB, E, H, W, b, d)
+        blend = 0.1 * pure + 0.9 * eof
+        # Re-normalize to unit variance after blending
+        std = blend.std(dim=(2, 3), keepdim=True)
+        blend = blend / (std + 1e-6)
+        return blend
         
     def noise_eof_alpha(vB, E, H, W, b, d):
         blended = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
@@ -262,12 +272,13 @@ def main():
         ("3. Alpha-Scaled EOF", noise_eof_alpha, False),
         ("4. EOF(30%) + VarHead", noise_eof, True),
         ("5. EOF(70%) + VarHead", noise_eof_70, True),
-        ("6. GEOS Spread-Scaled EOF", noise_eof_geos, False)
+        ("6. EOF(90%) + VarHead", noise_eof_90, True),
+        ("7. GEOS Spread-Scaled EOF", noise_eof_geos, False)
     ]
     
-    print(f"\n{'─'*130}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(30)':>11} {'5. VarH(70)':>11} {'6. GEOS.Spr':>11}")
-    print(f"{'─'*130}")
+    print(f"\n{'─'*145}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(30)':>11} {'5. VarH(70)':>11} {'6. VarH(90)':>11} {'7. GEOS.Spr':>11}")
+    print(f"{'─'*145}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
@@ -313,7 +324,7 @@ def main():
         crps_vals = [geos_crps_out[0]] # Print total CRPS to Terminal
         
         # Diagnostic print before heavy ODE solves
-        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (25 mem × 10 steps)...", flush=True)
+        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (35 mem × 10 steps)...", flush=True)
         
         # Run all ML strategies with a progress bar for this batch
         from tqdm import tqdm
@@ -363,7 +374,7 @@ def main():
         for w in range(4):
             run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
             fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
-        print(f"  {'─'*115}")
+        print(f"  {'─'*145}")
         
         # Incremental CSV save after each batch
         import pandas as pd
