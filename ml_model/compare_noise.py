@@ -205,14 +205,7 @@ def main():
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
         return flow_matcher.eof_sample(eof_bases, mjo, vB*E, H, W, lead_ids=lead)
     
-    def noise_eof_60(vB, E, H, W, b, d):
-        pure = torch.randn((vB*E, 1, H, W), device=d)
-        eof = _get_raw_eof(vB, E, H, W, b, d)
-        blend = 0.4 * pure + 0.6 * eof
-        std = blend.std(dim=(2, 3), keepdim=True)
-        blend = blend / (std + 1e-6)
-        return blend
-        
+
     def noise_eof_75(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_raw_eof(vB, E, H, W, b, d)
@@ -239,15 +232,14 @@ def main():
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
-        ("2. VarH(60%)", noise_eof_60, True),
-        ("3. VarH(75%)", noise_eof_75, True),
-        ("4. VarH(90%)", noise_eof_90, True),
-        ("5. VarH(98%)", noise_eof_98, True)
+        ("2. VarH(75%)", noise_eof_75, True),
+        ("3. VarH(90%)", noise_eof_90, True),
+        ("4. VarH(98%)", noise_eof_98, True)
     ]
     
-    print(f"\n{'─'*140}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>19} {'2. VarH(60)':>19} {'3. VarH(75)':>19} {'4. VarH(90)':>19} {'5. VarH(98)':>19}")
-    print(f"{'─'*140}")
+    print(f"\n{'─'*120}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>19} {'2. VarH(75)':>19} {'3. VarH(90)':>19} {'4. VarH(98)':>19}")
+    print(f"{'─'*120}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
