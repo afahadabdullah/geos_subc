@@ -255,8 +255,12 @@ def main():
         results["0. GEOS Baseline"].append(geos_crps)
         crps_vals = [geos_crps]
         
-        # Run all ML strategies
-        for name, fn, use_var in strategies:
+        # Diagnostic print before heavy ODE solves
+        print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (10 mem × 50 steps)...", flush=True)
+        
+        # Run all ML strategies with a progress bar for this batch
+        from tqdm import tqdm
+        for name, fn, use_var in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
             crps, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var)
             results[name].append(crps)
             crps_vals.append(crps)
@@ -269,7 +273,9 @@ def main():
             plot_path = os.path.join(args.output_dir, f"noise_comparison_month_{month}.png")
             save_strategy_plot(target_plot, plot_data, plot_path)
 
-        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f} {crps_vals[6]:>11.4f}")
+        # Print the structured table row, overwriting the diagnostic line if on interactive terminal
+        sys.stdout.write('\033[F\033[K') # move up 1 line and clear it
+        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f} {crps_vals[6]:>11.4f}", flush=True)
 
     print(f"{'─'*125}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
