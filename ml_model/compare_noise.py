@@ -144,8 +144,8 @@ def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=20)
-    parser.add_argument("--num_steps", type=int, default=10)
+    parser.add_argument("--num_ensemble", type=int, default=10)
+    parser.add_argument("--num_steps", type=int, default=50) # FULL 50 STEPS
     args = parser.parse_args()
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -196,35 +196,15 @@ def main():
         return raw_eof * scale
 
     def noise_eof_geos(vB, E, H, W, b, d):
-        raw_eof = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
-        # GEOS is [vB, 4, L, H, W]. We need the variance across the 4 members
+        raw_eof = noise_eof(vB, E, H, W, b, d) 
         x_g = b['x_geos'].to(d)
-        geos_var = x_g.var(dim=1, keepdim=True) # [vB, 1, 4, H, W]
-        
-        # We need the variance for the specific lead. But our batch 'x_geos' only contains the 
-        # lead week we are currently processing in the shape [vB, 1, 4, H, W] where dim 2 is weeks 1-4.
-        # Actually in test batch, x_geos is [vB, 4, 1, H, W] or depending on flattening. Let's look at train:
-        # train shape: `[B, 1, 1, 4, H, W]` where dim=1 is member, dim=4 is lead? No.
-        # From S2SHybridDataset: x_geos -> M=4, C=4 (leads) -> shape [vB, M, C, H, W]
-        # Wait, if x_geos is [vB, 4, 4, H, W] and we want the variance for the current `lead_idx`
-        
-        # Let's just compute var across dim=1 (members), then gather by lead_idx
-        # x_g shape: [vB, 4, 4, H, W]  (members=4, weeks=4)
         c_var = x_g.var(dim=1) # [vB, 4, H, W]
         
         lead_ids = b['lead_idx'].to(d) # [vB]
-        # Gather the variance map for the specific lead week
         b_idx = torch.arange(vB, device=d)
         lead_var_map = c_var[b_idx, lead_ids] # [vB, H, W]
-        
-        # Normalize the variance map so it's a relative scaling factor centered around 1.0
-        # Add small epsilon to avoid divide by zero
         lead_var_map = lead_var_map / (lead_var_map.mean(dim=(1, 2), keepdim=True) + 1e-6)
-        
-        # Expand to ensemble size
         scale_map = lead_var_map.unsqueeze(1).expand(vB, E, H, W).reshape(-1, 1, H, W)
-        
-        # We use sqrt because we are scaling noise (amplitude), not variance directly
         return raw_eof * torch.sqrt(scale_map + 1e-6)
 
     strategies = [
@@ -236,11 +216,13 @@ def main():
         ("6. GEOS Spread-Scaled EOF", noise_eof_geos, False)
     ]
     
-    print(f"\n{'─'*115}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'1. Pure':>11} {'2. Tight':>11} {'3. EOF':>11} {'4. Alpha':>11} {'5. VarHead':>11} {'6. GEOS.Spr':>11}")
-    print(f"{'─'*115}")
+    print(f"\n{'─'*125}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. Tight':>11} {'3. EOF':>11} {'4. Alpha':>11} {'5. VarHead':>11} {'6. GEOS.Spr':>11}")
+    print(f"{'─'*125}")
     
-    results = {name: [] for name, _, _ in strategies}
+    results = {"0. GEOS Baseline": []}
+    for name, _, _ in strategies:
+        results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
         if b_idx >= 12: break
@@ -248,8 +230,32 @@ def main():
         month = batch['month'][0].item()
         plot_data = {}
         
-        # Run all strategies
-        crps_vals = []
+        # 0. Calculate GEOS CRPS directly
+        geos_crps = 0.0
+        vB = batch['y_target'].shape[0]
+        num_inits = vB // 4
+        true_tgt = batch['target_raw_full'][0::4].to(device)
+        H, W = true_tgt.shape[-2:]
+        
+        if 'geos_raw_full' in batch:
+            geos_ens_sample = batch['geos_raw_full'][0::4].to(device) # [num_inits, M=4, 4, H, W]
+            lats = np.linspace(-90, 90, H)
+            cos_weights = np.maximum(np.cos(np.deg2rad(lats)), 0)
+            area_weights = torch.from_numpy(cos_weights).float().to(device)
+            area_weights = area_weights / area_weights.sum()
+            area_weights = area_weights.view(1, 1, H, 1)
+            
+            # compute_crps expects [E, B, C, H, W] -> transpose to [M, num_inits, 4, H, W]
+            geos_ens_t = geos_ens_sample.transpose(0, 1)
+            geos_crps = compute_crps(geos_ens_t, true_tgt, area_weights)
+            
+            if b_idx == 0:
+                plot_data["0. GEOS Baseline"] = (geos_ens_t, geos_ens_t.var(dim=0))
+                
+        results["0. GEOS Baseline"].append(geos_crps)
+        crps_vals = [geos_crps]
+        
+        # Run all ML strategies
         for name, fn, use_var in strategies:
             crps, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var)
             results[name].append(crps)
@@ -263,10 +269,11 @@ def main():
             plot_path = os.path.join(args.output_dir, f"noise_comparison_month_{month}.png")
             save_strategy_plot(target_plot, plot_data, plot_path)
 
-        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f}")
+        print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f} {crps_vals[6]:>11.4f}")
 
-    print(f"{'─'*115}")
+    print(f"{'─'*125}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
+    print(f"{np.mean(results['0. GEOS Baseline']):>11.4f} ", end="")
     for name, _, _ in strategies:
         print(f"{np.mean(results[name]):>11.4f} ", end="")
     print("\n")
