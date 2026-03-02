@@ -845,9 +845,15 @@ def train(args, accelerator):
             v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Target Variance (Gradient Isolated) ---
-            # We want the variance head to predict the squared error of the mean head,
+            # We want the variance head to predict the RELATIVE spatial scaling of the error,
             # WITHOUT letting gradients flow backward to disrupt the flow matching trajectory.
-            target_var = (v_target - v_pred.detach())**2
+            # 1. Compute absolute error magnitude
+            abs_err = torch.abs(v_target - v_pred.detach())
+            
+            # 2. Normalize by the global mean error of that specific sample/lead.
+            # This makes the target a RELATIVE multiplier with a mean of 1.0.
+            # e.g., target_scale = 1.2 in the tropics means "this pixel needs 20% more spread than average"
+            target_scale = abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6)
 
             # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -859,20 +865,17 @@ def train(args, accelerator):
             loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
             
             if is_variance_phase:
-                # Phase 2: Train variance heads to predict a log-variance
-                target_log_var = torch.log(target_var + 1e-6)
+                # Under the new architecture, model output `var_pred` represents log-variance.
+                # The ODE solver exponentiates it to get the standard deviation multiplier:
+                std_mult = torch.exp(0.5 * var_pred)
                 
-                # 1. Primary objective: predict log squared error
-                loss_mse = (area_weights * temp_weights * (var_pred - target_log_var)**2).mean()
+                # 1. Primary objective: predict the relative scaling map
+                loss_mse = (area_weights * temp_weights * (std_mult - target_scale)**2).mean()
                 
-                # 2. Regularization: keep log-variance within reasonable bounds (-2.0 to +1.0)
-                # and gently pull towards 0.0 (multiplier of 1.0).
-                # Since log_var_pred corresponds to std_mult = exp(0.5*val):
-                # val = 0.0 -> mult = 1.0x
-                # val = -1.4 -> mult = 0.5x
-                # val = 1.8 -> mult = 2.5x
-                var_penalty = torch.relu(var_pred - 1.8)**2 + torch.relu(-1.4 - var_pred)**2
-                identity_pull = (var_pred - 0.0)**2
+                # 2. Regularization: keep multiplier within [0.5, 2.5] bounds
+                # and gently pull towards 1.0 (identity scaling).
+                var_penalty = torch.relu(std_mult - 2.5)**2 + torch.relu(0.5 - std_mult)**2
+                identity_pull = (std_mult - 1.0)**2
                 
                 loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
                 
