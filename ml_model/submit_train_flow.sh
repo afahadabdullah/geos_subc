@@ -46,7 +46,6 @@ fi
 
 echo "🔥 Launching Flow Matching Training..."
 accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow.py --config ml_model/config_flow.yaml \
-    --start-epoch 115 \
     --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
