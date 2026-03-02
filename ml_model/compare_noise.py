@@ -205,80 +205,49 @@ def main():
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
         return flow_matcher.eof_sample(eof_bases, mjo, vB*E, H, W, lead_ids=lead)
     
-    def noise_eof(vB, E, H, W, b, d):
-        """Blended EOF: 50% isotropic N(0,1) + 50% EOF structure.
-        
-        The model was TRAINED with pure N(0,1) noise. Raw EOF noise is 
-        out-of-distribution even when normalized to unit variance because 
-        it concentrates energy in correlated spatial patterns.
-        Blending keeps margins close to N(0,1) while adding physical structure.
-        """
+    def noise_eof_60(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_raw_eof(vB, E, H, W, b, d)
-        blend = 0.5 * pure + 0.5 * eof
-        # Re-normalize to unit variance after blending
+        blend = 0.4 * pure + 0.6 * eof
         std = blend.std(dim=(2, 3), keepdim=True)
         blend = blend / (std + 1e-6)
         return blend
         
-    def noise_eof_70(vB, E, H, W, b, d):
-        """Blended EOF: 30% isotropic N(0,1) + 70% EOF structure."""
+    def noise_eof_75(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_raw_eof(vB, E, H, W, b, d)
-        blend = 0.3 * pure + 0.7 * eof
-        # Re-normalize to unit variance after blending
+        blend = 0.25 * pure + 0.75 * eof
         std = blend.std(dim=(2, 3), keepdim=True)
         blend = blend / (std + 1e-6)
         return blend
 
     def noise_eof_90(vB, E, H, W, b, d):
-        """Blended EOF: 10% isotropic N(0,1) + 90% EOF structure."""
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_raw_eof(vB, E, H, W, b, d)
         blend = 0.1 * pure + 0.9 * eof
-        # Re-normalize to unit variance after blending
         std = blend.std(dim=(2, 3), keepdim=True)
         blend = blend / (std + 1e-6)
         return blend
-        
-    def noise_eof_alpha(vB, E, H, W, b, d):
-        blended = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
-        # Scale: Week 1 (lead 0) = 0.7x, Week 4 (lead 3) = 1.3x
-        lead_ids = b['lead_idx'].to(d) # [vB]
-        lead_exp = lead_ids.unsqueeze(1).expand(vB, E).reshape(-1)
-        scale = 0.7 + (lead_exp.float() * 0.2)
-        scale = scale.view(-1, 1, 1, 1)
-        return blended * scale
 
-    def noise_eof_geos(vB, E, H, W, b, d):
-        blended = noise_eof(vB, E, H, W, b, d)
-        x_g = b['geos_ens_raw'].to(d) # [vB, M, L, H, W]
-        c_var = x_g.var(dim=1) # [vB, L, H, W]
-        
-        lead_ids = b['lead_idx'].to(d)
-        bi = torch.arange(vB, device=d)
-        lead_var_map = c_var[bi, lead_ids]
-        
-        mean_var = lead_var_map.mean(dim=(1, 2), keepdim=True)
-        lead_var_map = lead_var_map / (mean_var + 1e-6)
-        lead_var_map = torch.clamp(lead_var_map, min=0.5, max=2.0)
-        
-        scale_map = lead_var_map.unsqueeze(1).expand(vB, E, H, W).reshape(-1, 1, H, W)
-        return blended * torch.sqrt(scale_map)
+    def noise_eof_98(vB, E, H, W, b, d):
+        pure = torch.randn((vB*E, 1, H, W), device=d)
+        eof = _get_raw_eof(vB, E, H, W, b, d)
+        blend = 0.02 * pure + 0.98 * eof
+        std = blend.std(dim=(2, 3), keepdim=True)
+        blend = blend / (std + 1e-6)
+        return blend
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
-        ("2. MJO EOF (50%)", noise_eof, False),
-        ("3. Alpha-Scaled EOF", noise_eof_alpha, False),
-        ("4. EOF(50%) + VarHead", noise_eof, True),
-        ("5. EOF(70%) + VarHead", noise_eof_70, True),
-        ("6. EOF(90%) + VarHead", noise_eof_90, True),
-        ("7. GEOS Spread-Scaled EOF", noise_eof_geos, False)
+        ("2. VarH(60%)", noise_eof_60, True),
+        ("3. VarH(75%)", noise_eof_75, True),
+        ("4. VarH(90%)", noise_eof_90, True),
+        ("5. VarH(98%)", noise_eof_98, True)
     ]
     
-    print(f"\n{'─'*145}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(50)':>11} {'5. VarH(70)':>11} {'6. VarH(90)':>11} {'7. GEOS.Spr':>11}")
-    print(f"{'─'*145}")
+    print(f"\n{'─'*110}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. VarH(60)':>11} {'3. VarH(75)':>11} {'4. VarH(90)':>11} {'5. VarH(98)':>11}")
+    print(f"{'─'*110}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
@@ -375,7 +344,7 @@ def main():
         for w in range(4):
             run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
             fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
-        print(f"  {'─'*145}")
+        print(f"  {'─'*110}")
         
         # Incremental CSV save after each batch
         import pandas as pd
