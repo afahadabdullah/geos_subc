@@ -277,6 +277,22 @@ def main():
     for name, _, _ in strategies:
         print(f"{np.mean(results[name]):>11.4f} ", end="")
     print("\n")
+    
+    # Save to CSV
+    import pandas as pd
+    
+    # Create DataFrame from results
+    # results dict has keys: "0. GEOS Baseline", "1. Pure Random", etc.
+    # lengths of all lists in results should be equal to the number of batches
+    df = pd.DataFrame(results)
+    
+    # Add summary row for the mean
+    mean_row = {k: np.mean(v) for k, v in results.items()}
+    df.loc['MEAN'] = mean_row
+    
+    csv_path = os.path.join(args.output_dir, f"noise_comparison_results_{args.year}.csv")
+    df.to_csv(csv_path, float_format='%.4f')
+    print(f"  💾 Saved numerical results to: {csv_path}")
 
 if __name__ == "__main__":
     main()
