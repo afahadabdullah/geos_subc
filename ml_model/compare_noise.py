@@ -221,6 +221,16 @@ def main():
         blend = blend / (std + 1e-6)
         return blend
         
+    def noise_eof_70(vB, E, H, W, b, d):
+        """Blended EOF: 30% isotropic N(0,1) + 70% EOF structure."""
+        pure = torch.randn((vB*E, 1, H, W), device=d)
+        eof = _get_raw_eof(vB, E, H, W, b, d)
+        blend = 0.3 * pure + 0.7 * eof
+        # Re-normalize to unit variance after blending
+        std = blend.std(dim=(2, 3), keepdim=True)
+        blend = blend / (std + 1e-6)
+        return blend
+        
     def noise_eof_alpha(vB, E, H, W, b, d):
         blended = noise_eof(vB, E, H, W, b, d) # [vB*E, 1, H, W]
         # Scale: Week 1 (lead 0) = 0.7x, Week 4 (lead 3) = 1.3x
@@ -248,15 +258,16 @@ def main():
 
     strategies = [
         ("1. Pure Random", noise_pure, False),
-        ("2. MJO EOF (PhasexLead)", noise_eof, False),
+        ("2. MJO EOF (30%)", noise_eof, False),
         ("3. Alpha-Scaled EOF", noise_eof_alpha, False),
-        ("4. EOF + Variance Head", noise_eof, True),
-        ("5. GEOS Spread-Scaled EOF", noise_eof_geos, False)
+        ("4. EOF(30%) + VarHead", noise_eof, True),
+        ("5. EOF(70%) + VarHead", noise_eof_70, True),
+        ("6. GEOS Spread-Scaled EOF", noise_eof_geos, False)
     ]
     
-    print(f"\n{'─'*115}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarHead':>11} {'5. GEOS.Spr':>11}")
-    print(f"{'─'*115}")
+    print(f"\n{'─'*130}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. EOF':>11} {'3. Alpha':>11} {'4. VarH(30)':>11} {'5. VarH(70)':>11} {'6. GEOS.Spr':>11}")
+    print(f"{'─'*130}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
@@ -352,7 +363,7 @@ def main():
         for w in range(4):
             run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
             fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
-        print(f"  {'─'*100}")
+        print(f"  {'─'*115}")
         
         # Incremental CSV save after each batch
         import pandas as pd
