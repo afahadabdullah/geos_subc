@@ -859,18 +859,22 @@ def train(args, accelerator):
             loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
             
             if is_variance_phase:
-                # Phase 2: Only train variance heads
-                # 1. Primary objective: predict squared error
-                loss_mse = (area_weights * temp_weights * (var_pred - target_var)**2).mean()
+                # Phase 2: Train variance heads to predict a log-variance
+                target_log_var = torch.log(target_var + 1e-6)
                 
-                # 2. Regularization: strongly penalize extreme variances, aggressively pull toward 1.0
-                # Our baseline EOF noise is already very good. We want the head to only apply
-                # conservative fine-tuning (e.g. 0.8 to 1.5). The `(v_target - v_pred)**2` target 
-                # is unscaled and very noisy, so without a massive anchor, the network blows up.
-                var_penalty = torch.relu(var_pred - 2.0)**2 + torch.relu(0.2 - var_pred)**2
-                identity_pull = (var_pred - 1.0)**2
+                # 1. Primary objective: predict log squared error
+                loss_mse = (area_weights * temp_weights * (var_pred - target_log_var)**2).mean()
                 
-                loss_reg = (var_penalty * 20.0 + identity_pull * 10.0).mean()
+                # 2. Regularization: keep log-variance within reasonable bounds (-2.0 to +1.0)
+                # and gently pull towards 0.0 (multiplier of 1.0).
+                # Since log_var_pred corresponds to std_mult = exp(0.5*val):
+                # val = 0.0 -> mult = 1.0x
+                # val = -1.4 -> mult = 0.5x
+                # val = 1.8 -> mult = 2.5x
+                var_penalty = torch.relu(var_pred - 1.8)**2 + torch.relu(-1.4 - var_pred)**2
+                identity_pull = (var_pred - 0.0)**2
+                
+                loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
                 
                 loss_var = loss_mse + loss_reg
                 loss = loss_var
