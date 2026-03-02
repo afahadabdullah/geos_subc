@@ -1,10 +1,14 @@
 #!/bin/bash
-#SBATCH -J cmp_noise        # Job name
-#SBATCH -o cmp_noise_%j.o   # Combined Output and Error file name
-#SBATCH -p gh-dev           # partition
-#SBATCH -N 1                # Total number of nodes
-#SBATCH -n 1                # Number of tasks per node
-#SBATCH -t 02:00:00         # Run time (d-hh:mm:ss)
+#SBATCH -J cmp_noise                  # Job name
+#SBATCH -o ml_output_flow4/cmp_noise_%j.out
+#SBATCH -e ml_output_flow4/cmp_noise_%j.err
+#SBATCH -p gh-dev                    # Queue (partition) name
+#SBATCH -N 1                         # Total # of nodes
+#SBATCH -n 1                         # Total # of tasks
+#SBATCH -t 02:00:00                  # Run time (hh:mm:ss)
+#SBATCH -A ATM25008                  # Project account
+#SBATCH --mail-type=all
+#SBATCH --mail-user=a.fahad@nasa.gov
 
 echo "Starting noise comparison script..."
 date
