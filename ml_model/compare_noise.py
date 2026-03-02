@@ -144,7 +144,7 @@ def main():
     parser = argparse.ArgumentParser(description="Compare Noise Strategies")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=8)
+    parser.add_argument("--num_ensemble", type=int, default=20)
     parser.add_argument("--num_steps", type=int, default=10)
     args = parser.parse_args()
     
@@ -163,7 +163,7 @@ def main():
     
     model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
     
-    best_ckpt = os.path.join(args.output_dir, "best_model_epoch_116_crps_1.3479.pt")
+    best_ckpt = os.path.join(args.output_dir, "best_model_epoch_115_crps_1.3602.pt")
     print(f"Loaded: {os.path.basename(best_ckpt)}")
     
     ckpt = torch.load(best_ckpt, map_location=device, weights_only=True)
