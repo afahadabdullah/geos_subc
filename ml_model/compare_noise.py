@@ -309,6 +309,14 @@ def main():
         # Print the structured table row, overwriting the diagnostic line if on interactive terminal
         sys.stdout.write('\033[F\033[K') # move up 1 line and clear it
         print(f"  Batch {b_idx:<2} {month:>4} | {crps_vals[0]:>11.4f} {crps_vals[1]:>11.4f} {crps_vals[2]:>11.4f} {crps_vals[3]:>11.4f} {crps_vals[4]:>11.4f} {crps_vals[5]:>11.4f}", flush=True)
+        
+        # Print per-lead breakdown underneath
+        all_crps_out = [geos_crps_out] + [results[name][-1] for name, _, _ in strategies]
+        for w in range(4):
+            lead_vals = [c[w+1] for c in all_crps_out] # index 1=W1, 2=W2, 3=W3, 4=W4
+            label = f"    W{w+1}"
+            print(f"  {label:<13} | {lead_vals[0]:>11.4f} {lead_vals[1]:>11.4f} {lead_vals[2]:>11.4f} {lead_vals[3]:>11.4f} {lead_vals[4]:>11.4f} {lead_vals[5]:>11.4f}", flush=True)
+        print(f"  {'─'*100}")
 
     print(f"{'─'*115}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
