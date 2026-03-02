@@ -197,8 +197,8 @@ def main():
 
     def noise_eof_geos(vB, E, H, W, b, d):
         raw_eof = noise_eof(vB, E, H, W, b, d) 
-        x_g = b['x_geos'].to(d)
-        c_var = x_g.var(dim=1) # [vB, 4, H, W]
+        x_g = b['geos_ens_raw'].to(d) # [vB, 4 (members), 4 (leads), H, W]
+        c_var = x_g.var(dim=1) # [vB, 4 (leads), H, W]
         
         lead_ids = b['lead_idx'].to(d) # [vB]
         b_idx = torch.arange(vB, device=d)
