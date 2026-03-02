@@ -203,7 +203,14 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             lead_ids = batch['lead_idx']
             if not isinstance(lead_ids, torch.Tensor):
                 lead_ids = torch.tensor(lead_ids)
-            noise_expanded = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
+            
+            # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
+            eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
+            pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+            blend = 0.02 * pure_noise + 0.98 * eof_noise
+            # Re-normalize to unit variance
+            std = blend.std(dim=(2, 3), keepdim=True)
+            noise_expanded = blend / (std + 1e-6)
         else:
             noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
@@ -818,7 +825,20 @@ def train(args, accelerator):
 
             # Flow Matching Interpolation
             t = flow_matcher.sample_time_batch(B)
-            noise = torch.randn_like(target_norm)
+            # Generate Noise (EOF blend in Phase 2, Pure in Phase 1)
+            if is_variance_phase and eof_bases is not None:
+                mjo_phases = batch.get('mjo_phase', torch.zeros(B, dtype=torch.long))
+                if not isinstance(mjo_phases, torch.Tensor):
+                    mjo_phases = torch.tensor(mjo_phases)
+                
+                # 98% EOF / 2% Pure blend exactly as done at inference
+                eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, B, H, W, lead_ids=lead_idx)
+                pure_noise = torch.randn_like(target_norm)
+                blend = 0.02 * pure_noise + 0.98 * eof_noise
+                std = blend.std(dim=(2, 3), keepdim=True)
+                noise = blend / (std + 1e-6)
+            else:
+                noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
             # Predict the velocity (routed through the correct per-week output head)
