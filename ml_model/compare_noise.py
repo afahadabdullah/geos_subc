@@ -79,12 +79,25 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     area_weights = area_weights / area_weights.sum()
     area_weights = area_weights.view(1, 1, H, 1)
     
-    crps = compute_crps(ensemble_4L, true_target_precip, area_weights)
+    crps_all = compute_crps(ensemble_4L, true_target_precip, area_weights)
+    
+    # Calculate Lead-specific CRPS (L is dim 2 in both [E, inits, L, H, W] and [inits, L, H, W])
+    # However, compute_crps takes full arrays. Let's compute them by slicing.
+    crps_leads = []
+    for l in range(4):
+        # [E, inits, 1, H, W]
+        ens_l = ensemble_4L[:, :, l:l+1, :, :]
+        # [inits, 1, H, W]
+        tgt_l = true_target_precip[:, l:l+1, :, :]
+        c_l = compute_crps(ens_l, tgt_l, area_weights)
+        crps_leads.append(c_l)
+        
+    crps_out = [crps_all] + crps_leads # [all, w1, w2, w3, w4]
     
     # Calculate empirical variance of the ensemble for plotting
     ens_var = ensemble_4L.var(dim=0)  # [num_inits, 4, H, W]
     
-    return crps, ensemble_4L, ens_var, true_target_precip
+    return crps_out, ensemble_4L, ens_var, true_target_precip
 
 def save_strategy_plot(target, results_dict, output_path):
     """
@@ -120,6 +133,9 @@ def save_strategy_plot(target, results_dict, output_path):
         mean_img = ens_img.mean(axis=0)      # [4, H, W]
         
         axes[row, 0].set_ylabel(name, fontsize=12, fontweight='bold')
+        
+        # We handle "0. GEOS Baseline" safely which might have a different number of ensemble members (4 vs 10).
+        # We already handle that dimension safely above array limits.
         
         for col, l in enumerate(leads_to_plot):
             t_min, t_max = t_img[l].min(), t_img[l].max()
@@ -220,6 +236,7 @@ def main():
     print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. Tight':>11} {'3. EOF':>11} {'4. Alpha':>11} {'5. VarHead':>11} {'6. GEOS.Spr':>11}")
     print(f"{'─'*125}")
     
+    # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
     for name, _, _ in strategies:
         results[name] = []
@@ -231,7 +248,7 @@ def main():
         plot_data = {}
         
         # 0. Calculate GEOS CRPS directly
-        geos_crps = 0.0
+        geos_crps_out = [0.0]*5
         vB = batch['y_target'].shape[0]
         num_inits = vB // 4
         true_tgt = batch['target_raw_full'][0::4].to(device)
@@ -247,13 +264,20 @@ def main():
             
             # compute_crps expects [E, B, C, H, W] -> transpose to [M, num_inits, 4, H, W]
             geos_ens_t = geos_ens_sample.transpose(0, 1)
-            geos_crps = compute_crps(geos_ens_t, true_tgt, area_weights)
+            geos_crps_all = compute_crps(geos_ens_t, true_tgt, area_weights)
             
+            geos_crps_leads = []
+            for l in range(4):
+                c_l = compute_crps(geos_ens_t[:, :, l:l+1, :, :], true_tgt[:, l:l+1, :, :], area_weights)
+                geos_crps_leads.append(c_l)
+            
+            geos_crps_out = [geos_crps_all] + geos_crps_leads
+                
             if b_idx == 0:
                 plot_data["0. GEOS Baseline"] = (geos_ens_t, geos_ens_t.var(dim=0))
                 
-        results["0. GEOS Baseline"].append(geos_crps)
-        crps_vals = [geos_crps]
+        results["0. GEOS Baseline"].append(geos_crps_out)
+        crps_vals = [geos_crps_out[0]] # Print total CRPS to Terminal
         
         # Diagnostic print before heavy ODE solves
         print(f"  [Batch {b_idx}/11] Starting inference for {len(strategies)} ML methods (10 mem × 50 steps)...", flush=True)
@@ -261,9 +285,9 @@ def main():
         # Run all ML strategies with a progress bar for this batch
         from tqdm import tqdm
         for name, fn, use_var in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
-            crps, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var)
-            results[name].append(crps)
-            crps_vals.append(crps)
+            crps_out, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var)
+            results[name].append(crps_out)
+            crps_vals.append(crps_out[0]) # print total
             
             if b_idx == 0: # Save plot data for first month
                 plot_data[name] = (ens_4L, ens_var)
@@ -279,26 +303,36 @@ def main():
 
     print(f"{'─'*125}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
-    print(f"{np.mean(results['0. GEOS Baseline']):>11.4f} ", end="")
-    for name, _, _ in strategies:
-        print(f"{np.mean(results[name]):>11.4f} ", end="")
-    print("\n")
     
+    # Calculate means (index 0 is total CRPS)
+    geos_mean_total = np.mean([x[0] for x in results['0. GEOS Baseline']])
+    print(f"{geos_mean_total:>11.4f} ", end="")
+    for name, _, _ in strategies:
+        strat_mean_total = np.mean([x[0] for x in results[name]])
+        print(f"{strat_mean_total:>11.4f} ", end="")
+    print("\n")
     # Save to CSV
     import pandas as pd
     
-    # Create DataFrame from results
-    # results dict has keys: "0. GEOS Baseline", "1. Pure Random", etc.
-    # lengths of all lists in results should be equal to the number of batches
-    df = pd.DataFrame(results)
+    # Flatten results into separate columns for Total, W1, W2, W3, W4
+    flat_results = {}
+    lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
+    
+    for strat_name, batch_lists in results.items():
+        # batch_lists is a list of [total, w1, w2, w3, w4] for each batch
+        for i, suffix in enumerate(lead_suffixes):
+            col_name = f"{strat_name}{suffix}"
+            flat_results[col_name] = [batch[i] for batch in batch_lists]
+            
+    df = pd.DataFrame(flat_results)
     
     # Add summary row for the mean
-    mean_row = {k: np.mean(v) for k, v in results.items()}
+    mean_row = {col: np.mean(vals) for col, vals in flat_results.items()}
     df.loc['MEAN'] = mean_row
     
     csv_path = os.path.join(args.output_dir, f"noise_comparison_results_{args.year}.csv")
     df.to_csv(csv_path, float_format='%.4f')
-    print(f"  💾 Saved numerical results to: {csv_path}")
+    print(f"  💾 Saved numerical results (incl. leads) to: {csv_path}")
 
 if __name__ == "__main__":
     main()
