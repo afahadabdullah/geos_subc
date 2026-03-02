@@ -163,11 +163,7 @@ def main():
     
     model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
     
-    model_paths = glob.glob(os.path.join(args.output_dir, "best_model_epoch_*_crps_*.pt"))
-    def extract_crps(path):
-        try: return float(os.path.basename(path).replace('.pt', '').split('_crps_')[-1])
-        except: return 999.0
-    best_ckpt = min(model_paths, key=extract_crps)
+    best_ckpt = os.path.join(args.output_dir, "best_model_epoch_116_crps_1.3479.pt")
     print(f"Loaded: {os.path.basename(best_ckpt)}")
     
     ckpt = torch.load(best_ckpt, map_location=device, weights_only=True)
