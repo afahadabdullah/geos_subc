@@ -245,9 +245,9 @@ def main():
         ("5. VarH(98%)", noise_eof_98, True)
     ]
     
-    print(f"\n{'─'*110}")
-    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>11} {'2. VarH(60)':>11} {'3. VarH(75)':>11} {'4. VarH(90)':>11} {'5. VarH(98)':>11}")
-    print(f"{'─'*110}")
+    print(f"\n{'─'*140}")
+    print(f"  {'Sample':<8} {'Mon':>4} | {'0. GEOS':>11} {'1. Pure':>19} {'2. VarH(60)':>19} {'3. VarH(75)':>19} {'4. VarH(90)':>19} {'5. VarH(98)':>19}")
+    print(f"{'─'*140}")
     
     # Store results as lists of lists: [all, w1, w2, w3, w4]
     results = {"0. GEOS Baseline": []}
@@ -321,8 +321,14 @@ def main():
         def fmt_row(label, vals):
             best_idx = int(np.argmin(vals))
             parts = []
+            geos_v = vals[0]
             for j, v in enumerate(vals):
                 s = f"{v:>11.4f}"
+                if j > 0 and geos_v > 0:
+                    pct = ((geos_v - v) / geos_v) * 100.0
+                    s += f" ({pct:>+5.1f}%)"
+                elif j > 0:
+                    s += " " * 9
                 if j == best_idx:
                     s = f"{BLUE}{BOLD}{s}{RESET}"
                 parts.append(s)
@@ -344,7 +350,7 @@ def main():
         for w in range(4):
             run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
             fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
-        print(f"  {'─'*110}")
+        print(f"  {'─'*140}")
         
         # Incremental CSV save after each batch
         import pandas as pd
@@ -360,7 +366,7 @@ def main():
         csv_path = os.path.join(args.output_dir, f"noise_comparison_results_{args.year}.csv")
         df.to_csv(csv_path, float_format='%.4f')
 
-    print(f"{'─'*115}")
+    print(f"{'─'*140}")
     print(f"  {'MEAN':<8} {'':>4} | ", end="")
     
     # Calculate means (index 0 is total CRPS)
@@ -368,7 +374,8 @@ def main():
     print(f"{geos_mean_total:>11.4f} ", end="")
     for name, _, _ in strategies:
         strat_mean_total = np.mean([x[0] for x in results[name]])
-        print(f"{strat_mean_total:>11.4f} ", end="")
+        pct = ((geos_mean_total - strat_mean_total) / geos_mean_total) * 100.0
+        print(f"{strat_mean_total:>11.4f} ({pct:>+5.1f}%) ", end="")
     print("\n")
     print(f"  💾 Final CSV saved to: {csv_path}")
 
