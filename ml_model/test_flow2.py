@@ -547,8 +547,8 @@ def main():
         corr = cov / (np.sqrt(var_x * var_y) + 1e-8)
         return corr
         
-    model_corr_map = temporal_correlation(all_full_preds_arr, all_targets_arr)
-    geos_corr_map = temporal_correlation(all_geos_means_arr, all_targets_arr)
+    model_corr_map = temporal_correlation(all_full_preds_arr, all_targets_arr).mean(axis=0) # [H, W]
+    geos_corr_map = temporal_correlation(all_geos_means_arr, all_targets_arr).mean(axis=0)  # [H, W]
     
     # Area-Weighted Correlation Averages
     aw_np = area_weights.squeeze().cpu().numpy() # [H]
