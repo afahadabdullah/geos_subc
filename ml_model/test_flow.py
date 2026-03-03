@@ -296,9 +296,24 @@ def main():
     output_data_dir = os.path.join(output_dir, f"test_data_{args.year}_N{args.ensemble_size}")
     os.makedirs(output_data_dir, exist_ok=True)
     
+    # Provide 12 initialization dates (1 per month)
+    rng = random.Random(42)  # Fixed seed for deterministic test samples
+    target_batches = set()
+    total_expected_batches = 52 # 1 year = 52 weeks
+    chunk_size = total_expected_batches / 12.0
+    
+    for m in range(12):
+        start_idx = int(m * chunk_size)
+        end_idx = int((m + 1) * chunk_size) - 1
+        # Handle decimal boundary cases for the last month
+        if m == 11:
+            end_idx = total_expected_batches - 1
+        # Pick one random initialization batch from this 1-month window
+        target_batches.add(rng.randint(start_idx, max(start_idx, end_idx)))
+
     # Check cache integrity (we just added spatial maps so old caches will crash)
-    for i in range(12):
-        df = os.path.join(output_data_dir, f"batch_{i}.npz")
+    for b_idx in target_batches:
+        df = os.path.join(output_data_dir, f"batch_{b_idx}.npz")
         if os.path.exists(df):
             try:
                 with np.load(df) as f:
@@ -307,7 +322,7 @@ def main():
                 print(f"Purging outdated cache: {df}")
                 os.remove(df)
                 
-    all_cached = all([os.path.exists(os.path.join(output_data_dir, f"batch_{i}.npz")) for i in range(12)])
+    all_cached = all([os.path.exists(os.path.join(output_data_dir, f"batch_{b_idx}.npz")) for b_idx in target_batches])
 
     # Load lat values for area weights
     import xarray as xr
@@ -406,28 +421,23 @@ def main():
     all_model_mse_maps = []
     all_geos_crps_maps = []
     all_geos_mse_maps = []
-    
-    # Provide 12 initialization dates (1 per month)
-    rng = random.Random(42)  # Fixed seed for deterministic test samples
-    target_batches = set()
-    total_expected_batches = 52 # 1 year = 52 weeks
-    chunk_size = total_expected_batches / 12.0
-    
-    for m in range(12):
-        start_idx = int(m * chunk_size)
-        end_idx = int((m + 1) * chunk_size) - 1
-        # Handle decimal boundary cases for the last month
-        if m == 11:
-            end_idx = total_expected_batches - 1
-        # Pick one random initialization batch from this 1-month window
-        target_batches.add(rng.randint(start_idx, max(start_idx, end_idx)))
-        
     pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
         if len(all_model_crps) >= 12:
             break
             
-        if batch_idx not in target_batches:
+        if not all_cached and batch_idx not in target_batches:
+            if batch['y_target'].shape[0] != 4:
+                continue
+            continue
+            
+        # When all_cached=True, test_iterator is range(12), so batch_idx is 0..11
+        # We map these sequential indices back to their true randomized batch names to load the right files
+        if all_cached:
+            actual_b_idx = sorted(list(target_batches))[batch_idx]
+            batch_idx = actual_b_idx
+            # Dummy batch
+            batch = {'y_target': torch.zeros((4, 1, 1, 1))}
             continue
             
         if not all_cached:
