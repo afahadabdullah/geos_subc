@@ -22,7 +22,7 @@ cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 # The optimal Phase 1 model before Variance Head pollution
 CKPT="ml_output_flow4/best_model_epoch_115_crps_1.3602.pt"
 
-for YEAR in 2021 2022; do
+for YEAR in 2021; do
     echo "--- Running Inference Validation for Year $YEAR ---"
     python3 ml_model/test_flow.py --config ml_model/config_flow.yaml \
         --ckpt $CKPT \
