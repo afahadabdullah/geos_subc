@@ -464,9 +464,9 @@ def main():
                 geos_single = torch.from_numpy(data['geos_single'])
                 model_single = torch.from_numpy(data['model_single'])
                 
-                save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), m_crps, m_rmse, 
-                               geos_mean_raw.unsqueeze(0), g_crps, g_rmse, output_dir, 
-                               geos_single=geos_single.unsqueeze(0), model_single=model_single.unsqueeze(0),
+                save_test_plot(batch_idx, full_pred, true_target_precip_plot, m_crps, m_rmse, 
+                               geos_mean_raw, g_crps, g_rmse, output_dir, 
+                               geos_single=geos_single, model_single=model_single,
                                lats=lats, lons=lons)
         else:
             # Run inference
