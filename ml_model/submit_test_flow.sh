@@ -19,8 +19,18 @@ export PYTHONUNBUFFERED=1
 # Move to Scratch storage
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
-# The argument points to the best Flow Matcher checkpoint and the year to test
-python3 ml_model/test_flow.py --config ml_model/config_flow.yaml --year 2015 --ensemble-size 20
+# The optimal Phase 1 model before Variance Head pollution
+CKPT="ml_output_flow4/unet_converged_epoch115.pt"
+
+for YEAR in 2021 2022; do
+    echo "--- Running Inference Validation for Year $YEAR ---"
+    python3 ml_model/test_flow.py --config ml_model/config_flow.yaml \
+        --ckpt $CKPT \
+        --year $YEAR \
+        --ensemble-size 30 \
+        --steps 50
+    echo "---------------------------------------------------"
+done
 
 echo "Testing finished!"
 date
