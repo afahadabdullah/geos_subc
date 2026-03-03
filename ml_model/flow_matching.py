@@ -184,20 +184,16 @@ class CustomFlowMatcher:
                              scales the initial noise by sqrt(var_pred).
         """
         if apply_flow_variance:
-            # Query log-variance multiplier at t=0
+            # Query variance at t=0
             t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
-            _, log_var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
-            
-            # Convert log-variance to standard deviation multiplier: std = exp(0.5 * log_var)
-            # This is mathematically guaranteed to be strictly positive and prevents NaN issues.
-            std_mult = torch.exp(0.5 * log_var_pred)
-            
-            # Clamp multiplier to prevent runaway ensemble divergence or collapse
-            # min=0.5 (half variance), max=2.5 (2.5x variance)
-            std_mult = torch.clamp(std_mult, min=0.5, max=2.5)
-            
+            _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
+            # Standard Deviation = sqrt(Variance). Small epsilon for numerical stability.
+            std_pred = torch.sqrt(var_pred + 1e-6)
+            # Clamp to prevent runaway ensemble divergence or collapse
+            # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
+            std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
             # Flow-Dependent scaling of initial condition
-            x_t = noise * std_mult
+            x_t = noise * std_pred
         else:
             x_t = noise.clone()
             
