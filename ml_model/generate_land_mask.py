@@ -1,6 +1,6 @@
 """
 Generate a static land-sea mask from SSS data (NaN over land) and save with diagnostic plot.
-Land pixels get 1.5x weight, Ocean pixels get 1.0x weight in training loss.
+Land pixels get 1.1x weight, Ocean pixels get 0.9x weight in training loss.
 """
 import os
 import numpy as np
@@ -50,17 +50,17 @@ def main():
     print(f"Land pixels: {land_mask.sum()} ({100*land_mask.sum()/land_mask.size:.1f}%)")
     print(f"Ocean pixels: {(~land_mask).sum()} ({100*(~land_mask).sum()/land_mask.size:.1f}%)")
     
-    # Create weighting tensor: 1.5 for land, 1.0 for ocean
-    # This gives approximately 60/40 relative emphasis (1.5 / (1.5+1.0) = 60%)
-    land_ocean_weights = np.where(land_mask, 1.5, 1.0).astype(np.float32)
+    # Create weighting tensor: 1.1 for land, 0.9 for ocean
+    # This gives approximately 55/45 relative emphasis (1.1 / (1.1+0.9) = 55%)
+    land_ocean_weights = np.where(land_mask, 1.1, 0.9).astype(np.float32)
     
     # Save as .pt
     output_path = os.path.join(os.path.dirname(__file__), "land_sea_mask.pt")
     torch.save({
         'land_mask': torch.from_numpy(land_mask),           # [H, W] bool
         'land_ocean_weights': torch.from_numpy(land_ocean_weights),  # [H, W] float32
-        'land_weight': 1.5,
-        'ocean_weight': 1.0,
+        'land_weight': 1.1,
+        'ocean_weight': 0.9,
     }, output_path)
     print(f"\n✅ Saved land-sea mask to {output_path}")
     
@@ -103,10 +103,10 @@ def main():
     axes[1].add_feature(cfeature.COASTLINE, linewidth=0.8, color='blue')
     
     # Panel 3: Land/Ocean Loss Weights
-    im2 = axes[2].imshow(land_ocean_weights, cmap='coolwarm', vmin=0.8, vmax=1.7,
+    im2 = axes[2].imshow(land_ocean_weights, cmap='coolwarm', vmin=0.8, vmax=1.2,
                           origin='lower', extent=extent, transform=ccrs.PlateCarree())
     fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    axes[2].set_title("Loss Weights (Land=1.5, Ocean=1.0)", fontsize=14)
+    axes[2].set_title("Loss Weights (Land=1.1, Ocean=0.9)", fontsize=14)
     axes[2].add_feature(cfeature.COASTLINE, linewidth=0.8)
     
     plt.tight_layout()

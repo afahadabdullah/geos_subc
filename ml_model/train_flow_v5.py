@@ -813,7 +813,7 @@ def train(args, accelerator):
             if land_ocean_weights is not None:
                 spatial_weights = area_weights * land_ocean_weights
 
-            # v5 Joint Loss: Velocity + 0.1 * Variance (from epoch 0)
+            # v5 Joint Loss: 0.95 * Velocity + 0.05 * Variance (from epoch 0)
             loss_v = (spatial_weights * temp_weights * (v_pred - v_target)**2).mean()
             
             # Variance Head loss (gradient-isolated from UNet backbone via .detach() in target_scale)
@@ -827,7 +827,7 @@ def train(args, accelerator):
             loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
             
             loss_var = loss_mse_var + loss_reg
-            loss = loss_v + 0.1 * loss_var
+            loss = 0.95 * loss_v + 0.05 * loss_var
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
