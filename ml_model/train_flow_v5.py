@@ -128,9 +128,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     
     # Sample 6 batches evenly across the validation set for monthly coverage (2 months apart).
     # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
-    # 6 evenly-spaced batches give us representative seasonal coverage.
+    # 12 evenly-spaced batches give us monthly representation.
     total_val_batches = len(val_loader)
-    num_val_samples = 6
+    num_val_samples = 12
     if total_val_batches >= num_val_samples:
         step = total_val_batches / num_val_samples
         target_batches = [int(i * step) for i in range(num_val_samples)]
@@ -166,8 +166,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 8 ensemble members (speed). Full validation: 6 members (quality).
-        num_ensemble = 8 if (is_fast_recon and not is_test) else 6
+        # Fast validation: 12 ensemble members (speed). Full validation: 6 members (quality).
+        num_ensemble = 12 if (is_fast_recon and not is_test) else 6
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
@@ -922,8 +922,8 @@ def train(args, accelerator):
                     print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_crps:.4f}")
                     best_val_crps = current_val_metric
 
-                # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
-                if is_new_best and epoch > 6 and not is_plot_epoch:
+                # Trigger high-quality sampling if new BEST (absolute) found after epoch 100
+                if is_new_best and epoch >= 100 and not is_plot_epoch:
                     num_steps = 50 
                     print(f"📸 Breakthrough! Triggering high-quality {num_steps}-step sampling for diagnostic plots...")
                     best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
