@@ -556,22 +556,14 @@ def main():
         corr = cov / (np.sqrt(var_x * var_y) + 1e-8)
         return corr
         
-    model_corr_map = temporal_correlation(all_full_preds_arr, all_targets_arr).mean(axis=0) # [H, W]
-    geos_corr_map = temporal_correlation(all_geos_means_arr, all_targets_arr).mean(axis=0)  # [H, W]
+    model_corr_maps_4wk = temporal_correlation(all_full_preds_arr, all_targets_arr) # [4, H, W]
+    geos_corr_maps_4wk = temporal_correlation(all_geos_means_arr, all_targets_arr)  # [4, H, W]
     
     # Area-Weighted Correlation Averages
     aw_np = area_weights.squeeze().cpu().numpy() # [H]
-    aw_2d = np.broadcast_to(aw_np[:, np.newaxis], model_corr_map.shape) # [H, W]
+    aw_2d = np.broadcast_to(aw_np[:, np.newaxis], (model_corr_maps_4wk.shape[1], model_corr_maps_4wk.shape[2])) # [H, W]
     
-    mask_model = ~np.isnan(model_corr_map)
-    model_avg_corr = np.nansum(model_corr_map[mask_model] * aw_2d[mask_model]) / (np.nansum(aw_2d[mask_model]) + 1e-8)
-    
-    mask_geos = ~np.isnan(geos_corr_map)
-    geos_avg_corr = np.nansum(geos_corr_map[mask_geos] * aw_2d[mask_geos]) / (np.nansum(aw_2d[mask_geos]) + 1e-8)
-    
-    # Save Correlation Plot
     proj = ccrs.PlateCarree()
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={'projection': proj})
     extent = [lons.min(), lons.max(), lats.min(), lats.max()]
     
     def style_ax_corr(ax, title):
@@ -579,68 +571,81 @@ def main():
         ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
         ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=':')
         ax.set_extent(extent, crs=ccrs.PlateCarree())
+
+    # --- Plot Weekly Correlation Maps ---
+    for wk in range(4):
+        model_corr_map = model_corr_maps_4wk[wk]
+        geos_corr_map = geos_corr_maps_4wk[wk]
+        
+        mask_model = ~np.isnan(model_corr_map)
+        model_avg_corr = np.nansum(model_corr_map[mask_model] * aw_2d[mask_model]) / (np.nansum(aw_2d[mask_model]) + 1e-8)
+        
+        mask_geos = ~np.isnan(geos_corr_map)
+        geos_avg_corr = np.nansum(geos_corr_map[mask_geos] * aw_2d[mask_geos]) / (np.nansum(aw_2d[mask_geos]) + 1e-8)
+        
+        fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={'projection': proj})
+        
+        im0 = axes[0].imshow(geos_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[0], f"Week {wk+1} GEOS Correlation (Avg: {geos_avg_corr:.3f})")
+        
+        im1 = axes[1].imshow(model_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[1], f"Week {wk+1} Model Correlation (Avg: {model_avg_corr:.3f})")
+        
+        diff_corr = model_corr_map - geos_corr_map
+        im2 = axes[2].imshow(diff_corr, cmap='PuOr', vmin=-0.4, vmax=0.4, origin='lower', extent=extent, transform=ccrs.PlateCarree())
+        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+        style_ax_corr(axes[2], f"Week {wk+1} Difference: Model - GEOS")
+        
+        plt.tight_layout()
+        corr_filename = os.path.join(output_dir, "test_plots", f"correlation_map_{args.year}_N{args.ensemble_size}_wk{wk+1}.png")
+        plt.savefig(corr_filename, bbox_inches='tight', dpi=150)
+        plt.close()
     
-    im0 = axes[0].imshow(geos_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
-    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-    style_ax_corr(axes[0], f"GEOS Correlation (Avg: {geos_avg_corr:.3f})")
-    
-    im1 = axes[1].imshow(model_corr_map, cmap='RdYlGn', vmin=-1, vmax=1, origin='lower', extent=extent, transform=ccrs.PlateCarree())
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    style_ax_corr(axes[1], f"Model Correlation (Avg: {model_avg_corr:.3f})")
-    
-    diff_corr = model_corr_map - geos_corr_map
-    im2 = axes[2].imshow(diff_corr, cmap='PuOr', vmin=-0.4, vmax=0.4, origin='lower', extent=extent, transform=ccrs.PlateCarree())
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    style_ax_corr(axes[2], "Difference: Model - GEOS\n(Purple > 0 = Model Better, Orange < 0 = GEOS Better)")
-    
-    plt.tight_layout()
-    corr_filename = os.path.join(output_dir, "test_plots2", f"correlation_map_{args.year}_N{args.ensemble_size}.png")
-    plt.savefig(corr_filename, bbox_inches='tight', dpi=150)
-    plt.close()
-    
-    # --- Generate CRPS Map Plot --- #
-    print("Calculating and Plotting Spatial CRPS and RMSE Maps...")
-    # Concatenate all stored maps of shape [num_inits, 4, H, W] into [Total_inits, 4, H, W]
-    all_model_crps_maps_arr = np.concatenate(all_model_crps_maps, axis=0) 
+    # --- Generate Weekly CRPS & RMSE Map Plots ---
+    print("Calculating and Plotting Spatial CRPS and RMSE Maps per lead week...")
+    all_model_crps_maps_arr = np.concatenate(all_model_crps_maps, axis=0) # [T, 4, H, W]
     all_geos_crps_maps_arr = np.concatenate(all_geos_crps_maps, axis=0)
     all_model_mse_maps_arr = np.concatenate(all_model_mse_maps, axis=0)
     all_geos_mse_maps_arr = np.concatenate(all_geos_mse_maps, axis=0)
 
-    # Average over all initialization dates and 4 lead weeks to create a global spatial map [H, W]
-    avg_model_crps_map = np.mean(all_model_crps_maps_arr, axis=(0, 1)) # [H, W]
-    avg_geos_crps_map = np.mean(all_geos_crps_maps_arr, axis=(0, 1)) 
+    avg_model_crps_maps_4wk = np.mean(all_model_crps_maps_arr, axis=0) # [4, H, W]
+    avg_geos_crps_maps_4wk = np.mean(all_geos_crps_maps_arr, axis=0) 
     
-    avg_model_rmse_map = np.sqrt(np.mean(all_model_mse_maps_arr, axis=(0, 1)))
-    avg_geos_rmse_map = np.sqrt(np.mean(all_geos_mse_maps_arr, axis=(0, 1)))
+    avg_model_rmse_maps_4wk = np.sqrt(np.mean(all_model_mse_maps_arr, axis=0))
+    avg_geos_rmse_maps_4wk = np.sqrt(np.mean(all_geos_mse_maps_arr, axis=0))
     
-    # Helper to plot 3-panel error maps
-    def plot_error_map(geos_map, model_map, metric_name, vmin, vmax, diff_vmax, filename):
+    def plot_error_map(geos_map, model_map, metric_name, vmin, vmax, diff_vmax, filename, title_prefix):
         fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={'projection': proj})
         
-        # GEOS
         im0 = axes[0].imshow(geos_map, cmap='OrRd', vmin=vmin, vmax=vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
         fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-        style_ax_corr(axes[0], f"GEOS {metric_name} Error")
+        style_ax_corr(axes[0], f"{title_prefix} GEOS {metric_name} Error")
         
-        # Model
         im1 = axes[1].imshow(model_map, cmap='OrRd', vmin=vmin, vmax=vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
         fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-        style_ax_corr(axes[1], f"Model {metric_name} Error")
+        style_ax_corr(axes[1], f"{title_prefix} Model {metric_name} Error")
         
-        # Difference (GEOS - Model : Positive means GEOS error > Model error => Green = Model Better)
         diff_err = geos_map - model_map
         im2 = axes[2].imshow(diff_err, cmap='PiYG', vmin=-diff_vmax, vmax=diff_vmax, origin='lower', extent=extent, transform=ccrs.PlateCarree())
         fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-        style_ax_corr(axes[2], f"{metric_name} Improvement: GEOS - Model\n(Green > 0 = Model Better, Pink < 0 = GEOS Better)")
+        style_ax_corr(axes[2], f"{title_prefix} {metric_name} Impr: GEOS-Model (>0 Model Better)")
         
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "test_plots2", filename), bbox_inches='tight', dpi=150)
+        plt.savefig(os.path.join(output_dir, "test_plots", filename), bbox_inches='tight', dpi=150)
         plt.close()
         
-    plot_error_map(avg_geos_crps_map, avg_model_crps_map, "CRPS", 0, 8, 3, f"crps_map_{args.year}_N{args.ensemble_size}.png")
-    plot_error_map(avg_geos_rmse_map, avg_model_rmse_map, "RMSE", 0, 15, 5, f"rmse_map_{args.year}_N{args.ensemble_size}.png")
+    for wk in range(4):
+        plot_error_map(avg_geos_crps_maps_4wk[wk], avg_model_crps_maps_4wk[wk], "CRPS", 0, 8, 3, f"crps_map_{args.year}_N{args.ensemble_size}_wk{wk+1}.png", f"Week {wk+1}")
+        plot_error_map(avg_geos_rmse_maps_4wk[wk], avg_model_rmse_maps_4wk[wk], "RMSE", 0, 15, 5, f"rmse_map_{args.year}_N{args.ensemble_size}_wk{wk+1}.png", f"Week {wk+1}")
 
-    # Final Area-Weighted Global Error Scorings from the Spatial Maps
+    # Final Area-Weighted Global Error Scorings from the multi-week average Maps
+    avg_model_crps_map = np.mean(avg_model_crps_maps_4wk, axis=0) # [H, W]
+    avg_geos_crps_map = np.mean(avg_geos_crps_maps_4wk, axis=0)
+    avg_model_rmse_map = np.sqrt(np.mean(np.mean(all_model_mse_maps_arr, axis=0), axis=0))
+    avg_geos_rmse_map = np.sqrt(np.mean(np.mean(all_geos_mse_maps_arr, axis=0), axis=0))
+
     m_crps_mask = ~np.isnan(avg_model_crps_map)
     avg_model_crps_test = np.nansum(avg_model_crps_map[m_crps_mask] * aw_2d[m_crps_mask]) / (np.nansum(aw_2d[m_crps_mask]) + 1e-8)
     
