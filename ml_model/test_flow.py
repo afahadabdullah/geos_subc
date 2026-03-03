@@ -256,9 +256,9 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     
     if save_plot:
         # Generate diagnostic plot for this batch
-        save_test_plot(batch_idx, full_pred.unsqueeze(0), true_target_precip_plot.unsqueeze(0), val_metric, model_rmse, 
-                       geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, output_dir, 
-                       geos_single=geos_ens_sample[0].unsqueeze(0), model_single=ensemble_preds_precip[0].unsqueeze(0),
+        save_test_plot(batch_idx, full_pred, true_target_precip_plot, val_metric, model_rmse, 
+                       geos_mean_raw, geos_crps, geos_rmse, output_dir, 
+                       geos_single=geos_ens_sample[:, 0], model_single=ensemble_preds_precip[0],
                        lats=lats, lons=lons)
                    
     tensors = {
@@ -406,21 +406,24 @@ def main():
     all_geos_crps_maps = []
     all_geos_mse_maps = []
     
-    # Provide 6 initialization dates (2 months apart)
-    rng = random.Random(42)
+    # Provide 12 initialization dates (1 per month)
+    rng = random.Random(42)  # Fixed seed for deterministic test samples
     target_batches = set()
     total_expected_batches = 52 # 1 year = 52 weeks
-    chunk_size = total_expected_batches / 6.0
+    chunk_size = total_expected_batches / 12.0
     
-    for m in range(6):
+    for m in range(12):
         start_idx = int(m * chunk_size)
         end_idx = int((m + 1) * chunk_size) - 1
-        # Pick one random initialization batch from this 2-month window
-        target_batches.add(rng.randint(start_idx, end_idx))
+        # Handle decimal boundary cases for the last month
+        if m == 11:
+            end_idx = total_expected_batches - 1
+        # Pick one random initialization batch from this 1-month window
+        target_batches.add(rng.randint(start_idx, max(start_idx, end_idx)))
         
     pbar = tqdm(test_iterator, desc=f"Testing {args.year}", leave=True)
     for batch_idx, batch in enumerate(pbar):
-        if len(all_model_crps) >= 6:
+        if len(all_model_crps) >= 12:
             break
             
         if batch_idx not in target_batches:
