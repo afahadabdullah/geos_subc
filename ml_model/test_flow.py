@@ -518,20 +518,16 @@ def main():
         all_geos_crps.append(g_crps)
         all_geos_rmse.append(g_rmse)
         
-        # Determine current divisor (how many inits we've seen)
-        total_so_far = sum([n_inits if 'n_inits' in locals() else 1 for _ in all_model_crps]) # Approx logic wrapper
-        # Since we just appended sums, we use total inits so far locally
-        # Or simpler for pbar: just sum / total test dataset items seen.
-        seen_inits = batch_idx * 4 // 4 + n_inits if not all_cached else batch_idx * 1 + 1 
-        if all_cached: seen_inits = len(all_model_crps) # Rough
+        # Simple progress tracking: count how many batches we've processed
+        num_batches_done = len(all_model_crps)
         
         with open(csv_file, mode='a', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow([batch_idx, m_crps / n_inits, m_rmse / n_inits, g_crps / n_inits, g_rmse / n_inits])
+            writer.writerow([batch_idx, m_crps, m_rmse, g_crps, g_rmse])
             
         pbar.set_postfix({
-            "M_CRPS": f"{sum(all_model_crps) / seen_inits:.3f}",
-            "G_CRPS": f"{sum(all_geos_crps) / seen_inits:.3f}"
+            "M_CRPS": f"{sum(all_model_crps) / num_batches_done:.3f}",
+            "G_CRPS": f"{sum(all_geos_crps) / num_batches_done:.3f}"
         })
 
     print("\nCalculating Temporal Correlation Maps...")
