@@ -154,11 +154,13 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # of the GEOS ensemble to force the model to explore uncertainty exactly where
     # the physics model is uncertain.
     # ---------------------------------------------------------------------------------
-    # Calculate GEOS structural variance across the 4 members, for all leads [4, H, W]
-    geos_struct_var = geos_ens_sample.var(dim=0) # [4, H, W]
+    # Calculate GEOS structural variance across the 4 members, for all leads [num_inits, 4, H, W]
+    geos_struct_var = geos_ens_sample.var(dim=1) # [num_inits, 4, H, W]
     
     # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members simultaneously ---
-    vB = batch['x_obs'].shape[0] # Should be 4
+    vB = batch['x_obs'].shape[0] # Should be num_inits * 4
+    
+    geos_struct_var = geos_struct_var.view(vB, H, W) # [vB, H, W]
     
     fx_obs = batch['x_obs'].to(device) # [vB, C, H, W]
     fx_geos = batch['x_geos'].to(device) # [vB, 1, 4, H, W]
