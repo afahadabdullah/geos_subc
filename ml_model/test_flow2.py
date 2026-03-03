@@ -438,7 +438,6 @@ def main():
             batch_idx = actual_b_idx
             # Dummy batch
             batch = {'y_target': torch.zeros((4, 1, 1, 1))}
-            continue
             
         if not all_cached:
             # We process tests sample by sample for accurate ensemble aggregation
