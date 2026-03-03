@@ -28,7 +28,7 @@ for YEAR in 2021; do
         --ckpt $CKPT \
         --year $YEAR \
         --ensemble-size 30 \
-        --steps 50
+        --steps 10
     echo "---------------------------------------------------"
 done
 

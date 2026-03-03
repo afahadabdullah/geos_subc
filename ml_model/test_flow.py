@@ -19,7 +19,8 @@ from flow_matching import FlowMatchingModel, CustomFlowMatcher
 def get_area_weights(lats, device):
     lats_rad = np.deg2rad(lats)
     weights = np.cos(lats_rad)
-    weights = weights / np.mean(weights)
+    weights = np.maximum(weights, 0)
+    weights = weights / weights.sum()  # Normalize to sum to 1 (matches compare_noise.py)
     weights_tensor = torch.from_numpy(weights).float().to(device)
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
@@ -217,7 +218,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # Single parallel ODE solve for the entire test batch and ensemble
     p_x1_expanded = flow_matcher.euler_solve(
         model, smart_noise_expanded, fx_cond_expanded, 
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
     )
     
     # Reshape back to [vB, num_ensemble, H, W]
@@ -280,7 +281,7 @@ def main():
     parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
     parser.add_argument("--ensemble-size", type=int, default=4, help="Number of members in smart noise ensemble")
-    parser.add_argument("--steps", type=int, default=50, help="Number of Euler steps for ODE solve")
+    parser.add_argument("--steps", type=int, default=10, help="Number of Euler steps for ODE solve")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
