@@ -746,6 +746,8 @@ def train(args, accelerator):
         
         model.train()
         train_loss = 0.0
+        train_loss_v = 0.0
+        train_loss_var = 0.0
         pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch} [v5-Joint]")
 
         for i, batch in enumerate(pbar):    
@@ -835,12 +837,16 @@ def train(args, accelerator):
             optimizer.zero_grad()
 
             train_loss += loss.item()
+            train_loss_v += loss_v.item()
+            train_loss_var += loss_var.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}", "v": f"{loss_v.item():.4f}", "var": f"{loss_var.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
+        avg_train_loss_v = train_loss_v / len(loader)
+        avg_train_loss_var = train_loss_var / len(loader)
         
         if accelerator.is_main_process:
-            print(f"📈 Epoch {epoch} Training Loss (Noise MSE): {avg_train_loss:.4f}")
+            print(f"📈 Epoch {epoch} Training Loss (Joint MSE): {avg_train_loss:.4f} [v: {avg_train_loss_v:.4f} | var: {avg_train_loss_var:.4f}]")
 
         # ---------------------------------------------------------
         # Unconditional Epoch-End Resume Checkpoint
