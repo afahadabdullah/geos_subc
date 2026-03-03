@@ -104,116 +104,102 @@ def run_val_inference(epoch, model, val_loader, scheduler, device, accelerator, 
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # We'll evaluate on the first batch of the val_loader for consistent plotting/metrics
+    # Take the first batch (BatchSize=4 expected). These represent leads 1, 2, 3, 4 of the first val date.
     batch = next(iter(val_loader))
-    fb_target = batch['y_target'].to(device)
-    # true_raw_target = batch['target_raw'].to(device) # No longer needed in plots
-    vB, _, H, W = fb_target.shape
+    fb_target_norm = batch['y_target'].to(device) # [4, 1, H, W]
+    vB, _, H, W = fb_target_norm.shape
     
-    fx_geos = batch['x_geos'].to(device) 
-    fx_obs  = batch['x_obs'].to(device)
-    fx_geos_flat = fx_geos.view(vB, -1, H, W)
+    # Prepare Ground Truth Precip (4, H, W)
+    # We use 'target_raw_full' which is (4, H, W) - redundant across batch members but reliable
+    true_target_precip = batch['target_raw_full'][0].to(device) # [4, H, W]
     
-    f_months = batch['month'].to(device)
-    fsin_month = torch.sin(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
-    fcos_month = torch.cos(2 * np.pi * (f_months - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    # Prepare GEOS Baseline (4, H, W)
+    geos_ens_raw = batch['geos_ens_raw'].to(device) # [4, M=4, L=4, H, W]
+    # Members for the first sample in batch
+    geos_ens_sample = geos_ens_raw[0] # [M=4, L=4, H, W]
+    geos_mean_raw = geos_ens_sample.mean(dim=0) # [4, H, W]
     
-    fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month], dim=1) # [vB, 30, H, W]
+    # Prepare 4-week prediction buffer
+    pred_res_norm_agg = torch.zeros((4, H, W), device=device)
     
-    if is_fast_recon and not is_test:
-        # Ensemble-based Fast Reconstruction at t=500 for CRPS
-        num_ensemble = 10
-        t_recon = 500
-        t_batched = torch.full((vB,), t_recon, device=device, dtype=torch.long)
-        
-        ensemble_preds_norm = []
-        for _ in range(num_ensemble):
-            noise = torch.randn_like(fb_target)
-            x_t = scheduler.add_noise(fb_target, noise, t_batched)
-            pred_noise = unwrapped_model(x_t, fx_cond, t_batched)
-            pred_x0 = scheduler.reconstruct_x0(pred_noise, t_batched, x_t)
-            ensemble_preds_norm.append(pred_x0)
-            
-        # ensemble_preds_norm: [E, B, 4, H, W]
-        ensemble_preds_norm = torch.stack(ensemble_preds_norm)
-        
-        # Calculate CRPS in normalized space (or physical, user didn't specify, but RMSE was physical)
-        # Let's convert ensemble to physical units for physical CRPS
-        ensemble_residuals_raw = ((ensemble_preds_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-        
-        fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
-        fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
-        
-        ensemble_full_raw = fx_geos_raw.unsqueeze(0) + ensemble_residuals_raw
-        ensemble_full_precip = torch.clamp(ensemble_full_raw, min=0.0)
-        
-        # Ground truth in physical units
-        demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-        true_target_raw = fx_geos_raw + demap_target_residual_raw
-        true_target_precip = torch.clamp(true_target_raw, min=0.0)
-        
-        # Calculate CRPS
-        val_metric = compute_crps(ensemble_full_precip, true_target_precip, area_weights)
-        
-        # Calculate Model RMSE
-        full_pred = ensemble_full_precip.mean(dim=0)
-        model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
-        
-        # Calculate GEOS Baseline Metrics
-        geos_ens_raw = batch['geos_ens_raw'].to(device) # [B, M=4, L, H, W]
-        geos_crps = compute_crps(geos_ens_raw.transpose(0, 1), true_target_precip, area_weights)
-        geos_mean_raw = geos_ens_raw.mean(dim=1)
-        geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
-        
-        recon_type = f"FastEnsembleCRPS (n={num_ensemble}, t=500)"
-    else:
-        # Full Reverse Sampling (1000 steps) with 4 members
-        num_ens_full = 5
-        ensemble_preds_full_norm = []
-        
-        for eidx in range(num_ens_full):
-            latents = torch.randn((vB, 4, H, W), device=device)
-            for t in tqdm(reversed(range(0, scheduler.num_timesteps)), 
-                          desc=f"Reverse Sampling [Member {eidx+1}/{num_ens_full}]", 
-                          leave=False, disable=not accelerator.is_main_process):
-                t_batched = torch.full((vB,), t, device=device, dtype=torch.long)
-                pred_noise = unwrapped_model(latents, fx_cond, t_batched)
-                latents = scheduler.step(pred_noise, t, latents)
-            ensemble_preds_full_norm.append(latents)
-            
-        ensemble_preds_full_norm = torch.stack(ensemble_preds_full_norm) # [E, B, 4, H, W]
-        
-        # Denormalization
-        denorm_res_full_raw = ((ensemble_preds_full_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-        fx_geos_norm = fx_geos.squeeze(1).squeeze(1)
-        fx_geos_raw = ((fx_geos_norm + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
-        
-        ensemble_full_precip = torch.clamp(fx_geos_raw.unsqueeze(0) + denorm_res_full_raw, min=0.0)
-        
-        # Ground truth in physical units
-        demap_target_residual_raw = ((fb_target + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
-        true_target_precip = torch.clamp(fx_geos_raw + demap_target_residual_raw, min=0.0)
-        
-        # CRPS for full sampling (if n=4)
-        val_metric = compute_crps(ensemble_full_precip, true_target_precip, area_weights)
-        full_pred = ensemble_full_precip.mean(dim=0)
-        model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
-        
-        # Calculate GEOS Baseline Metrics
-        geos_ens_raw = batch['geos_ens_raw'].to(device)
-        geos_crps = compute_crps(geos_ens_raw.transpose(0, 1), true_target_precip, area_weights)
-        geos_mean_raw = geos_ens_raw.mean(dim=1)
-        geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
-        
-        recon_type = f"FullSampling (n={num_ens_full})"
+    # We collect ensemble members for CRPS if fast_recon
+    num_ensemble = 10 if is_fast_recon and not is_test else (5 if is_test else 1)
+    ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
+    for eidx in range(num_ensemble):
+        sample_weeks = []
+        for lead_idx in range(4):
+            # Extract lead-specific conditioning from the batch
+            # Index 0-3 in the batch correspond to leads 0-3
+            fx_obs = batch['x_obs'][lead_idx].unsqueeze(0).to(device)  # [1, 24, H, W]
+            fx_geos = batch['x_geos'][lead_idx].to(device)              # [1, 1, 4, H, W]
+            fx_geos_flat = fx_geos.view(1, -1, H, W)                    # [1, 4, H, W]
+            
+            f_month = batch['month'][lead_idx].to(device).view(1)
+            fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            # Lead Embedding (Match training logic)
+            fl_idx = batch['lead_idx'][lead_idx].to(device).view(1)
+            f_lead_val = (fl_idx.float() / 1.5) - 1.0
+            f_lead_channel = f_lead_val.view(1, 1, 1, 1).expand(1, 1, H, W)
+            
+            fx_cond = torch.cat([fx_obs, fx_geos_flat, fsin_month, fcos_month, f_lead_channel], dim=1) # [1, 31, H, W]
+            
+            target_norm_week = fb_target_norm[lead_idx].unsqueeze(0) # [1, 1, H, W]
+            
+            if is_fast_recon and not is_test:
+                # Fast reconstruction (1-step)
+                t_recon = 500
+                t_batched = torch.full((1,), t_recon, device=device, dtype=torch.long)
+                noise = torch.randn_like(target_norm_week)
+                x_t = scheduler.add_noise(target_norm_week, noise, t_batched)
+                with torch.no_grad():
+                    p_noise = unwrapped_model(x_t, fx_cond, t_batched)
+                    p_x0 = scheduler.reconstruct_x0(p_noise, t_batched, x_t)
+                week_res_norm = p_x0.squeeze(0) # [1, H, W]
+            else:
+                # Full Reverse Sampling (1000 steps)
+                latents = torch.randn((1, 1, H, W), device=device)
+                steps = 1000 if not is_fast_recon else 10 # very fast check
+                for t in reversed(range(0, scheduler.num_timesteps)):
+                    t_batched = torch.full((1,), t, device=device, dtype=torch.long)
+                    with torch.no_grad():
+                        p_noise = unwrapped_model(latents, fx_cond, t_batched)
+                        latents = scheduler.step(p_noise, t, latents)
+                week_res_norm = latents.squeeze(0) # [1, H, W]
+            
+            # Convert residual back to physical units
+            week_res_raw = ((week_res_norm + 1.0) / 2.0) * (residual_max - residual_min) + residual_min
+            # Add to GEOS Mean for the specific week
+            week_precip = torch.clamp(geos_mean_raw[lead_idx] + week_res_raw.squeeze(0), min=0.0)
+            sample_weeks.append(week_precip)
+            
+        ensemble_preds_precip.append(torch.stack(sample_weeks)) # [4, H, W]
+
+    ensemble_preds_precip = torch.stack(ensemble_preds_precip) # [E, 4, H, W]
+    full_pred = ensemble_preds_precip.mean(dim=0) # [4, H, W]
+    
+    # Calculate CRPS
+    # compute_crps expects [E, B, C, H, W] and [B, C, H, W]
+    val_metric = compute_crps(ensemble_preds_precip.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    
+    # Calculate Model RMSE
+    model_rmse = torch.sqrt(((full_pred - true_target_precip)**2 * area_weights).mean()).item()
+    
+    # Calculate GEOS Baseline Metrics
+    # geos_ens_sample: [M=4, L=4, H, W]
+    geos_crps = compute_crps(geos_ens_sample.unsqueeze(1), true_target_precip.unsqueeze(0), area_weights)
+    geos_rmse = torch.sqrt(((geos_mean_raw - true_target_precip)**2 * area_weights).mean()).item()
+    
+    recon_type = f"SingleLead-Ensemble (n={num_ensemble})"
     if accelerator.is_main_process:
-        metric_name = "CRPS" if "CRPS" in recon_type else "RMSE"
-        print(f"Epoch {epoch} | Val {metric_name} [{recon_type}]: {val_metric:.4f}")
+        print(f"Epoch {epoch} | Val CRPS [{recon_type}]: {val_metric:.4f}")
         
-    # Col 5 will now show AI Innovation: Model Pred - GEOS Mean
     ai_residual = full_pred - geos_mean_raw
-    return val_metric, full_pred, true_target_precip, model_rmse, geos_mean_raw, geos_crps, geos_rmse, ai_residual
+    
+    # We return them unsqueezed as [1, 4, H, W] for save_val_plot's [0] indexing
+    return val_metric, full_pred.unsqueeze(0), true_target_precip.unsqueeze(0), model_rmse, geos_mean_raw.unsqueeze(0), geos_crps, geos_rmse, ai_residual.unsqueeze(0)
 
 def train(args, accelerator):
     device = accelerator.device
@@ -283,7 +269,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = DiffusionModelV4(in_channels=34, out_channels=4).to(device)
+    model = DiffusionModelV4(in_channels=32, out_channels=1).to(device)
     scheduler = CustomDiffusionScheduler(num_timesteps=1000, device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -460,22 +446,30 @@ def train(args, accelerator):
         pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
 
         for i, batch in enumerate(pbar):    
-            # Conditionals: [B, 48, H, W]
-            x_geos = batch['x_geos'].to(device) 
-            x_obs  = batch['x_obs'].to(device)
+            # Conditionals: [B, 31, H, W]
+            x_geos = batch['x_geos'].to(device) # [B, 1, 1, 4, H, W]
+            x_obs  = batch['x_obs'].to(device)  # [B, 24, H, W]
             
-            B, M, C, L, H, W = x_geos.shape
-            x_geos_flat = x_geos.view(B, -1, H, W)
+            B, M, C_extra, L, H, W = x_geos.shape
+            # Flatten GEOS weeks 1-4 into channels
+            x_geos_flat = x_geos.view(B, -1, H, W) # [B, 4, H, W]
             
             months = batch['month'].to(device)
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
             cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
 
-            # Conditionals are already normalized [-1, 1] by dataset_hybrid
-            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month], dim=1) # [B, 30, H, W]
+            # --- Lead Embedding (NEW) ---
+            lead_idx = batch['lead_idx'].to(device) # [B]
+            # Map [0, 1, 2, 3] to [-1.0, -0.33, 0.33, 1.0]
+            lead_val = (lead_idx.float() / 1.5) - 1.0 
+            lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
 
-            # Targets are already log-residual normalized [-1, 1] by dataset_hybrid
-            target_norm = batch['y_target'].to(device) # [B, 4, H, W]
+            # Conditionals are already normalized [-1, 1] by dataset_hybrid
+            # Total: 24 (Obs) + 4 (GEOS) + 2 (Month) + 1 (Lead) = 31 channels
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
+
+            # Targets are already residual normalized [-1, 1] by dataset_hybrid
+            target_norm = batch['y_target'].to(device) # [B, 1, H, W]
 
             if epoch == start_epoch and i == 0 and accelerator.is_main_process:
                 print(f"\n--- DEBUG | Train Batch 0 Exhaustive Diagnostics ---")
@@ -488,6 +482,7 @@ def train(args, accelerator):
                     print(f"  {vname:<4} Bounds (Norm) : {v_raw:>6.2f} to {v_max:>6.2f}")
                 
                 print(f"  GEOS Bounds (Norm) : {x_geos.min().item():>6.2f} to {x_geos.max().item():>6.2f}")
+                print(f"  Lead Index         : {lead_idx[0].item()} (Val: {lead_val[0].item():.2f})")
                 print(f"  Final x_cond shape : {x_cond.shape}")
                 print(f"  Final x_cond bounds: {x_cond.min().item():>6.2f} to {x_cond.max().item():>6.2f}")
                 print(f"  Target Bounds (Norm): {target_norm.min().item():>6.2f} to {target_norm.max().item():>6.2f}")

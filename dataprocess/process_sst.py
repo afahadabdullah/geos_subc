@@ -102,6 +102,11 @@ def process_year(year, sst_dir=SST_DIR, output_dir=OUTPUT_DIR):
     4. Compute 4 weekly means before each init date
     5. Save as Zarr
     """
+    out_path = os.path.join(output_dir, f"sst_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS to get init dates and grid
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
@@ -227,7 +232,7 @@ if __name__ == "__main__":
                         help=f"Directory containing sst.day.mean.{{year}}.nc files (default: {SST_DIR})")
     args = parser.parse_args()
     
-    years = args.years if args.years else list(range(1999, 2017))
+    years = args.years if args.years else list(range(1999, 2026))
     
     print(f"Processing SST for years: {years}")
     print(f"SST source dir: {args.sst_dir}")

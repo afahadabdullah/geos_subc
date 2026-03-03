@@ -6,6 +6,11 @@ import glob
 from tqdm import tqdm
 
 def process_year(year, output_dir="dataprocess"):
+    out_path = f"{output_dir}/gpcp_weekly_{year}.zarr"
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS Forecast to get Init dates and Grid
     geos_path = f"dataprocess/geos_subc_{year}.zarr"
     if not os.path.exists(geos_path):
@@ -39,7 +44,8 @@ def process_year(year, output_dir="dataprocess"):
     # Load with Xarray
     # We use 'precip' variable usually in GPCP
     try:
-        ds_gpcp = xr.open_mfdataset(gpcp_files + next_year_files, combine='by_coords')
+        # coords='minimal' and compat='override' handle slight differences in metadata/coords between daily files
+        ds_gpcp = xr.open_mfdataset(gpcp_files + next_year_files, combine='by_coords', coords='minimal', compat='override')
     except Exception as e:
         print(f"Error loading GPCP netcdfs: {e}")
         return
@@ -135,5 +141,5 @@ def process_year(year, output_dir="dataprocess"):
     print(f"Finished {year}.")
 
 if __name__ == "__main__":
-    for year in range(1999, 2017):
+    for year in range(1999, 2026):
         process_year(year)

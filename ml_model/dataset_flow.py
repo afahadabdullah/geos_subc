@@ -21,30 +21,24 @@ class S2SHybridDataset(Dataset):
         
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
-                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt"):
+                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt", subsample_monthly=False):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
         self.preload = preload
         self.normalize = normalize
         self.stats_file = stats_file
+        self.subsample_monthly = subsample_monthly
         
         # Load Stats
         if self.normalize:
             self.load_stats()
         
-        # Load MJO Data
-        mjo_path = os.path.join(self.data_root, "mjo_processed.csv")
-        if os.path.exists(mjo_path):
-            import pandas as pd
-            self.df_mjo = pd.read_csv(mjo_path)
-            self.df_mjo['S'] = pd.to_datetime(self.df_mjo['S'])
-            self.df_mjo = self.df_mjo.set_index('S')
-        else:
-            self.df_mjo = None
-        
         # Index samples
         self.prepare_samples()
+        
+        # Load MJO phase lookup for EOF-based noise
+        self._load_mjo_phases()
         
         if self.preload:
             self._preload_data()
@@ -69,14 +63,40 @@ class S2SHybridDataset(Dataset):
         samples_tmp = []
         
         for year in self.years:
-            # File paths
-            geos_path = os.path.join(self.data_root, f"geos_subc_{year}.zarr")
-            gpcp_path = os.path.join(self.data_root, f"gpcp_weekly_{year}.zarr")
-            sst_path = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
-            sss_path = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
-            sm_path = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
-            ivt_path = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
-            z500u250_path = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
+            # GEOS Path (Check both S2S legacy and FIMR new format)
+            geos_path_s2s = os.path.join(self.data_root, "geos_s2s", f"{year}.zarr")
+            geos_path_fimr = os.path.join(self.data_root, f"geos_subc_{year}.zarr")
+            geos_path = geos_path_fimr if os.path.exists(geos_path_fimr) else geos_path_s2s
+            
+            # GPCP Path (Check both formats)
+            gpcp_path_old = os.path.join(self.data_root, "gpcp", f"{year}.zarr")
+            gpcp_path_new = os.path.join(self.data_root, f"gpcp_weekly_{year}.zarr")
+            gpcp_path = gpcp_path_new if os.path.exists(gpcp_path_new) else gpcp_path_old
+            
+            # Observational Paths (Check both formats)
+            sst_path_old = os.path.join(self.data_root, "sst", f"{year}.zarr")
+            sst_path_new = os.path.join(self.data_root, f"sst_weekly_{year}.zarr")
+            sst_path = sst_path_new if os.path.exists(sst_path_new) else sst_path_old
+            
+            sss_path_old = os.path.join(self.data_root, "sss", f"{year}.zarr")
+            sss_path_new = os.path.join(self.data_root, f"sss_weekly_{year}.zarr")
+            sss_path = sss_path_new if os.path.exists(sss_path_new) else sss_path_old
+            
+            sm_path_old = os.path.join(self.data_root, "soilw", f"{year}.zarr")
+            sm_path_new = os.path.join(self.data_root, f"soilw_weekly_{year}.zarr")
+            sm_path = sm_path_new if os.path.exists(sm_path_new) else sm_path_old
+            
+            ivt_path_old = os.path.join(self.data_root, "ivt", f"{year}.zarr")
+            ivt_path_new = os.path.join(self.data_root, f"ivt_weekly_{year}.zarr")
+            ivt_path = ivt_path_new if os.path.exists(ivt_path_new) else ivt_path_old
+            
+            mjo_path_old = os.path.join(self.data_root, "mjo", f"{year}.zarr")
+            mjo_path_new = os.path.join(self.data_root, f"mjowave_weekly_{year}.zarr")
+            mjo_path = mjo_path_new if os.path.exists(mjo_path_new) else mjo_path_old
+            
+            z500u250_path_old = os.path.join(self.data_root, "z500_u250", f"{year}.zarr")
+            z500u250_path_new = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
+            z500u250_path = z500u250_path_new if os.path.exists(z500u250_path_new) else z500u250_path_old
             
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
@@ -92,6 +112,7 @@ class S2SHybridDataset(Dataset):
                 has_sss = os.path.exists(sss_path)
                 has_sm = os.path.exists(sm_path)
                 has_ivt = os.path.exists(ivt_path)
+                has_mjo = os.path.exists(mjo_path)
                 has_z500u250 = os.path.exists(z500u250_path)
                 
                 # DIAGNOSTIC: Print once per data_root if files are missing
@@ -103,13 +124,21 @@ class S2SHybridDataset(Dataset):
                     print(f"  SSS : {'OK' if has_sss else 'MISSING'} ({os.path.basename(sss_path)})")
                     print(f"  SM  : {'OK' if has_sm else 'MISSING'} ({os.path.basename(sm_path)})")
                     print(f"  IVT : {'OK' if has_ivt else 'MISSING'} ({os.path.basename(ivt_path)})")
+                    print(f"  MJO : {'OK' if has_mjo else 'MISSING'} ({os.path.basename(mjo_path)})")
                     print(f"  Z500: {'OK' if has_z500u250 else 'MISSING'} ({os.path.basename(z500u250_path)})")
                     print("-----------------------------")
                 
                 n_samples = ds_geos.sizes['S']
                 init_dates = pd.to_datetime(ds_geos['S'].values)
                 
+                seen_months_this_year = set()
+                
                 for s_idx, s_date in enumerate(init_dates):
+                    if self.subsample_monthly:
+                        if s_date.month in seen_months_this_year:
+                            continue
+                        seen_months_this_year.add(s_date.month)
+                        
                     all_init_dates.append(s_date)
                     # Every initialization has 4 leads (weeks 1-4)
                     for lead_idx in range(4):
@@ -125,6 +154,7 @@ class S2SHybridDataset(Dataset):
                             "sss_path": sss_path if has_sss else None,
                             "sm_path": sm_path if has_sm else None,
                             "ivt_path": ivt_path if has_ivt else None,
+                            "mjo_path": mjo_path if has_mjo else None,
                             "z500u250_path": z500u250_path if has_z500u250 else None
                         })
                 
@@ -152,6 +182,41 @@ class S2SHybridDataset(Dataset):
                  
         self.samples = samples_tmp
         print(f"Found {len(self.samples)} samples. Prev-Init map built.")
+
+    def _load_mjo_phases(self):
+        """Load MJO phase lookup from mjo_processed.csv using lagged RMM indices."""
+        self.mjo_phase_map = {}
+        mjo_csv = os.path.join(self.data_root, "mjo_processed.csv")
+        
+        if not os.path.exists(mjo_csv):
+            print(f"  ⚠️ MJO CSV not found at {mjo_csv}. All phases default to 0 (weak MJO).")
+            return
+        
+        mjo_df = pd.read_csv(mjo_csv, parse_dates=['S'])
+        
+        for _, row in mjo_df.iterrows():
+            rmm1 = row['RMM1_lagged']
+            rmm2 = row['RMM2_lagged']
+            init_date_str = str(row['S'])[:10]  # 'YYYY-MM-DD'
+            
+            if pd.isna(rmm1) or pd.isna(rmm2):
+                self.mjo_phase_map[init_date_str] = 0
+                continue
+            
+            amplitude = np.sqrt(rmm1**2 + rmm2**2)
+            if amplitude < 1.0:
+                self.mjo_phase_map[init_date_str] = 0
+            else:
+                angle = np.arctan2(rmm2, rmm1) % (2 * np.pi)
+                phase = int(angle / (2 * np.pi / 8)) + 1
+                self.mjo_phase_map[init_date_str] = min(phase, 8)
+        
+        # Count distribution
+        phase_dist = {}
+        for p in self.mjo_phase_map.values():
+            phase_dist[p] = phase_dist.get(p, 0) + 1
+        print(f"  MJO Phase Map: {len(self.mjo_phase_map)} dates loaded. Distribution: {phase_dist}")
+
 
     def _preload_data(self):
         print(f"Preloading {len(self.samples)} samples into RAM...")
@@ -181,6 +246,7 @@ class S2SHybridDataset(Dataset):
             if m["sss_path"]:  handles["sss"]  = xr.open_zarr(m["sss_path"], consolidated=False)
             if m["sm_path"]:   handles["sm"]   = xr.open_zarr(m["sm_path"], consolidated=False)
             if m["ivt_path"]:  handles["ivt"]  = xr.open_zarr(m["ivt_path"], consolidated=False)
+            if m.get("mjo_path"): handles["mjo"] = xr.open_zarr(m["mjo_path"], consolidated=False)
             if m["z500u250_path"]: handles["z500"] = xr.open_zarr(m["z500u250_path"], consolidated=False)
             
             # Load all inits for this year
@@ -265,20 +331,26 @@ class S2SHybridDataset(Dataset):
             # Robust Variable Detection: pr, precip, or PRECTOT
             geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
             geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
+            
+            # Temporary Debug
+            if meta['date'].year == 2019:
+                print(f"DEBUG GEOS 2019 [{geos_var}]: shape={geos_data.shape}, sum={geos_data.sum()}, s_idx={meta['s_idx']}")
+                
             if close_geos: ds_geos.close()
             
             geos_tensor = torch.from_numpy(geos_data).float()
             if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
                 geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
-                
-            if geos_tensor.ndim == 3: 
-                 geos_tensor = geos_tensor.unsqueeze(0)
+            # GEOS data from FIMR (2017+) might be deterministic [L, H, W]
+            # while earlier GEOS S2S3 had ensembles [M, L, H, W]
+            if geos_tensor.ndim == 3: # missing M
+                 geos_tensor = geos_tensor.unsqueeze(0) # [1, L, H, W]
                  
             # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
             geos_tensor = torch.clamp(geos_tensor, min=0.0)
             
             # Save raw ensemble for baseline metrics (M, L, H, W)
-            geos_ens_raw = geos_tensor.clone() 
+            geos_ens_raw = geos_tensor.clone()  
                  
             # Take the ensemble mean across the members for model conditioning
             geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
@@ -396,13 +468,32 @@ class S2SHybridDataset(Dataset):
                             u250_val[:] = v
                     if close_zu: ds_zu.close()
 
+            # MJO Wave Spatial Envelope (4, H, W)
+            mjo_val = np.zeros((4, 181, 360), dtype=np.float32)
+            if meta.get("mjo_path"):
+                ds_mjo, close_mjo = get_ds(meta["mjo_path"], "mjo")
+                if ds_mjo:
+                    m_var = next((c for c in ['mjo_wave', 'mjo'] if c in ds_mjo), None)
+                    if m_var:
+                        v = ds_mjo[m_var].isel(S=meta['s_idx']).values
+                        if v.ndim == 3:
+                            if v.shape[1] == 360 and v.shape[2] == 181:
+                                v = np.transpose(v, (0, 2, 1))
+                            mjo_val = v
+                        elif v.ndim == 2:
+                            if v.shape[0] == 360 and v.shape[1] == 181:
+                                v = v.T
+                            mjo_val[:] = v
+                    if close_mjo: ds_mjo.close()
+
             # --- Z500 Zonal Deviation (Rossby Wave Tracing) ---
             zonal_mean = z500_val.mean(axis=2, keepdims=True) 
             zonal_dev_val = z500_val - zonal_mean # (4, 181, 360)
 
             # Stack Obs along Channel dimension
+            # Added +4 channels for MJO Wave Spatial Map
             obs_stack = np.concatenate([sst_val, sss_val, sm_val,
-                                        ivt_val, zonal_dev_val, u250_val], axis=0) 
+                                        ivt_val, zonal_dev_val, u250_val, mjo_val], axis=0) 
             
             if self.normalize and self.bounds is not None:
                 def min_max_scale(val, vmin, vmax):
@@ -417,26 +508,23 @@ class S2SHybridDataset(Dataset):
                 else:
                     obs_stack[16:20] = min_max_scale(obs_stack[16:20], self.bounds["z500"]["min"], self.bounds["z500"]["max"])
                 obs_stack[20:24] = min_max_scale(obs_stack[20:24], self.bounds["u250"]["min"], self.bounds["u250"]["max"])
+                # MJO Wave spatial array
+                if "mjo" in self.bounds:
+                    obs_stack[24:28] = min_max_scale(obs_stack[24:28], self.bounds["mjo"]["min"], self.bounds["mjo"]["max"])
+                else:
+                    # Fallback min/max anomaly if stats file isn't updated yet
+                    obs_stack[24:28] = min_max_scale(obs_stack[24:28], -100.0, 100.0)
             
             obs_tensor = torch.from_numpy(obs_stack).float()
             if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
                 obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
-
-            # --- MJO Features (Conditioning) ---
-            s_date = meta['date']
-            if self.df_mjo is not None and s_date in self.df_mjo.index:
-                mjo = self.df_mjo.loc[s_date]
-                rmm_vals = np.array([mjo['RMM1_lagged'], mjo['RMM2_lagged']], dtype=np.float32)
-            else:
-                rmm_vals = np.zeros(2, dtype=np.float32)
 
             # Package common features
             cached_common = {
                 "geos_cond": geos_cond_tensor,
                 "obs_tensor": obs_tensor,
                 "geos_ens_raw": geos_ens_raw,
-                "pure_geos_mean_raw": pure_geos_mean_raw,
-                "mjo": torch.tensor(rmm_vals, dtype=torch.float32)
+                "pure_geos_mean_raw": pure_geos_mean_raw
             }
             
             if return_common_only:
@@ -462,9 +550,11 @@ class S2SHybridDataset(Dataset):
         target_raw_lead = target_tensor.clone()
         
         if self.normalize and self.bounds is not None:
-            r_min, r_max = -30.0, 30.0
-            residual_raw = target_tensor - cached_common["pure_geos_mean_raw"][meta['lead_idx']]
-            target_tensor = 2.0 * (torch.clamp(residual_raw, r_min, r_max) - r_min) / (r_max - r_min + 1e-6) - 1.0
+            # Power Transform: Y = sqrt(GPCP)
+            # Map [0, sqrt(50)] -> [-1, 1]
+            s_min, s_max = 0.0, 7.071
+            target_sqrt = torch.sqrt(target_tensor)
+            target_tensor = 2.0 * (torch.clamp(target_sqrt, s_min, s_max) - s_min) / (s_max - s_min + 1e-6) - 1.0
         
         target_tensor = target_tensor.unsqueeze(0)
         target_raw_lead = target_raw_lead.unsqueeze(0)
@@ -478,5 +568,5 @@ class S2SHybridDataset(Dataset):
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
             "geos_ens_raw": cached_common["geos_ens_raw"],
-            "mjo": cached_common["mjo"]
+            "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)
         }

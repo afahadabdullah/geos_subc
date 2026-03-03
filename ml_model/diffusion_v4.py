@@ -8,11 +8,12 @@ class DiffusionModelV4(nn.Module):
     Wrapper for diffusers.UNet2DModel that maintains the V4 spatial conditioning API.
     Professional backbone replacing the scratch-built UNet.
     """
-    def __init__(self, in_channels=34, out_channels=4):
+    def __init__(self, in_channels=32, out_channels=1):
         super().__init__()
         
         # Professional UNet backbone with industry-standard config
         # We use UNet2DModel because the conditioning is spatial (concatenated)
+        # in_channels=32: 1 noisy target + 31 conditioning (24 Obs + 4 GEOS + 2 Month + 1 LeadIdx)
         self.unet = UNet2DModel(
             sample_size=(181, 360),
             in_channels=in_channels,

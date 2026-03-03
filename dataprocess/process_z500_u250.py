@@ -40,6 +40,11 @@ def process_year(year, daily_dir=DAILY_DIR, output_dir=OUTPUT_DIR):
     3. Compute 4 weekly means before each init date
     4. Save as Zarr with both variables
     """
+    out_path = os.path.join(output_dir, f"z500_u250_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        print(f"File {out_path} already exists. Skipping {year}.")
+        return
+
     # 1. Load GEOS to get init dates
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
     if not os.path.exists(geos_path):
@@ -194,7 +199,7 @@ if __name__ == "__main__":
                         help="Output directory.")
     args = parser.parse_args()
 
-    years = args.years if args.years else list(range(1999, 2023))
+    years = args.years if args.years else list(range(1999, 2026))
 
     for year in years:
         process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir)
