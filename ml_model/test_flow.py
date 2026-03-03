@@ -522,7 +522,7 @@ def main():
         total_so_far = sum([n_inits if 'n_inits' in locals() else 1 for _ in all_model_crps]) # Approx logic wrapper
         # Since we just appended sums, we use total inits so far locally
         # Or simpler for pbar: just sum / total test dataset items seen.
-        seen_inits = batch_idx * test_batch_size // 4 + n_inits if not all_cached else batch_idx * 1 + 1 
+        seen_inits = batch_idx * 4 // 4 + n_inits if not all_cached else batch_idx * 1 + 1 
         if all_cached: seen_inits = len(all_model_crps) # Rough
         
         with open(csv_file, mode='a', newline='') as f:
