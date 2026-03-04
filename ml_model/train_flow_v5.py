@@ -55,19 +55,18 @@ def compute_crps(ensemble_preds, target, area_weights):
     crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
     weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
     
-    weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
-    return weighted_crps.item()
-
-def compute_correlation(pred, target, area_weights):
+def compute_correlation_terms(pred, target, area_weights):
     """
-    Computes spatially-weighted Pearson correlation between prediction and target.
+    Computes spatially-weighted covariance and variance terms for Pearson correlation.
     pred: [B, C, H, W] - Ensemble Mean
     target: [B, C, H, W] - True Target
     area_weights: [1, 1, H, 1]
+    
+    Returns: (cov, pred_var, target_var)
     """
     mask = ~torch.isnan(target)
     if not mask.any():
-        return 0.0
+        return 0.0, 0.0, 0.0
         
     weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
     
@@ -79,16 +78,11 @@ def compute_correlation(pred, target, area_weights):
     pred_dev = pred - pred_mean
     target_dev = target - target_mean
     
-    cov = ((pred_dev * target_dev) * weights_clean).sum()
-    pred_var = ((pred_dev ** 2) * weights_clean).sum()
-    target_var = ((target_dev ** 2) * weights_clean).sum()
+    cov = ((pred_dev * target_dev) * weights_clean).sum().item()
+    pred_var = ((pred_dev ** 2) * weights_clean).sum().item()
+    target_var = ((target_dev ** 2) * weights_clean).sum().item()
     
-    denom = torch.sqrt(pred_var * target_var)
-    if denom < 1e-8:
-        return 0.0
-        
-    corr = cov / denom
-    return corr.item()
+    return cov, pred_var, target_var
 
 
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None):
@@ -175,6 +169,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     total_geos_crps = 0.0
     total_geos_rmse = 0.0
     count = 0
+    total_cov = 0.0
+    total_pred_var = 0.0
+    total_target_var = 0.0
     
     # We will only save/return the tensors for the first batch (idx 0) so the plotting remains identical
     saved_tensors = {}
@@ -325,7 +322,15 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         total_rmse += b_rmse * num_inits
         count += num_inits
         
-        b_corr = compute_correlation(full_pred, true_target_precip, area_weights)
+        b_cov, b_pred_var, b_target_var = compute_correlation_terms(full_pred, true_target_precip, area_weights)
+        total_cov += b_cov
+        total_pred_var += b_pred_var
+        total_target_var += b_target_var
+        
+        # Calculate batch correlation for printing
+        b_denom = np.sqrt(b_pred_var * b_target_var)
+        b_corr = b_cov / b_denom if b_denom > 1e-8 else 0.0
+        
         if len(target_batches) > 1:
             print(f"Batch {b_idx:03d} | CRPS: {b_crps:.4f} | RMSE: {b_rmse:.4f} | Corr: {b_corr:.4f}")
         
@@ -349,6 +354,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Compute Averages
     avg_crps = total_crps / count
     avg_rmse = total_rmse / count
+    
+    denom = np.sqrt(total_pred_var * total_target_var)
+    avg_corr = total_cov / denom if denom > 1e-8 else 0.0
+    
     if cached_geos_crps is None:
         avg_geos_crps = total_geos_crps / count
         avg_geos_rmse = total_geos_rmse / count
@@ -358,9 +367,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     
     recon_type = f"Monthly (N={len(target_batches)}x{num_ensemble})"
     if accelerator.is_main_process:
-        print(f"Epoch {epoch} | Val CRPS [{recon_type}]: {avg_crps:.4f} (GEOS baseline: {avg_geos_crps:.4f})")
+        print(f"Epoch {epoch} | Val CRPS [{recon_type}]: {avg_crps:.4f} (GEOS baseline: {avg_geos_crps:.4f}) | RMSE: {avg_rmse:.4f} | Corr: {avg_corr:.4f}")
         
-    return avg_crps, saved_tensors['full_pred'], saved_tensors['true_target'], avg_rmse, saved_tensors['geos_mean'], avg_geos_crps, avg_geos_rmse, saved_tensors['ai_res'], saved_tensors['geos_single'], saved_tensors['model_single'], saved_tensors['model_var']
+    return avg_crps, saved_tensors['full_pred'], saved_tensors['true_target'], avg_rmse, saved_tensors['geos_mean'], avg_geos_crps, avg_geos_rmse, saved_tensors['ai_res'], saved_tensors['geos_single'], saved_tensors['model_single'], saved_tensors['model_var'], avg_corr
 
 def train(args, accelerator):
     device = accelerator.device
@@ -964,7 +973,7 @@ def train(args, accelerator):
             use_flow_variance=False,
             eof_bases=eof_bases
         )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
+        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var, current_corr = val_outputs
         
         if global_cached_geos_crps is None:
             global_cached_geos_crps = geos_crps
@@ -995,7 +1004,7 @@ def train(args, accelerator):
                 if is_new_best and epoch >= 100 and not is_plot_epoch:
                     num_steps = 50 
                     print(f"📸 Breakthrough! Triggering high-quality {num_steps}-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
+                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv, b_corr = run_val_inference(
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
