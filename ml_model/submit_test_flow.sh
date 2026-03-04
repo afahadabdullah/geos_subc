@@ -27,7 +27,7 @@ for YEAR in 2021; do
     python3 ml_model/test_flow.py --config ml_model/config_flow.yaml \
         --ckpt $CKPT \
         --year $YEAR \
-        --ensemble-size 30 \
+        --ensemble-size 15 \
         --steps 10
     echo "---------------------------------------------------"
 done
