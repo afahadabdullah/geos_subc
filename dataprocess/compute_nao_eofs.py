@@ -33,62 +33,67 @@ from tqdm import tqdm
 
 def parse_nao_index(nao_path):
     """
-    Parse CPC monthly NAO index file (norm.nao.monthly.b5001.current.ascii.table).
+    Parse CPC daily NAO index file (norm.daily.nao.index.b500101.current.ascii).
     
     Format:
-              Jan    Feb    Mar    Apr    May    Jun    Jul    Aug    Sep    Oct    Nov    Dec
-    1950   0.92   0.40  -0.36   0.73  -0.59  -0.06  -1.26  -0.05   0.25   0.85  -1.26  -1.02
+    YYYY MM DD VALUE
+    1950  1  1  0.365
     
-    Returns: dict mapping (year, month) -> NAO index value
+    Returns: dict mapping datetime.date -> NAO index value
     """
     nao_lookup = {}
-    month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
     
     with open(nao_path, 'r') as f:
         lines = f.readlines()
     
-    # Skip header line(s)
     for line in lines:
         parts = line.split()
-        if len(parts) < 13:
+        if len(parts) < 4:
             continue
         try:
-            year = int(parts[0])
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            val = float(parts[3])
+            import datetime
+            d = datetime.date(year, month, day)
+            nao_lookup[d] = val
         except ValueError:
-            continue  # Skip header
-        
-        for m_idx, val_str in enumerate(parts[1:13]):
-            try:
-                val = float(val_str)
-                nao_lookup[(year, m_idx + 1)] = val
-            except ValueError:
-                continue
+            continue
     
-    print(f"  Parsed NAO index: {len(nao_lookup)} monthly values ({min(nao_lookup.keys())[0]}-{max(nao_lookup.keys())[0]})")
+    dates = list(nao_lookup.keys())
+    if dates:
+        print(f"  Parsed daily NAO index: {len(nao_lookup)} days ({min(dates)} to {max(dates)})")
     return nao_lookup
 
 
 def get_lagged_nao_phase(init_date, nao_lookup, threshold=0.5):
     """
-    Get NAO phase for an init date using the PREVIOUS month's NAO value.
-    This prevents data leakage since the current month's NAO isn't finalized yet.
+    Get NAO phase using a 7-day trailing average ending 1 day BEFORE the init date.
+    This prevents data leakage and captures the active weather regime much more 
+    sharply than a monthly average.
     
     Returns:
       0 = Negative (NAO < -threshold)
       1 = Neutral  (-threshold <= NAO <= threshold)
       2 = Positive (NAO > threshold)
     """
-    # Use previous month
-    if init_date.month == 1:
-        lag_year, lag_month = init_date.year - 1, 12
+    import datetime
+    
+    # Calculate average of day -7 through day -1
+    if isinstance(init_date, pd.Timestamp):
+        base_date = init_date.date()
     else:
-        lag_year, lag_month = init_date.year, init_date.month - 1
-    
-    nao_val = nao_lookup.get((lag_year, lag_month), None)
-    
-    if nao_val is None:
+        base_date = init_date
+        
+    vals = []
+    for lag in range(1, 8):
+        d = base_date - datetime.timedelta(days=lag)
+        if d in nao_lookup:
+            vals.append(nao_lookup[d])
+            
+    if not vals:
         return 1  # Default to neutral if data missing
+        
+    nao_val = sum(vals) / len(vals)
     
     if nao_val < -threshold:
         return 0  # Negative
@@ -155,8 +160,8 @@ def main(args):
     print(f"    N EOFs per category: {n_eofs}")
     print(f"    Min samples per category: {min_samples}")
     
-    # 1. Load NAO Index
-    nao_path = os.path.join(data_dir, "norm.nao.monthly.b5001.current.ascii.table")
+    # 1. Load Daily NAO Index
+    nao_path = os.path.join(data_dir, "norm.daily.nao.index.b500101.current.ascii")
     if not os.path.exists(nao_path):
         raise FileNotFoundError(f"NAO index not found: {nao_path}")
     nao_lookup = parse_nao_index(nao_path)

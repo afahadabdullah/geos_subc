@@ -37,23 +37,22 @@ from train_flow import compute_crps
 # ─── Index Parsers (same as in compute_*_eofs.py) ───
 
 def parse_nao_index(nao_path):
-    """Parse CPC monthly NAO index file."""
+    """Parse CPC daily NAO index file."""
     nao_lookup = {}
     with open(nao_path, 'r') as f:
         lines = f.readlines()
     for line in lines:
         parts = line.split()
-        if len(parts) < 13:
+        if len(parts) < 4:
             continue
         try:
-            year = int(parts[0])
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+            val = float(parts[3])
+            import datetime
+            d = datetime.date(year, month, day)
+            nao_lookup[d] = val
         except ValueError:
             continue
-        for m_idx, val_str in enumerate(parts[1:13]):
-            try:
-                nao_lookup[(year, m_idx + 1)] = float(val_str)
-            except ValueError:
-                continue
     return nao_lookup
 
 
@@ -73,13 +72,25 @@ def parse_oni_index(oni_path):
     return oni_lookup
 
 
-def get_nao_phase(month, year, nao_lookup, threshold=0.5):
-    """Get NAO phase using previous month's value (lag to avoid leakage)."""
-    if month == 1:
-        lag_year, lag_month = year - 1, 12
+def get_nao_phase(init_date, nao_lookup, threshold=0.5):
+    """Get NAO phase using a 7-day trailing average ending 1 day BEFORE init_date."""
+    import datetime
+    import pandas as pd
+    if isinstance(init_date, pd.Timestamp):
+        base_date = init_date.date()
     else:
-        lag_year, lag_month = year, month - 1
-    val = nao_lookup.get((lag_year, lag_month), 0.0)
+        base_date = init_date
+        
+    vals = []
+    for lag in range(1, 8):
+        d = base_date - datetime.timedelta(days=lag)
+        if d in nao_lookup:
+            vals.append(nao_lookup[d])
+            
+    if not vals:
+        return 1
+        
+    val = sum(vals) / len(vals)
     if val < -threshold: return 0
     elif val > threshold: return 2
     return 1
@@ -267,7 +278,10 @@ def main():
             raise FileNotFoundError(f"No checkpoints found in {args.output_dir}")
         best_ckpt = ckpts[-1]
     
-    print(f"Loaded: {os.path.basename(best_ckpt)}")
+    print("\n" + "="*80)
+    print(f"🚀 MODEL CHECKPOINT LOADED:")
+    print(f"   ► {best_ckpt}")
+    print("="*80 + "\n")
     ckpt = torch.load(best_ckpt, map_location=device, weights_only=True)
     model.load_state_dict(ckpt['model'])
     model.eval()
@@ -288,7 +302,7 @@ def main():
     nao_bases = None
     nao_lookup = None
     nao_eof_path = os.path.join(ml_dir, "nao_eof_bases.pt")
-    nao_idx_path = os.path.join(data_dir, "norm.nao.monthly.b5001.current.ascii.table")
+    nao_idx_path = os.path.join(data_dir, "norm.daily.nao.index.b500101.current.ascii")
     if os.path.exists(nao_eof_path) and os.path.exists(nao_idx_path):
         nao_data = torch.load(nao_eof_path, map_location='cpu', weights_only=False)
         nao_bases = nao_data['eof_bases']
@@ -345,8 +359,21 @@ def main():
             b_idx = i % vB
             month = int(months[b_idx])
             lead = int(leads[b_idx])
-            # Determine init year from the test year arg
-            nao_phase = get_nao_phase(month, args.year, nao_lookup)
+            # Need the fully qualified init date
+            import pandas as pd
+            import datetime
+            # Reconstruct an approximate date for the test inference
+            # We assume day=15 for the representative month since real init_date is missing in expanded tensor
+            # Note: During actual batch dataloading, batch['date'] or similar should ideally be passed.
+            # However `compare_noise_v4` doesn't pass the date to noise_fn by default. 
+            # We will grab it directly from the dataset.
+            # wait, `b` (the batch dict) comes from S2SHybridDataset. Let's check what date keys exist.
+            # It usually has nothing but month, let's extract it from the original meta.
+            # For this comparison script, it's easier to just assume day 15 for the lag calculation if it's missing,
+            # BUT wait, the S2SHybridDataset DOES pass time information.
+            # Let's change the interface temporarily. Just reconstruct a dummy day 15 since compare script aggregates monthly.
+            init_date = datetime.date(args.year, month, 15)
+            nao_phase = get_nao_phase(init_date, nao_lookup)
             noise[i, 0] = sample_from_eof_basis(nao_bases, nao_phase, lead, d, H, W)
         return noise
     
