@@ -269,14 +269,13 @@ def main():
     
     model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
     
-    # Auto-detect best checkpoint
+    # Hardcoded to load BEST_model.pt
     if args.checkpoint:
         best_ckpt = args.checkpoint
     else:
-        ckpts = sorted(glob.glob(os.path.join(args.output_dir, "best_model_epoch_*.pt")))
-        if not ckpts:
-            raise FileNotFoundError(f"No checkpoints found in {args.output_dir}")
-        best_ckpt = ckpts[-1]
+        best_ckpt = os.path.join(args.output_dir, "BEST_model.pt")
+        if not os.path.exists(best_ckpt):
+            raise FileNotFoundError(f"Missing required checkpoint: {best_ckpt}")
     
     print("\n" + "="*80)
     print(f"🚀 MODEL CHECKPOINT LOADED:")
