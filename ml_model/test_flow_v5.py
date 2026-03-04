@@ -239,7 +239,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # Single parallel ODE solve for the entire test batch and ensemble
     p_x1_expanded = flow_matcher.euler_solve(
         model, smart_noise_expanded, fx_cond_expanded, 
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
     )
     
     # Reshape back to [vB, num_ensemble, H, W]

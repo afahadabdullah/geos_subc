@@ -581,7 +581,7 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=True,
+            use_flow_variance=False,
             eof_bases=eof_bases
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
@@ -923,7 +923,7 @@ def train(args, accelerator):
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
             cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=True,
+            use_flow_variance=False,
             eof_bases=eof_bases
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
@@ -961,7 +961,7 @@ def train(args, accelerator):
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
-                        use_flow_variance=True,
+                        use_flow_variance=False,
                         eof_bases=eof_bases
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
