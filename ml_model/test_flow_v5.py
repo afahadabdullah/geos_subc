@@ -204,7 +204,18 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
         eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
         pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-        blend = 0.02 * pure_noise + 0.98 * eof_noise
+        
+        # Create the blending weights
+        # Member 0 gets 100% EOF, 0% Isotropic (Canonical Unperturbed Sample)
+        # Members 1+ get 98% EOF, 2% Isotropic (Perturbed Ensemble)
+        w_iso = torch.full((vB, num_ensemble, 1, 1, 1), 0.02, device=device)
+        w_iso[:, 0, :, :, :] = 0.0
+        w_eof = 1.0 - w_iso
+        
+        w_iso = w_iso.reshape(vB * num_ensemble, 1, 1, 1)
+        w_eof = w_eof.reshape(vB * num_ensemble, 1, 1, 1)
+        
+        blend = w_iso * pure_noise + w_eof * eof_noise
         
         # Re-normalize to unit variance
         std = blend.std(dim=(2, 3), keepdim=True)
@@ -271,7 +282,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         'true_target_precip': true_target_precip_plot,
         'geos_mean': geos_mean_raw,
         'geos_single': geos_ens_sample[:, 0], # [num_inits, L, H, W]
-        'model_single': ensemble_preds_precip[0], # [num_inits, L, H, W]
+        'model_single': ensemble_preds_precip[0], # explicitly pass unperturbed member 0
         'model_crps_map': model_crps_map,
         'model_mse_map': mse_map,
         'geos_crps_map': geos_crps_map,

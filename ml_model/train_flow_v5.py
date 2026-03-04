@@ -205,9 +205,22 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                 lead_ids = torch.tensor(lead_ids)
             
             # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
+            # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
             eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
             pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-            blend = 0.02 * pure_noise + 0.98 * eof_noise
+            
+            # Create the blending weights
+            # Member 0 gets 100% EOF, 0% Isotropic (Canonical Unperturbed Sample)
+            # Members 1+ get 98% EOF, 2% Isotropic (Perturbed Ensemble)
+            w_iso = torch.full((vB, num_ensemble, 1, 1, 1), 0.02, device=device)
+            w_iso[:, 0, :, :, :] = 0.0
+            w_eof = 1.0 - w_iso
+            
+            w_iso = w_iso.reshape(vB * num_ensemble, 1, 1, 1)
+            w_eof = w_eof.reshape(vB * num_ensemble, 1, 1, 1)
+            
+            blend = w_iso * pure_noise + w_eof * eof_noise
+            
             # Re-normalize to unit variance
             std = blend.std(dim=(2, 3), keepdim=True)
             noise_expanded = blend / (std + 1e-6)
