@@ -224,6 +224,10 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # Reshape back to [vB, num_ensemble, H, W]
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
     
+    # Clamp the ODE output slightly outside the strict [-1, 1] target bounds
+    # to prevent extreme outliers from noise traces.
+    p_x1_batch = torch.clamp(p_x1_batch, min=-2.0, max=2.0)
+    
     week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
     week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
     
