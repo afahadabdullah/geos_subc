@@ -58,6 +58,39 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
+def compute_correlation(pred, target, area_weights):
+    """
+    Computes spatially-weighted Pearson correlation between prediction and target.
+    pred: [B, C, H, W] - Ensemble Mean
+    target: [B, C, H, W] - True Target
+    area_weights: [1, 1, H, 1]
+    """
+    mask = ~torch.isnan(target)
+    if not mask.any():
+        return 0.0
+        
+    weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
+    
+    # Calculate weighted means
+    pred_mean = (pred * weights_clean).sum() / (weights_clean.sum() + 1e-8)
+    target_mean = (target * weights_clean).sum() / (weights_clean.sum() + 1e-8)
+    
+    # Calculate covariance and variances
+    pred_dev = pred - pred_mean
+    target_dev = target - target_mean
+    
+    cov = ((pred_dev * target_dev) * weights_clean).sum()
+    pred_var = ((pred_dev ** 2) * weights_clean).sum()
+    target_var = ((target_dev ** 2) * weights_clean).sum()
+    
+    denom = torch.sqrt(pred_var * target_var)
+    if denom < 1e-8:
+        return 0.0
+        
+    corr = cov / denom
+    return corr.item()
+
+
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None):
     """
     Standardizes plotting logic for validation results (7-column layout).
@@ -291,6 +324,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         total_crps += b_crps * num_inits # Weight by batch items
         total_rmse += b_rmse * num_inits
         count += num_inits
+        
+        b_corr = compute_correlation(full_pred, true_target_precip, area_weights)
+        if len(target_batches) > 1:
+            print(f"Batch {b_idx:03d} | CRPS: {b_crps:.4f} | RMSE: {b_rmse:.4f} | Corr: {b_corr:.4f}")
         
         # Save only the first season (Winter) for visual plotting consistency
         if b_idx == 0:
