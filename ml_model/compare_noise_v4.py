@@ -444,16 +444,16 @@ def main():
     # ─── Build Strategy List ───
     strategies = [
         ("1. Pure Random",      noise_pure,     False),
-        ("2. MJO EOF(75%)",     noise_mjo_75,   False),
-        ("3. MJO EOF(98%)",     noise_mjo_98,   False),
+        ("2. MJO EOF(75%)",     noise_mjo_75,   True),
+        ("3. MJO EOF(98%)",     noise_mjo_98,   True),
     ]
     
     if nao_bases is not None:
-        strategies.append(("4. NAO EOF(75%)",  noise_nao_75,  False))
+        strategies.append(("4. NAO EOF(75%)",  noise_nao_75,  True))
     if enso_bases is not None:
-        strategies.append(("5. ENSO EOF(75%)", noise_enso_75, False))
+        strategies.append(("5. ENSO EOF(75%)", noise_enso_75, True))
     if nao_bases is not None or enso_bases is not None:
-        strategies.append(("6. Multi-Modal",   noise_multimodal, False))
+        strategies.append(("6. Multi-Modal",   noise_multimodal, True))
     
     n_ml = len(strategies)
     
