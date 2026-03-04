@@ -136,7 +136,7 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
 
 @torch.no_grad()
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True, eof_bases=None):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=15, num_steps=50, save_plot=True, eof_bases=None):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
@@ -186,11 +186,13 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
     # With zombie processes gone, we can fit [vB * num_ensemble] through the UNet at once.
     
-    # Expand condition to [vB, num_ensemble, 35, H, W] -> [vB * num_ensemble, 35, H, W]
-    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+    total_ensemble = num_ensemble * 2 # e.g. 15 base + 15 antithetic = 30 total
+    
+    # Expand condition to [vB, total_ensemble, 35, H, W] -> [vB * total_ensemble, 35, H, W]
+    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, total_ensemble, -1, H, W).reshape(vB * total_ensemble, -1, H, W)
     
     # Expand variance scalar for base noise
-    var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, num_ensemble, 1, H, W).reshape(vB * num_ensemble, 1, H, W)
+    var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, total_ensemble, 1, H, W).reshape(vB * total_ensemble, 1, H, W)
     
     # Generate noise: use EOF-structured noise if available, otherwise GEOS-variance-scaled
     if eof_bases is not None:
@@ -201,23 +203,37 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         if not isinstance(lead_ids, torch.Tensor):
             lead_ids = torch.tensor(lead_ids)
         
-        # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded.
+        # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded for base members.
         mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
         lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
             
         # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
-        eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
-        pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-        blend = 0.02 * pure_noise + 0.98 * eof_noise
+        eof_noise_base = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
+        pure_noise_base = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        blend_base = 0.02 * pure_noise_base + 0.98 * eof_noise_base
         
         # Re-normalize to unit variance
-        std = blend.std(dim=(2, 3), keepdim=True)
-        smart_noise_expanded = blend / (std + 1e-6)
+        std_base = blend_base.std(dim=(2, 3), keepdim=True)
+        noise_base = blend_base / (std_base + 1e-6)
+        
+        # ANTITHETIC SAMPLING: create negated mirror for each base sample
+        noise_anti = -noise_base
+        
+        # Interleave base and anti to keep batch dimension aligned
+        noise_base_reshaped = noise_base.view(vB, num_ensemble, 1, H, W)
+        noise_anti_reshaped = noise_anti.view(vB, num_ensemble, 1, H, W)
+        smart_noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * total_ensemble, 1, H, W)
     else:
-        base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        base_noise_base = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        base_noise_anti = -base_noise_base
+        
+        noise_base_reshaped = base_noise_base.view(vB, num_ensemble, 1, H, W)
+        noise_anti_reshaped = base_noise_anti.view(vB, num_ensemble, 1, H, W)
+        base_noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * total_ensemble, 1, H, W)
+        
         smart_noise_expanded = base_noise_expanded * var_scaled_expanded
         
-    lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
+    lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, total_ensemble).reshape(-1).long()
     
     # Single parallel ODE solve for the entire test batch and ensemble
     p_x1_expanded = flow_matcher.euler_solve(
@@ -225,16 +241,16 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
     )
     
-    # Reshape back to [vB, num_ensemble, H, W]
-    p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
+    # Reshape back to [vB, total_ensemble, H, W]
+    p_x1_batch = p_x1_expanded.view(vB, total_ensemble, H, W)
     
     week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
-    week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
+    week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, total_ensemble, H, W]
     
-    ensemble_preds_precip = week_precip.transpose(0, 1) # [num_ensemble, vB, H, W]
+    ensemble_preds_precip = week_precip.transpose(0, 1) # [total_ensemble, vB, H, W]
     
     # Reshape to separate initialization dates and lead weeks
-    ensemble_preds_precip = ensemble_preds_precip.view(num_ensemble, num_inits, 4, H, W)
+    ensemble_preds_precip = ensemble_preds_precip.view(total_ensemble, num_inits, 4, H, W)
     full_pred = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
     
     val_metric, model_crps_map = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
