@@ -232,10 +232,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
 
-        # Clamp the ODE output slightly outside the strict [-1, 1] target bounds.
-        # This prevents early-epoch explosive model variance (where untrained v_pred=0 
-        # leaves x_1 = x_0 noise, pushing values to +3 or +4, which squares into 400+ mm/day).
-        p_x1_batch = torch.clamp(p_x1_batch, min=-2.0, max=2.0)
+        # Clamp the ODE output to the strict [-1, 1] target bounds.
+        # This enforces the physical precipitation ceiling (50 mm/day max).
+        p_x1_batch = torch.clamp(p_x1_batch, min=-1.0, max=1.0)
         
         week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
