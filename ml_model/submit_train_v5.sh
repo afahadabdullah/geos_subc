@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J flow_v5                   # Job name
-#SBATCH -o ml_output_flow5/flow_%j.out
-#SBATCH -e ml_output_flow5/flow_%j.err
+#SBATCH -o ml_output_flow5/flow_%j.log
+#SBATCH -j y                          # Merge stderr into stdout
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
