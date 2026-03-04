@@ -280,7 +280,7 @@ def main():
     
     print("\n" + "="*80)
     print(f"🚀 MODEL CHECKPOINT LOADED:")
-    print(f"   ► {best_ckpt}")
+    print(f"   ► {os.path.abspath(best_ckpt)}")
     print("="*80 + "\n")
     ckpt = torch.load(best_ckpt, map_location=device, weights_only=True)
     model.load_state_dict(ckpt['model'])
