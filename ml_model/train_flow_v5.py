@@ -208,9 +208,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             
             noise_expanded = torch.zeros((vB * num_ensemble, 1, H, W), device=device)
             for i in range(vB * num_ensemble):
-                b_idx = i // num_ensemble  # batch-major indexing
-                phase = int(mjo_phases[b_idx])
-                lead = int(lead_ids[b_idx])
+                sample_b_idx = i // num_ensemble  # batch-major indexing
+                phase = int(mjo_phases[sample_b_idx])
+                lead = int(lead_ids[sample_b_idx])
                 
                 key = (phase, lead)
                 if key not in eof_bases:
