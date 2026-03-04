@@ -195,8 +195,46 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate noise: Temporarily forced to pure isotropic noise for testing Variance Head
-        noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+        # Generate noise: EOF-modulated isotropic noise (spatial coherence + random diversity)
+        # Each member gets pure randn() spatially shaped by the leading EOF eigenvectors
+        # for the corresponding MJO phase/lead, then normalized to unit variance.
+        if eof_bases is not None:
+            mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
+            if not isinstance(mjo_phases, torch.Tensor):
+                mjo_phases = torch.tensor(mjo_phases)
+            lead_ids = batch['lead_idx']
+            if not isinstance(lead_ids, torch.Tensor):
+                lead_ids = torch.tensor(lead_ids)
+            
+            noise_expanded = torch.zeros((vB * num_ensemble, 1, H, W), device=device)
+            for i in range(vB * num_ensemble):
+                b_idx = i // num_ensemble  # batch-major indexing
+                phase = int(mjo_phases[b_idx])
+                lead = int(lead_ids[b_idx])
+                
+                key = (phase, lead)
+                if key not in eof_bases:
+                    key = phase
+                if key not in eof_bases:
+                    key = (0, lead)
+                
+                if key in eof_bases and 'eofs' in eof_bases[key]:
+                    eofs = eof_bases[key]['eofs'].to(device)  # [K, H, W]
+                    K = eofs.shape[0]
+                    
+                    # Random coefficients (pure randn, no eigenvalue scaling)
+                    alpha = torch.randn(K, device=device)
+                    noise_field = torch.einsum('k,khw->hw', alpha, eofs)
+                    
+                    # Normalize to unit variance
+                    std = noise_field.std()
+                    if std > 1e-6:
+                        noise_field = noise_field / std
+                    noise_expanded[i, 0] = noise_field
+                else:
+                    noise_expanded[i, 0] = torch.randn(H, W, device=device)
+        else:
+            noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
         # Single parallel ODE solve for the entire validation batch and ensemble
