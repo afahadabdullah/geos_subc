@@ -200,9 +200,13 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         lead_ids = batch['lead_idx']
         if not isinstance(lead_ids, torch.Tensor):
             lead_ids = torch.tensor(lead_ids)
+        
+        # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded.
+        mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
+        lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
             
         # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
-        eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
+        eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
         pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         blend = 0.02 * pure_noise + 0.98 * eof_noise
         

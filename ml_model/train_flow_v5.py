@@ -204,10 +204,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             if not isinstance(lead_ids, torch.Tensor):
                 lead_ids = torch.tensor(lead_ids)
             
-            # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
+            # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded.
+            # fx_cond is expanded as [b0_e0, b0_e1, ..., b0_eN, b1_e0, ...] (batch-major).
+            # eof_sample uses i % len(phases) which would produce ensemble-major order.
+            # Fix: repeat_interleave so phases=[b0,b0,...,b0, b1,b1,...,b1, ...]
+            mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
+            lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
+            
             # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
             # Training is explicitly on this 98/2 blend, so all inference members must use it
-            eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, vB * num_ensemble, H, W, lead_ids=lead_ids)
+            eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
             pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
             blend = 0.02 * pure_noise + 0.98 * eof_noise
             
