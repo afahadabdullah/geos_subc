@@ -854,7 +854,8 @@ def train(args, accelerator):
             loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
             
             loss_var = loss_mse_var + loss_reg
-            loss = 0.95 * loss_v + 0.05 * loss_var
+            # Pure Velocity MSE as requested
+            loss = loss_v
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
