@@ -875,14 +875,14 @@ def train(args, accelerator):
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
-        # Phase 1 (epoch < 20):  No validation (model still warming up)
-        # Phase 2 (20-49):       Every 3 epochs (20, 23, 26, ...)
-        # Phase 3 (50-99):       Every 2 epochs (50, 52, 54, ...)
-        # Phase 4 (100+):        Every epoch (100, 101, 102, ...)
+        # Phase 0 (epoch < 20):  Every 5 epochs starting at 1 (1, 6, 11, 16)
+        # Phase 1 (20-49):       Every 3 epochs (21, 24, 27, ...)
+        # Phase 2 (50-99):       Every 2 epochs (50, 52, 54, ...)
+        # Phase 3 (100+):        Every epoch (100, 101, 102, ...)
         # Full 50-step val only fires if fast val finds a new absolute best.
         def should_validate(ep):
             if ep < 20:
-                return False
+                return (ep % 5 == 1)  # 1, 6, 11, 16
             elif ep < 50:
                 return (ep % 3 == 0)
             elif ep < 100:
