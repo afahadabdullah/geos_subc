@@ -2,14 +2,14 @@
 """
 Multi-Modal Noise Strategy Comparison & Visualization (v4)
 ============================================================
-Evaluates CRPS under 7 different ensemble noise strategies:
-  0. GEOS Baseline:       Raw GEOS S2S ensemble (4 members)
-  1. Pure Random:          noise ~ N(0, 1)
-  2. MJO EOF (75%):        75% MJO EOF + 25% isotropic
-  3. MJO EOF (98%):        98% MJO EOF + 2% isotropic
-  4. NAO EOF (75%):        75% NAO EOF + 25% isotropic
-  5. ENSO EOF (75%):       75% ENSO EOF + 25% isotropic
-  6. Multi-Modal Blend:    Season-aware blend of MJO + NAO + ENSO EOFs
+Evaluates CRPS under 8 different ensemble noise strategies:
+  0. GEOS Baseline:         Raw GEOS S2S ensemble (4 members)
+  1. Pure Random:            noise ~ N(0, 1)
+  2. MJO EOF (98%):          98% MJO EOF + 2% isotropic
+  3. NAO EOF (98%):          98% NAO EOF + 2% isotropic
+  4. ENSO EOF (98%):         98% ENSO EOF + 2% isotropic
+  5. Seasonal Multi-Modal:   Season-aware static blend of MJO + NAO + ENSO EOFs
+  6. Dynamic Multi-Modal:    Amplitude-weighted blend of MJO + NAO + ENSO EOFs
 
 Also saves a visual comparison plot for the first sample.
 
@@ -96,6 +96,25 @@ def get_nao_phase(init_date, nao_lookup, threshold=0.5):
     return 1
 
 
+def get_nao_value(init_date, nao_lookup):
+    """Get raw NAO value (7-day trailing average) for amplitude calculation."""
+    import datetime
+    import pandas as pd
+    if isinstance(init_date, pd.Timestamp):
+        base_date = init_date.date()
+    else:
+        base_date = init_date
+        
+    vals = []
+    for lag in range(1, 8):
+        d = base_date - datetime.timedelta(days=lag)
+        if d in nao_lookup:
+            vals.append(nao_lookup[d])
+    if not vals:
+        return 0.0
+    return sum(vals) / len(vals)
+
+
 def get_enso_state(month, year, oni_lookup, threshold=0.5):
     """Get ENSO state using previous season's ONI (lag to avoid leakage)."""
     month_to_season = {
@@ -111,6 +130,20 @@ def get_enso_state(month, year, oni_lookup, threshold=0.5):
     if val < -threshold: return 0
     elif val > threshold: return 2
     return 1
+
+
+def get_enso_value(month, year, oni_lookup):
+    """Get raw ONI value for amplitude calculation."""
+    month_to_season = {
+        1: ('OND', -1), 2: ('NDJ', 0), 3: ('DJF', 0), 4: ('JFM', 0),
+        5: ('FMA', 0), 6: ('MAM', 0), 7: ('AMJ', 0), 8: ('MJJ', 0),
+        9: ('JJA', 0), 10: ('JAS', 0), 11: ('ASO', 0), 12: ('SON', 0),
+    }
+    seas, yr_off = month_to_season[month]
+    lookup_year = year + yr_off
+    if month == 1:
+        lookup_year = year - 1
+    return oni_lookup.get((lookup_year, seas), 0.0)
 
 
 # ─── EOF Sampling Helpers ───
@@ -323,6 +356,18 @@ def main():
     else:
         print(f"  ⚠️ ENSO EOFs not found. Run compute_enso_eofs.py first. Skipping ENSO strategies.")
     
+    # MJO RMM CSV (for amplitude in dynamic weighting)
+    mjo_df = None
+    mjo_csv_path = os.path.join(data_dir, "mjo_processed.csv")
+    if os.path.exists(mjo_csv_path):
+        import pandas as pd
+        mjo_df = pd.read_csv(mjo_csv_path, parse_dates=['S'])
+        mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
+        mjo_df = mjo_df.set_index('date_str')
+        print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries (for dynamic amplitude)")
+    else:
+        print(f"  ⚠️ MJO CSV not found at {mjo_csv_path}. Dynamic weighting will use default MJO amplitude.")
+    
     # ─── Noise Functions ───
     
     def noise_pure(vB, E, H, W, b, d):
@@ -335,13 +380,6 @@ def main():
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
         return flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)
     
-    def noise_mjo_75(vB, E, H, W, b, d):
-        pure = torch.randn((vB*E, 1, H, W), device=d)
-        eof = _get_mjo_eof(vB, E, H, W, b, d)
-        blend = 0.25 * pure + 0.75 * eof
-        std = blend.std(dim=(2, 3), keepdim=True)
-        return blend / (std + 1e-6)
-    
     def noise_mjo_98(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_mjo_eof(vB, E, H, W, b, d)
@@ -351,6 +389,7 @@ def main():
     
     def _get_nao_eof(vB, E, H, W, b, d):
         """Generate NAO-conditioned EOF noise for the entire expanded batch."""
+        import datetime
         noise = torch.zeros((vB*E, 1, H, W), device=d)
         months = b['month']
         leads = b['lead_idx']
@@ -358,19 +397,6 @@ def main():
             b_idx = i % vB
             month = int(months[b_idx])
             lead = int(leads[b_idx])
-            # Need the fully qualified init date
-            import pandas as pd
-            import datetime
-            # Reconstruct an approximate date for the test inference
-            # We assume day=15 for the representative month since real init_date is missing in expanded tensor
-            # Note: During actual batch dataloading, batch['date'] or similar should ideally be passed.
-            # However `compare_noise_v4` doesn't pass the date to noise_fn by default. 
-            # We will grab it directly from the dataset.
-            # wait, `b` (the batch dict) comes from S2SHybridDataset. Let's check what date keys exist.
-            # It usually has nothing but month, let's extract it from the original meta.
-            # For this comparison script, it's easier to just assume day 15 for the lag calculation if it's missing,
-            # BUT wait, the S2SHybridDataset DOES pass time information.
-            # Let's change the interface temporarily. Just reconstruct a dummy day 15 since compare script aggregates monthly.
             init_date = datetime.date(args.year, month, 15)
             nao_phase = get_nao_phase(init_date, nao_lookup)
             noise[i, 0] = sample_from_eof_basis(nao_bases, nao_phase, lead, d, H, W)
@@ -389,23 +415,23 @@ def main():
             noise[i, 0] = sample_from_eof_basis(enso_bases, enso_state, lead, d, H, W)
         return noise
     
-    def noise_nao_75(vB, E, H, W, b, d):
+    def noise_nao_98(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_nao_eof(vB, E, H, W, b, d)
-        blend = 0.25 * pure + 0.75 * eof
+        blend = 0.02 * pure + 0.98 * eof
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
     
-    def noise_enso_75(vB, E, H, W, b, d):
+    def noise_enso_98(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
         eof = _get_enso_eof(vB, E, H, W, b, d)
-        blend = 0.25 * pure + 0.75 * eof
+        blend = 0.02 * pure + 0.98 * eof
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
     
-    def noise_multimodal(vB, E, H, W, b, d):
+    def noise_multimodal_seasonal(vB, E, H, W, b, d):
         """
-        Season-aware multi-modal blended noise.
+        Season-aware multi-modal blended noise (static weights).
         
         Winter (Nov-Mar): MJO 40% + NAO 35% + ENSO 15% + Isotropic 10%
         Summer (May-Sep): MJO 60% + NAO 10% + ENSO 20% + Isotropic 10%
@@ -414,7 +440,6 @@ def main():
         mjo_noise = _get_mjo_eof(vB, E, H, W, b, d)
         pure_noise = torch.randn((vB*E, 1, H, W), device=d)
         
-        # Get NAO and ENSO noise (or fallback to isotropic if bases not available)
         if nao_bases is not None and nao_lookup is not None:
             nao_noise = _get_nao_eof(vB, E, H, W, b, d)
         else:
@@ -425,7 +450,6 @@ def main():
         else:
             enso_noise = torch.randn((vB*E, 1, H, W), device=d)
         
-        # Determine season from the batch month (first sample is representative)
         month = int(b['month'][0])
         
         if month in [11, 12, 1, 2, 3]:  # Winter
@@ -436,24 +460,101 @@ def main():
             w_mjo, w_nao, w_enso, w_iso = 0.50, 0.20, 0.20, 0.10
         
         blend = w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise + w_iso * pure_noise
+        std = blend.std(dim=(2, 3), keepdim=True)
+        return blend / (std + 1e-6)
+    
+    def noise_multimodal_dynamic(vB, E, H, W, b, d):
+        """
+        Dynamically weighted multi-modal blended noise.
         
-        # Renormalize to unit variance per sample
+        Weights are computed from the REAL-TIME amplitude of each climate mode,
+        instead of fixed seasonal values. This means:
+          - If MJO is raging (amp=2.5) but NAO is dead (amp=0.1), MJO dominates.
+          - If it's a strong La Niña winter with weak MJO, ENSO dominates.
+        
+        90% of the blend is amplitude-weighted EOF noise, 10% is isotropic.
+        """
+        import datetime
+        import pandas as pd
+        
+        mjo_noise = _get_mjo_eof(vB, E, H, W, b, d)
+        pure_noise = torch.randn((vB*E, 1, H, W), device=d)
+        
+        if nao_bases is not None and nao_lookup is not None:
+            nao_noise = _get_nao_eof(vB, E, H, W, b, d)
+        else:
+            nao_noise = torch.randn((vB*E, 1, H, W), device=d)
+        
+        if enso_bases is not None and oni_lookup is not None:
+            enso_noise = _get_enso_eof(vB, E, H, W, b, d)
+        else:
+            enso_noise = torch.randn((vB*E, 1, H, W), device=d)
+        
+        month = int(b['month'][0])
+        init_date = datetime.date(args.year, month, 15)
+        
+        # ── Compute MJO amplitude ──
+        date_str = init_date.strftime('%Y-%m-%d')
+        if mjo_df is not None and date_str in mjo_df.index:
+            row = mjo_df.loc[date_str]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            rmm1 = row.get('RMM1_lagged', 0.0)
+            rmm2 = row.get('RMM2_lagged', 0.0)
+            if pd.isna(rmm1) or pd.isna(rmm2):
+                mjo_amp = 1.0
+            else:
+                mjo_amp = float(np.sqrt(rmm1**2 + rmm2**2))
+        else:
+            mjo_amp = 1.0  # Default moderate amplitude
+        
+        # ── Compute NAO amplitude ──
+        if nao_lookup is not None:
+            nao_amp = abs(get_nao_value(init_date, nao_lookup))
+        else:
+            nao_amp = 0.5
+        
+        # ── Compute ENSO amplitude ──
+        if oni_lookup is not None:
+            enso_amp = abs(get_enso_value(month, args.year, oni_lookup))
+        else:
+            enso_amp = 0.5
+        
+        # Cap amplitudes to prevent one extreme outlier from wiping out the others
+        mjo_amp = min(mjo_amp, 3.0)
+        nao_amp = min(nao_amp, 2.5)
+        enso_amp = min(enso_amp, 2.5)
+        
+        # Ensure minimum floor so no mode is ever completely zeroed out
+        mjo_amp = max(mjo_amp, 0.1)
+        nao_amp = max(nao_amp, 0.1)
+        enso_amp = max(enso_amp, 0.1)
+        
+        # Normalize to get fractional weights
+        total = mjo_amp + nao_amp + enso_amp
+        w_mjo = mjo_amp / total
+        w_nao = nao_amp / total
+        w_enso = enso_amp / total
+        
+        # 90% physically weighted + 10% isotropic safety net
+        blend = 0.90 * (w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise) + 0.10 * pure_noise
+        
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
     
     # ─── Build Strategy List ───
     strategies = [
-        ("1. Pure Random",      noise_pure,     False),
-        ("2. MJO EOF(75%)",     noise_mjo_75,   True),
-        ("3. MJO EOF(98%)",     noise_mjo_98,   True),
+        ("1. Pure Random",          noise_pure,              False),
+        ("2. MJO EOF(98%)",         noise_mjo_98,            True),
     ]
     
     if nao_bases is not None:
-        strategies.append(("4. NAO EOF(75%)",  noise_nao_75,  True))
+        strategies.append(("3. NAO EOF(98%)",      noise_nao_98,              True))
     if enso_bases is not None:
-        strategies.append(("5. ENSO EOF(75%)", noise_enso_75, True))
+        strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True))
     if nao_bases is not None or enso_bases is not None:
-        strategies.append(("6. Multi-Modal",   noise_multimodal, True))
+        strategies.append(("5. Seasonal MM",       noise_multimodal_seasonal, True))
+        strategies.append(("6. Dynamic MM",        noise_multimodal_dynamic,  True))
     
     n_ml = len(strategies)
     
