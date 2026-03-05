@@ -393,7 +393,7 @@ def main():
         months = b['month']
         leads = b['lead_idx']
         for i in range(vB * E):
-            b_idx = i % vB
+            b_idx = i // E
             month = int(months[b_idx])
             lead = int(leads[b_idx])
             init_date = datetime.date(args.year, month, 15)
@@ -407,7 +407,7 @@ def main():
         months = b['month']
         leads = b['lead_idx']
         for i in range(vB * E):
-            b_idx = i % vB
+            b_idx = i // E
             month = int(months[b_idx])
             lead = int(leads[b_idx])
             enso_state = get_enso_state(month, args.year, oni_lookup)

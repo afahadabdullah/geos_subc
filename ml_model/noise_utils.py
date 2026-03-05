@@ -136,7 +136,7 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
         months = batch['month']
         leads = batch['lead_idx']
         for i in range(vB * E):
-            b_idx = i % vB
+            b_idx = i // E
             m = int(months[b_idx])
             l = int(leads[b_idx])
             init_date = datetime.date(year, m, 15)
@@ -149,7 +149,7 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
         months = batch['month']
         leads = batch['lead_idx']
         for i in range(vB * E):
-            b_idx = i % vB
+            b_idx = i // E
             m = int(months[b_idx])
             l = int(leads[b_idx])
             enso_state = get_enso_state(m, year, oni_lookup)
