@@ -317,6 +317,93 @@ def train(args, accelerator):
     epochs = config.get("epochs", 500)
     batch_size = config.get("batch_size", 4)
     lr = float(config.get("learning_rate", 1e-4))
+
+    # Area weights (needed early for diagnostic plot)
+    lats = np.linspace(-90, 90, 181)
+    area_weights = get_area_weights(lats, device)
+
+    # ─── Land-Ocean Mask (V6: 65% land / 35% ocean) ───
+    # Derive from SSS data: NaN pixels = land, valid pixels = ocean
+    # Cache to .pt file so we only need SSS once.
+    land_ocean_weights = torch.ones(1, 1, 181, 360, device=device)  # Default: uniform
+    mask_cache_path = os.path.join(os.path.dirname(__file__), "land_ocean_mask_v6.pt")
+    
+    if os.path.exists(mask_cache_path):
+        # ── Load cached mask ──
+        cached = torch.load(mask_cache_path, map_location=device, weights_only=True)
+        land_ocean_weights = cached['weights'].to(device)
+        if accelerator.is_main_process:
+            print(f"  ✅ V6 Land-Ocean Mask loaded from cache: {mask_cache_path}")
+            print(f"     Land pixels: {cached['n_land']}, weight = {cached['land_w']:.4f}")
+            print(f"     Ocean pixels: {cached['n_ocean']}, weight = {cached['ocean_w']:.4f}")
+    else:
+        # ── Create mask from SSS ──
+        sss_sample_path = os.path.join(config["data_dir"], "sss_weekly_2020.zarr")
+        if os.path.exists(sss_sample_path):
+            try:
+                ds_sss = xr.open_zarr(sss_sample_path, consolidated=False)
+                sss_arr = ds_sss['sss'].isel(S=0, L=0).values  # [Y, X]
+                is_land = np.isnan(sss_arr)  # True = land
+                n_land = int(is_land.sum())
+                n_ocean = int((~is_land).sum())
+                n_total = n_land + n_ocean
+                
+                if n_land > 0 and n_ocean > 0:
+                    land_w = 0.65 * n_total / n_land
+                    ocean_w = 0.35 * n_total / n_ocean
+                    
+                    mask_np = np.where(is_land, land_w, ocean_w).astype(np.float32)
+                    land_ocean_weights = torch.from_numpy(mask_np).to(device).view(1, 1, 181, 360)
+                    
+                    # Save cache for future runs
+                    if accelerator.is_main_process:
+                        torch.save({
+                            'weights': land_ocean_weights.cpu(),
+                            'is_land': torch.from_numpy(is_land),
+                            'n_land': n_land, 'n_ocean': n_ocean,
+                            'land_w': land_w, 'ocean_w': ocean_w,
+                        }, mask_cache_path)
+                        print(f"  ✅ V6 Land-Ocean Mask created from {sss_sample_path}")
+                        print(f"     Land pixels: {n_land} ({n_land/n_total*100:.1f}%), weight = {land_w:.4f}")
+                        print(f"     Ocean pixels: {n_ocean} ({n_ocean/n_total*100:.1f}%), weight = {ocean_w:.4f}")
+                        print(f"     💾 Cached to {mask_cache_path}")
+                        
+                        # ── Diagnostic Plot ──
+                        fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+                        
+                        im0 = axes[0].imshow(is_land.astype(float), cmap='RdYlGn', vmin=0, vmax=1,
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[0].set_title(f"Land-Ocean Mask (Green=Land, Red=Ocean)\nLand: {n_land} px ({n_land/n_total*100:.1f}%)")
+                        fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+                        
+                        im1 = axes[1].imshow(mask_np, cmap='hot_r',
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[1].set_title(f"Loss Weight Map\nLand w={land_w:.3f}, Ocean w={ocean_w:.3f}")
+                        fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+                        
+                        combined = (area_weights.cpu().numpy().reshape(181, 1) * mask_np)
+                        im2 = axes[2].imshow(combined, cmap='magma',
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[2].set_title("Combined: Area Weight × Land-Ocean Weight")
+                        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+                        
+                        plt.suptitle("V6 Land-Ocean Loss Weighting Diagnostic", fontsize=16, fontweight='bold')
+                        plt.tight_layout()
+                        diag_dir = config.get("output_dir", "ml_output_flow6")
+                        os.makedirs(diag_dir, exist_ok=True)
+                        plot_path = os.path.join(diag_dir, "land_ocean_mask_diagnostic.png")
+                        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        plt.close()
+                        print(f"     📸 Diagnostic plot saved: {plot_path}")
+                else:
+                    if accelerator.is_main_process:
+                        print(f"  ⚠️ SSS mask has no land/ocean split. Using uniform weights.")
+            except Exception as e:
+                if accelerator.is_main_process:
+                    print(f"  ⚠️ Failed to load SSS for land mask: {e}. Using uniform weights.")
+        else:
+            if accelerator.is_main_process:
+                print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
     
     # ---------------------------------------------------------
     # 1. Dataset Initialization & Global Stats Calculation
@@ -434,97 +521,6 @@ def train(args, accelerator):
         print(f"     Shared UNet features: 64 intermediate channels")
         print(f"-------------------------------------\n")
 
-    # Area weights
-    lats = np.linspace(-90, 90, 181)
-    area_weights = get_area_weights(lats, device)
-
-    # ─── Land-Ocean Mask (V6: 65% land / 35% ocean) ───
-    # Derive from SSS data: NaN pixels = land, valid pixels = ocean
-    # Cache to .pt file so we only need SSS once.
-    land_ocean_weights = torch.ones(1, 1, 181, 360, device=device)  # Default: uniform
-    mask_cache_path = os.path.join(os.path.dirname(__file__), "land_ocean_mask_v6.pt")
-    
-    if os.path.exists(mask_cache_path):
-        # ── Load cached mask ──
-        cached = torch.load(mask_cache_path, map_location=device, weights_only=True)
-        land_ocean_weights = cached['weights'].to(device)
-        if accelerator.is_main_process:
-            print(f"  ✅ V6 Land-Ocean Mask loaded from cache: {mask_cache_path}")
-            print(f"     Land pixels: {cached['n_land']}, weight = {cached['land_w']:.4f}")
-            print(f"     Ocean pixels: {cached['n_ocean']}, weight = {cached['ocean_w']:.4f}")
-    else:
-        # ── Create mask from SSS ──
-        sss_sample_path = os.path.join(config["data_dir"], "sss_weekly_2020.zarr")
-        if os.path.exists(sss_sample_path):
-            try:
-                ds_sss = xr.open_zarr(sss_sample_path, consolidated=False)
-                sss_arr = ds_sss['sss'].isel(S=0, L=0).values  # [Y, X]
-                is_land = np.isnan(sss_arr)  # True = land
-                n_land = int(is_land.sum())
-                n_ocean = int((~is_land).sum())
-                n_total = n_land + n_ocean
-                
-                if n_land > 0 and n_ocean > 0:
-                    # Weight so that: sum(land_w * n_land + ocean_w * n_ocean) / n_total = 1.0
-                    # with the constraint that total_land_contribution / total_ocean_contribution = 65/35
-                    land_w = 0.65 * n_total / n_land
-                    ocean_w = 0.35 * n_total / n_ocean
-                    
-                    mask_np = np.where(is_land, land_w, ocean_w).astype(np.float32)
-                    land_ocean_weights = torch.from_numpy(mask_np).to(device).view(1, 1, 181, 360)
-                    
-                    # Save cache for future runs
-                    if accelerator.is_main_process:
-                        torch.save({
-                            'weights': land_ocean_weights.cpu(),
-                            'is_land': torch.from_numpy(is_land),
-                            'n_land': n_land, 'n_ocean': n_ocean,
-                            'land_w': land_w, 'ocean_w': ocean_w,
-                        }, mask_cache_path)
-                        print(f"  ✅ V6 Land-Ocean Mask created from {sss_sample_path}")
-                        print(f"     Land pixels: {n_land} ({n_land/n_total*100:.1f}%), weight = {land_w:.4f}")
-                        print(f"     Ocean pixels: {n_ocean} ({n_ocean/n_total*100:.1f}%), weight = {ocean_w:.4f}")
-                        print(f"     💾 Cached to {mask_cache_path}")
-                        
-                        # ── Diagnostic Plot ──
-                        fig, axes = plt.subplots(1, 3, figsize=(24, 6))
-                        
-                        # Panel 1: Binary land/ocean mask
-                        im0 = axes[0].imshow(is_land.astype(float), cmap='RdYlGn', vmin=0, vmax=1,
-                                            extent=[-180, 180, -90, 90], aspect='auto')
-                        axes[0].set_title(f"Land-Ocean Mask (Green=Land, Red=Ocean)\nLand: {n_land} px ({n_land/n_total*100:.1f}%)")
-                        fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-                        
-                        # Panel 2: Weight map
-                        im1 = axes[1].imshow(mask_np, cmap='hot_r',
-                                            extent=[-180, 180, -90, 90], aspect='auto')
-                        axes[1].set_title(f"Loss Weight Map\nLand w={land_w:.3f}, Ocean w={ocean_w:.3f}")
-                        fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-                        
-                        # Panel 3: Combined area × land-ocean weights
-                        combined = (area_weights.cpu().numpy().reshape(181, 1) * mask_np)
-                        im2 = axes[2].imshow(combined, cmap='magma',
-                                            extent=[-180, 180, -90, 90], aspect='auto')
-                        axes[2].set_title("Combined: Area Weight × Land-Ocean Weight")
-                        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-                        
-                        plt.suptitle("V6 Land-Ocean Loss Weighting Diagnostic", fontsize=16, fontweight='bold')
-                        plt.tight_layout()
-                        diag_dir = config.get("output_dir", "ml_output_flow6")
-                        os.makedirs(diag_dir, exist_ok=True)
-                        plot_path = os.path.join(diag_dir, "land_ocean_mask_diagnostic.png")
-                        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-                        plt.close()
-                        print(f"     📸 Diagnostic plot saved: {plot_path}")
-                else:
-                    if accelerator.is_main_process:
-                        print(f"  ⚠️ SSS mask has no land/ocean split. Using uniform weights.")
-            except Exception as e:
-                if accelerator.is_main_process:
-                    print(f"  ⚠️ Failed to load SSS for land mask: {e}. Using uniform weights.")
-        else:
-            if accelerator.is_main_process:
-                print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
 
     # Output directory
     output_dir = config.get("output_dir", "ml_output_diffusion_v5")
