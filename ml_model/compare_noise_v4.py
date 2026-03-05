@@ -2,14 +2,13 @@
 """
 Multi-Modal Noise Strategy Comparison & Visualization (v4)
 ============================================================
-Evaluates CRPS under 8 different ensemble noise strategies:
-  0. GEOS Baseline:         Raw GEOS S2S ensemble (4 members)
+Evaluates CRPS under 6 different ensemble noise strategies:
+  0. GEOS Baseline:          Raw GEOS S2S ensemble (4 members)
   1. Pure Random:            noise ~ N(0, 1)
   2. MJO EOF (98%):          98% MJO EOF + 2% isotropic
   3. NAO EOF (98%):          98% NAO EOF + 2% isotropic
   4. ENSO EOF (98%):         98% ENSO EOF + 2% isotropic
-  5. Seasonal Multi-Modal:   Season-aware static blend of MJO + NAO + ENSO EOFs
-  6. Dynamic Multi-Modal:    Amplitude-weighted blend of MJO + NAO + ENSO EOFs
+  5. Multi-Modal Selection:  Distinct members selected from MJO (9), NAO (9), ENSO (9), Random (3)
 
 Also saves a visual comparison plot for the first sample.
 
@@ -429,118 +428,51 @@ def main():
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
     
-    def noise_multimodal_seasonal(vB, E, H, W, b, d):
+    def noise_multimodal_selection(vB, E, H, W, b, d):
         """
-        Season-aware multi-modal blended noise (static weights).
-        
-        Winter (Nov-Mar): MJO 40% + NAO 35% + ENSO 15% + Isotropic 10%
-        Summer (May-Sep): MJO 60% + NAO 10% + ENSO 20% + Isotropic 10%
-        Transition (Apr, Oct): MJO 50% + NAO 20% + ENSO 20% + Isotropic 10%
+        Multi-Modal Selection Strategy (No Blending)
+        Draws distinct ensemble members from the individual teleconnection bases:
+        e.g., for E=30: 9 MJO, 9 NAO, 9 ENSO, 3 Pure Random.
         """
-        mjo_noise = _get_mjo_eof(vB, E, H, W, b, d)
-        pure_noise = torch.randn((vB*E, 1, H, W), device=d)
+        mjo_full = noise_mjo_98(vB, E, H, W, b, d).view(vB, E, 1, H, W)
         
         if nao_bases is not None and nao_lookup is not None:
-            nao_noise = _get_nao_eof(vB, E, H, W, b, d)
+            nao_full = noise_nao_98(vB, E, H, W, b, d).view(vB, E, 1, H, W)
         else:
-            nao_noise = torch.randn((vB*E, 1, H, W), device=d)
-        
+            nao_full = noise_pure(vB, E, H, W, b, d).view(vB, E, 1, H, W)
+            
         if enso_bases is not None and oni_lookup is not None:
-            enso_noise = _get_enso_eof(vB, E, H, W, b, d)
+            enso_full = noise_enso_98(vB, E, H, W, b, d).view(vB, E, 1, H, W)
         else:
-            enso_noise = torch.randn((vB*E, 1, H, W), device=d)
+            enso_full = noise_pure(vB, E, H, W, b, d).view(vB, E, 1, H, W)
+            
+        pure_full = noise_pure(vB, E, H, W, b, d).view(vB, E, 1, H, W)
         
-        month = int(b['month'][0])
+        # Determine subset sizes based on total ensemble size E
+        n_mjo = int(0.30 * E)   # e.g., 9
+        n_nao = int(0.30 * E)   # e.g., 9
+        n_enso = int(0.30 * E)  # e.g., 9
+        n_pure = E - n_mjo - n_nao - n_enso # e.g., 3
         
-        if month in [11, 12, 1, 2, 3]:  # Winter
-            w_mjo, w_nao, w_enso, w_iso = 0.40, 0.35, 0.15, 0.10
-        elif month in [5, 6, 7, 8, 9]:  # Summer
-            w_mjo, w_nao, w_enso, w_iso = 0.60, 0.10, 0.20, 0.10
-        else:  # Transition (Apr, Oct)
-            w_mjo, w_nao, w_enso, w_iso = 0.50, 0.20, 0.20, 0.10
+        out = torch.zeros((vB, E, 1, H, W), device=d)
         
-        blend = w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise + w_iso * pure_noise
-        std = blend.std(dim=(2, 3), keepdim=True)
-        return blend / (std + 1e-6)
-    
-    def noise_multimodal_dynamic(vB, E, H, W, b, d):
-        """
-        Dynamically weighted multi-modal blended noise.
+        idx = 0
+        # MJO Subset
+        out[:, idx:idx+n_mjo] = mjo_full[:, idx:idx+n_mjo]
+        idx += n_mjo
         
-        Weights are computed from the REAL-TIME amplitude of each climate mode,
-        instead of fixed seasonal values. This means:
-          - If MJO is raging (amp=2.5) but NAO is dead (amp=0.1), MJO dominates.
-          - If it's a strong La Niña winter with weak MJO, ENSO dominates.
+        # NAO Subset
+        out[:, idx:idx+n_nao] = nao_full[:, idx:idx+n_nao]
+        idx += n_nao
         
-        90% of the blend is amplitude-weighted EOF noise, 10% is isotropic.
-        """
-        import datetime
-        import pandas as pd
+        # ENSO Subset
+        out[:, idx:idx+n_enso] = enso_full[:, idx:idx+n_enso]
+        idx += n_enso
         
-        mjo_noise = _get_mjo_eof(vB, E, H, W, b, d)
-        pure_noise = torch.randn((vB*E, 1, H, W), device=d)
+        # PURE Subset
+        out[:, idx:idx+n_pure] = pure_full[:, idx:idx+n_pure]
         
-        if nao_bases is not None and nao_lookup is not None:
-            nao_noise = _get_nao_eof(vB, E, H, W, b, d)
-        else:
-            nao_noise = torch.randn((vB*E, 1, H, W), device=d)
-        
-        if enso_bases is not None and oni_lookup is not None:
-            enso_noise = _get_enso_eof(vB, E, H, W, b, d)
-        else:
-            enso_noise = torch.randn((vB*E, 1, H, W), device=d)
-        
-        month = int(b['month'][0])
-        init_date = datetime.date(args.year, month, 15)
-        
-        # ── Compute MJO amplitude ──
-        date_str = init_date.strftime('%Y-%m-%d')
-        if mjo_df is not None and date_str in mjo_df.index:
-            row = mjo_df.loc[date_str]
-            if isinstance(row, pd.DataFrame):
-                row = row.iloc[0]
-            rmm1 = row.get('RMM1_lagged', 0.0)
-            rmm2 = row.get('RMM2_lagged', 0.0)
-            if pd.isna(rmm1) or pd.isna(rmm2):
-                mjo_amp = 1.0
-            else:
-                mjo_amp = float(np.sqrt(rmm1**2 + rmm2**2))
-        else:
-            mjo_amp = 1.0  # Default moderate amplitude
-        
-        # ── Compute NAO amplitude ──
-        if nao_lookup is not None:
-            nao_amp = abs(get_nao_value(init_date, nao_lookup))
-        else:
-            nao_amp = 0.5
-        
-        # ── Compute ENSO amplitude ──
-        if oni_lookup is not None:
-            enso_amp = abs(get_enso_value(month, args.year, oni_lookup))
-        else:
-            enso_amp = 0.5
-        
-        # Cap amplitudes to prevent one extreme outlier from wiping out the others
-        mjo_amp = min(mjo_amp, 3.0)
-        nao_amp = min(nao_amp, 2.5)
-        enso_amp = min(enso_amp, 2.5)
-        
-        # Ensure minimum floor so no mode is ever completely zeroed out
-        mjo_amp = max(mjo_amp, 0.1)
-        nao_amp = max(nao_amp, 0.1)
-        enso_amp = max(enso_amp, 0.1)
-        
-        # Normalize to get fractional weights
-        total = mjo_amp + nao_amp + enso_amp
-        w_mjo = mjo_amp / total
-        w_nao = nao_amp / total
-        w_enso = enso_amp / total
-        
-        # 90% physically weighted + 10% isotropic safety net
-        blend = 0.90 * (w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise) + 0.10 * pure_noise
-        
-        std = blend.std(dim=(2, 3), keepdim=True)
-        return blend / (std + 1e-6)
+        return out.view(vB * E, 1, H, W)
     
     # ─── Build Strategy List ───
     strategies = [
@@ -553,8 +485,7 @@ def main():
     if enso_bases is not None:
         strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True))
     if nao_bases is not None or enso_bases is not None:
-        strategies.append(("5. Seasonal MM",       noise_multimodal_seasonal, True))
-        strategies.append(("6. Dynamic MM",        noise_multimodal_dynamic,  True))
+        strategies.append(("5. MM Selection",      noise_multimodal_selection, True))
     
     n_ml = len(strategies)
     
