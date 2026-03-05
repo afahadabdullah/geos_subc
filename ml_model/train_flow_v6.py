@@ -915,7 +915,7 @@ def train(args, accelerator):
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
             cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=False,
+            use_flow_variance=True,  # Use variance head with EOF noise
             eof_bases=eof_bases
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
