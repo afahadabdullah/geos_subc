@@ -502,7 +502,7 @@ def train(args, accelerator):
                         fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
                         
                         # Panel 3: Combined area × land-ocean weights
-                        combined = (area_weights.cpu().numpy().squeeze() * mask_np)
+                        combined = (area_weights.cpu().numpy().reshape(181, 1) * mask_np)
                         im2 = axes[2].imshow(combined, cmap='magma',
                                             extent=[-180, 180, -90, 90], aspect='auto')
                         axes[2].set_title("Combined: Area Weight × Land-Ocean Weight")
