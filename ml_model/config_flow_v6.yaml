@@ -1,0 +1,17 @@
+# ML Training Config - Flow Matching V6 (Land-Weighted Loss)
+# Identical to V4 except train_flow_v6.py applies 65% land / 35% ocean loss weighting
+batch_size: 4
+learning_rate: 5e-5
+epochs: 1000
+output_dir: ml_output_flow6
+mixed_precision: fp16
+num_workers: 1
+data_dir: /home1/11353/afahad/geos_subc/dataprocess
+train_start_year: 1999
+train_end_year: 2020
+val_start_year: 2021
+val_end_year: 2022
+preload: True
+save_top_k: 4
+
+reset_validation_history: False
