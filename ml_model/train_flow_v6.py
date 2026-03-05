@@ -127,11 +127,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # Sample 6 batches evenly across the validation set for monthly coverage (2 months apart).
+    # Sample 12 batches evenly across the validation set for monthly coverage (1 month apart).
     # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
-    # 6 evenly-spaced batches give us representative seasonal coverage.
+    # 12 evenly-spaced batches give us full monthly representation.
     total_val_batches = len(val_loader)
-    num_val_samples = 6
+    num_val_samples = 12
     if total_val_batches >= num_val_samples:
         step = total_val_batches / num_val_samples
         target_batches = [int(i * step) for i in range(num_val_samples)]
@@ -167,8 +167,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 8 ensemble members (speed). Full validation: 6 members (quality).
-        num_ensemble = 8 if (is_fast_recon and not is_test) else 6
+        # Fast validation: 6 ensemble members (speed). Full validation: 6 members (quality).
+        num_ensemble = 6
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
