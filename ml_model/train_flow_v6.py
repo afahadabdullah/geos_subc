@@ -196,8 +196,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate noise: use EOF-structured noise ONLY in test mode, otherwise pure isotropic noise
-        if eof_bases is not None and is_test:
+        # Generate noise: use EOF-structured noise if available
+        if eof_bases is not None:
             mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
             if not isinstance(mjo_phases, torch.Tensor):
                 mjo_phases = torch.tensor(mjo_phases)
@@ -953,8 +953,8 @@ def train(args, accelerator):
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
-                        use_flow_variance=True,
-                        eof_bases=eof_bases
+                        use_flow_variance=True, # Use variance head
+                        eof_bases=eof_bases # Use EOF structured noise
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
                                   b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
