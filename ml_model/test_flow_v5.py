@@ -134,9 +134,10 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
     plt.savefig(os.path.join(output_dir, "test_plots", filename), bbox_inches='tight', dpi=150)
     plt.close()
 
-@torch.no_grad()
+import noise_utils
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True, eof_bases=None):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True, 
+                      eof_bases=None, nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None, year=None):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
@@ -193,43 +194,10 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, num_ensemble, 1, H, W).reshape(vB * num_ensemble, 1, H, W)
     
     # Generate noise: EOF-modulated isotropic noise (spatial coherence + random diversity)
-    # Each member gets pure randn() spatially shaped by the leading EOF eigenvectors
-    # for the corresponding MJO phase/lead, then normalized to unit variance.
     if eof_bases is not None:
-        mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-        if not isinstance(mjo_phases, torch.Tensor):
-            mjo_phases = torch.tensor(mjo_phases)
-        lead_ids = batch['lead_idx']
-        if not isinstance(lead_ids, torch.Tensor):
-            lead_ids = torch.tensor(lead_ids)
-        
-        smart_noise_expanded = torch.zeros((vB * num_ensemble, 1, H, W), device=device)
-        for i in range(vB * num_ensemble):
-            sample_b_idx = i // num_ensemble  # batch-major indexing
-            phase = int(mjo_phases[sample_b_idx])
-            lead = int(lead_ids[sample_b_idx])
-            
-            key = (phase, lead)
-            if key not in eof_bases:
-                key = phase
-            if key not in eof_bases:
-                key = (0, lead)
-            
-            if key in eof_bases and 'eofs' in eof_bases[key]:
-                eofs = eof_bases[key]['eofs'].to(device)  # [K, H, W]
-                K = eofs.shape[0]
-                
-                # Random coefficients (pure randn, no eigenvalue scaling)
-                alpha = torch.randn(K, device=device)
-                noise_field = torch.einsum('k,khw->hw', alpha, eofs)
-                
-                # Normalize to unit variance
-                std = noise_field.std()
-                if std > 1e-6:
-                    noise_field = noise_field / std
-                smart_noise_expanded[i, 0] = noise_field
-            else:
-                smart_noise_expanded[i, 0] = torch.randn(H, W, device=device)
+        smart_noise_expanded = noise_utils.generate_dynamic_multimodal_noise(
+            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year
+        )
     else:
         base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         smart_noise_expanded = base_noise_expanded * var_scaled_expanded
@@ -239,7 +207,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # Single parallel ODE solve for the entire test batch and ensemble
     p_x1_expanded = flow_matcher.euler_solve(
         model, smart_noise_expanded, fx_cond_expanded, 
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True  # Ensure variance head is used per user request
     )
     
     # Reshape back to [vB, num_ensemble, H, W]
@@ -418,6 +386,7 @@ def main():
         
         flow_matcher = CustomFlowMatcher(device=device)
     
+    import noise_utils
     # Load MJO EOF bases for physically structured ensemble noise
     eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
     eof_bases = None
@@ -427,6 +396,36 @@ def main():
         print(f"✅ Loaded MJO EOF bases: {eof_data['n_eofs']} EOFs/phase")
     else:
         print(f"⚠️ MJO EOF bases not found. Using GEOS-variance-scaled noise.")
+        
+    # NAO
+    nao_eof_path = os.path.join(os.path.dirname(__file__), "nao_eof_bases.pt")
+    nao_idx_path = os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii")
+    nao_bases, nao_lookup = None, None
+    if os.path.exists(nao_eof_path) and os.path.exists(nao_idx_path):
+        nao_data = torch.load(nao_eof_path, map_location='cpu', weights_only=False)
+        nao_bases = nao_data['eof_bases']
+        nao_lookup = noise_utils.parse_nao_index(nao_idx_path)
+        print(f"✅ Loaded NAO EOFs")
+        
+    # ENSO
+    enso_eof_path = os.path.join(os.path.dirname(__file__), "enso_eof_bases.pt")
+    oni_idx_path = os.path.join(config["data_dir"], "oni.ascii.txt")
+    enso_bases, oni_lookup = None, None
+    if os.path.exists(enso_eof_path) and os.path.exists(oni_idx_path):
+        enso_data = torch.load(enso_eof_path, map_location='cpu', weights_only=False)
+        enso_bases = enso_data['eof_bases']
+        oni_lookup = noise_utils.parse_oni_index(oni_idx_path)
+        print(f"✅ Loaded ENSO EOFs")
+        
+    # MJO RMM CSV
+    mjo_df = None
+    mjo_csv_path = os.path.join(config["data_dir"], "mjo_processed.csv")
+    if os.path.exists(mjo_csv_path):
+        import pandas as pd
+        mjo_df = pd.read_csv(mjo_csv_path, parse_dates=['S'])
+        mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
+        mjo_df = mjo_df.set_index('date_str')
+        print(f"✅ Loaded MJO RMM CSV")
 
     csv_file = os.path.join(output_dir, f"test_metrics_v5_{args.year}_N{args.ensemble_size}.csv")
     with open(csv_file, mode='w', newline='') as f:
@@ -509,7 +508,8 @@ def main():
                 batch_idx, batch, model, flow_matcher, device, output_dir, None,
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, 
                 num_ensemble=args.ensemble_size, num_steps=args.steps, save_plot=(batch_idx < 5),
-                eof_bases=eof_bases
+                eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup, 
+                enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df, year=args.year
             )
             
             f_pred = tensors['full_pred'].cpu().numpy()

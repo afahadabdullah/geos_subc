@@ -134,9 +134,10 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
     plt.savefig(os.path.join(output_dir, "test_plots", filename), bbox_inches='tight', dpi=150)
     plt.close()
 
-@torch.no_grad()
+import noise_utils
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=15, num_steps=50, save_plot=True, eof_bases=None):
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=15, num_steps=50, save_plot=True, 
+                      eof_bases=None, nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None, year=None):
     model.eval()
     
     fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
@@ -196,25 +197,9 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     
     # Generate noise: use EOF-structured noise if available, otherwise GEOS-variance-scaled
     if eof_bases is not None:
-        mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-        if not isinstance(mjo_phases, torch.Tensor):
-            mjo_phases = torch.tensor(mjo_phases)
-        lead_ids = batch['lead_idx']
-        if not isinstance(lead_ids, torch.Tensor):
-            lead_ids = torch.tensor(lead_ids)
-        
-        # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded for base members.
-        mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
-        lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
-            
-        # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
-        eof_noise_base = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
-        pure_noise_base = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-        blend_base = 0.02 * pure_noise_base + 0.98 * eof_noise_base
-        
-        # Re-normalize to unit variance
-        std_base = blend_base.std(dim=(2, 3), keepdim=True)
-        noise_base = blend_base / (std_base + 1e-6)
+        noise_base = noise_utils.generate_dynamic_multimodal_noise(
+            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year
+        )
         
         # ANTITHETIC SAMPLING: create negated mirror for each base sample
         noise_anti = -noise_base
@@ -413,6 +398,7 @@ def main():
         
         flow_matcher = CustomFlowMatcher(device=device)
     
+    import noise_utils
     # Load MJO EOF bases for physically structured ensemble noise
     eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
     eof_bases = None
@@ -422,6 +408,36 @@ def main():
         print(f"✅ Loaded MJO EOF bases: {eof_data['n_eofs']} EOFs/phase")
     else:
         print(f"⚠️ MJO EOF bases not found. Using GEOS-variance-scaled noise.")
+        
+    # NAO
+    nao_eof_path = os.path.join(os.path.dirname(__file__), "nao_eof_bases.pt")
+    nao_idx_path = os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii")
+    nao_bases, nao_lookup = None, None
+    if os.path.exists(nao_eof_path) and os.path.exists(nao_idx_path):
+        nao_data = torch.load(nao_eof_path, map_location='cpu', weights_only=False)
+        nao_bases = nao_data['eof_bases']
+        nao_lookup = noise_utils.parse_nao_index(nao_idx_path)
+        print(f"✅ Loaded NAO EOFs")
+        
+    # ENSO
+    enso_eof_path = os.path.join(os.path.dirname(__file__), "enso_eof_bases.pt")
+    oni_idx_path = os.path.join(config["data_dir"], "oni.ascii.txt")
+    enso_bases, oni_lookup = None, None
+    if os.path.exists(enso_eof_path) and os.path.exists(oni_idx_path):
+        enso_data = torch.load(enso_eof_path, map_location='cpu', weights_only=False)
+        enso_bases = enso_data['eof_bases']
+        oni_lookup = noise_utils.parse_oni_index(oni_idx_path)
+        print(f"✅ Loaded ENSO EOFs")
+        
+    # MJO RMM CSV
+    mjo_df = None
+    mjo_csv_path = os.path.join(config["data_dir"], "mjo_processed.csv")
+    if os.path.exists(mjo_csv_path):
+        import pandas as pd
+        mjo_df = pd.read_csv(mjo_csv_path, parse_dates=['S'])
+        mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
+        mjo_df = mjo_df.set_index('date_str')
+        print(f"✅ Loaded MJO RMM CSV")
 
     csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
     with open(csv_file, mode='w', newline='') as f:
@@ -504,7 +520,8 @@ def main():
                 batch_idx, batch, model, flow_matcher, device, output_dir, None,
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, 
                 num_ensemble=args.ensemble_size, num_steps=args.steps, save_plot=(batch_idx < 5),
-                eof_bases=eof_bases
+                eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup, 
+                enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df, year=args.year
             )
             
             f_pred = tensors['full_pred'].cpu().numpy()
