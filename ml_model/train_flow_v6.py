@@ -196,8 +196,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate noise: use EOF-structured noise if available, otherwise isotropic
-        if eof_bases is not None:
+        # Generate noise: use EOF-structured noise ONLY in test mode, otherwise pure isotropic noise
+        if eof_bases is not None and is_test:
             mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
             if not isinstance(mjo_phases, torch.Tensor):
                 mjo_phases = torch.tensor(mjo_phases)
