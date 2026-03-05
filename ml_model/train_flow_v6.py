@@ -539,10 +539,7 @@ def train(args, accelerator):
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
-    # Phase transition constant (must be before checkpoint loading for resume detection)
-    VARIANCE_PHASE_EPOCH = 115  # Freeze UNet at this epoch, train only var_heads
-    
-    # Load MJO EOF bases for physically structured ensemble noise
+    # Load MJO EOF bases for physically structured ensemble noise (used at inference/validation)
     eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
     eof_bases = None
     if os.path.exists(eof_bases_path):
@@ -575,20 +572,12 @@ def train(args, accelerator):
             if not args.test:
                 start_epoch = checkpoint['epoch'] + 1
                 
-                # Detect if we're resuming into Phase 2
-                # If so, DON'T load the optimizer state — it was saved with var_heads-only params
-                # and won't match the full-model optimizer created at line 364.
-                # A fresh var_heads optimizer will be created in the Phase 2 resume block below.
-                if start_epoch >= VARIANCE_PHASE_EPOCH:
+                try:
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                except (ValueError, RuntimeError) as e:
                     if accelerator.is_main_process:
-                        print(f"   ℹ️ Phase 2 resume detected (epoch {start_epoch}). Skipping optimizer state load (will create var-only optimizer).")
-                else:
-                    try:
-                        optimizer.load_state_dict(checkpoint['optimizer'])
-                    except (ValueError, RuntimeError) as e:
-                        if accelerator.is_main_process:
-                            print(f"   ⚠️ Optimizer state mismatch (likely from Phase 2 checkpoint). Starting with fresh optimizer.")
-                            print(f"      Error: {e}")
+                        print(f"   ⚠️ Optimizer state mismatch. Starting with fresh optimizer.")
+                        print(f"      Error: {e}")
                 
                 if 'best_val_crps' in checkpoint:
                     best_val_crps = checkpoint['best_val_crps']
@@ -612,19 +601,7 @@ def train(args, accelerator):
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val CRPS so far: {best_val_crps:.4f}\n")
                     
-                if getattr(args, 'reset_variance', False):
-                    print("   [ARCHITECTURE FIX] --reset-variance passed! Purging old Variance Head weights.")
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    
-                    for module in unwrapped_model.var_heads:
-                        for layer in module.modules():
-                            if isinstance(layer, torch.nn.Conv2d):
-                                torch.nn.init.orthogonal_(layer.weight, gain=0.01)
-                                if layer.bias is not None:
-                                    torch.nn.init.constant_(layer.bias, 0.0)
-                                    
-                    print("   [ARCHITECTURE FIX] Variance Heads freshly initialized to predict ~0.0 log-variance (1.0x multiplier).")
-                    
+
         except Exception as e:
             if accelerator.is_main_process:
                 print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
@@ -645,7 +622,7 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=(start_epoch >= VARIANCE_PHASE_EPOCH),
+            use_flow_variance=True,
             eof_bases=eof_bases
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
@@ -826,39 +803,6 @@ def train(args, accelerator):
 
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
-    is_variance_phase = False  # Will be set per-epoch
-    
-    # If resuming into Phase 2 (e.g. from epoch 250), freeze immediately
-    if start_epoch >= VARIANCE_PHASE_EPOCH:
-        if accelerator.is_main_process:
-            print(f"🔒 Resuming in Phase 2 (epoch {start_epoch} >= {VARIANCE_PHASE_EPOCH}). Freezing UNet + mean heads.")
-            # Save milestone checkpoint if it doesn't exist yet
-            milestone_path = os.path.join(output_dir, f"unet_converged_epoch{VARIANCE_PHASE_EPOCH - 1}.pt")
-            if not os.path.exists(milestone_path):
-                unwrapped_save = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': VARIANCE_PHASE_EPOCH - 1,
-                    'model': unwrapped_save.state_dict(),
-                    'best_val_crps': best_val_crps,
-                    'top_models': top_models
-                }, milestone_path)
-                print(f"   💾 Saved milestone checkpoint: {milestone_path}")
-        unwrapped = accelerator.unwrap_model(model)
-        for param in unwrapped.unet.parameters():
-            param.requires_grad_(False)
-        for param in unwrapped.heads.parameters():
-            param.requires_grad_(False)
-        for param in unwrapped.var_heads.parameters():
-            param.requires_grad_(True)
-        # Create variance-only optimizer
-        optimizer = torch.optim.AdamW(
-            [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-            lr=1e-4
-        )
-        model, optimizer, loader, val_loader = accelerator.prepare(
-            model, optimizer, loader, val_loader
-        )
-        is_variance_phase = True
     
     for epoch in range(start_epoch, epochs):
         if epochs_done_this_run >= max_epochs_this_run:
@@ -866,44 +810,9 @@ def train(args, accelerator):
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
         
-        # --- PHASE TRANSITION at VARIANCE_PHASE_EPOCH ---
-        if epoch == VARIANCE_PHASE_EPOCH and not is_variance_phase:
-            # Save the converged UNet as a milestone
-            if accelerator.is_main_process:
-                unwrapped = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch - 1,
-                    'model': unwrapped.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'best_val_crps': best_val_crps,
-                    'top_models': top_models
-                }, os.path.join(output_dir, f"unet_converged_epoch{epoch-1}.pt"))
-                print(f"\n🔒 Phase 2 START: Saved milestone checkpoint. Freezing UNet backbone + mean heads.")
-                print(f"   Only variance heads will be trained from now on.")
-            
-            # Freeze UNet + mean heads
-            unwrapped = accelerator.unwrap_model(model)
-            for param in unwrapped.unet.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.heads.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.var_heads.parameters():
-                param.requires_grad_(True)
-            
-            # Create variance-only optimizer (fresh, higher LR for new heads)
-            optimizer = torch.optim.AdamW(
-                [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-                lr=1e-4
-            )
-            model, optimizer, loader, val_loader = accelerator.prepare(
-                model, optimizer, loader, val_loader
-            )
-            is_variance_phase = True
-        
         model.train()
         train_loss = 0.0
-        phase_label = "Phase2-Var" if is_variance_phase else "Phase1-Vel"
-        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch} [{phase_label}]")
+        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
 
         for i, batch in enumerate(pbar):    
             # Conditionals: [B, 31, H, W]
@@ -932,35 +841,11 @@ def train(args, accelerator):
 
             # Flow Matching Interpolation
             t = flow_matcher.sample_time_batch(B)
-            # Generate Noise (EOF blend in Phase 2, Pure in Phase 1)
-            if is_variance_phase and eof_bases is not None:
-                mjo_phases = batch.get('mjo_phase', torch.zeros(B, dtype=torch.long))
-                if not isinstance(mjo_phases, torch.Tensor):
-                    mjo_phases = torch.tensor(mjo_phases)
-                
-                # 98% EOF / 2% Pure blend exactly as done at inference
-                eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, B, H, W, lead_ids=lead_idx)
-                pure_noise = torch.randn_like(target_norm)
-                blend = 0.02 * pure_noise + 0.98 * eof_noise
-                std = blend.std(dim=(2, 3), keepdim=True)
-                noise = blend / (std + 1e-6)
-            else:
-                noise = torch.randn_like(target_norm)
+            noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
             # Predict the velocity (routed through the correct per-week output head)
-            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
-
-            # --- Target Variance (Gradient Isolated) ---
-            # We want the variance head to predict the RELATIVE spatial scaling of the error,
-            # WITHOUT letting gradients flow backward to disrupt the flow matching trajectory.
-            # 1. Compute absolute error magnitude
-            abs_err = torch.abs(v_target - v_pred.detach())
-            
-            # 2. Normalize by the global mean error of that specific sample/lead.
-            # This makes the target a RELATIVE multiplier with a mean of 1.0.
-            # e.g., target_scale = 1.2 in the tropics means "this pixel needs 20% more spread than average"
-            target_scale = abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6)
+            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -968,29 +853,8 @@ def train(args, accelerator):
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss computation
-            loss_v = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
-            
-            if is_variance_phase:
-                # Under the new architecture, model output `var_pred` represents log-variance.
-                # The ODE solver exponentiates it to get the standard deviation multiplier:
-                std_mult = torch.exp(0.5 * var_pred)
-                
-                # 1. Primary objective: predict the relative scaling map
-                loss_mse = (area_weights * land_ocean_weights * temp_weights * (std_mult - target_scale)**2).mean()
-                
-                # 2. Regularization: keep multiplier within [0.5, 2.5] bounds
-                # and gently pull towards 1.0 (identity scaling).
-                var_penalty = torch.relu(std_mult - 2.5)**2 + torch.relu(0.5 - std_mult)**2
-                identity_pull = (std_mult - 1.0)**2
-                
-                loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
-                
-                loss_var = loss_mse + loss_reg
-                loss = loss_var
-            else:
-                # Phase 1: Pure velocity training
-                loss = loss_v
+            # Loss computation (V6: area-weighted + land-ocean weighted + temporal weighted MSE)
+            loss = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -998,10 +862,7 @@ def train(args, accelerator):
             optimizer.zero_grad()
 
             train_loss += loss.item()
-            if is_variance_phase:
-                pbar.set_postfix({"loss_var": f"{loss.item():.4f}", "loss_v(frozen)": f"{loss_v.item():.4f}"})
-            else:
-                pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}"})
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
@@ -1058,7 +919,7 @@ def train(args, accelerator):
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
             cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=is_variance_phase,
+            use_flow_variance=False,
             eof_bases=eof_bases
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
@@ -1096,7 +957,7 @@ def train(args, accelerator):
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
-                        use_flow_variance=is_variance_phase,
+                        use_flow_variance=True,
                         eof_bases=eof_bases
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
