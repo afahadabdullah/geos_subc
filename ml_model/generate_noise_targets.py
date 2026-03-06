@@ -91,9 +91,10 @@ def main():
         # ── 1. Calculate True Physical Error Map (The Ideal Spread) ──
         true_gpcp = batch['target_raw'] # [1, 1, H, W]
         # Calculate raw GEOS ensemble mean for this specific lead time
-        # GEOS is [1, 4, H, W], we need lead index
+        # GEOS is [1, M, L, H, W], we need lead index
         lead_idx = int(batch['lead_idx'][0].item())
-        geos_mean = batch['pure_geos_mean_raw'][0, lead_idx:lead_idx+1].unsqueeze(0) # [1, 1, H, W]
+        # Average over M (dim=0 since we take batch[0]), then select Lead
+        geos_mean = batch['geos_ens_raw'][0].mean(dim=0)[lead_idx:lead_idx+1].unsqueeze(0) # [1, 1, H, W]
         
         # Absolute Error Map (Target Uncertainty)
         abs_error_map = torch.abs(true_gpcp - geos_mean).squeeze().to(device) # [H, W]
@@ -154,7 +155,8 @@ def main():
         month = int(batch['month'][0].item())
         lead = int(batch['lead_idx'][0].item())
         
-        out_file = os.path.join(args.out_dir, f"target_{idx:05d}_m{month}_l{lead+1}.pt")
+        # We assume start_year is the year since we'll run it year-by-year in the bash script
+        out_file = os.path.join(args.out_dir, f"target_y{args.start_year}_{idx:05d}_m{month}_l{lead+1}.pt")
         
         # Extract MJO
         rmm1, rmm2 = 0.0, 0.0
@@ -193,8 +195,8 @@ def main():
         p_nao = (stats_dict.get(2, 0) / total) * 100
         p_enso = (stats_dict.get(3, 0) / total) * 100
         
-        if idx % 10 == 0:
-            print(f"[{idx}] m{month:02d}.l{lead+1} | "
+        if idx % 50 == 0:
+            print(f"[{idx}] y{args.start_year}.m{month:02d}.l{lead+1} | "
                   f"Wins: Rand({p_rand:.0f}%) MJO({p_mjo:.0f}%) NAO({p_nao:.0f}%) ENSO({p_enso:.0f}%)", flush=True)
 
 if __name__ == "__main__":

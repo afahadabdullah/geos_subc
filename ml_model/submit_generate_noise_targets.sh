@@ -21,8 +21,8 @@ export PYTHONUNBUFFERED=1
 
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
-# Automatically sweep exactly 1999 to 2021 to bake the year into every single file directly!
-for Y in {1999..2021}; do
+# Automatically sweep exactly 1999 to 2022 to bake the year into every single file directly!
+for Y in {1999..2022}; do
     echo "========================================="
     echo "Generating Targets for Year $Y"
     python3 ml_model/generate_noise_targets.py \
