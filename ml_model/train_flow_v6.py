@@ -573,8 +573,8 @@ def train(args, accelerator):
         print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for dynamic validation noise.")
     
     start_epoch = 0
-    best_val_crps = float('inf')
-    top_models = [] # List of {"path": str, "crps": float, "epoch": int}
+    best_val_loss = float('inf')
+    top_models = [] # List of {"path": str, "val_loss": float, "epoch": int}
     
     # Load latest checkpoint if it exists
     if args.test:
@@ -899,7 +899,7 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps,
+                'best_val_loss': best_val_loss,
                 'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -928,67 +928,65 @@ def train(args, accelerator):
             continue
 
         if accelerator.is_main_process:
-            print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
+            print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
-        # Always do fast validation first. Only do expensive full sampling if new best is found.
-        is_plot_epoch = args.full_val
+        model.eval()
+        val_loss_total = 0.0
+        val_steps = 0
         
-        val_outputs = run_val_inference(
-            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
-            is_test=is_plot_epoch, 
-            is_fast_recon=not is_plot_epoch,
-            cached_geos_crps=global_cached_geos_crps,
-            cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=True,  # Use variance head
-            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
-        )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
+        with torch.no_grad():
+            for batch in val_loader:
+                x_geos = batch['x_geos'].to(device)
+                x_obs  = batch['x_obs'].to(device)
+                
+                B, M, C_extra, L, H, W = x_geos.shape
+                x_geos_flat = x_geos.view(B, -1, H, W)
+                
+                months = batch['month'].to(device)
+                sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                
+                lead_idx = batch['lead_idx'].to(device)
+                lead_val = (lead_idx.float() / 1.5) - 1.0 
+                lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
+                
+                x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
+                target_norm = batch['y_target'].to(device)
+                
+                t = flow_matcher.sample_time_batch(B)
+                noise = torch.randn_like(target_norm)
+                x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+                
+                v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
+                
+                w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
+                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+                
+                loss_val = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
+                val_loss_total += loss_val.item()
+                val_steps += 1
+                
+        current_val_metric = val_loss_total / max(1, val_steps)
         
-        if global_cached_geos_crps is None:
-            global_cached_geos_crps = geos_crps
-            global_cached_geos_rmse = geos_rmse
-            
         if accelerator.is_main_process:
-            # 1. Always plot the results from the first validation pass (usually fast ensemble)
-            plot_suffix = "fast" if not is_plot_epoch else "full"
-            save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
-                          geos_mean, geos_crps, geos_rmse, output_dir, ai_residual=current_ai_res, suffix=plot_suffix,
-                          geos_single=geos_single, model_single=model_single, model_var=model_var)
+            print(f"✅ Validation Complete. Avg Noise MSE Loss: {current_val_metric:.4f}")
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
-            worst_top_crps = max([m['crps'] for m in top_models]) if len(top_models) == 4 else float('inf')
+            worst_top_loss = max([m['val_loss'] for m in top_models]) if len(top_models) == 4 else float('inf')
             
-            if current_val_metric < worst_top_crps:
-                print(f"🌟 New Top-4 model found! CRPS: {current_val_metric:.4f}")
+            if current_val_metric < worst_top_loss:
+                print(f"🌟 New Top-4 model found! Val Loss: {current_val_metric:.4f}")
                 is_in_top4 = True
                 
                 # Absolute Best Check
-                is_new_best = (current_val_metric < best_val_crps)
+                is_new_best = (current_val_metric < best_val_loss)
                 if is_new_best:
-                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_crps:.4f}")
-                    best_val_crps = current_val_metric
-
-                # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
-                if is_new_best and epoch > 6 and not is_plot_epoch:
-                    num_steps = 50 
-                    print(f"📸 Breakthrough! Triggering high-quality {num_steps}-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
-                        epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
-                        is_test=True, is_fast_recon=False,
-                        use_flow_variance=True,
-                        eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                        enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
-                    )
-                    save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
-                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
-                                  geos_single=b_gs, model_single=b_ms, model_var=b_mv)
+                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_loss:.4f}")
+                    best_val_loss = current_val_metric
 
                 # Manage Top 4 Persistence
-                new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
+                new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
                 new_best_path = os.path.join(output_dir, new_best_name)
                 
                 unwrapped_model = accelerator.unwrap_model(model)
@@ -996,21 +994,21 @@ def train(args, accelerator):
                     'epoch': epoch,
                     'model': unwrapped_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'best_val_crps': best_val_crps,
+                    'best_val_loss': best_val_loss,
                     'top_models': top_models
                 }
                 
                 if len(top_models) == 4:
                     # Replace worst
-                    worst_model = max(top_models, key=lambda x: x['crps'])
+                    worst_model = max(top_models, key=lambda x: x['val_loss'])
                     if os.path.exists(worst_model['path']):
                         os.remove(worst_model['path'])
                     top_models.remove(worst_model)
                 
                 # Save new and update list
                 torch.save(best_ckpt, new_best_path)
-                top_models.append({"path": new_best_path, "crps": current_val_metric, "epoch": epoch})
-                top_models.sort(key=lambda x: x['crps']) # Best first
+                top_models.append({"path": new_best_path, "val_loss": current_val_metric, "epoch": epoch})
+                top_models.sort(key=lambda x: x['val_loss']) # Best first
                 
                 # Keep a symlink or redundant copy for 'best_flow_ckpt.pt'
                 if is_new_best:
