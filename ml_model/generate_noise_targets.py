@@ -46,9 +46,10 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     # ── Load EOFs & Physics Data ──
-    mjo_bases_path = os.path.join(args.data_dir, "mjo_eof_bases.pt")
-    nao_bases_path = os.path.join(os.path.dirname(args.checkpoint), "nao_eof_bases.pt")
-    enso_bases_path = os.path.join(os.path.dirname(args.checkpoint), "enso_eof_bases.pt")
+    ml_dir = os.path.dirname(__file__)
+    mjo_bases_path = os.path.join(ml_dir, "mjo_eof_bases.pt")
+    nao_bases_path = os.path.join(ml_dir, "nao_eof_bases.pt")
+    enso_bases_path = os.path.join(ml_dir, "enso_eof_bases.pt")
     mjo_csv_path = os.path.join(args.data_dir, "mjo_processed.csv") # Used processed CSV
     
     mjo_data = torch.load(mjo_bases_path, map_location="cpu") if os.path.exists(mjo_bases_path) else None
