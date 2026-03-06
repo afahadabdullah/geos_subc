@@ -202,8 +202,8 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
     if perturb_cond:
-        # Add structured physical perturbation to the GEOS Precipitation conditioning channel
-        fx_cond_expanded[:, 1:2, :, :] += (noise_expanded * 0.10)
+        # Add structured physical perturbation to the Z500 (ch 4) and U250 (ch 5) atmospheric dynamics channels
+        fx_cond_expanded[:, 4:6, :, :] += (noise_expanded * 0.10)
         
     # Solve ODE
     p_x1_expanded = flow_matcher.euler_solve(
