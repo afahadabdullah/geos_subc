@@ -2,10 +2,9 @@
 #SBATCH -J cmp_noise_v4                # Job name
 #SBATCH -o ml_output_flow4/cmp_noise_v4_%j.log
 #SBATCH -e ml_output_flow4/cmp_noise_v4_%j.log
-#SBATCH -p gh                          # Queue (partition) name
+#SBATCH -p gh-dev                      # Queue (partition) name
 #SBATCH -N 1                           # Total # of nodes
-#SBATCH -n 4                           # Total # of tasks
-#SBATCH --gpus=1                       # Total # of GPUs
+#SBATCH -n 1                           # Total # of tasks
 #SBATCH -t 02:00:00                    # Run time (hh:mm:ss)
 #SBATCH -A ATM25008                    # Project account
 #SBATCH --mail-type=all
