@@ -520,7 +520,7 @@ def main():
         
     def noise_multimodal_dynamic_lhs(vB, E, H, W, b, d):
         import noise_utils
-        return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year, use_lhs=True)
+        return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
     
     # ─── Build Strategy List ───
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
