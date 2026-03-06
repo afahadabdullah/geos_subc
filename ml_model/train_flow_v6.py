@@ -13,9 +13,12 @@ import matplotlib.pyplot as plt
 import argparse
 from accelerate import Accelerator
 
+import pandas as pd
+
 # Local Modules
 from dataset_flow import S2SHybridDataset
 from flow_matching import FlowMatchingModel, CustomFlowMatcher
+import noise_utils
 
 def get_area_weights(lats, device):
     lats_rad = np.deg2rad(lats)
@@ -123,7 +126,8 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
-                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None):
+                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None,
+                      nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -196,28 +200,30 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate noise: use EOF-structured noise if available
+        # Generate antithetical dynamic multimodal noise (z and -z)
+        num_base_members = num_ensemble // 2
+        
+        # Try to dynamically fetch validation year from batch if available, fallback to 2021
+        val_year = 2021
+        if 'year' in batch:
+            val_year = int(batch['year'][0].item())
+            
         if eof_bases is not None:
-            mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-            if not isinstance(mjo_phases, torch.Tensor):
-                mjo_phases = torch.tensor(mjo_phases)
-            lead_ids = batch['lead_idx']
-            if not isinstance(lead_ids, torch.Tensor):
-                lead_ids = torch.tensor(lead_ids)
+            noise_base = noise_utils.generate_dynamic_multimodal_noise(
+                batch, num_base_members, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, val_year
+            )
+            noise_anti = -noise_base
             
-            # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded.
-            mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
-            lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
-            
-            # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
-            eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
-            pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-            blend = 0.02 * pure_noise + 0.98 * eof_noise
-            # Re-normalize to unit variance
-            std = blend.std(dim=(2, 3), keepdim=True)
-            noise_expanded = blend / (std + 1e-6)
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
         else:
-            noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+            noise_base = torch.randn((vB * num_base_members, 1, H, W), device=device)
+            noise_anti = -noise_base
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
+            
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
         # Single parallel ODE solve for the entire validation batch and ensemble
@@ -535,18 +541,26 @@ def train(args, accelerator):
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
-    # Load MJO EOF bases for physically structured ensemble noise (used at inference/validation)
-    eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
-    eof_bases = None
-    if os.path.exists(eof_bases_path):
-        eof_data = torch.load(eof_bases_path, map_location='cpu', weights_only=False)
-        eof_bases = eof_data['eof_bases']
+    # Load Dynamic Multi-Modal Bases
+    eof_bases_path = os.path.join(config["data_dir"], "mjo_eof_bases.pt")
+    nao_bases_path = os.path.join(config["data_dir"], "nao_eof_bases.pt")
+    enso_bases_path = os.path.join(config["data_dir"], "enso_eof_bases.pt")
+    
+    eof_bases = torch.load(eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(eof_bases_path) else None
+    nao_bases = torch.load(nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_bases_path) else None
+    enso_bases = torch.load(enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_bases_path) else None
+    
+    try:
+        nao_lookup = noise_utils.parse_nao_index(os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii"))
+        oni_lookup = noise_utils.parse_oni_index(os.path.join(config["data_dir"], "oni.ascii.txt"))
+        mjo_df = pd.read_csv(os.path.join(config["data_dir"], "mjo_processed.csv"), parse_dates=['S']).set_index(pd.to_datetime(pd.read_csv(os.path.join(config["data_dir"], "mjo_processed.csv"), parse_dates=['S'])['S']).dt.strftime('%Y-%m-%d'))
+    except Exception as e:
         if accelerator.is_main_process:
-            print(f"✅ Loaded MJO EOF bases from {eof_bases_path}")
-            print(f"   {eof_data['n_eofs']} EOFs per phase, phases: {list(eof_bases.keys())}")
-    else:
-        if accelerator.is_main_process:
-            print(f"⚠️ MJO EOF bases not found at {eof_bases_path}. Using isotropic noise for ensembles.")
+            print(f"⚠️ Teleconnection index loading failed: {e}. Falling back to default amplitudes.")
+        nao_lookup, oni_lookup, mjo_df = None, None, None
+        
+    if accelerator.is_main_process and eof_bases is not None:
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for dynamic validation noise.")
     
     start_epoch = 0
     best_val_crps = float('inf')
@@ -619,7 +633,8 @@ def train(args, accelerator):
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
             use_flow_variance=True,
-            eof_bases=eof_bases
+            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
         
@@ -915,8 +930,9 @@ def train(args, accelerator):
             is_fast_recon=not is_plot_epoch,
             cached_geos_crps=global_cached_geos_crps,
             cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=True,  # Use variance head with EOF noise
-            eof_bases=eof_bases
+            use_flow_variance=True,  # Use variance head
+            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
         )
         current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
         
@@ -953,8 +969,9 @@ def train(args, accelerator):
                         epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                         target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
                         is_test=True, is_fast_recon=False,
-                        use_flow_variance=True, # Use variance head
-                        eof_bases=eof_bases # Use EOF structured noise
+                        use_flow_variance=True,
+                        eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                        enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
                     )
                     save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
                                   b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
