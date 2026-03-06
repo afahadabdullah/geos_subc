@@ -378,6 +378,19 @@ def main():
     else:
         print(f"  ⚠️ MJO CSV not found at {mjo_csv_path}. Dynamic weighting will use default MJO amplitude.")
     
+    # SSG Network (Optional trained ML noise generator)
+    ssg_model = None
+    ssg_ckpt_path = os.path.join(os.path.dirname(ml_dir), "ml_output_ssg", "BEST_ssg.pt")
+    if os.path.exists(ssg_ckpt_path):
+        from model_ssg import SpatialSpreadGenerator
+        ssg_model = SpatialSpreadGenerator(in_channels=7, out_channels=4, hidden_dim=64).to(device)
+        ssg_state = torch.load(ssg_ckpt_path, map_location=device)['model_state_dict']
+        ssg_model.load_state_dict(ssg_state)
+        ssg_model.eval()
+        print(f"  ✅ Spatial Spread Generator (SSG) Network loaded! ({ssg_ckpt_path})")
+    else:
+        print(f"  ⚠️ SSG Network checkpoint not found at {ssg_ckpt_path}. Skipping SSG strategy.")
+    
     # ─── Noise Functions ───
     
     def noise_pure(vB, E, H, W, b, d):
@@ -522,21 +535,66 @@ def main():
         import noise_utils
         return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
     
+    def noise_ssg(vB, E, H, W, b, d):
+        if ssg_model is None:
+            return noise_pure(vB, E, H, W, b, d)
+        
+        month = b['month'][0].item()
+        lead = b['lead_idx'][0].item()
+        
+        import math, datetime, noise_utils
+        fsin_month = math.sin(2 * math.pi * (month - 1) / 12)
+        fcos_month = math.cos(2 * math.pi * (month - 1) / 12)
+        f_lead = lead / 4.0
+        
+        rmm1, rmm2 = 0.0, 0.0
+        if 'mjo' in b and len(b['mjo'].shape) >= 2:
+            rmm1 = b['mjo'][0, 0].item()
+            rmm2 = b['mjo'][0, 1].item()
+            
+        fake_date = datetime.date(args.year, month, 15)
+        nao_val = noise_utils.get_nao_value(fake_date, nao_lookup) if nao_lookup else 0.0
+        enso_val = noise_utils.get_enso_value(month, args.year, oni_lookup) if oni_lookup else 0.0
+        
+        x = torch.zeros((1, 7, H, W), device=d)
+        x[0, 0] = fsin_month
+        x[0, 1] = fcos_month
+        x[0, 2] = f_lead
+        x[0, 3] = rmm1
+        x[0, 4] = rmm2
+        x[0, 5] = nao_val
+        x[0, 6] = enso_val
+        
+        with torch.no_grad():
+            weights = ssg_model.get_blending_weights(x) # [1, 4, H, W]
+            
+        w_rand = weights[0, 0].unsqueeze(0).unsqueeze(0)
+        w_mjo = weights[0, 1].unsqueeze(0).unsqueeze(0)
+        w_nao = weights[0, 2].unsqueeze(0).unsqueeze(0)
+        w_enso = weights[0, 3].unsqueeze(0).unsqueeze(0)
+        
+        n_rand = noise_pure(vB, E, H, W, b, d)
+        n_mjo = noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, None, None, None, None, None, flow_matcher, args.year, use_lhs=True) if mjo_bases else n_rand
+        n_nao = noise_utils.generate_dynamic_multimodal_noise(b, E, d, None, nao_bases, nao_lookup, None, None, None, flow_matcher, args.year, use_lhs=True) if nao_bases else n_rand
+        n_enso = noise_utils.generate_dynamic_multimodal_noise(b, E, d, None, None, None, enso_bases, oni_lookup, None, flow_matcher, args.year, use_lhs=True) if enso_bases else n_rand
+        
+        blend = w_rand * n_rand + w_mjo * n_mjo + w_nao * n_nao + w_enso * n_enso
+        std = blend.std(dim=(2, 3), keepdim=True)
+        return blend / (std + 1e-6)
+    
     # ─── Build Strategy List ───
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",          noise_pure,              False, False),
-        ("2. MJO EOF(98%)",         noise_mjo_98,            True,  False),
+        ("1. Pure Random",          noise_pure,              False, False)
     ]
     
-    if nao_bases is not None:
-        strategies.append(("3. NAO EOF(98%)",      noise_nao_98,              True, False))
-    if enso_bases is not None:
-        strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True, False))
     if nao_bases is not None or enso_bases is not None:
-        strategies.append(("5. Dynamic MM",        noise_multimodal_dynamic,  True, False))
-        strategies.append(("6. EOF Cent(LHS)",     noise_multimodal_dynamic_lhs, True, False))
-        strategies.append(("7. DynMM+CondP",       noise_multimodal_dynamic,  True, True))
+        strategies.append(("2. Dynamic MM",        noise_multimodal_dynamic,  True, False))
+        strategies.append(("3. EOF Cent(LHS)",     noise_multimodal_dynamic_lhs, True, False))
+        strategies.append(("4. DynMM+CondP",       noise_multimodal_dynamic,  True, True))
+    
+    if os.path.exists(ssg_ckpt_path):
+        strategies.append(("5. SSG Network",       noise_ssg,                 True, True))
     
     n_ml = len(strategies)
     
