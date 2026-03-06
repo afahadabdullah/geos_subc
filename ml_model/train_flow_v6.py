@@ -131,16 +131,26 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # Sample 6 batches evenly across the validation set for bi-monthly coverage.
-    # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
-    # 6 evenly-spaced batches give us a good representation while halving validation time.
-    total_val_batches = len(val_loader)
-    num_val_samples = 6
-    if total_val_batches >= num_val_samples:
-        step = total_val_batches / num_val_samples
-        target_batches = [int(i * step) for i in range(num_val_samples)]
-    else:
-        target_batches = list(range(total_val_batches))
+    # Sample exactly 6 specific months from 2021 (Jan, Mar, May, Jul, Sep, Nov)
+    target_months = [1, 3, 5, 7, 9, 11]
+    target_batches = []
+    found_months = set()
+    
+    # We iterate once over the loader to map out the batch indices that correspond to our requested 2021 months
+    for b_idx, batch in enumerate(val_loader):
+        year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        month = int(batch['month'][0].item())
+        
+        if year == 2021 and month in target_months and month not in found_months:
+            target_batches.append(b_idx)
+            found_months.add(month)
+            
+        if len(target_batches) == len(target_months):
+            break
+            
+    # Fallback just in case the dataloader is much smaller or doesn't have 2021
+    if len(target_batches) < 6:
+        target_batches = list(range(min(6, len(val_loader))))
     
     total_crps = 0.0
     total_rmse = 0.0
