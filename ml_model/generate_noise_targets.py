@@ -122,19 +122,19 @@ def main():
         
         # 1. MJO LHS
         if mjo_bases:
-            spread_1 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, mjo_bases, None, None, None, None, flow_matcher, args.start_year, True)
+            spread_1 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, mjo_bases, None, None, None, None, mjo_df, flow_matcher, args.start_year, True)
         else:
             spread_1 = torch.zeros_like(spread_0)
             
         # 2. NAO LHS
         if nao_bases:
-            spread_2 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, None, nao_bases, nao_lookup, None, None, flow_matcher, args.start_year, True)
+            spread_2 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, None, nao_bases, nao_lookup, None, None, mjo_df, flow_matcher, args.start_year, True)
         else:
             spread_2 = torch.zeros_like(spread_0)
             
         # 3. ENSO LHS
         if enso_bases:
-            spread_3 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, None, None, None, enso_bases, oni_lookup, None, flow_matcher, args.start_year, True)
+            spread_3 = generate_and_get_spread_map(noise_utils.generate_dynamic_multimodal_noise, batch, E, device, None, None, None, enso_bases, oni_lookup, mjo_df, flow_matcher, args.start_year, True)
         else:
             spread_3 = torch.zeros_like(spread_0)
             
