@@ -292,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-Modal Noise Strategy Comparison (v4)")
     parser.add_argument("--output_dir", type=str, default="ml_output_flow4")
     parser.add_argument("--year", type=int, default=2022)
-    parser.add_argument("--num_ensemble", type=int, default=30)
+    parser.add_argument("--num_ensemble", type=int, default=15)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint. If None, auto-detects best_model_*.pt")
     args = parser.parse_args()
