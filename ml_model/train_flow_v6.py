@@ -131,11 +131,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # Sample 12 batches evenly across the validation set for monthly coverage (1 month apart).
+    # Sample 6 batches evenly across the validation set for bi-monthly coverage.
     # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
-    # 12 evenly-spaced batches give us full monthly representation.
+    # 6 evenly-spaced batches give us a good representation while halving validation time.
     total_val_batches = len(val_loader)
-    num_val_samples = 12
+    num_val_samples = 6
     if total_val_batches >= num_val_samples:
         step = total_val_batches / num_val_samples
         target_batches = [int(i * step) for i in range(num_val_samples)]
