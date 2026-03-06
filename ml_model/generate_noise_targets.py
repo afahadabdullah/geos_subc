@@ -6,7 +6,7 @@ from tqdm import tqdm
 import pandas as pd
 from accelerate import Accelerator
 
-from dataset_hybrid import S2SHybridDataset
+from dataset_flow import S2SHybridDataset
 from flow_matching import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 
