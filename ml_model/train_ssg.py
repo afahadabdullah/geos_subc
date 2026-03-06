@@ -11,10 +11,13 @@ from accelerate import Accelerator
 from model_ssg import SpatialSpreadGenerator
 
 class SSGDataset(Dataset):
-    def __init__(self, data_dir):
-        self.files = glob.glob(os.path.join(data_dir, "target_*.pt"))
+    def __init__(self, data_dir, years):
+        self.files = []
+        for y in years:
+            self.files.extend(glob.glob(os.path.join(data_dir, f"target_y{y}_*.pt")))
+            
         if not self.files:
-            print(f"WARNING: No target files found in {data_dir}")
+            print(f"WARNING: No target files found for years {years} in {data_dir}")
             
     def __len__(self):
         return len(self.files)
@@ -53,13 +56,19 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     
     # ── Dataset ──
-    dataset = SSGDataset(args.data_dir)
-    if len(dataset) == 0:
+    # User requested 1999-2020 for Training, 2021 for Validation
+    train_years = list(range(1999, 2021))
+    val_years = [2021]
+    
+    train_dataset = SSGDataset(args.data_dir, years=train_years)
+    val_dataset = SSGDataset(args.data_dir, years=val_years)
+    
+    if len(train_dataset) == 0:
+        print("ERROR: Train dataset empty. Run target generation first!")
         return
         
-    train_size = int(0.9 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    if len(val_dataset) == 0:
+        print("WARNING: Val dataset empty. Proceeding without validation tracking.")
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)

@@ -21,15 +21,19 @@ export PYTHONUNBUFFERED=1
 
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
-python3 ml_model/generate_noise_targets.py \
-    --data_dir /scratch/11353/afahad/geossub/geos_subc/dataprocess \
-    --out_dir /scratch/11353/afahad/geossub/geos_subc/dataprocess/noise \
-    --checkpoint ml_output_flow4/BEST_model.pt \
-    --start_year 2010 \
-    --end_year 2020 \
-    --batch_size 1 \
-    --num_ensemble 15 \
-    --num_steps 10
+# Automatically sweep exactly 1999 to 2021 to bake the year into every single file directly!
+for Y in {1999..2021}; do
+    echo "========================================="
+    echo "Generating Targets for Year $Y"
+    python3 ml_model/generate_noise_targets.py \
+        --data_dir /scratch/11353/afahad/geossub/geos_subc/dataprocess \
+        --out_dir /scratch/11353/afahad/geossub/geos_subc/dataprocess/noise \
+        --checkpoint ml_output_flow4/BEST_model.pt \
+        --start_year $Y \
+        --end_year $Y \
+        --batch_size 1 \
+        --num_ensemble 30
+done
 
-echo "Noise target generation finished!"
+echo "Noise target generation finished for 1999-2021!"
 date
