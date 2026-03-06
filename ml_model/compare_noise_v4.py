@@ -171,10 +171,11 @@ def sample_from_eof_basis(eof_bases, phase, lead, device, H, W):
 # ─── Core Inference Runner ───
 
 @torch.no_grad()
-def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_var_head=False):
-    """Generic inference runner for a given noise strategy."""
-    fb_target_norm = batch['y_target'].to(device)
-    vB, _, H, W = fb_target_norm.shape
+def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_var_head=False, perturb_cond=False):
+    model.eval()
+    
+    vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
+    _, _, H, W = batch['y_target'].shape
     num_inits = vB // 4
     
     true_target_precip = batch['target_raw_full'][0::4].to(device)
@@ -193,12 +194,17 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
     
-    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+    # Clone is necessary because expand creates a non-writable view
+    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W).clone()
     lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
     
     # Generate noise
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
+    if perturb_cond:
+        # Add structured physical perturbation to the GEOS Precipitation conditioning channel
+        fx_cond_expanded[:, 1:2, :, :] += (noise_expanded * 0.10)
+        
     # Solve ODE
     p_x1_expanded = flow_matcher.euler_solve(
         model, noise_expanded, fx_cond_expanded,
@@ -512,24 +518,25 @@ def main():
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
         
-    def noise_multimodal_dynamic_ortho(vB, E, H, W, b, d):
+    def noise_multimodal_dynamic_lhs(vB, E, H, W, b, d):
         import noise_utils
-        base_noise = noise_multimodal_dynamic(vB, E, H, W, b, d)
-        return noise_utils.orthogonalize_noise_batch(base_noise, vB, E)
+        return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year, use_lhs=True)
     
     # ─── Build Strategy List ───
+    # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",          noise_pure,              False),
-        ("2. MJO EOF(98%)",         noise_mjo_98,            True),
+        ("1. Pure Random",          noise_pure,              False, False),
+        ("2. MJO EOF(98%)",         noise_mjo_98,            True,  False),
     ]
     
     if nao_bases is not None:
-        strategies.append(("3. NAO EOF(98%)",      noise_nao_98,              True))
+        strategies.append(("3. NAO EOF(98%)",      noise_nao_98,              True, False))
     if enso_bases is not None:
-        strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True))
+        strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True, False))
     if nao_bases is not None or enso_bases is not None:
-        strategies.append(("5. Dynamic MM",        noise_multimodal_dynamic,  True))
-        strategies.append(("6. DynMM Ortho",       noise_multimodal_dynamic_ortho, True))
+        strategies.append(("5. Dynamic MM",        noise_multimodal_dynamic,  True, False))
+        strategies.append(("6. EOF Cent(LHS)",     noise_multimodal_dynamic_lhs, True, False))
+        strategies.append(("7. DynMM+CondP",       noise_multimodal_dynamic,  True, True))
     
     n_ml = len(strategies)
     
@@ -545,7 +552,7 @@ def main():
     print(f"{'─'*140}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _ in strategies:
+    for name, _, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -592,8 +599,8 @@ def main():
         print(f"  [Batch {b_idx}/11] Starting inference for {n_ml} ML methods ({args.num_ensemble} mem × {args.num_steps} steps)...", flush=True)
         
         from tqdm import tqdm
-        for name, fn, use_var in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
-            crps_out, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var)
+        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
+            crps_out, ens_4L, ens_var, tgt = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var, perturb_cond)
             results[name].append(crps_out)
             crps_vals.append(crps_out[0])
             torch.cuda.empty_cache()
@@ -635,14 +642,14 @@ def main():
         fmt_row(f"Batch {b_idx:<2} {month:>4}", crps_vals)
         
         # Per-lead breakdown
-        all_crps_out = [geos_crps_out] + [results[name][-1] for name, _, _ in strategies]
+        all_crps_out = [geos_crps_out] + [results[name][-1] for name, _, _, _ in strategies]
         for w in range(4):
             lead_vals = [c[w+1] for c in all_crps_out]
             fmt_row(f"    W{w+1}", lead_vals)
         
         # Running average
         n_done = b_idx + 1
-        all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
         run_avg_total = [(np.mean([x[0][0] for x in results[nm]]), np.mean([x[0][1] for x in results[nm]])) for nm in all_names]
         fmt_row(f"  RunAvg({n_done})", run_avg_total)
         for w in range(4):
@@ -673,7 +680,7 @@ def main():
     geos_mean_r = np.mean([x[0][1] for x in results['0. GEOS Baseline']])
     print(f"{geos_mean_c:>7.4f} ({geos_mean_r:>7.4f}) ", end="")
     
-    for name, _, _ in strategies:
+    for name, _, _, _ in strategies:
         strat_mean_c = np.mean([x[0][0] for x in results[name]])
         strat_mean_r = np.mean([x[0][1] for x in results[name]])
         print(f"{strat_mean_c:>7.4f} ({strat_mean_r:>7.4f}) ", end="")

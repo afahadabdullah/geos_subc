@@ -109,7 +109,38 @@ def sample_from_eof_basis(eof_bases, phase, lead, device, H, W):
     if std > 1e-6: noise_field = noise_field / std
     return noise_field
 
-def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year):
+def sample_batch_lhs(eof_bases, phase, lead, device, H, W, E):
+    key = (phase, lead)
+    # Match previous fallbacks
+    if key not in eof_bases: key = phase
+    if key not in eof_bases: key = (1, lead)
+    if key not in eof_bases:
+        if isinstance(phase, int) and phase in eof_bases: key = phase
+        elif 0 in eof_bases: key = 0
+        else: return torch.randn(E, H, W, device=device)
+        
+    eofs = eof_bases[key]['eofs'].to(device)
+    K = eofs.shape[0]
+    
+    from scipy.stats import qmc, norm
+    sampler = qmc.LatinHypercube(d=K)
+    sample = sampler.random(n=E)
+    alpha = torch.tensor(norm.ppf(sample), dtype=torch.float32, device=device) # [E, K]
+    
+    if 'eigenvalues' in eof_bases[key]:
+        eigenvals = eof_bases[key]['eigenvalues'].to(device)
+        alpha = alpha * torch.sqrt(eigenvals)
+        
+    noise_fields = torch.einsum('ek,khw->ehw', alpha, eofs)
+    
+    # Normalize each ensemble member
+    std = noise_fields.std(dim=(1,2), keepdim=True)
+    mask = (std > 1e-6).squeeze()
+    if mask.any():
+        noise_fields[mask] = noise_fields[mask] / std[mask]
+    return noise_fields
+
+def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year, use_lhs=False):
     """
     Generates dynamically weighted multi-modal blended noise for a batch.
     batch: data dict from dataloader
@@ -126,34 +157,49 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
         mjo = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
         if not isinstance(mjo, torch.Tensor): mjo = torch.tensor(mjo)
         lead = batch['lead_idx'].clone().detach() if isinstance(batch['lead_idx'], torch.Tensor) else torch.tensor(batch['lead_idx'])
-        mjo_expanded = mjo.repeat_interleave(E)
-        lead_expanded = lead.repeat_interleave(E)
-        mjo_noise = flow_matcher.eof_sample(mjo_bases, mjo_expanded, vB * E, H, W, lead_ids=lead_expanded)
+        
+        if not use_lhs:
+            mjo_expanded = mjo.repeat_interleave(E)
+            lead_expanded = lead.repeat_interleave(E)
+            mjo_noise = flow_matcher.eof_sample(mjo_bases, mjo_expanded, vB * E, H, W, lead_ids=lead_expanded)
+        else:
+            for b_idx in range(vB):
+                p = int(mjo[b_idx])
+                l = int(lead[b_idx])
+                mjo_noise[b_idx*E:(b_idx+1)*E, 0] = sample_batch_lhs(mjo_bases, p, l, device, H, W, E)
     
     # ── NAO EOFs ──
     nao_noise = torch.randn((vB * E, 1, H, W), device=device)
     if nao_bases is not None and nao_lookup is not None:
         months = batch['month']
         leads = batch['lead_idx']
-        for i in range(vB * E):
-            b_idx = i // E
+        for b_idx in range(vB):
             m = int(months[b_idx])
             l = int(leads[b_idx])
             init_date = datetime.date(year, m, 15)
             nao_phase = get_nao_phase(init_date, nao_lookup)
-            nao_noise[i, 0] = sample_from_eof_basis(nao_bases, nao_phase, l, device, H, W)
+            
+            if not use_lhs:
+                for j in range(E):
+                    nao_noise[b_idx*E + j, 0] = sample_from_eof_basis(nao_bases, nao_phase, l, device, H, W)
+            else:
+                nao_noise[b_idx*E:(b_idx+1)*E, 0] = sample_batch_lhs(nao_bases, nao_phase, l, device, H, W, E)
             
     # ── ENSO EOFs ──
     enso_noise = torch.randn((vB * E, 1, H, W), device=device)
     if enso_bases is not None and oni_lookup is not None:
         months = batch['month']
         leads = batch['lead_idx']
-        for i in range(vB * E):
-            b_idx = i // E
+        for b_idx in range(vB):
             m = int(months[b_idx])
             l = int(leads[b_idx])
             enso_state = get_enso_state(m, year, oni_lookup)
-            enso_noise[i, 0] = sample_from_eof_basis(enso_bases, enso_state, l, device, H, W)
+            
+            if not use_lhs:
+                for j in range(E):
+                    enso_noise[b_idx*E + j, 0] = sample_from_eof_basis(enso_bases, enso_state, l, device, H, W)
+            else:
+                enso_noise[b_idx*E:(b_idx+1)*E, 0] = sample_batch_lhs(enso_bases, enso_state, l, device, H, W, E)
             
     # ── Compute Dynamic Amplitudes ──
     month_val = int(batch['month'][0])
