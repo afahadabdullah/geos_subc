@@ -610,19 +610,26 @@ def main():
         sys.stdout.write('\033[F\033[K')
         
         BLUE = '\033[94m'
+        ORANGE = '\033[38;5;214m'
         BOLD = '\033[1m'
         RESET = '\033[0m'
         
         def fmt_row(label, vals):
             # vals contains (CRPS, RMSE)
             crps_vals_list = [c for c, r in vals]
-            best_idx = int(np.argmin(crps_vals_list))
+            rmse_vals_list = [r for c, r in vals]
+            best_c_idx = int(np.argmin(crps_vals_list))
+            best_r_idx = int(np.argmin(rmse_vals_list))
+            
             parts = []
             for j, (c, r) in enumerate(vals):
-                s = f"{c:>7.4f} ({r:>7.4f})"
-                if j == best_idx:
-                    s = f"{BLUE}{BOLD}{s}{RESET}"
-                parts.append(s)
+                s_c = f"{c:>7.4f}"
+                s_r = f"({r:>7.4f})"
+                if j == best_c_idx:
+                    s_c = f"{BLUE}{BOLD}{s_c}{RESET}"
+                if j == best_r_idx:
+                    s_r = f"{ORANGE}{BOLD}{s_r}{RESET}"
+                parts.append(f"{s_c} {s_r}")
             print(f"  {label:<13} | {' '.join(parts)}", flush=True)
         
         fmt_row(f"Batch {b_idx:<2} {month:>4}", crps_vals)
