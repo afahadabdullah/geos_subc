@@ -24,8 +24,12 @@ import sys
 import glob
 import yaml
 import argparse
+import warnings
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
 from flow_matching import FlowMatchingModel, CustomFlowMatcher
