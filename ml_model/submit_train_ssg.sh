@@ -31,7 +31,8 @@ accelerate launch --num_processes 1 ml_model/train_ssg.py \
     --out_dir ml_output_ssg \
     --batch_size 128 \
     --epochs 50 \
-    --lr 1e-3
+    --lr 1e-3 \
+    --resume
 
 echo "SSG Training finished!"
 date

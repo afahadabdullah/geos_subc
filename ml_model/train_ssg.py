@@ -55,6 +55,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--resume", action="store_true", help="Resume from latest_ssg.pt")
     args = parser.parse_args()
 
     accelerator = Accelerator(mixed_precision="fp16")
@@ -84,6 +85,19 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     
+    start_epoch = 0
+    best_val_loss = float('inf')
+    
+    latest_path = os.path.join(args.out_dir, "latest_ssg.pt")
+    if args.resume and os.path.exists(latest_path):
+        print(f"Loading checkpoint from {latest_path}...")
+        checkpoint = torch.load(latest_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        print(f"Resumed successfully at epoch {start_epoch}")
+    
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
@@ -93,9 +107,13 @@ def main():
     history_val = []
     history_acc = []
     
+    if start_epoch >= args.epochs:
+        print("Training already completed up to required epochs.")
+        return
+        
     print(f"Starting SSG Training: {len(train_dataset)} Train | {len(val_dataset)} Val")
     
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         train_loss = 0.0
         
@@ -154,6 +172,17 @@ def main():
                     'val_loss': val_loss
                 }, save_path)
                 print(f"  --> Saved new best model to {save_path}")
+                
+            # Save latest checkpoint for retraining
+            latest_ckpt_path = os.path.join(args.out_dir, "latest_ssg.pt")
+            unwrapped = accelerator.unwrap_model(model)
+            torch.save({
+                'model_state_dict': unwrapped.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'epoch': epoch,
+                'val_loss': val_loss,
+                'best_val_loss': best_val_loss
+            }, latest_ckpt_path)
                 
             # Plot Diagnostics every 5 epochs or last epoch
             if epoch % 5 == 0 or epoch == args.epochs - 1:
