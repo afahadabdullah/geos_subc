@@ -5,10 +5,14 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import os
 import glob
 import argparse
+import warnings
 from tqdm import tqdm
 from accelerate import Accelerator
 import matplotlib.pyplot as plt
 import numpy as np
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 from model_ssg import SpatialSpreadGenerator
 
@@ -72,8 +76,8 @@ def main():
     if len(val_dataset) == 0:
         print("WARNING: Val dataset empty. Proceeding without validation tracking.")
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=1)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
     
     # ── Model & Optim ──
     model = SpatialSpreadGenerator(in_channels=7, out_channels=4, hidden_dim=64)
