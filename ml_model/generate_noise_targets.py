@@ -7,8 +7,7 @@ import pandas as pd
 from accelerate import Accelerator
 
 from dataset_hybrid import S2SHybridDataset
-from model_unet import FlowMatchingModel
-from diffusion import FlowMatcher
+from flow_matching import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 
 def compute_crps_map(ensemble_preds, target):
@@ -73,7 +72,7 @@ def main():
         
     model.to(device)
     model.eval()
-    flow_matcher = FlowMatcher(sigma_min=1e-3)
+    flow_matcher = CustomFlowMatcher(device=device)
     
     # ── Load EOFs ──
     mjo_bases_path = os.path.join(args.data_dir, "mjo_eof_bases.pt")
