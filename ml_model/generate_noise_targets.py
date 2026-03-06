@@ -208,6 +208,19 @@ def main():
         }
         
         torch.save(save_data, out_file)
+        
+        # Calculate winner percentages for logging
+        unique, counts = torch.unique(winner_map, return_counts=True)
+        stats_dict = {int(k): int(v) for k, v in zip(unique, counts)}
+        total = sum(stats_dict.values())
+        p_rand = (stats_dict.get(0, 0) / total) * 100
+        p_mjo = (stats_dict.get(1, 0) / total) * 100
+        p_nao = (stats_dict.get(2, 0) / total) * 100
+        p_enso = (stats_dict.get(3, 0) / total) * 100
+        
+        if idx % 5 == 0:
+            print(f"[{idx}] Saved {args.start_year}-{args.end_year} | M: {month:02d} | L: {lead+1} | "
+                  f"Winners: Rand({p_rand:.0f}%) MJO({p_mjo:.0f}%) NAO({p_nao:.0f}%) ENSO({p_enso:.0f}%)", flush=True)
 
 if __name__ == "__main__":
     main()
