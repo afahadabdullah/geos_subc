@@ -7,6 +7,8 @@ import glob
 import argparse
 from tqdm import tqdm
 from accelerate import Accelerator
+import matplotlib.pyplot as plt
+import numpy as np
 
 from model_ssg import SpatialSpreadGenerator
 
@@ -83,6 +85,9 @@ def main():
     )
     
     best_val_loss = float('inf')
+    history_train = []
+    history_val = []
+    history_acc = []
     
     print(f"Starting SSG Training: {len(train_dataset)} Train | {len(val_dataset)} Val")
     
@@ -108,8 +113,11 @@ def main():
         correct_pixels = 0
         total_pixels = 0
         
+        first_batch = None
+        first_logits = None
+        
         with torch.no_grad():
-            for x, y in val_loader:
+            for i, (x, y) in enumerate(val_loader):
                 logits = model(x)
                 loss = criterion(logits, y)
                 val_loss += loss.item() * x.size(0)
@@ -118,8 +126,16 @@ def main():
                 correct_pixels += (preds == y).sum().item()
                 total_pixels += y.numel()
                 
+                if i == 0:
+                    first_batch = (x[0].clone(), y[0].clone())
+                    first_logits = logits[0].clone()
+                
         val_loss /= len(val_dataset)
         val_acc = (correct_pixels / total_pixels) * 100.0
+        
+        history_train.append(train_loss)
+        history_val.append(val_loss)
+        history_acc.append(val_acc)
         
         if accelerator.is_main_process:
             print(f"Epoch [{epoch+1}/{args.epochs}] Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
@@ -134,6 +150,59 @@ def main():
                     'val_loss': val_loss
                 }, save_path)
                 print(f"  --> Saved new best model to {save_path}")
+                
+            # Plot Diagnostics every 5 epochs or last epoch
+            if epoch % 5 == 0 or epoch == args.epochs - 1:
+                if first_batch is not None and first_logits is not None:
+                    probs = torch.softmax(first_logits, dim=0).cpu().numpy()
+                    target = first_batch[1].cpu().numpy()
+                    pred = torch.argmax(first_logits, dim=0).cpu().numpy()
+                    
+                    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+                    
+                    # Colors: 0=Rand (Gray), 1=MJO (Blue), 2=NAO (Orange), 3=ENSO (Green)
+                    from matplotlib.colors import ListedColormap
+                    cmap = ListedColormap(['#AAAAAA', '#1f77b4', '#ff7f0e', '#2ca02c'])
+                    
+                    axes[0,0].imshow(target, cmap=cmap, vmin=0, vmax=3)
+                    axes[0,0].set_title("True Winner Map")
+                    
+                    axes[0,1].imshow(pred, cmap=cmap, vmin=0, vmax=3)
+                    axes[0,1].set_title("Predicted Winner Map")
+                    
+                    axes[0,2].imshow(probs[0], cmap='Greys', vmin=0, vmax=1)
+                    axes[0,2].set_title(f"Rand Weight [{probs[0].mean():.2f}]")
+                    
+                    axes[1,0].imshow(probs[1], cmap='Blues', vmin=0, vmax=1)
+                    axes[1,0].set_title(f"MJO Weight [{probs[1].mean():.2f}]")
+                    
+                    axes[1,1].imshow(probs[2], cmap='Oranges', vmin=0, vmax=1)
+                    axes[1,1].set_title(f"NAO Weight [{probs[2].mean():.2f}]")
+                    
+                    axes[1,2].imshow(probs[3], cmap='Greens', vmin=0, vmax=1)
+                    axes[1,2].set_title(f"ENSO Weight [{probs[3].mean():.2f}]")
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(args.out_dir, f"diagnostic_ep{epoch:03d}.png"))
+                    plt.close()
+                    
+    if accelerator.is_main_process:
+        # Final Loss Curve
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 1)
+        plt.plot(history_train, label='Train Loss')
+        plt.plot(history_val, label='Val Loss')
+        plt.legend()
+        plt.title('Loss Curve')
+        
+        plt.subplot(1, 2, 2)
+        plt.plot(history_acc, label='Val Accuracy', color='green')
+        plt.legend()
+        plt.title('Validation Accuracy (%)')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(args.out_dir, "training_curve.png"))
+        plt.close()
 
 if __name__ == "__main__":
     main()
