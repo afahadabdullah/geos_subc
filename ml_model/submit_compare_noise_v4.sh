@@ -39,7 +39,7 @@ fi
 python3 ml_model/compare_noise_v4.py \
     --output_dir ml_output_flow4 \
     --year 2021 \
-    --num_ensemble 15 \
+    --num_ensemble 30 \
     --num_steps 10
 
 echo "Noise comparison v4 finished!"
