@@ -25,8 +25,8 @@ cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 # Create output dir if it doesn't exist
 mkdir -p ml_output_ssg
 
-# Run multi-GPU training with Accelerate (or single GPU if only 1 is allocated)
-accelerate launch --multi_gpu --num_processes 1 ml_model/train_ssg.py \
+# Run training with Accelerate (single GPU is allocated)
+accelerate launch --num_processes 1 ml_model/train_ssg.py \
     --data_dir /scratch/11353/afahad/geossub/geos_subc/dataprocess/noise \
     --out_dir ml_output_ssg \
     --batch_size 128 \
