@@ -222,15 +222,20 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     area_weights = area_weights.view(1, 1, H, 1)
     
     crps_all = compute_crps(ensemble_4L, true_target_precip, area_weights)
+    ens_mean = ensemble_4L.mean(dim=0)
+    rmse_all = torch.sqrt(torch.mean((ens_mean - true_target_precip)**2 * area_weights) * area_weights.numel()).item()
     
     crps_leads = []
     for l in range(4):
         ens_l = ensemble_4L[:, :, l:l+1, :, :]
         tgt_l = true_target_precip[:, l:l+1, :, :]
         c_l = compute_crps(ens_l, tgt_l, area_weights)
-        crps_leads.append(c_l)
         
-    crps_out = [crps_all] + crps_leads
+        ens_mean_l = ens_mean[:, l:l+1, :, :]
+        r_l = torch.sqrt(torch.mean((ens_mean_l - tgt_l)**2 * area_weights) * area_weights.numel()).item()
+        crps_leads.append((c_l, r_l))
+        
+    crps_out = [(crps_all, rmse_all)] + crps_leads
     ens_var = ensemble_4L.var(dim=0)
     
     return crps_out, ensemble_4L, ens_var, true_target_precip
@@ -506,6 +511,11 @@ def main():
         
         std = blend.std(dim=(2, 3), keepdim=True)
         return blend / (std + 1e-6)
+        
+    def noise_multimodal_dynamic_ortho(vB, E, H, W, b, d):
+        import noise_utils
+        base_noise = noise_multimodal_dynamic(vB, E, H, W, b, d)
+        return noise_utils.orthogonalize_noise_batch(base_noise, vB, E)
     
     # ─── Build Strategy List ───
     strategies = [
@@ -519,6 +529,7 @@ def main():
         strategies.append(("4. ENSO EOF(98%)",     noise_enso_98,             True))
     if nao_bases is not None or enso_bases is not None:
         strategies.append(("5. Dynamic MM",        noise_multimodal_dynamic,  True))
+        strategies.append(("6. DynMM Ortho",       noise_multimodal_dynamic_ortho, True))
     
     n_ml = len(strategies)
     
@@ -528,7 +539,7 @@ def main():
     strat_names = ["0. GEOS"] + [s[0] for s in strategies]
     header = f"  {'Sample':<8} {'Mon':>4} |"
     for nm in strat_names:
-        header += f" {nm:>19}"
+        header += f" {nm:>17}"
     print(f"\n{'─'*140}")
     print(header)
     print(f"{'─'*140}")
@@ -561,12 +572,16 @@ def main():
             
             geos_ens_t = geos_ens_sample.transpose(0, 1)
             geos_crps_all = compute_crps(geos_ens_t, true_tgt, area_weights)
+            geos_mean = geos_ens_t.mean(dim=0)
+            geos_rmse_all = torch.sqrt(torch.mean((geos_mean - true_tgt)**2 * area_weights) * area_weights.numel()).item()
             
             geos_crps_leads = []
             for l in range(4):
                 c_l = compute_crps(geos_ens_t[:, :, l:l+1, :, :], true_tgt[:, l:l+1, :, :], area_weights)
-                geos_crps_leads.append(c_l)
-            geos_crps_out = [geos_crps_all] + geos_crps_leads
+                geos_mean_l = geos_mean[:, l:l+1, :, :]
+                r_l = torch.sqrt(torch.mean((geos_mean_l - true_tgt[:, l:l+1, :, :])**2 * area_weights) * area_weights.numel()).item()
+                geos_crps_leads.append((c_l, r_l))
+            geos_crps_out = [(geos_crps_all, geos_rmse_all)] + geos_crps_leads
             
             if b_idx == 0:
                 plot_data["0. GEOS Baseline"] = (geos_ens_t, geos_ens_t.var(dim=0))
@@ -599,16 +614,12 @@ def main():
         RESET = '\033[0m'
         
         def fmt_row(label, vals):
-            best_idx = int(np.argmin(vals))
+            # vals contains (CRPS, RMSE)
+            crps_vals_list = [c for c, r in vals]
+            best_idx = int(np.argmin(crps_vals_list))
             parts = []
-            geos_v = vals[0]
-            for j, v in enumerate(vals):
-                s = f"{v:>11.4f}"
-                if j > 0 and geos_v > 0:
-                    pct = ((geos_v - v) / geos_v) * 100.0
-                    s += f" ({pct:>+5.1f}%)"
-                elif j > 0:
-                    s += " " * 9
+            for j, (c, r) in enumerate(vals):
+                s = f"{c:>7.4f} ({r:>7.4f})"
                 if j == best_idx:
                     s = f"{BLUE}{BOLD}{s}{RESET}"
                 parts.append(s)
@@ -625,21 +636,22 @@ def main():
         # Running average
         n_done = b_idx + 1
         all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
-        run_avg_total = [np.mean([x[0] for x in results[nm]]) for nm in all_names]
+        run_avg_total = [(np.mean([x[0][0] for x in results[nm]]), np.mean([x[0][1] for x in results[nm]])) for nm in all_names]
         fmt_row(f"  RunAvg({n_done})", run_avg_total)
         for w in range(4):
-            run_avg_w = [np.mean([x[w+1] for x in results[nm]]) for nm in all_names]
+            run_avg_w = [(np.mean([x[w+1][0] for x in results[nm]]), np.mean([x[w+1][1] for x in results[nm]])) for nm in all_names]
             fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
         print(f"  {'─'*140}")
         
-        # Incremental CSV
+        # Incremental CSV (extracting only CRPS to preserve legacy plotting tool compatibility, or add CRPS vs RMSE)
         import pandas as pd
         flat_results = {}
         lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
         for strat_name, batch_lists in results.items():
             for i, suffix in enumerate(lead_suffixes):
                 col_name = f"{strat_name}{suffix}"
-                flat_results[col_name] = [bl[i] for bl in batch_lists]
+                flat_results[col_name] = [bl[i][0] for bl in batch_lists] # Save CRPS only
+                flat_results[f"{strat_name}{suffix} RMSE"] = [bl[i][1] for bl in batch_lists] # Save RMSE
         df = pd.DataFrame(flat_results)
         mean_row = {col: np.mean(vals) for col, vals in flat_results.items()}
         df.loc['MEAN'] = mean_row
@@ -648,14 +660,16 @@ def main():
     
     # Final Summary
     print(f"{'─'*140}")
-    print(f"  {'MEAN':<8} {'':>4} | ", end="")
+    print(f"  {'MEAN (CRPS) (RMSE)':<20} | ", end="")
     
-    geos_mean_total = np.mean([x[0] for x in results['0. GEOS Baseline']])
-    print(f"{geos_mean_total:>11.4f} ", end="")
+    geos_mean_c = np.mean([x[0][0] for x in results['0. GEOS Baseline']])
+    geos_mean_r = np.mean([x[0][1] for x in results['0. GEOS Baseline']])
+    print(f"{geos_mean_c:>7.4f} ({geos_mean_r:>7.4f}) ", end="")
+    
     for name, _, _ in strategies:
-        strat_mean_total = np.mean([x[0] for x in results[name]])
-        pct = ((geos_mean_total - strat_mean_total) / geos_mean_total) * 100.0
-        print(f"{strat_mean_total:>11.4f} ({pct:>+5.1f}%) ", end="")
+        strat_mean_c = np.mean([x[0][0] for x in results[name]])
+        strat_mean_r = np.mean([x[0][1] for x in results[name]])
+        print(f"{strat_mean_c:>7.4f} ({strat_mean_r:>7.4f}) ", end="")
     print("\n")
     print(f"  💾 Final CSV saved to: {csv_path}")
 

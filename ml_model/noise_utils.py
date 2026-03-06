@@ -192,3 +192,26 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
     blend = 0.90 * (w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise) + 0.10 * pure_noise
     std = blend.std(dim=(2, 3), keepdim=True)
     return blend / (std + 1e-6)
+
+def orthogonalize_noise_batch(noise, vB, E):
+    """
+    Gram-Schmidt orthogonalization across the ensemble dimension (E) for each sample in the batch (vB).
+    noise: shape [vB * E, 1, H, W]
+    Returns: shape [vB * E, 1, H, W] orthogonalized and standardized noise.
+    """
+    noise_reshaped = noise.view(vB, E, -1) # [vB, E, H*W]
+    out = torch.zeros_like(noise_reshaped)
+    
+    for b in range(vB):
+        for i in range(E):
+            v = noise_reshaped[b, i].clone()
+            for j in range(i):
+                u = out[b, j]
+                proj = torch.sum(v * u) / (torch.sum(u * u) + 1e-8)
+                v = v - proj * u
+            std = v.std()
+            if std > 1e-6:
+                v = v / std
+            out[b, i] = v
+            
+    return out.view(noise.shape)
