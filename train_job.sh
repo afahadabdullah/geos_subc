@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J cmde_train          # Job name
-#SBATCH -o ml_output_cmde/train_%j.out  # Output file (%j = job ID)
-#SBATCH -e ml_output_cmde/train_%j.err  # Error file
+#SBATCH -o ml_output_cmde/train_%j.log  # Output file (%j = job ID)
+#SBATCH -e ml_output_cmde/train_%j.log  # Error file
 #SBATCH -p gh-dev               # Partition (gh-dev for GH200 dev queue)
 #SBATCH -N 1                    # 1 node
 #SBATCH -n 1                    # 1 task

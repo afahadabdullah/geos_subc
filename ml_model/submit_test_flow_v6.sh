@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J test_v6
-#SBATCH -o ml_output_flow6/test_v6_%j.out
-#SBATCH -e ml_output_flow6/test_v6_%j.err
+#SBATCH -o ml_output_flow6/test_v6_%j.log
+#SBATCH -e ml_output_flow6/test_v6_%j.log
 #SBATCH -p gpu-h100
 #SBATCH -N 1
 #SBATCH -n 1

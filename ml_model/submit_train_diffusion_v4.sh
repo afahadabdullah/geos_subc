@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J diff_v4                  # Job name
-#SBATCH -o ml_output_diffusion_v4/diff_v4_%j.out
-#SBATCH -e ml_output_diffusion_v4/diff_v4_%j.err
+#SBATCH -o ml_output_diffusion_v4/diff_v4_%j.log
+#SBATCH -e ml_output_diffusion_v4/diff_v4_%j.log
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks

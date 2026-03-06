@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -J test_flow        # Job name
-#SBATCH -o test_flow_%j.o   # Combined Output and Error file name
+#SBATCH -o test_flow_%j.log   # Combined Output and Error file name
 #SBATCH -p gh-dev           # partition
 #SBATCH -N 1                # Total number of nodes
 #SBATCH -n 1                # Number of tasks per node
