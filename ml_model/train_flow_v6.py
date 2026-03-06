@@ -167,8 +167,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 6 ensemble members (speed). Full validation: 6 members (quality).
-        num_ensemble = 6
+        # Fast validation: 12 ensemble members (speed). Full validation: 12 members (quality).
+        num_ensemble = 12
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
@@ -176,7 +176,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         num_steps = 10 if is_fast_recon and not is_test else 50
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
-        # With zombie processes gone, we can fit [vB * 6] through the UNet at once.
+        # With zombie processes gone, we can fit [vB * 12] through the UNet at once.
         vB = fb_target_norm.shape[0] 
         
         fx_obs = batch['x_obs'].to(device) 
