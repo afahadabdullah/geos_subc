@@ -38,7 +38,7 @@ fi
 # ─── Step 2: Run noise comparison ───
 python3 ml_model/compare_noise_v4.py \
     --output_dir ml_output_flow4 \
-    --year 2021 \
+    --year 2022 \
     --num_ensemble 30 \
     --num_steps 10
 
