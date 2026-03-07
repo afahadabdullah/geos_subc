@@ -1024,7 +1024,7 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps,
+                'best_val_loss': best_val_loss,
                 'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -1034,7 +1034,7 @@ def train(args, accelerator):
                 writer.writerow([epoch, avg_train_loss, 0.0, current_val_metric])
                     
             if is_in_top4:
-                top_str = ", ".join([f"E{m['epoch']}({m['crps']:.3f})" for m in top_models])
+                top_str = ", ".join([f"E{m['epoch']}({m['val_loss']:.4f})" for m in top_models])
                 print(f"📍 Top 4 Models: [{top_str}]")
 
         # Track progress for this execution session
