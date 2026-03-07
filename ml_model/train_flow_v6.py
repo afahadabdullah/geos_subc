@@ -599,27 +599,32 @@ def train(args, accelerator):
                         print(f"   ⚠️ Optimizer state mismatch. Starting with fresh optimizer.")
                         print(f"      Error: {e}")
                 
-                if 'best_val_crps' in checkpoint:
-                    best_val_crps = checkpoint['best_val_crps']
-                elif 'best_val_rmse' in checkpoint:
-                    best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
+                if 'best_val_loss' in checkpoint:
+                    best_val_loss = checkpoint['best_val_loss']
+                elif 'best_val_crps' in checkpoint:
+                    if accelerator.is_main_process:
+                        print("   ⚠️ Legacy CRPS checkpoint detected. Migrating tracking to MSE Loss scale.")
+                    best_val_loss = float('inf')
+                    checkpoint['top_models'] = [] # Clear legacy CRPS top_models so we don't mix scales
                 
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
+                    # Ensure backward compatible keys
+                    for m in top_models:
+                        if 'crps' in m:
+                            m['val_loss'] = m.pop('crps')
                     
-                # We are validating on a new year (2021), so we MUST reset the CRPS tracking
-                # otherwise the model will never save if 2021 is harder than the old validation year.
                 if config.get("reset_validation_history", False):
                     if accelerator.is_main_process:
-                        print(f"⚠️ Resetting validation CRPS metrics as requested by config (reset_validation_history: True).")
-                    best_val_crps = float('inf')
+                        print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
+                    best_val_loss = float('inf')
                     top_models = []
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
-                    print(f"   Best Val CRPS so far: {best_val_crps:.4f}\n")
+                    print(f"   Best Val Loss so far: {best_val_loss:.4f}\n")
                     
 
         except Exception as e:
