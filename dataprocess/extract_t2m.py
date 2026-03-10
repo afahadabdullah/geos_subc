@@ -44,8 +44,12 @@ def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/ho
         print(f"\n--- Processing Year: {year} ---")
         
         try:
-            # Slicing time for the year
-            ds_year = ds.sel(time=str(year))
+            # Slicing time for the year using a robust datetime slice
+            ds_year = ds.sel(time=slice(f"{year}-01-01", f"{year}-12-31"))
+            
+            if len(ds_year.time) == 0:
+                print(f"Warning: No data found for {year} in ARCO-ERA5 bucket. Skipping.")
+                continue
             
             # Extract T2M (no level dimension needed for 2m_temperature)
             t2m = ds_year[var_name].rename('t2m')
