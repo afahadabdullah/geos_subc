@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J cmde_train                # Job name
-#SBATCH -o cmde_train.o%j            # Stdout output file
-#SBATCH -e cmde_train.e%j            # Stderr error file
+#SBATCH -o cmde_train.%j.log
+#SBATCH -e cmde_train.%j.log
 #SBATCH -p gh-dev                    # Partition (GH200 dev queue)
 #SBATCH -N 1                         # Total nodes
 #SBATCH -n 1                         # Total MPI tasks

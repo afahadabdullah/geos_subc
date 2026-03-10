@@ -5,6 +5,7 @@ import numpy as np
 import random
 import yaml
 import csv
+import xarray as xr
 from tqdm.auto import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -12,9 +13,12 @@ import matplotlib.pyplot as plt
 import argparse
 from accelerate import Accelerator
 
+import pandas as pd
+
 # Local Modules
 from dataset_flow import S2SHybridDataset
 from flow_matching import FlowMatchingModel, CustomFlowMatcher
+import noise_utils
 
 def get_area_weights(lats, device):
     lats_rad = np.deg2rad(lats)
@@ -122,20 +126,31 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
-                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None):
+                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None,
+                      nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
-    # Sample 6 batches evenly across the validation set for monthly coverage (2 months apart).
-    # With 2 years of weekly data (~104 samples, batch_size=4 -> ~26 batches),
-    # 6 evenly-spaced batches give us representative seasonal coverage.
-    total_val_batches = len(val_loader)
-    num_val_samples = 6
-    if total_val_batches >= num_val_samples:
-        step = total_val_batches / num_val_samples
-        target_batches = [int(i * step) for i in range(num_val_samples)]
-    else:
-        target_batches = list(range(total_val_batches))
+    # Sample exactly 6 specific months from 2021 (Jan, Mar, May, Jul, Sep, Nov)
+    target_months = [1, 3, 5, 7, 9, 11]
+    target_batches = []
+    found_months = set()
+    
+    # We iterate once over the loader to map out the batch indices that correspond to our requested 2021 months
+    for b_idx, batch in enumerate(val_loader):
+        year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        month = int(batch['month'][0].item())
+        
+        if year == 2021 and month in target_months and month not in found_months:
+            target_batches.append(b_idx)
+            found_months.add(month)
+            
+        if len(target_batches) == len(target_months):
+            break
+            
+    # Fallback just in case the dataloader is much smaller or doesn't have 2021
+    if len(target_batches) < 6:
+        target_batches = list(range(min(6, len(val_loader))))
     
     total_crps = 0.0
     total_rmse = 0.0
@@ -166,8 +181,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 8 ensemble members (speed). Full validation: 6 members (quality).
-        num_ensemble = 8 if (is_fast_recon and not is_test) else 6
+        # Fast validation: 12 ensemble members (speed). Full validation: 12 members (quality).
+        num_ensemble = 12
         ensemble_preds_precip = [] # Will be [E, 4, H, W]
 
         # Progress bar for internal status during long samplings
@@ -175,7 +190,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         num_steps = 10 if is_fast_recon and not is_test else 50
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
-        # With zombie processes gone, we can fit [vB * 6] through the UNet at once.
+        # With zombie processes gone, we can fit [vB * 12] through the UNet at once.
         vB = fb_target_norm.shape[0] 
         
         fx_obs = batch['x_obs'].to(device) 
@@ -195,28 +210,30 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate noise: use EOF-structured noise if available, otherwise isotropic
+        # Generate antithetical dynamic multimodal noise (z and -z)
+        num_base_members = num_ensemble // 2
+        
+        # Try to dynamically fetch validation year from batch if available, fallback to 2021
+        val_year = 2021
+        if 'year' in batch:
+            val_year = int(batch['year'][0].item())
+            
         if eof_bases is not None:
-            mjo_phases = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-            if not isinstance(mjo_phases, torch.Tensor):
-                mjo_phases = torch.tensor(mjo_phases)
-            lead_ids = batch['lead_idx']
-            if not isinstance(lead_ids, torch.Tensor):
-                lead_ids = torch.tensor(lead_ids)
+            noise_base = noise_utils.generate_dynamic_multimodal_noise(
+                batch, num_base_members, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, val_year
+            )
+            noise_anti = -noise_base
             
-            # CRITICAL: Expand phases/leads to batch-major order to match fx_cond_expanded.
-            mjo_phases_expanded = mjo_phases.repeat_interleave(num_ensemble)
-            lead_ids_expanded = lead_ids.repeat_interleave(num_ensemble)
-            
-            # Blend 98% EOF structure with 2% isotropic N(0,1) for numerical stability
-            eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases_expanded, vB * num_ensemble, H, W, lead_ids=lead_ids_expanded)
-            pure_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-            blend = 0.02 * pure_noise + 0.98 * eof_noise
-            # Re-normalize to unit variance
-            std = blend.std(dim=(2, 3), keepdim=True)
-            noise_expanded = blend / (std + 1e-6)
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
         else:
-            noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
+            noise_base = torch.randn((vB * num_base_members, 1, H, W), device=device)
+            noise_anti = -noise_base
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
+            
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
         # Single parallel ODE solve for the entire validation batch and ensemble
@@ -316,6 +333,93 @@ def train(args, accelerator):
     epochs = config.get("epochs", 500)
     batch_size = config.get("batch_size", 4)
     lr = float(config.get("learning_rate", 1e-4))
+
+    # Area weights (needed early for diagnostic plot)
+    lats = np.linspace(-90, 90, 181)
+    area_weights = get_area_weights(lats, device)
+
+    # ─── Land-Ocean Mask (V6: 65% land / 35% ocean) ───
+    # Derive from SSS data: NaN pixels = land, valid pixels = ocean
+    # Cache to .pt file so we only need SSS once.
+    land_ocean_weights = torch.ones(1, 1, 181, 360, device=device)  # Default: uniform
+    mask_cache_path = os.path.join(os.path.dirname(__file__), "land_ocean_mask_v6.pt")
+    
+    if os.path.exists(mask_cache_path):
+        # ── Load cached mask ──
+        cached = torch.load(mask_cache_path, map_location=device, weights_only=True)
+        land_ocean_weights = cached['weights'].to(device)
+        if accelerator.is_main_process:
+            print(f"  ✅ V6 Land-Ocean Mask loaded from cache: {mask_cache_path}")
+            print(f"     Land pixels: {cached['n_land']}, weight = {cached['land_w']:.4f}")
+            print(f"     Ocean pixels: {cached['n_ocean']}, weight = {cached['ocean_w']:.4f}")
+    else:
+        # ── Create mask from SSS ──
+        sss_sample_path = os.path.join(config["data_dir"], "sss_weekly_2020.zarr")
+        if os.path.exists(sss_sample_path):
+            try:
+                ds_sss = xr.open_zarr(sss_sample_path, consolidated=False)
+                sss_arr = ds_sss['sss'].isel(S=0, L=0).values  # [Y, X]
+                is_land = np.isnan(sss_arr)  # True = land
+                n_land = int(is_land.sum())
+                n_ocean = int((~is_land).sum())
+                n_total = n_land + n_ocean
+                
+                if n_land > 0 and n_ocean > 0:
+                    land_w = 0.65 * n_total / n_land
+                    ocean_w = 0.35 * n_total / n_ocean
+                    
+                    mask_np = np.where(is_land, land_w, ocean_w).astype(np.float32)
+                    land_ocean_weights = torch.from_numpy(mask_np).to(device).view(1, 1, 181, 360)
+                    
+                    # Save cache for future runs
+                    if accelerator.is_main_process:
+                        torch.save({
+                            'weights': land_ocean_weights.cpu(),
+                            'is_land': torch.from_numpy(is_land),
+                            'n_land': n_land, 'n_ocean': n_ocean,
+                            'land_w': land_w, 'ocean_w': ocean_w,
+                        }, mask_cache_path)
+                        print(f"  ✅ V6 Land-Ocean Mask created from {sss_sample_path}")
+                        print(f"     Land pixels: {n_land} ({n_land/n_total*100:.1f}%), weight = {land_w:.4f}")
+                        print(f"     Ocean pixels: {n_ocean} ({n_ocean/n_total*100:.1f}%), weight = {ocean_w:.4f}")
+                        print(f"     💾 Cached to {mask_cache_path}")
+                        
+                        # ── Diagnostic Plot ──
+                        fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+                        
+                        im0 = axes[0].imshow(is_land.astype(float), cmap='RdYlGn', vmin=0, vmax=1,
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[0].set_title(f"Land-Ocean Mask (Green=Land, Red=Ocean)\nLand: {n_land} px ({n_land/n_total*100:.1f}%)")
+                        fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+                        
+                        im1 = axes[1].imshow(mask_np, cmap='hot_r',
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[1].set_title(f"Loss Weight Map\nLand w={land_w:.3f}, Ocean w={ocean_w:.3f}")
+                        fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+                        
+                        combined = (area_weights.cpu().numpy().reshape(181, 1) * mask_np)
+                        im2 = axes[2].imshow(combined, cmap='magma',
+                                            extent=[-180, 180, -90, 90], aspect='auto')
+                        axes[2].set_title("Combined: Area Weight × Land-Ocean Weight")
+                        fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+                        
+                        plt.suptitle("V6 Land-Ocean Loss Weighting Diagnostic", fontsize=16, fontweight='bold')
+                        plt.tight_layout()
+                        diag_dir = config.get("output_dir", "ml_output_flow6")
+                        os.makedirs(diag_dir, exist_ok=True)
+                        plot_path = os.path.join(diag_dir, "land_ocean_mask_diagnostic.png")
+                        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        plt.close()
+                        print(f"     📸 Diagnostic plot saved: {plot_path}")
+                else:
+                    if accelerator.is_main_process:
+                        print(f"  ⚠️ SSS mask has no land/ocean split. Using uniform weights.")
+            except Exception as e:
+                if accelerator.is_main_process:
+                    print(f"  ⚠️ Failed to load SSS for land mask: {e}. Using uniform weights.")
+        else:
+            if accelerator.is_main_process:
+                print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
     
     # ---------------------------------------------------------
     # 1. Dataset Initialization & Global Stats Calculation
@@ -433,9 +537,6 @@ def train(args, accelerator):
         print(f"     Shared UNet features: 64 intermediate channels")
         print(f"-------------------------------------\n")
 
-    # Area weights
-    lats = np.linspace(-90, 90, 181)
-    area_weights = get_area_weights(lats, device)
 
     # Output directory
     output_dir = config.get("output_dir", "ml_output_diffusion_v5")
@@ -450,25 +551,30 @@ def train(args, accelerator):
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
-    # Phase transition constant (must be before checkpoint loading for resume detection)
-    VARIANCE_PHASE_EPOCH = 115  # Freeze UNet at this epoch, train only var_heads
+    # Load Dynamic Multi-Modal Bases
+    eof_bases_path = os.path.join(config["data_dir"], "mjo_eof_bases.pt")
+    nao_bases_path = os.path.join(config["data_dir"], "nao_eof_bases.pt")
+    enso_bases_path = os.path.join(config["data_dir"], "enso_eof_bases.pt")
     
-    # Load MJO EOF bases for physically structured ensemble noise
-    eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
-    eof_bases = None
-    if os.path.exists(eof_bases_path):
-        eof_data = torch.load(eof_bases_path, map_location='cpu', weights_only=False)
-        eof_bases = eof_data['eof_bases']
+    eof_bases = torch.load(eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(eof_bases_path) else None
+    nao_bases = torch.load(nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_bases_path) else None
+    enso_bases = torch.load(enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_bases_path) else None
+    
+    try:
+        nao_lookup = noise_utils.parse_nao_index(os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii"))
+        oni_lookup = noise_utils.parse_oni_index(os.path.join(config["data_dir"], "oni.ascii.txt"))
+        mjo_df = pd.read_csv(os.path.join(config["data_dir"], "mjo_processed.csv"), parse_dates=['S']).set_index(pd.to_datetime(pd.read_csv(os.path.join(config["data_dir"], "mjo_processed.csv"), parse_dates=['S'])['S']).dt.strftime('%Y-%m-%d'))
+    except Exception as e:
         if accelerator.is_main_process:
-            print(f"✅ Loaded MJO EOF bases from {eof_bases_path}")
-            print(f"   {eof_data['n_eofs']} EOFs per phase, phases: {list(eof_bases.keys())}")
-    else:
-        if accelerator.is_main_process:
-            print(f"⚠️ MJO EOF bases not found at {eof_bases_path}. Using isotropic noise for ensembles.")
+            print(f"⚠️ Teleconnection index loading failed: {e}. Falling back to default amplitudes.")
+        nao_lookup, oni_lookup, mjo_df = None, None, None
+        
+    if accelerator.is_main_process and eof_bases is not None:
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for dynamic validation noise.")
     
     start_epoch = 0
-    best_val_crps = float('inf')
-    top_models = [] # List of {"path": str, "crps": float, "epoch": int}
+    best_val_loss = float('inf')
+    top_models = [] # List of {"path": str, "val_loss": float, "epoch": int}
     
     # Load latest checkpoint if it exists
     if args.test:
@@ -486,56 +592,41 @@ def train(args, accelerator):
             if not args.test:
                 start_epoch = checkpoint['epoch'] + 1
                 
-                # Detect if we're resuming into Phase 2
-                # If so, DON'T load the optimizer state — it was saved with var_heads-only params
-                # and won't match the full-model optimizer created at line 364.
-                # A fresh var_heads optimizer will be created in the Phase 2 resume block below.
-                if start_epoch >= VARIANCE_PHASE_EPOCH:
+                try:
+                    optimizer.load_state_dict(checkpoint['optimizer'])
+                except (ValueError, RuntimeError) as e:
                     if accelerator.is_main_process:
-                        print(f"   ℹ️ Phase 2 resume detected (epoch {start_epoch}). Skipping optimizer state load (will create var-only optimizer).")
-                else:
-                    try:
-                        optimizer.load_state_dict(checkpoint['optimizer'])
-                    except (ValueError, RuntimeError) as e:
-                        if accelerator.is_main_process:
-                            print(f"   ⚠️ Optimizer state mismatch (likely from Phase 2 checkpoint). Starting with fresh optimizer.")
-                            print(f"      Error: {e}")
+                        print(f"   ⚠️ Optimizer state mismatch. Starting with fresh optimizer.")
+                        print(f"      Error: {e}")
                 
-                if 'best_val_crps' in checkpoint:
-                    best_val_crps = checkpoint['best_val_crps']
-                elif 'best_val_rmse' in checkpoint:
-                    best_val_crps = checkpoint['best_val_rmse'] # Migration fallback
+                if 'best_val_loss' in checkpoint:
+                    best_val_loss = checkpoint['best_val_loss']
+                elif 'best_val_crps' in checkpoint:
+                    if accelerator.is_main_process:
+                        print("   ⚠️ Legacy CRPS checkpoint detected. Migrating tracking to MSE Loss scale.")
+                    best_val_loss = float('inf')
+                    checkpoint['top_models'] = [] # Clear legacy CRPS top_models so we don't mix scales
                 
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
+                    # Ensure backward compatible keys
+                    for m in top_models:
+                        if 'crps' in m:
+                            m['val_loss'] = m.pop('crps')
                     
-                # We are validating on a new year (2021), so we MUST reset the CRPS tracking
-                # otherwise the model will never save if 2021 is harder than the old validation year.
                 if config.get("reset_validation_history", False):
                     if accelerator.is_main_process:
-                        print(f"⚠️ Resetting validation CRPS metrics as requested by config (reset_validation_history: True).")
-                    best_val_crps = float('inf')
+                        print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
+                    best_val_loss = float('inf')
                     top_models = []
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
-                    print(f"   Best Val CRPS so far: {best_val_crps:.4f}\n")
+                    print(f"   Best Val Loss so far: {best_val_loss:.4f}\n")
                     
-                if getattr(args, 'reset_variance', False):
-                    print("   [ARCHITECTURE FIX] --reset-variance passed! Purging old Variance Head weights.")
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    
-                    for module in unwrapped_model.var_heads:
-                        for layer in module.modules():
-                            if isinstance(layer, torch.nn.Conv2d):
-                                torch.nn.init.orthogonal_(layer.weight, gain=0.01)
-                                if layer.bias is not None:
-                                    torch.nn.init.constant_(layer.bias, 0.0)
-                                    
-                    print("   [ARCHITECTURE FIX] Variance Heads freshly initialized to predict ~0.0 log-variance (1.0x multiplier).")
-                    
+
         except Exception as e:
             if accelerator.is_main_process:
                 print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
@@ -556,8 +647,9 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=(start_epoch >= VARIANCE_PHASE_EPOCH),
-            eof_bases=eof_bases
+            use_flow_variance=True,
+            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
         )
         v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res = val_outputs
         
@@ -737,39 +829,6 @@ def train(args, accelerator):
 
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
-    is_variance_phase = False  # Will be set per-epoch
-    
-    # If resuming into Phase 2 (e.g. from epoch 250), freeze immediately
-    if start_epoch >= VARIANCE_PHASE_EPOCH:
-        if accelerator.is_main_process:
-            print(f"🔒 Resuming in Phase 2 (epoch {start_epoch} >= {VARIANCE_PHASE_EPOCH}). Freezing UNet + mean heads.")
-            # Save milestone checkpoint if it doesn't exist yet
-            milestone_path = os.path.join(output_dir, f"unet_converged_epoch{VARIANCE_PHASE_EPOCH - 1}.pt")
-            if not os.path.exists(milestone_path):
-                unwrapped_save = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': VARIANCE_PHASE_EPOCH - 1,
-                    'model': unwrapped_save.state_dict(),
-                    'best_val_crps': best_val_crps,
-                    'top_models': top_models
-                }, milestone_path)
-                print(f"   💾 Saved milestone checkpoint: {milestone_path}")
-        unwrapped = accelerator.unwrap_model(model)
-        for param in unwrapped.unet.parameters():
-            param.requires_grad_(False)
-        for param in unwrapped.heads.parameters():
-            param.requires_grad_(False)
-        for param in unwrapped.var_heads.parameters():
-            param.requires_grad_(True)
-        # Create variance-only optimizer
-        optimizer = torch.optim.AdamW(
-            [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-            lr=1e-4
-        )
-        model, optimizer, loader, val_loader = accelerator.prepare(
-            model, optimizer, loader, val_loader
-        )
-        is_variance_phase = True
     
     for epoch in range(start_epoch, epochs):
         if epochs_done_this_run >= max_epochs_this_run:
@@ -777,44 +836,9 @@ def train(args, accelerator):
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
         
-        # --- PHASE TRANSITION at VARIANCE_PHASE_EPOCH ---
-        if epoch == VARIANCE_PHASE_EPOCH and not is_variance_phase:
-            # Save the converged UNet as a milestone
-            if accelerator.is_main_process:
-                unwrapped = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch - 1,
-                    'model': unwrapped.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'best_val_crps': best_val_crps,
-                    'top_models': top_models
-                }, os.path.join(output_dir, f"unet_converged_epoch{epoch-1}.pt"))
-                print(f"\n🔒 Phase 2 START: Saved milestone checkpoint. Freezing UNet backbone + mean heads.")
-                print(f"   Only variance heads will be trained from now on.")
-            
-            # Freeze UNet + mean heads
-            unwrapped = accelerator.unwrap_model(model)
-            for param in unwrapped.unet.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.heads.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.var_heads.parameters():
-                param.requires_grad_(True)
-            
-            # Create variance-only optimizer (fresh, higher LR for new heads)
-            optimizer = torch.optim.AdamW(
-                [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-                lr=1e-4
-            )
-            model, optimizer, loader, val_loader = accelerator.prepare(
-                model, optimizer, loader, val_loader
-            )
-            is_variance_phase = True
-        
         model.train()
         train_loss = 0.0
-        phase_label = "Phase2-Var" if is_variance_phase else "Phase1-Vel"
-        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch} [{phase_label}]")
+        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
 
         for i, batch in enumerate(pbar):    
             # Conditionals: [B, 31, H, W]
@@ -843,35 +867,11 @@ def train(args, accelerator):
 
             # Flow Matching Interpolation
             t = flow_matcher.sample_time_batch(B)
-            # Generate Noise (EOF blend in Phase 2, Pure in Phase 1)
-            if is_variance_phase and eof_bases is not None:
-                mjo_phases = batch.get('mjo_phase', torch.zeros(B, dtype=torch.long))
-                if not isinstance(mjo_phases, torch.Tensor):
-                    mjo_phases = torch.tensor(mjo_phases)
-                
-                # 98% EOF / 2% Pure blend exactly as done at inference
-                eof_noise = flow_matcher.eof_sample(eof_bases, mjo_phases, B, H, W, lead_ids=lead_idx)
-                pure_noise = torch.randn_like(target_norm)
-                blend = 0.02 * pure_noise + 0.98 * eof_noise
-                std = blend.std(dim=(2, 3), keepdim=True)
-                noise = blend / (std + 1e-6)
-            else:
-                noise = torch.randn_like(target_norm)
+            noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
             # Predict the velocity (routed through the correct per-week output head)
-            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
-
-            # --- Target Variance (Gradient Isolated) ---
-            # We want the variance head to predict the RELATIVE spatial scaling of the error,
-            # WITHOUT letting gradients flow backward to disrupt the flow matching trajectory.
-            # 1. Compute absolute error magnitude
-            abs_err = torch.abs(v_target - v_pred.detach())
-            
-            # 2. Normalize by the global mean error of that specific sample/lead.
-            # This makes the target a RELATIVE multiplier with a mean of 1.0.
-            # e.g., target_scale = 1.2 in the tropics means "this pixel needs 20% more spread than average"
-            target_scale = abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6)
+            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -879,29 +879,8 @@ def train(args, accelerator):
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss computation
-            loss_v = (area_weights * temp_weights * (v_pred - v_target)**2).mean()
-            
-            if is_variance_phase:
-                # Under the new architecture, model output `var_pred` represents log-variance.
-                # The ODE solver exponentiates it to get the standard deviation multiplier:
-                std_mult = torch.exp(0.5 * var_pred)
-                
-                # 1. Primary objective: predict the relative scaling map
-                loss_mse = (area_weights * temp_weights * (std_mult - target_scale)**2).mean()
-                
-                # 2. Regularization: keep multiplier within [0.5, 2.5] bounds
-                # and gently pull towards 1.0 (identity scaling).
-                var_penalty = torch.relu(std_mult - 2.5)**2 + torch.relu(0.5 - std_mult)**2
-                identity_pull = (std_mult - 1.0)**2
-                
-                loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
-                
-                loss_var = loss_mse + loss_reg
-                loss = loss_var
-            else:
-                # Phase 1: Pure velocity training
-                loss = loss_v
+            # Loss computation (V6: area-weighted + land-ocean weighted + temporal weighted MSE)
+            loss = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -909,10 +888,7 @@ def train(args, accelerator):
             optimizer.zero_grad()
 
             train_loss += loss.item()
-            if is_variance_phase:
-                pbar.set_postfix({"loss_var": f"{loss.item():.4f}", "loss_v(frozen)": f"{loss_v.item():.4f}"})
-            else:
-                pbar.set_postfix({"loss_v": f"{loss_v.item():.4f}"})
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
@@ -928,7 +904,7 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps,
+                'best_val_loss': best_val_loss,
                 'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -957,65 +933,65 @@ def train(args, accelerator):
             continue
 
         if accelerator.is_main_process:
-            print(f"\n⌛ Epoch {epoch} complete. Starting Validation (Inference)...")
+            print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
-        # Always do fast validation first. Only do expensive full sampling if new best is found.
-        is_plot_epoch = args.full_val
+        model.eval()
+        val_loss_total = 0.0
+        val_steps = 0
         
-        val_outputs = run_val_inference(
-            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
-            is_test=is_plot_epoch, 
-            is_fast_recon=not is_plot_epoch,
-            cached_geos_crps=global_cached_geos_crps,
-            cached_geos_rmse=global_cached_geos_rmse,
-            use_flow_variance=is_variance_phase,
-            eof_bases=eof_bases
-        )
-        current_val_metric, full_pred, true_target_precip, model_rmse, geos_mean, geos_crps, geos_rmse, current_ai_res, geos_single, model_single, model_var = val_outputs
+        with torch.no_grad():
+            for batch in val_loader:
+                x_geos = batch['x_geos'].to(device)
+                x_obs  = batch['x_obs'].to(device)
+                
+                B, M, C_extra, L, H, W = x_geos.shape
+                x_geos_flat = x_geos.view(B, -1, H, W)
+                
+                months = batch['month'].to(device)
+                sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                
+                lead_idx = batch['lead_idx'].to(device)
+                lead_val = (lead_idx.float() / 1.5) - 1.0 
+                lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
+                
+                x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
+                target_norm = batch['y_target'].to(device)
+                
+                t = flow_matcher.sample_time_batch(B)
+                noise = torch.randn_like(target_norm)
+                x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+                
+                v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
+                
+                w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
+                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+                
+                loss_val = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
+                val_loss_total += loss_val.item()
+                val_steps += 1
+                
+        current_val_metric = val_loss_total / max(1, val_steps)
         
-        if global_cached_geos_crps is None:
-            global_cached_geos_crps = geos_crps
-            global_cached_geos_rmse = geos_rmse
-            
         if accelerator.is_main_process:
-            # 1. Always plot the results from the first validation pass (usually fast ensemble)
-            plot_suffix = "fast" if not is_plot_epoch else "full"
-            save_val_plot(epoch, full_pred, true_target_precip, current_val_metric, model_rmse, 
-                          geos_mean, geos_crps, geos_rmse, output_dir, ai_residual=current_ai_res, suffix=plot_suffix,
-                          geos_single=geos_single, model_single=model_single, model_var=model_var)
+            print(f"✅ Validation Complete. Avg Noise MSE Loss: {current_val_metric:.4f}")
 
             # 2. Check for Top 4 Model Buffer
             is_in_top4 = False
-            worst_top_crps = max([m['crps'] for m in top_models]) if len(top_models) == 4 else float('inf')
+            worst_top_loss = max([m['val_loss'] for m in top_models]) if len(top_models) == 4 else float('inf')
             
-            if current_val_metric < worst_top_crps:
-                print(f"🌟 New Top-4 model found! CRPS: {current_val_metric:.4f}")
+            if current_val_metric < worst_top_loss:
+                print(f"🌟 New Top-4 model found! Val Loss: {current_val_metric:.4f}")
                 is_in_top4 = True
                 
                 # Absolute Best Check
-                is_new_best = (current_val_metric < best_val_crps)
+                is_new_best = (current_val_metric < best_val_loss)
                 if is_new_best:
-                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_crps:.4f}")
-                    best_val_crps = current_val_metric
-
-                # Trigger high-quality sampling if new BEST (absolute) found after epoch 6
-                if is_new_best and epoch > 6 and not is_plot_epoch:
-                    num_steps = 50 
-                    print(f"📸 Breakthrough! Triggering high-quality {num_steps}-step sampling for diagnostic plots...")
-                    best_sampled_metric, best_sampled_pred, best_target, b_rmse, b_geos_mean, b_geos_crps, b_geos_rmse, b_ai_res, b_gs, b_ms, b_mv = run_val_inference(
-                        epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
-                        is_test=True, is_fast_recon=False,
-                        use_flow_variance=is_variance_phase,
-                        eof_bases=eof_bases
-                    )
-                    save_val_plot(epoch, best_sampled_pred, best_target, best_sampled_metric, b_rmse, 
-                                  b_geos_mean, b_geos_crps, b_geos_rmse, output_dir, ai_residual=b_ai_res, suffix="BEST_sampled",
-                                  geos_single=b_gs, model_single=b_ms, model_var=b_mv)
+                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_loss:.4f}")
+                    best_val_loss = current_val_metric
 
                 # Manage Top 4 Persistence
-                new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
+                new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
                 new_best_path = os.path.join(output_dir, new_best_name)
                 
                 unwrapped_model = accelerator.unwrap_model(model)
@@ -1023,21 +999,21 @@ def train(args, accelerator):
                     'epoch': epoch,
                     'model': unwrapped_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
-                    'best_val_crps': best_val_crps,
+                    'best_val_loss': best_val_loss,
                     'top_models': top_models
                 }
                 
                 if len(top_models) == 4:
                     # Replace worst
-                    worst_model = max(top_models, key=lambda x: x['crps'])
+                    worst_model = max(top_models, key=lambda x: x['val_loss'])
                     if os.path.exists(worst_model['path']):
                         os.remove(worst_model['path'])
                     top_models.remove(worst_model)
                 
                 # Save new and update list
                 torch.save(best_ckpt, new_best_path)
-                top_models.append({"path": new_best_path, "crps": current_val_metric, "epoch": epoch})
-                top_models.sort(key=lambda x: x['crps']) # Best first
+                top_models.append({"path": new_best_path, "val_loss": current_val_metric, "epoch": epoch})
+                top_models.sort(key=lambda x: x['val_loss']) # Best first
                 
                 # Keep a symlink or redundant copy for 'best_flow_ckpt.pt'
                 if is_new_best:
@@ -1048,7 +1024,7 @@ def train(args, accelerator):
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_val_crps': best_val_crps,
+                'best_val_loss': best_val_loss,
                 'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -1058,7 +1034,7 @@ def train(args, accelerator):
                 writer.writerow([epoch, avg_train_loss, 0.0, current_val_metric])
                     
             if is_in_top4:
-                top_str = ", ".join([f"E{m['epoch']}({m['crps']:.3f})" for m in top_models])
+                top_str = ", ".join([f"E{m['epoch']}({m['val_loss']:.4f})" for m in top_models])
                 print(f"📍 Top 4 Models: [{top_str}]")
 
         # Track progress for this execution session

@@ -1,11 +1,12 @@
-# ML Training Config - Custom Flow Matching Model v6
+# ML Training Config - Flow Matching Model v5
+# EOF-Native Retraining with Variance Head from Epoch 0
 batch_size: 4
 learning_rate: 5e-5
 epochs: 1000
-output_dir: ml_output_flow4
+output_dir: ml_output_flow5
 mixed_precision: fp16
 num_workers: 1
-data_dir: /home1/11353/afahad/geos_subc/dataprocess
+data_dir: /scratch/11353/afahad/geossub/geos_subc/dataprocess/
 train_start_year: 1999
 train_end_year: 2020
 val_start_year: 2021

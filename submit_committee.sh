@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J train_committee
-#SBATCH -o train_committee.o%j
-#SBATCH -e train_committee.e%j
+#SBATCH -o train_committee.%j.log
+#SBATCH -e train_committee.%j.log
 #SBATCH -p gh
 #SBATCH -N 1
 #SBATCH -n 1

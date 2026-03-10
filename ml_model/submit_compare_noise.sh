@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J cmp_noise                  # Job name
-#SBATCH -o ml_output_flow4/cmp_noise_%j.out
-#SBATCH -e ml_output_flow4/cmp_noise_%j.err
+#SBATCH -o ml_output_flow4/cmp_noise_%j.log
+#SBATCH -e ml_output_flow4/cmp_noise_%j.log
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks

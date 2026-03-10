@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J train_diffusion_v2      # Job name
-#SBATCH -o ml_output_diffusion_v2/job.%j.out
-#SBATCH -e ml_output_diffusion_v2/job.%j.err
+#SBATCH -o ml_output_diffusion_v2/job.%j.log
+#SBATCH -e ml_output_diffusion_v2/job.%j.log
 #SBATCH -p gh-dev                  # Queue (partition) name
 #SBATCH -N 1                       # Total # of nodes
 #SBATCH -n 1                       # Total # of tasks

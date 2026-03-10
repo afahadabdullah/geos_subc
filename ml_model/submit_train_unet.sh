@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J train_unet_v3_dev      # Job name
-#SBATCH -o ml_output_unet/job.%j.out    # Name of stdout output file
-#SBATCH -e ml_output_unet/job.%j.err    # Name of stderr error file
+#SBATCH -o ml_output_unet/job.%j.log
+#SBATCH -e ml_output_unet/job.%j.log
 #SBATCH -p gh-dev                 # Queue (partition) name 'gh-dev' (Developer queue)
 #SBATCH -N 1                      # Total # of nodes 
 #SBATCH -n 1                      # Total # of tasks

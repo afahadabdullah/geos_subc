@@ -136,7 +136,7 @@ def save_test_plot(batch_idx, full_pred, true_target_precip, model_crps, model_r
 
 import noise_utils
 def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir, log_file, 
-                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=15, num_steps=50, save_plot=True, 
+                      target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, lons, lats, num_ensemble=20, num_steps=50, save_plot=True, 
                       eof_bases=None, nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None, year=None):
     model.eval()
     
@@ -187,55 +187,43 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
     # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
     # With zombie processes gone, we can fit [vB * num_ensemble] through the UNet at once.
     
-    total_ensemble = num_ensemble * 2 # e.g. 15 base + 15 antithetic = 30 total
-    
-    # Expand condition to [vB, total_ensemble, 35, H, W] -> [vB * total_ensemble, 35, H, W]
-    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, total_ensemble, -1, H, W).reshape(vB * total_ensemble, -1, H, W)
+    # Expand condition to [vB, num_ensemble, 35, H, W] -> [vB * num_ensemble, 35, H, W]
+    fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
     
     # Expand variance scalar for base noise
-    var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, total_ensemble, 1, H, W).reshape(vB * total_ensemble, 1, H, W)
+    var_scaled_expanded = var_scaled.unsqueeze(1).expand(vB, num_ensemble, 1, H, W).reshape(vB * num_ensemble, 1, H, W)
     
-    # Generate noise: use EOF-structured noise if available, otherwise GEOS-variance-scaled
+    # Generate noise: EOF-modulated isotropic noise (spatial coherence + random diversity)
     if eof_bases is not None:
-        noise_base = noise_utils.generate_dynamic_multimodal_noise(
+        smart_noise_expanded = noise_utils.generate_dynamic_multimodal_noise(
             batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year
         )
-        
-        # ANTITHETIC SAMPLING: create negated mirror for each base sample
-        noise_anti = -noise_base
-        
-        # Interleave base and anti to keep batch dimension aligned
-        noise_base_reshaped = noise_base.view(vB, num_ensemble, 1, H, W)
-        noise_anti_reshaped = noise_anti.view(vB, num_ensemble, 1, H, W)
-        smart_noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * total_ensemble, 1, H, W)
     else:
-        base_noise_base = torch.randn((vB * num_ensemble, 1, H, W), device=device)
-        base_noise_anti = -base_noise_base
-        
-        noise_base_reshaped = base_noise_base.view(vB, num_ensemble, 1, H, W)
-        noise_anti_reshaped = base_noise_anti.view(vB, num_ensemble, 1, H, W)
-        base_noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * total_ensemble, 1, H, W)
-        
+        base_noise_expanded = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         smart_noise_expanded = base_noise_expanded * var_scaled_expanded
         
-    lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, total_ensemble).reshape(-1).long()
+    lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
     
     # Single parallel ODE solve for the entire test batch and ensemble
     p_x1_expanded = flow_matcher.euler_solve(
         model, smart_noise_expanded, fx_cond_expanded, 
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=True  # Ensure variance head is used per user request
     )
     
-    # Reshape back to [vB, total_ensemble, H, W]
-    p_x1_batch = p_x1_expanded.view(vB, total_ensemble, H, W)
+    # Reshape back to [vB, num_ensemble, H, W]
+    p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
+    
+    # Clamp the ODE output to the strict [-1, 1] target bounds.
+    # This enforces the physical precipitation ceiling (50 mm/day max).
+    p_x1_batch = torch.clamp(p_x1_batch, min=-1.0, max=1.0)
     
     week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
-    week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, total_ensemble, H, W]
+    week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
     
-    ensemble_preds_precip = week_precip.transpose(0, 1) # [total_ensemble, vB, H, W]
+    ensemble_preds_precip = week_precip.transpose(0, 1) # [num_ensemble, vB, H, W]
     
     # Reshape to separate initialization dates and lead weeks
-    ensemble_preds_precip = ensemble_preds_precip.view(total_ensemble, num_inits, 4, H, W)
+    ensemble_preds_precip = ensemble_preds_precip.view(num_ensemble, num_inits, 4, H, W)
     full_pred = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
     
     val_metric, model_crps_map = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
@@ -272,7 +260,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
         'true_target_precip': true_target_precip_plot,
         'geos_mean': geos_mean_raw,
         'geos_single': geos_ens_sample[:, 0], # [num_inits, L, H, W]
-        'model_single': ensemble_preds_precip[0], # [num_inits, L, H, W]
+        'model_single': ensemble_preds_precip[0], # explicitly pass unperturbed member 0
         'model_crps_map': model_crps_map,
         'model_mse_map': mse_map,
         'geos_crps_map': geos_crps_map,
@@ -282,7 +270,7 @@ def run_test_inference(batch_idx, batch, model, flow_matcher, device, output_dir
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="ml_model/config_flow.yaml", help="Path to config file")
+    parser.add_argument("--config", type=str, default="ml_model/config_flow_v5.yaml", help="Path to config file")
     parser.add_argument("--ckpt", type=str, default=None, help="Path to model checkpoint (auto-discovers best if None)")
     parser.add_argument("--year", type=int, default=2015, help="Test year to validate against")
     parser.add_argument("--ensemble-size", type=int, default=4, help="Number of members in smart noise ensemble")
@@ -439,7 +427,7 @@ def main():
         mjo_df = mjo_df.set_index('date_str')
         print(f"✅ Loaded MJO RMM CSV")
 
-    csv_file = os.path.join(output_dir, f"test_metrics_{args.year}_N{args.ensemble_size}.csv")
+    csv_file = os.path.join(output_dir, f"test_metrics_v5_{args.year}_N{args.ensemble_size}.csv")
     with open(csv_file, mode='w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["Batch_Idx", "Model_CRPS", "Model_RMSE", "GEOS_CRPS", "GEOS_RMSE"])
