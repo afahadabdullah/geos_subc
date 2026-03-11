@@ -149,10 +149,9 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
     for year in YEAR_RANGE:
         row = f"  {year:<6}"
         for display, template, is_core, _ in VARIABLES:
-            path = os.path.join(data_root, template.format(year=year))
-            exists = os.path.exists(path)
-            marker = "." if exists else ("C" if is_core else "X")
-            colour = "green" if exists else ("red" if is_core else "yellow")
+            is_ok = year in summary[display]["ok"]
+            marker = "." if is_ok else ("C" if is_core else "X")
+            colour = "green" if is_ok else ("red" if is_core else "yellow")
             row += colored(f"{marker:<8}", colour)
         print(row)
 
