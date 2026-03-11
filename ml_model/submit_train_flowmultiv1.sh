@@ -45,7 +45,7 @@ else
 fi
 
 echo "🔥 Launching Flow Matching Multi-Target Training (PR + T2M)..."
-accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_v6.py --config ml_model/config_flow_multi.yaml \
+accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_multiv1.py --config ml_model/config_flow_multiv1.yaml \
     --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
@@ -70,7 +70,7 @@ if [ -f "$CKPT_FILE" ]; then
         fi
 
         echo "📡 Attempting SSH resubmission to $SUBMIT_TARGET..."
-        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch ml_model/submit_train_flowmulti.sh"
+        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch ml_model/submit_train_flowmultiv1.sh"
     else
         echo "✅ Final Epoch $CURRENT_EPOCH reached. Chaining complete."
     fi
