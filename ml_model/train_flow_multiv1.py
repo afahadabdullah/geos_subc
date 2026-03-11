@@ -504,7 +504,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=37, out_channels=2).to(device)
+    model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -533,8 +533,8 @@ def train(args, accelerator):
 
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
-        print(f"   Total Input Channels: 37")
-        print(f"   --- Condition Channels (x_cond = 35) ---")
+        print(f"   Total Input Channels: 41")
+        print(f"   --- Condition Channels (x_cond = 39) ---")
         print(f"     [00-03] x_obs: SST (L=1 to 4)")
         print(f"     [04-07] x_obs: SSS (L=1 to 4)")
         print(f"     [08-11] x_obs: Soil Moisture (L=1 to 4)")
