@@ -108,6 +108,7 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
 
     for display, template, is_core, required_vars in VARIABLES:
         ok_years, missing_years, missing_var_years = [], [], []
+        missing_var_reasons = {}
 
         for year in YEAR_RANGE:
             path = os.path.join(data_root, template.format(year=year))
@@ -117,6 +118,9 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
             elif status.startswith("ERR (Missing vars"):
                 missing_var_years.append(year)
                 missing_years.append(year)
+                if status not in missing_var_reasons:
+                    missing_var_reasons[status] = []
+                missing_var_reasons[status].append(year)
             else:
                 missing_years.append(year)
 
@@ -138,7 +142,13 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
             count = colored(f"{n_ok:>4}/{n_total}", "yellow")
 
         print(f"{label}  {count}  {missing_str}")
-        summary[display] = {"ok": ok_years, "missing": missing_years, "missing_vars": missing_var_years, "core": is_core}
+        summary[display] = {
+            "ok": ok_years, 
+            "missing": missing_years, 
+            "missing_vars": missing_var_years, 
+            "reasons": missing_var_reasons,
+            "core": is_core
+        }
 
     # ── Year-by-year cross matrix ─────────────────────────────────────────────
     print(f"\n{'='*80}")
@@ -178,13 +188,17 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
     for display, info in summary.items():
         missing = info["missing"]
         is_core = info["core"]
+        reasons = info.get("reasons", {})
+        
         if missing:
             tag = "[CORE]" if is_core else "      "
+            colour = "red" if is_core else "yellow"
             if is_core:
                 any_core_missing = True
-                print(colored(f"  {tag} {display}: {len(missing)} years missing → {_format_year_list(missing)}", "red"))
-            else:
-                print(colored(f"  {tag} {display}: {len(missing)} years missing → {_format_year_list(missing)}", "yellow"))
+                
+            print(colored(f"  {tag} {display}: {len(missing)} years missing → {_format_year_list(missing)}", colour))
+            for reason, years in reasons.items():
+                print(colored(f"         └─ {_format_year_list(years)}: {reason}", colour))
         else:
             print(colored(f"         {display}: Complete ✓", "green"))
 
