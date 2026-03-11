@@ -592,7 +592,7 @@ def train(args, accelerator):
     if accelerator.is_main_process and eof_bases is not None:
         print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for dynamic validation noise.")
     
-    start_epoch = 0
+    start_epoch = 1
     best_val_loss = float('inf')
     top_models = [] # List of {"path": str, "val_loss": float, "epoch": int}
     
@@ -867,7 +867,7 @@ def train(args, accelerator):
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
     
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, epochs + 1):
         if epochs_done_this_run >= max_epochs_this_run:
             if accelerator.is_main_process:
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")

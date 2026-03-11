@@ -61,7 +61,7 @@ if [ -f "$CKPT_FILE" ]; then
     # Safely get current epoch from checkpoint
     CURRENT_EPOCH=$(python -c "import torch; ckpt=torch.load('$CKPT_FILE', map_location='cpu', weights_only=True); print(ckpt['epoch'])" 2>/dev/null || echo "-1")
     
-    if [ "$CURRENT_EPOCH" -lt "$((MAX_EPOCHS - 1))" ]; then
+    if [ "$CURRENT_EPOCH" -lt "$MAX_EPOCHS" ]; then
         echo "📍 Training at Epoch $CURRENT_EPOCH / $MAX_EPOCHS. Resubmitting job..."
         # TACC Fix: Resubmit via SSH to the submission host (full domain)
         SUBMIT_TARGET="${SLURM_SUBMIT_HOST}.vista.tacc.utexas.edu"
