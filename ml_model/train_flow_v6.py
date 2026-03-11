@@ -62,6 +62,22 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
+def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.Tensor):
+    """
+    Computes area-weighted RMSE.
+    pred: [B, H, W]
+    target: [B, H, W]
+    area_weights: [1, 1, H, 1]
+    """
+    mse_map = (pred - target)**2
+    mask = ~torch.isnan(mse_map)
+    if mask.any():
+        aw_expanded = area_weights.view(1, 1, 181, 1).expand_as(mse_map)
+        rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
+    else:
+        rmse = 0.0
+    return rmse
+
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None):
     """
     Standardizes plotting logic for validation results (7-column layout).
@@ -163,27 +179,33 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     
     for b_idx, batch in enumerate(val_loader):
         if b_idx not in target_batches:
-            if b_idx > max(target_batches):
+            if b_idx > max(target_batches) if len(target_batches) > 0 else 0:
                 break # Stop iterating once we have all target batches
             continue
             
-        fb_target_norm = batch['y_target'].to(device) # [vB, 1, H, W]
+        fb_target_norm = batch['y_target'].to(device) # [vB, 2, H, W]
         vB, _, H, W = fb_target_norm.shape
         num_inits = vB // 4
         
         # Extract unique init dates (every 4th element)
-        true_target_precip = batch['target_raw_full'][0::4].to(device) # [num_inits, 4, H, W]
+        true_target_raw = batch['target_raw_full'][0::4].to(device) # [num_inits, 2, 4, H, W]
+        true_target_precip = true_target_raw[:, 0] # [num_inits, 4, H, W]
+        true_target_t2m = true_target_raw[:, 1] # [num_inits, 4, H, W]
         
         geos_ens_raw = batch['geos_ens_raw'].to(device) 
-        geos_ens_sample = geos_ens_raw[0::4] # [num_inits, M=4, L=4, H, W]
-        geos_mean_raw = geos_ens_sample.mean(dim=1) # [num_inits, 4, H, W]
+        geos_ens_sample = geos_ens_raw[0::4] # [num_inits, M=4, C=2, L=4, H, W]
+        
+        geos_mean_raw = geos_ens_sample.mean(dim=1) # [num_inits, 2, 4, H, W]
+        geos_mean_precip = geos_mean_raw[:, 0]
+        geos_mean_t2m = geos_mean_raw[:, 1]
     
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
         # Fast validation: 12 ensemble members (speed). Full validation: 12 members (quality).
         num_ensemble = 12
-        ensemble_preds_precip = [] # Will be [E, 4, H, W]
+        ensemble_preds_precip = [] # Will be [num_ensemble, num_inits, 4, H, W]
+        ensemble_preds_t2m = []
 
         # Progress bar for internal status during long samplings
         # Fast: 10 Euler steps (rapid screening). Full: 50 steps (publication quality)
@@ -242,45 +264,43 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_flow_variance
         )
         
-        p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
+        p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
 
-        
-        week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
+        # Reverse PR (Channel 0)
+        p_x1_pr = p_x1_batch[:, :, 0] # [vB, E, H, W]
+        week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
         
+        # Reverse T2M (Channel 1)
+        # Using placeholder min/max of 200/320 for T2M as setup in the dataloader until stats hit
+        p_x1_t2m = p_x1_batch[:, :, 1]
+        t2m_min, t2m_max = 200.0, 320.0 
+        week_t2m = ((p_x1_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
+        
         ensemble_preds_precip = week_precip.transpose(0, 1) # [num_ensemble, vB, H, W]
+        ensemble_preds_t2m = week_t2m.transpose(0, 1)
         
         # Reshape to separate initialization dates and lead weeks
         ensemble_preds_precip = ensemble_preds_precip.view(num_ensemble, num_inits, 4, H, W)
+        ensemble_preds_t2m = ensemble_preds_t2m.view(num_ensemble, num_inits, 4, H, W)
         
-        full_pred = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
-        model_var = ensemble_preds_precip.var(dim=0) # [num_inits, 4, H, W]
-    
-        # Calculate CRPS across all inits in this batch natively
+        full_pred_precip = ensemble_preds_precip.mean(dim=0) # [num_inits, 4, H, W]
+        model_var_precip = ensemble_preds_precip.var(dim=0) # [num_inits, 4, H, W]
+        
+        full_pred_t2m = ensemble_preds_t2m.mean(dim=0)
+        
+        # Calculate Natively
         b_crps = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
+        b_rmse = compute_rmse(full_pred_precip, true_target_precip, area_weights)
         
-        # Model RMSE (NaN-aware)
-        mse_map = (full_pred - true_target_precip)**2
-        mask = ~torch.isnan(mse_map)
-        if mask.any():
-            aw_expanded = area_weights.view(1, 1, 181, 1).expand_as(mse_map)
-            b_rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
-        else:
-            b_rmse = 0.0
+        b_crps_t2m = compute_crps(ensemble_preds_t2m, true_target_t2m, area_weights)
+        b_rmse_t2m = compute_rmse(full_pred_t2m, true_target_t2m, area_weights)
         
         # GEOS Baseline Metrics (NaN-aware)
         if cached_geos_crps is None:
-            # Transpose to [Member, Init, Lead, H, W] to match compute_crps standard [E, B, C, H, W]
-            g_crps = compute_crps(geos_ens_sample.transpose(0, 1), true_target_precip, area_weights)
-            geos_mse_map = (geos_mean_raw - true_target_precip)**2
-            mask_2d = ~torch.isnan(geos_mse_map)
-        
-            if mask_2d.any():
-                aw_expanded_2d = area_weights.view(1, 1, 181, 1).expand_as(geos_mse_map)
-                g_rmse = torch.sqrt((geos_mse_map[mask_2d] * aw_expanded_2d[mask_2d]).sum() / (aw_expanded_2d[mask_2d].sum() + 1e-8)).item()
-            else:
-                g_rmse = 0.0
-                
+            g_crps = compute_crps(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_precip, area_weights)
+            g_rmse = compute_rmse(geos_mean_precip, true_target_precip, area_weights)
+            
             total_geos_crps += g_crps * num_inits # Weight by batch items
             total_geos_rmse += g_rmse * num_inits
             
@@ -292,17 +312,15 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         if b_idx == 0:
             # We select the first init date [0] for plotting to keep dims matching matplotlib scripts
             true_target_precip_plot = torch.nan_to_num(true_target_precip[0], nan=0.0)
-            ai_residual = full_pred[0] - geos_mean_raw[0]
+            ai_residual = full_pred_precip[0] - geos_mean_precip[0]
             saved_tensors = {
-                'full_pred': full_pred[0].unsqueeze(0),
+                'full_pred': full_pred_precip[0].unsqueeze(0),
                 'true_target': true_target_precip_plot.unsqueeze(0),
-                'geos_mean': geos_mean_raw[0].unsqueeze(0),
+                'geos_mean': geos_mean_precip[0].unsqueeze(0),
                 'ai_res': ai_residual.unsqueeze(0),
-                # If GEOS ensemble has M dimension > 1 (S2S3), take [0, 0]. If deterministic (FIMR), it's [0, 0] thanks to the dataset unsqueeze.
-                # Use nan_to_num in case a missing slice causes max/min to be NaN, turning the plot white.
-                'geos_single': torch.nan_to_num(geos_ens_sample[0, 0], nan=0.0).unsqueeze(0),
+                'geos_single': torch.nan_to_num(geos_ens_sample[0, 0, 0], nan=0.0).unsqueeze(0),
                 'model_single': ensemble_preds_precip[0, 0].unsqueeze(0),
-                'model_var': model_var[0].unsqueeze(0)
+                'model_var': model_var_precip[0].unsqueeze(0)
             }
             
     # Compute Averages
@@ -317,7 +335,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     
     recon_type = f"Monthly (N={len(target_batches)}x{num_ensemble})"
     if accelerator.is_main_process:
-        print(f"Epoch {epoch} | Val CRPS [{recon_type}]: {avg_crps:.4f} (GEOS baseline: {avg_geos_crps:.4f})")
+        print(f"Epoch {epoch} | Val CRPS [PR]: {avg_crps:.4f} (GEOS baseline: {avg_geos_crps:.4f})")
+        print(f"Epoch {epoch} | Val CRPS [T2M]: {b_crps_t2m:.4f}  | RMSE: {b_rmse_t2m:.4f}")
         
     return avg_crps, saved_tensors['full_pred'], saved_tensors['true_target'], avg_rmse, saved_tensors['geos_mean'], avg_geos_crps, avg_geos_rmse, saved_tensors['ai_res'], saved_tensors['geos_single'], saved_tensors['model_single'], saved_tensors['model_var']
 
@@ -483,7 +502,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=36, out_channels=1).to(device)
+    model = FlowMatchingModel(in_channels=37, out_channels=2).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -512,7 +531,7 @@ def train(args, accelerator):
 
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
-        print(f"   Total Input Channels: 36")
+        print(f"   Total Input Channels: 37")
         print(f"   --- Condition Channels (x_cond = 35) ---")
         print(f"     [00-03] x_obs: SST (L=1 to 4)")
         print(f"     [04-07] x_obs: SSS (L=1 to 4)")
@@ -522,18 +541,17 @@ def train(args, accelerator):
         print(f"     [20-23] x_obs: U250 (L=1 to 4)")
         print(f"     [24-27] x_obs: MJO Spatial Wave (L=1 to 4)")
         print(f"     [28-31] x_geos: GEOS Precipitation Forecast (L=1 to 4)")
-        print(f"     [    32] Month: Sine Temporal Embedding")
-        print(f"     [    33] Month: Cosine Temporal Embedding")
-        print(f"     [    34] Target Lead: Relative Index Tracking [-1 to +1]")
-        print(f"   --- Dynamic Flow Channel (x_t = 1) ---")
-        print(f"     [    35] x_t: Pure Noise Vector (Solver Substrate)")
-        print(f"   --- Optimization Target ---")
-        print(f"     Velocity Target (v_theta): SQRT(GPCP) Precipitation, Normalized to [-1, 1]")
+        print(f"     [32-35] x_geos: GEOS T2M Forecast (L=1 to 4)")
+        print(f"     [    36] Month: Sine Temporal Embedding")
+        print(f"     [    37] Month: Cosine Temporal Embedding")
+        print(f"     [    38] Target Lead: Relative Index Tracking [-1 to +1]")
+        print(f"   --- Dynamic Flow Channel (x_t = 2) ---")
+        print(f"     [ 39,40] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
         print(f"   --- Dedicated Output Heads (Multi-Task Architecture) ---")
-        print(f"     Head 0: Week 1 (Conv2d 64→1)")
-        print(f"     Head 1: Week 2 (Conv2d 64→1)")
-        print(f"     Head 2: Week 3 (Conv2d 64→1)")
-        print(f"     Head 3: Week 4 (Conv2d 64→1)")
+        print(f"     Head 0: Week 1 (Conv2d 64→2)")
+        print(f"     Head 1: Week 2 (Conv2d 64→2)")
+        print(f"     Head 2: Week 3 (Conv2d 64→2)")
+        print(f"     Head 3: Week 4 (Conv2d 64→2)")
         print(f"     Shared UNet features: 64 intermediate channels")
         print(f"-------------------------------------\n")
 
@@ -838,16 +856,14 @@ def train(args, accelerator):
         
         model.train()
         train_loss = 0.0
-        pbar = tqdm(loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch}")
-
         for i, batch in enumerate(pbar):    
-            # Conditionals: [B, 31, H, W]
-            x_geos = batch['x_geos'].to(device) # [B, 1, 1, 4, H, W]
+            # Conditionals: [B, 35, H, W]
+            x_geos = batch['x_geos'].to(device) # [B, 2, 1, 4, H, W]  *(C=2 for pr and tas)*
             x_obs  = batch['x_obs'].to(device)  # [B, 24, H, W]
             
-            B, M, C_extra, L, H, W = x_geos.shape
-            # Flatten GEOS weeks 1-4 into channels
-            x_geos_flat = x_geos.view(B, -1, H, W) # [B, 4, H, W]
+            B, C_geos, M, C_extra, L, H, W = x_geos.unsqueeze(2).shape if len(x_geos.shape) == 5 else x_geos.shape # Handle M dimension
+            # Flatten GEOS variables and leads into channels
+            x_geos_flat = x_geos.contiguous().view(B, -1, H, W) # [B, 8, H, W] (2 vars * 4 leads)
             
             months = batch['month'].to(device)
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
@@ -859,11 +875,13 @@ def train(args, accelerator):
             lead_val = (lead_idx.float() / 1.5) - 1.0 
             lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
 
-            # Total: 28 (Obs/Dev/MJO) + 4 (GEOS) + 2 (Month) + 1 (Lead) = 35 channels
+            # Total: 24 (Obs) + 4 (MJO) + 8 (GEOS [2 vars * 4 leads]) + 2 (Month) + 1 (Lead) = 39 channels out of which Obs/MJO combined is 28.
+            # So 28 + 8 + 2 + 1 = 39 ? Wait. x_obs earlier was 28. 28 + 8 + 2 + 1 = 39. Let's trace.
+            # x_obs shape in dataset_flow.py gives: SST(4)+SSS(4)+SM(4)+IVT(4)+Z500(4)+U250(4)+MJO(4) = 28.
             x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
 
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
-            target_norm = batch['y_target'].to(device) # [B, 1, H, W]
+            target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
 
             # Flow Matching Interpolation
             t = flow_matcher.sample_time_batch(B)
@@ -880,7 +898,11 @@ def train(args, accelerator):
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
             # Loss computation (V6: area-weighted + land-ocean weighted + temporal weighted MSE)
-            loss = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
+            # Both PR (Channel 0) and T2M (Channel 1) are treated with the MSE loss
+            # For PR, this is the transformed velocity. For T2M, it's the 200-320K standardized velocity.
+            # Expanding temp_weights for 2 channels
+            temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
+            loss = (area_weights * land_ocean_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
