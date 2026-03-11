@@ -955,15 +955,15 @@ def train(args, accelerator):
         # --- ADAPTIVE VALIDATION SCHEDULE ---
         # Phase 1 (epoch < 5):   No validation (model still warming up)
         # Phase 2 (5-19):        Every 5 epochs
-        # Phase 3 (20-99):       Every 3 epochs
-        # Phase 4 (100+):        Every epoch
-        # MSE-only for first 100 epochs. Plotting starts at epoch 20 on new best.
+        # Phase 3 (20-69):       Every 3 epochs
+        # Phase 4 (70+):         Every epoch
+        # MSE-only for first 70 epochs. Plotting starts at epoch 20 on new best.
         def should_validate(ep):
             if ep < 5:
                 return False
             elif ep < 20:
                 return (ep % 5 == 0)
-            elif ep < 100:
+            elif ep < 70:
                 return (ep % 3 == 0)
             else:
                 return True
