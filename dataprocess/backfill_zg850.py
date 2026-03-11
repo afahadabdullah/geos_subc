@@ -99,6 +99,15 @@ def backfill_zg850():
             if ds_year.sizes[time_dim] == 0:
                 print(f"No zg850 data found for {year} in ArrayLake.")
                 continue
+                
+            # Process to weekly (L=32 -> L=4)
+            if 'L' in ds_year.dims:
+                if ds_year.sizes['L'] >= 28:
+                    ds_year = ds_year.isel(L=slice(0, 28))
+                    ds_year = ds_year.coarsen(L=7, boundary='exact').mean()
+                    print(f"Coarsened zg850 to L={ds_year.sizes['L']}")
+                else:
+                    print(f"Warning: L dimension is {ds_year.sizes['L']}, expected >= 28")
 
             # Strip encoding (same trick as load_data2.py)
             ds_year.encoding = {}
