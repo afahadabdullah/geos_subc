@@ -575,8 +575,20 @@ class S2SHybridDataset(Dataset):
             ds_t2m, close_t2m = get_ds(meta["t2m_target_path"], "t2m_target")
             if ds_t2m:
                 t2m_var = next((v for v in ['t2m'] if v in ds_t2m), list(ds_t2m.data_vars)[0])
-                t2m_val_lead = ds_t2m[t2m_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
-                t2m_val_raw_full = ds_t2m[t2m_var].isel(S=meta['s_idx']).values 
+                v_lead = ds_t2m[t2m_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+                v_full = ds_t2m[t2m_var].isel(S=meta['s_idx']).values 
+                
+                # Handle ERA5 [lon, lat] (360, 181) orientation
+                if v_lead.shape == (360, 181):
+                    v_lead = v_lead.T
+                if v_full.ndim == 3 and v_full.shape[1] == 360 and v_full.shape[2] == 181:
+                    v_full = np.transpose(v_full, (0, 2, 1))
+                elif v_full.ndim == 2 and v_full.shape == (360, 181):
+                    v_full = v_full.T
+                    
+                t2m_val_lead = v_lead
+                t2m_val_raw_full = v_full
+                
                 if close_t2m: ds_t2m.close()
             
         gpcp_tensor = torch.from_numpy(gpcp_val_lead).float() # (H, W)
