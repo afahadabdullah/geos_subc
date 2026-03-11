@@ -5,9 +5,15 @@ client = Client()
 repo = client.get_repo("umd/subc")
 session = repo.writable_session(branch="main")
 
+import zarr
+
 print("=== All Groups in umd/subc ===")
-for group in repo.groups:
-    print(f" - {group.name}")
+try:
+    z = zarr.open(session.store, mode='r', zarr_format=3)
+    for k in z.group_keys():
+        print(f" - {k}")
+except Exception as e:
+    print(f"Could not list Zarr groups: {e}")
 
 print("\n=== Inspecting esrl-fimr1p1-hindcast ===")
 ds = xr.open_zarr(session.store, zarr_format=3, group="esrl-fimr1p1-hindcast", consolidated=False)
