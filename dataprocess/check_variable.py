@@ -106,13 +106,16 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
     summary: dict = {}   # variable_name -> {"ok": list, "missing": list}
 
     for display, template, is_core, required_vars in VARIABLES:
-        ok_years, missing_years = [], []
+        ok_years, missing_years, missing_var_years = [], [], []
 
         for year in YEAR_RANGE:
             path = os.path.join(data_root, template.format(year=year))
             status = check_file(path, open_zarr, required_vars=required_vars)
             if status.startswith("OK"):
                 ok_years.append(year)
+            elif status.startswith("ERR (Missing vars"):
+                missing_var_years.append(year)
+                missing_years.append(year)
             else:
                 missing_years.append(year)
 
@@ -134,11 +137,11 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
             count = colored(f"{n_ok:>4}/{n_total}", "yellow")
 
         print(f"{label}  {count}  {missing_str}")
-        summary[display] = {"ok": ok_years, "missing": missing_years, "core": is_core}
+        summary[display] = {"ok": ok_years, "missing": missing_years, "missing_vars": missing_var_years, "core": is_core}
 
     # ── Year-by-year cross matrix ─────────────────────────────────────────────
     print(f"\n{'='*80}")
-    print("  Year-by-Year Availability Matrix  (C=core required, .=ok, X=missing)")
+    print("  Year-by-Year Availability Matrix  (C=core req, .=ok, X=missing file, V=missing var)")
     print("─" * 80)
 
     var_labels = [v[0][:4] for v in VARIABLES]   # first 4 chars as column header
@@ -150,8 +153,18 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
         row = f"  {year:<6}"
         for display, template, is_core, _ in VARIABLES:
             is_ok = year in summary[display]["ok"]
-            marker = "." if is_ok else ("C" if is_core else "X")
-            colour = "green" if is_ok else ("red" if is_core else "yellow")
+            is_missing_var = year in summary[display].get("missing_vars", [])
+            
+            if is_ok:
+                marker = "."
+                colour = "green"
+            elif is_missing_var:
+                marker = "V"
+                colour = "yellow"
+            else:
+                marker = "C" if is_core else "X"
+                colour = "red" if is_core else "yellow"
+                
             row += colored(f"{marker:<8}", colour)
         print(row)
 
