@@ -4,7 +4,7 @@ import pandas as pd
 from dask.diagnostics import ProgressBar
 import dask
 import os
-import zarr
+import shutil
 
 def backfill_zg850():
     """
@@ -19,23 +19,15 @@ def backfill_zg850():
     
     group_path = "esrl-fimr1p1-hindcast"
     try:
-        # We only want to keep zg and coordinates
-        z = zarr.open(session.store, mode='r', zarr_format=3)
-        all_keys = list(z[group_path].keys())
-        dim_keys = ['S', 'M', 'L', 'P', 'X', 'Y', 'lat', 'lon', 'latitude', 'longitude', 'time', 'level', 'plev']
-        keep_keys = ['zg'] + dim_keys
-        to_drop = [k for k in all_keys if k not in keep_keys]
-        
-        print(f"Opening {group_path} from ArrayLake (dropping {len(to_drop)} non-zg variables)...")
+        print(f"Opening {group_path} from ArrayLake...")
         ds_raw = xr.open_zarr(
             session.store, 
             zarr_format=3, 
             group=group_path, 
-            drop_variables=to_drop,
             consolidated=False
         )
+        print(f"Opened ArrayLake dataset. Keys: {list(ds_raw.data_vars.keys())}")
     except Exception as e:
-        print(f"Failed to open group from ArrayLake: {e}")
         return
 
     # Process zg to zg850
@@ -74,6 +66,13 @@ def backfill_zg850():
         print("Error: Could not identify time dimension.")
         return
 
+    # Debug: Print the min and max dates available
+    try:
+        t_min, t_max = ds_zg850[time_dim].min().values, ds_zg850[time_dim].max().values
+        print(f"Data available in ArrayLake from {t_min} to {t_max}")
+    except Exception as e:
+        print(f"Failed to check time bounds: {e}")
+
     # Loop through years 1999 to 2016
     for year in range(1999, 2017):
         target_zarr = f"dataprocess/geos_subc_{year}.zarr"
@@ -95,9 +94,17 @@ def backfill_zg850():
             existing_ds.close()
 
             # Filter remote data
-            ds_year = ds_zg850.sel({time_dim: slice(start_date, end_date)})
+            # Use 'time' or 'S' depending on what ArrayLake has
+            # The ArrayLake dataset seems to use 'init_time' or similar for some datasets
+            # The dates might also correspond to only a few initializations
+            try:
+                ds_year = ds_zg850.sel({time_dim: slice(start_date, end_date)})
+            except KeyError:
+                print(f"Failed to slice {time_dim} for {year}. ArrayLake dims: {ds_zg850.dims}, coords: {list(ds_zg850.coords)}")
+                continue
+
             if ds_year.sizes[time_dim] == 0:
-                print(f"No zg850 data found for {year} in ArrayLake.")
+                print(f"No zg850 data found for {year} in ArrayLake (Group: {group_path}).")
                 continue
                 
             # Process to weekly (L=32 -> L=4)
@@ -114,10 +121,25 @@ def backfill_zg850():
             for var in ds_year.variables:
                 ds_year[var].encoding = {}
 
-            print(f"Appending zg850 ({ds_year.sizes[time_dim]} steps) to {target_zarr}...")
+            print(f"Merging zg850 ({ds_year.sizes[time_dim]} steps) into {target_zarr}...")
             
+            # Load existing
+            existing_ds = xr.open_zarr(target_zarr, consolidated=False)
+            
+            # Merge
+            merged_ds = xr.merge([existing_ds, ds_year])
+            
+            # Write temp
+            temp_zarr = f"dataprocess/geos_subc_{year}_temp.zarr"
             with ProgressBar(), dask.config.set(scheduler='synchronous'):
-                ds_year.to_zarr(target_zarr, mode='a', append_dim=None)
+                merged_ds.to_zarr(temp_zarr, mode='w', zarr_format=3)
+                
+            existing_ds.close()
+            
+            # Swap
+            print(f"Overwriting original file {target_zarr}...")
+            shutil.rmtree(target_zarr)
+            shutil.move(temp_zarr, target_zarr)
                 
             print(f"Successfully backfilled {year}.")
 
