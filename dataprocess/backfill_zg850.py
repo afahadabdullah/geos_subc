@@ -17,7 +17,7 @@ def backfill_zg850():
     print("Creating session for branch 'main'...")
     session = repo.writable_session(branch="main")
     
-    group_path = "esrl-fimr1p1-hindcast"
+    group_path = "esrl-fimr1p1-forecast"
     try:
         print(f"Opening {group_path} from ArrayLake...")
         ds_raw = xr.open_zarr(
