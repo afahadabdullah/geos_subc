@@ -5,6 +5,7 @@ import numpy as np
 import random
 import yaml
 import csv
+import json
 import xarray as xr
 from tqdm.auto import tqdm
 from PIL import Image
@@ -597,7 +598,24 @@ def train(args, accelerator):
     
     # Load latest checkpoint if it exists
     if args.test:
-        ckpt_path = os.path.join(output_dir, args.ckpt)
+        # Resolve checkpoint from --ckpt-rank using JSON registry, or fallback to --ckpt
+        if hasattr(args, 'ckpt_rank') and args.ckpt_rank is not None:
+            registry_path = os.path.join(output_dir, "model_registry.json")
+            if os.path.exists(registry_path):
+                with open(registry_path, 'r') as f:
+                    registry = json.load(f)
+                rank = args.ckpt_rank
+                if rank < 1 or rank > len(registry):
+                    raise ValueError(f"--ckpt-rank {rank} out of range. Registry has {len(registry)} models.")
+                ckpt_entry = registry[rank - 1]  # 0-indexed
+                ckpt_path = ckpt_entry['path']
+                if accelerator.is_main_process:
+                    print(f"🎯 Loading checkpoint rank #{rank}: Epoch {ckpt_entry['epoch']}, Val Loss {ckpt_entry['val_loss']:.4f}")
+                    print(f"   Path: {ckpt_path}")
+            else:
+                raise FileNotFoundError(f"model_registry.json not found in {output_dir}. Cannot use --ckpt-rank.")
+        else:
+            ckpt_path = os.path.join(output_dir, args.ckpt)
     else:
         ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
 
@@ -1001,21 +1019,14 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print(f"✅ Validation Complete. Avg Noise MSE Loss: {current_val_metric:.4f}")
 
-            # 2. Check for Top 4 Model Buffer
-            is_in_top4 = False
-            worst_top_loss = max([m['val_loss'] for m in top_models]) if len(top_models) == 4 else float('inf')
+            # 2. Check if this is a new best model
+            is_new_best = (current_val_metric < best_val_loss)
             
-            if current_val_metric < worst_top_loss:
-                print(f"🌟 New Top-4 model found! Val Loss: {current_val_metric:.4f}")
-                is_in_top4 = True
-                
-                # Absolute Best Check
-                is_new_best = (current_val_metric < best_val_loss)
-                if is_new_best:
-                    print(f"🏆 NEW ABSOLUTE BEST! Previous Best: {best_val_loss:.4f}")
-                    best_val_loss = current_val_metric
+            if is_new_best:
+                print(f"🏆 NEW BEST MODEL! Val Loss: {current_val_metric:.4f} (Previous: {best_val_loss:.4f})")
+                best_val_loss = current_val_metric
 
-                # Manage Top 4 Persistence
+                # Save checkpoint with descriptive name
                 new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
                 new_best_path = os.path.join(output_dir, new_best_name)
                 
@@ -1025,58 +1036,66 @@ def train(args, accelerator):
                     'model': unwrapped_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
-                    'top_models': top_models
                 }
                 
-                if len(top_models) == 4:
-                    # Replace worst
-                    worst_model = max(top_models, key=lambda x: x['val_loss'])
-                    if os.path.exists(worst_model['path']):
-                        os.remove(worst_model['path'])
-                    top_models.remove(worst_model)
-                
-                # Save new and update list
                 torch.save(best_ckpt, new_best_path)
-                top_models.append({"path": new_best_path, "val_loss": current_val_metric, "epoch": epoch})
-                top_models.sort(key=lambda x: x['val_loss']) # Best first
+                torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
                 
-                # Keep a symlink or redundant copy for 'best_flow_ckpt.pt'
-                if is_new_best:
-                    torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
-                    
-                    # Generate validation plot only after epoch 20 on new absolute best
-                    if epoch >= 20:
-                        print(f"📊 Generating validation plot for new best at Epoch {epoch}...")
-                        val_outputs = run_val_inference(
-                            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-                            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-                            is_test=False, is_fast_recon=True,
-                            use_flow_variance=False,
-                            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
-                        )
-                        v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res, v_geos_single, v_model_single, v_model_var = val_outputs
-                        save_val_plot(epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, 
-                                      ai_residual=v_ai_res, suffix="best", geos_single=v_geos_single, model_single=v_model_single, model_var=v_model_var)
-                        print(f"📸 Validation plot saved for Epoch {epoch}.")
+                # Update JSON registry (append + re-sort)
+                registry_path = os.path.join(output_dir, "model_registry.json")
+                if os.path.exists(registry_path):
+                    with open(registry_path, 'r') as f:
+                        registry = json.load(f)
+                else:
+                    registry = []
+                
+                registry.append({
+                    "rank": 0,  # Will be recalculated
+                    "path": new_best_path,
+                    "val_loss": current_val_metric,
+                    "epoch": epoch
+                })
+                # Sort by val_loss (best first) and assign ranks
+                registry.sort(key=lambda x: x['val_loss'])
+                for i, entry in enumerate(registry):
+                    entry['rank'] = i + 1
+                
+                with open(registry_path, 'w') as f:
+                    json.dump(registry, f, indent=2)
+                
+                print(f"📋 Model Registry updated: {len(registry)} models tracked.")
+                top_str = ", ".join([f"c{e['rank']}:E{e['epoch']}({e['val_loss']:.4f})" for e in registry[:5]])
+                print(f"📍 Top 5: [{top_str}]")
+                
+                # Generate validation plot only after epoch 20 on new absolute best
+                if epoch >= 20:
+                    print(f"📊 Generating validation plot for new best at Epoch {epoch}...")
+                    val_outputs = run_val_inference(
+                        epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
+                        is_test=False, is_fast_recon=True,
+                        use_flow_variance=False,
+                        eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                        enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
+                    )
+                    v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res, v_geos_single, v_model_single, v_model_var = val_outputs
+                    save_val_plot(epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, 
+                                  ai_residual=v_ai_res, suffix="best", geos_single=v_geos_single, model_single=v_model_single, model_var=v_model_var)
+                    print(f"📸 Validation plot saved for Epoch {epoch}.")
 
             # Save Latest Checkpoint & Logs
+            unwrapped_model = accelerator.unwrap_model(model)
             ckpt = {
                 'epoch': epoch,
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
-                'top_models': top_models
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
             with open(log_file, "a") as f:
                 writer = csv.writer(f)
                 writer.writerow([epoch, avg_train_loss, 0.0, current_val_metric])
-                    
-            if is_in_top4:
-                top_str = ", ".join([f"E{m['epoch']}({m['val_loss']:.4f})" for m in top_models])
-                print(f"📍 Top 4 Models: [{top_str}]")
 
         # Track progress for this execution session
         epochs_done_this_run += 1
@@ -1087,6 +1106,8 @@ def main():
     parser.add_argument("--test", action="store_true", help="Run in inference/test mode only")
     parser.add_argument("--ckpt", type=str, default="best_flow_ckpt.pt", 
                         help="Checkpoint filename in output_dir to load for testing (default: best_flow_ckpt.pt)")
+    parser.add_argument("--ckpt-rank", type=int, default=None,
+                        help="Load the Nth best model from model_registry.json (e.g., --ckpt-rank 1 for best, --ckpt-rank 3 for 3rd best)")
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     parser.add_argument("--epochs-per-run", type=int, default=10000, 
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")
