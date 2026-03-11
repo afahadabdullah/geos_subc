@@ -75,7 +75,8 @@ def check_file(path: str, open_zarr: bool = False, required_vars: list = None):
             dim_str = " ".join(f"{k}={v}" for k, v in dims.items())
             
             if missing_vars:
-                return f"ERR (Missing vars: {','.join(missing_vars)}) [{dim_str}]"
+                found_vars_str = ', '.join(ds_vars)
+                return f"ERR (Missing vars: {','.join(missing_vars)} | Found: {found_vars_str}) [{dim_str}]"
             return f"OK [{dim_str}]"
         except Exception as e:
             return f"ERR ({e})"
