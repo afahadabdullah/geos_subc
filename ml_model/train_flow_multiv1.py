@@ -875,6 +875,7 @@ def train(args, accelerator):
         
         model.train()
         train_loss = 0.0
+        pbar = tqdm(loader, desc=f"Epoch {epoch}", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             # Conditionals
             x_geos = batch['x_geos'].to(device)
