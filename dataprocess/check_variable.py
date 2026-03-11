@@ -27,16 +27,18 @@ import argparse
 # ─────────────────────────────────────────────────────────────────────────────
 YEAR_RANGE = range(1999, 2026)  # 1999 to 2025 inclusive
 
-# (display_name, file_template, is_core)
+# (display_name, file_template, is_core, required_vars)
 VARIABLES = [
-    ("GEOS Forecast",           "geos_subc_{year}.zarr",        True),
-    ("GPCP Precipitation",      "gpcp_weekly_{year}.zarr",      True),
-    ("Sea Surface Temp (SST)",  "sst_weekly_{year}.zarr",       False),
-    ("Sea Surface Sal (SSS)",   "sss_weekly_{year}.zarr",       False),
-    ("Soil Moisture (SoilW)",   "soilw_weekly_{year}.zarr",     False),
-    ("IVT (ERA5)",              "ivt_weekly_{year}.zarr",       False),
-    ("MJO Wave Envelope",       "mjowave_weekly_{year}.zarr",   False),
-    ("Z500 & U250 (ERA5)",      "z500_u250_weekly_{year}.zarr", False),
+    ("GEOS Forecast",           "geos_subc_{year}.zarr",        True,  ["t2m", "z850"]),
+    ("GPCP Precipitation",      "gpcp_weekly_{year}.zarr",      True,  []),
+    ("Sea Surface Temp (SST)",  "sst_weekly_{year}.zarr",       False, []),
+    ("Sea Surface Sal (SSS)",   "sss_weekly_{year}.zarr",       False, []),
+    ("Soil Moisture (SoilW)",   "soilw_weekly_{year}.zarr",     False, []),
+    ("IVT (ERA5)",              "ivt_weekly_{year}.zarr",       False, []),
+    ("MJO Wave Envelope",       "mjowave_weekly_{year}.zarr",   False, []),
+    ("Z500 & U250 (ERA5)",      "z500_u250_weekly_{year}.zarr", False, []),
+    ("T2M (ERA5 Targets)",      "t2m_weekly_{year}.zarr",       False, []),
+    ("SLP (ERA5 Targets)",      "slp_weekly_{year}.zarr",       False, []),
 ]
 
 # Column widths for the table
@@ -47,11 +49,11 @@ COL_YEARS = 27  # space for ~10 years in "Y Y Y" format
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def check_file(path: str, open_zarr: bool = False):
+def check_file(path: str, open_zarr: bool = False, required_vars: list = None):
     """
     Returns a status string: 'OK', 'MISSING', or 'EMPTY/ERR'.
-    If open_zarr=True, also opens the Zarr store to verify readability and
-    prints basic dimension info.
+    If open_zarr=True, also opens the Zarr store to verify readability,
+    prints basic dimension info, and checks for required variables.
     """
     if not os.path.exists(path):
         return "MISSING"
@@ -60,9 +62,20 @@ def check_file(path: str, open_zarr: bool = False):
             import xarray as xr
             ds = xr.open_zarr(path, consolidated=False)
             dims = dict(ds.sizes)
+            
+            missing_vars = []
+            if required_vars:
+                ds_vars = [str(v).lower() for v in ds.variables]
+                for req_v in required_vars:
+                    if req_v.lower() not in ds_vars:
+                        missing_vars.append(req_v)
+            
             ds.close()
             # OK with dims embedded
             dim_str = " ".join(f"{k}={v}" for k, v in dims.items())
+            
+            if missing_vars:
+                return f"ERR (Missing vars: {','.join(missing_vars)}) [{dim_str}]"
             return f"OK [{dim_str}]"
         except Exception as e:
             return f"ERR ({e})"
@@ -92,12 +105,12 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
 
     summary: dict = {}   # variable_name -> {"ok": list, "missing": list}
 
-    for display, template, is_core in VARIABLES:
+    for display, template, is_core, required_vars in VARIABLES:
         ok_years, missing_years = [], []
 
         for year in YEAR_RANGE:
             path = os.path.join(data_root, template.format(year=year))
-            status = check_file(path, open_zarr)
+            status = check_file(path, open_zarr, required_vars=required_vars)
             if status.startswith("OK"):
                 ok_years.append(year)
             else:
@@ -135,7 +148,7 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
 
     for year in YEAR_RANGE:
         row = f"  {year:<6}"
-        for display, template, is_core in VARIABLES:
+        for display, template, is_core, _ in VARIABLES:
             path = os.path.join(data_root, template.format(year=year))
             exists = os.path.exists(path)
             marker = "." if exists else ("C" if is_core else "X")
