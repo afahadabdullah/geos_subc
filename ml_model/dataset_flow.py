@@ -98,6 +98,8 @@ class S2SHybridDataset(Dataset):
             z500u250_path_new = os.path.join(self.data_root, f"z500_u250_weekly_{year}.zarr")
             z500u250_path = z500u250_path_new if os.path.exists(z500u250_path_new) else z500u250_path_old
             
+            t2m_target_path = os.path.join(self.data_root, f"t2m_weekly_{year}.zarr")
+            
             # Check existence of core files
             if not os.path.exists(geos_path) or not os.path.exists(gpcp_path):
                 continue
@@ -126,6 +128,7 @@ class S2SHybridDataset(Dataset):
                     print(f"  IVT : {'OK' if has_ivt else 'MISSING'} ({os.path.basename(ivt_path)})")
                     print(f"  MJO : {'OK' if has_mjo else 'MISSING'} ({os.path.basename(mjo_path)})")
                     print(f"  Z500: {'OK' if has_z500u250 else 'MISSING'} ({os.path.basename(z500u250_path)})")
+                    print(f"  T2M : {'OK' if os.path.exists(t2m_target_path) else 'MISSING'} ({os.path.basename(t2m_target_path)})")
                     print("-----------------------------")
                 
                 n_samples = ds_geos.sizes['S']
@@ -155,7 +158,8 @@ class S2SHybridDataset(Dataset):
                             "sm_path": sm_path if has_sm else None,
                             "ivt_path": ivt_path if has_ivt else None,
                             "mjo_path": mjo_path if has_mjo else None,
-                            "z500u250_path": z500u250_path if has_z500u250 else None
+                            "z500u250_path": z500u250_path if has_z500u250 else None,
+                            "t2m_target_path": t2m_target_path if os.path.exists(t2m_target_path) else None
                         })
                 
                 ds_geos.close()
@@ -248,6 +252,7 @@ class S2SHybridDataset(Dataset):
             if m["ivt_path"]:  handles["ivt"]  = xr.open_zarr(m["ivt_path"], consolidated=False)
             if m.get("mjo_path"): handles["mjo"] = xr.open_zarr(m["mjo_path"], consolidated=False)
             if m["z500u250_path"]: handles["z500"] = xr.open_zarr(m["z500u250_path"], consolidated=False)
+            if m.get("t2m_target_path"): handles["t2m_target"] = xr.open_zarr(m["t2m_target_path"], consolidated=False)
             
             # Load all inits for this year
             for s_idx in sorted(init_to_indices.keys()):
@@ -329,42 +334,64 @@ class S2SHybridDataset(Dataset):
             if ds_geos is None: return None # Safety
             
             # Robust Variable Detection: pr, precip, or PRECTOT
-            geos_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
-            geos_data = ds_geos[geos_var].isel(S=meta['s_idx']).values 
+            geos_pr_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
+            geos_tas_var = next((v for v in ['tas', 't2m'] if v in ds_geos), 'tas')
             
-            # Temporary Debug
-            if meta['date'].year == 2019:
-                print(f"DEBUG GEOS 2019 [{geos_var}]: shape={geos_data.shape}, sum={geos_data.sum()}, s_idx={meta['s_idx']}")
-                
+            geos_pr_data = ds_geos[geos_pr_var].isel(S=meta['s_idx']).values 
+            
+            # Retrieve 'tas' if it exists, else use placeholder
+            if geos_tas_var in ds_geos:
+                geos_tas_data = ds_geos[geos_tas_var].isel(S=meta['s_idx']).values
+            else:
+                geos_tas_data = np.zeros_like(geos_pr_data)
+            
             if close_geos: ds_geos.close()
             
-            geos_tensor = torch.from_numpy(geos_data).float()
-            if torch.isnan(geos_tensor).any() or torch.isinf(geos_tensor).any():
-                geos_tensor = torch.nan_to_num(geos_tensor, nan=0.0, posinf=10.0, neginf=0.0)
+            geos_pr_tensor = torch.from_numpy(geos_pr_data).float()
+            geos_tas_tensor = torch.from_numpy(geos_tas_data).float()
+            
+            if torch.isnan(geos_pr_tensor).any() or torch.isinf(geos_pr_tensor).any():
+                geos_pr_tensor = torch.nan_to_num(geos_pr_tensor, nan=0.0, posinf=10.0, neginf=0.0)
+            if torch.isnan(geos_tas_tensor).any() or torch.isinf(geos_tas_tensor).any():
+                # TAS usually around 200-320K. Set NaNs to ~280K
+                geos_tas_tensor = torch.nan_to_num(geos_tas_tensor, nan=280.0, posinf=320.0, neginf=200.0)
+                
             # GEOS data from FIMR (2017+) might be deterministic [L, H, W]
             # while earlier GEOS S2S3 had ensembles [M, L, H, W]
-            if geos_tensor.ndim == 3: # missing M
-                 geos_tensor = geos_tensor.unsqueeze(0) # [1, L, H, W]
+            if geos_pr_tensor.ndim == 3: # missing M
+                 geos_pr_tensor = geos_pr_tensor.unsqueeze(0) # [1, L, H, W]
+                 geos_tas_tensor = geos_tas_tensor.unsqueeze(0)
                  
-            # Enforce physical precipitation minimums (0 mm/day) on raw GEOS fields
-            geos_tensor = torch.clamp(geos_tensor, min=0.0)
+            # Enforce physical precip minimum (0 mm/day) 
+            geos_pr_tensor = torch.clamp(geos_pr_tensor, min=0.0)
             
             # Save raw ensemble for baseline metrics (M, L, H, W)
-            geos_ens_raw = geos_tensor.clone()  
+            geos_ens_pr_raw = geos_pr_tensor.clone()  
+            geos_ens_tas_raw = geos_tas_tensor.clone()
                  
             # Take the ensemble mean across the members for model conditioning
-            geos_mean_tensor = geos_tensor.mean(dim=0, keepdim=True) # [1, L, H, W]
-                 
-            # Add Channel Dim for conditioning: (1, L, H, W) -> (1, 1, L, H, W)
-            geos_cond_tensor = geos_mean_tensor.unsqueeze(1) # [1, 1, L, H, W]
+            geos_pr_mean = geos_pr_tensor.mean(dim=0) # [L, H, W]
+            geos_tas_mean = geos_tas_tensor.mean(dim=0) # [L, H, W]
             
-            # Standard pure copy of the mean for residual mapping (L, H, W)
-            pure_geos_mean_raw = geos_mean_tensor.squeeze(0) 
+            # Stack into multiple channels: [C=2, L, H, W]
+            geos_mean_tensor = torch.stack([geos_pr_mean, geos_tas_mean], dim=0) # [2, L, H, W]
+                 
+            # Add Channel Dim for conditioning framework: (1, 2, L, H, W)
+            geos_cond_tensor = geos_mean_tensor.unsqueeze(0) # [1, 2, L, H, W]
+            
+            # Standard pure copy of the mean for residual mapping (2, L, H, W)
+            pure_geos_mean_raw = geos_mean_tensor.clone() 
             
             if self.normalize and self.bounds is not None:
                 g_min = self.bounds["geos_raw"]["min"]
                 g_max = self.bounds["geos_raw"]["max"]
-                geos_cond_tensor = 2.0 * (torch.clamp(geos_cond_tensor, g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
+                # Normalize pr (channel 0)
+                geos_cond_tensor[:, 0] = 2.0 * (torch.clamp(geos_cond_tensor[:, 0], g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
+                
+                # Normalize tas (channel 1) - using estimated physical bounds 200K to 320K for now
+                tas_min = 200.0
+                tas_max = 320.0
+                geos_cond_tensor[:, 1] = 2.0 * (torch.clamp(geos_cond_tensor[:, 1], tas_min, tas_max) - tas_min) / (tas_max - tas_min + 1e-6) - 1.0
 
             # 2. Load Obs (Static/State)
             # SST (4, H, W)
@@ -523,7 +550,8 @@ class S2SHybridDataset(Dataset):
             cached_common = {
                 "geos_cond": geos_cond_tensor,
                 "obs_tensor": obs_tensor,
-                "geos_ens_raw": geos_ens_raw,
+                "geos_ens_pr_raw": geos_ens_pr_raw,
+                "geos_ens_tas_raw": geos_ens_tas_raw,
                 "pure_geos_mean_raw": pure_geos_mean_raw
             }
             
@@ -531,34 +559,62 @@ class S2SHybridDataset(Dataset):
                 return cached_common
 
         # --- LEAD-SPECIFIC PART ---
-        # 3. Load Target (GPCP)
+        # 3. Load Target (GPCP Precip + ERA5 T2M)
+        # load precip
         ds_gpcp, close_gpcp = get_ds(meta["gpcp_path"], "gpcp")
         if ds_gpcp:
             gpcp_var = next((v for v in ['precip', 'target', 'total_precipitation'] if v in ds_gpcp), list(ds_gpcp.data_vars)[0])
-            target_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
-            target_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
+            gpcp_val_lead = ds_gpcp[gpcp_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+            gpcp_val_raw_full = ds_gpcp[gpcp_var].isel(S=meta['s_idx']).values 
             if close_gpcp: ds_gpcp.close()
+        
+        # load t2m
+        t2m_val_lead = np.zeros_like(gpcp_val_lead)
+        t2m_val_raw_full = np.zeros_like(gpcp_val_raw_full)
+        if meta.get("t2m_target_path"):
+            ds_t2m, close_t2m = get_ds(meta["t2m_target_path"], "t2m_target")
+            if ds_t2m:
+                t2m_var = next((v for v in ['t2m'] if v in ds_t2m), list(ds_t2m.data_vars)[0])
+                t2m_val_lead = ds_t2m[t2m_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+                t2m_val_raw_full = ds_t2m[t2m_var].isel(S=meta['s_idx']).values 
+                if close_t2m: ds_t2m.close()
             
-        target_tensor = torch.from_numpy(target_val_lead).float() # (H, W)
-        target_raw_full = torch.from_numpy(target_val_raw_full).float() # (L=4, H, W)
+        gpcp_tensor = torch.from_numpy(gpcp_val_lead).float() # (H, W)
+        t2m_tensor = torch.from_numpy(t2m_val_lead).float() # (H, W)
         
-        target_tensor = torch.nan_to_num(target_tensor, nan=0.0, posinf=100.0, neginf=0.0)
-        target_raw_full = torch.nan_to_num(target_raw_full, nan=0.0, posinf=100.0, neginf=0.0)
-        target_tensor = torch.clamp(target_tensor, min=0.0)
-        target_raw_full = torch.clamp(target_raw_full, min=0.0)
+        gpcp_raw_full = torch.from_numpy(gpcp_val_raw_full).float() # (L=4, H, W)
+        t2m_raw_full = torch.from_numpy(t2m_val_raw_full).float() # (L=4, H, W)
         
-        target_raw_lead = target_tensor.clone()
+        gpcp_tensor = torch.nan_to_num(gpcp_tensor, nan=0.0, posinf=100.0, neginf=0.0)
+        t2m_tensor = torch.nan_to_num(t2m_tensor, nan=280.0, posinf=320.0, neginf=200.0)
+        
+        gpcp_raw_full = torch.nan_to_num(gpcp_raw_full, nan=0.0, posinf=100.0, neginf=0.0)
+        t2m_raw_full = torch.nan_to_num(t2m_raw_full, nan=280.0, posinf=320.0, neginf=200.0)
+        
+        gpcp_tensor = torch.clamp(gpcp_tensor, min=0.0)
+        gpcp_raw_full = torch.clamp(gpcp_raw_full, min=0.0)
+        
+        gpcp_raw_lead = gpcp_tensor.clone()
+        t2m_raw_lead = t2m_tensor.clone()
         
         if self.normalize and self.bounds is not None:
-            # Power Transform: Y = sqrt(GPCP)
+            # Precip Power Transform: Y = sqrt(GPCP)
             # Map [0, sqrt(50)] -> [-1, 1]
             s_min, s_max = 0.0, 7.071
-            target_sqrt = torch.sqrt(target_tensor)
-            target_tensor = 2.0 * (torch.clamp(target_sqrt, s_min, s_max) - s_min) / (s_max - s_min + 1e-6) - 1.0
+            gpcp_sqrt = torch.sqrt(gpcp_tensor)
+            gpcp_tensor = 2.0 * (torch.clamp(gpcp_sqrt, s_min, s_max) - s_min) / (s_max - s_min + 1e-6) - 1.0
+            
+            # Temp Transform: min-max [200, 320]
+            t_min, t_max = 200.0, 320.0
+            t2m_tensor = 2.0 * (torch.clamp(t2m_tensor, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
         
-        target_tensor = target_tensor.unsqueeze(0)
-        target_raw_lead = target_raw_lead.unsqueeze(0)
+        # Stack targets: [C=2, H, W]
+        target_tensor = torch.stack([gpcp_tensor, t2m_tensor], dim=0)
+        target_raw_lead = torch.stack([gpcp_raw_lead, t2m_raw_lead], dim=0)
+        target_raw_full = torch.stack([gpcp_raw_full, t2m_raw_full], dim=0)
 
+        # Retaining 'geos_ens_raw' dictionary key for backwards compatibility, providing just PR right now.
+        # But we also add the TAS one if needed by new models.
         return {
             "x_geos": cached_common["geos_cond"], 
             "x_obs": cached_common["obs_tensor"],
@@ -567,6 +623,7 @@ class S2SHybridDataset(Dataset):
             "target_raw_full": target_raw_full,
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
-            "geos_ens_raw": cached_common["geos_ens_raw"],
+            "geos_ens_raw": cached_common["geos_ens_pr_raw"],
+            "geos_ens_tas_raw": cached_common["geos_ens_tas_raw"],
             "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)
         }
