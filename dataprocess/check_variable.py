@@ -25,20 +25,20 @@ import argparse
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration – mirrors dataset_flow.py file naming conventions
 # ─────────────────────────────────────────────────────────────────────────────
-YEAR_RANGE = range(1999, 2026)  # 1999 to 2025 inclusive
+YEAR_RANGE = range(1999, 2022)  # 1999 to 2021 inclusive
 
 # (display_name, file_template, is_core, required_vars)
 VARIABLES = [
-    ("GEOS Forecast",           "geos_subc_{year}.zarr",        True,  ["t2m", "z850"]),
-    ("GPCP Precipitation",      "gpcp_weekly_{year}.zarr",      True,  []),
-    ("Sea Surface Temp (SST)",  "sst_weekly_{year}.zarr",       False, []),
-    ("Sea Surface Sal (SSS)",   "sss_weekly_{year}.zarr",       False, []),
-    ("Soil Moisture (SoilW)",   "soilw_weekly_{year}.zarr",     False, []),
-    ("IVT (ERA5)",              "ivt_weekly_{year}.zarr",       False, []),
-    ("MJO Wave Envelope",       "mjowave_weekly_{year}.zarr",   False, []),
-    ("Z500 & U250 (ERA5)",      "z500_u250_weekly_{year}.zarr", False, []),
-    ("T2M (ERA5 Targets)",      "t2m_weekly_{year}.zarr",       False, []),
-    ("SLP (ERA5 Targets)",      "slp_weekly_{year}.zarr",       False, []),
+    ("GEOS Forecast",           "geos_subc_{year}.zarr",        True,  ["pr", "t2m", "z850"]),
+    ("GPCP Precipitation",      "gpcp_weekly_{year}.zarr",      True,  ["precip"]),
+    ("Sea Surface Temp (SST)",  "sst_weekly_{year}.zarr",       False, ["sst"]),
+    ("Sea Surface Sal (SSS)",   "sss_weekly_{year}.zarr",       False, ["sss"]),
+    ("Soil Moisture (SoilW)",   "soilw_weekly_{year}.zarr",     False, ["sm"]),
+    ("IVT (ERA5)",              "ivt_weekly_{year}.zarr",       False, ["ivt"]),
+    ("MJO Wave Envelope",       "mjowave_weekly_{year}.zarr",   False, ["mjo"]),
+    ("Z500 & U250 (ERA5)",      "z500_u250_weekly_{year}.zarr", False, ["z500", "u250"]),
+    ("T2M (ERA5 Targets)",      "t2m_weekly_{year}.zarr",       False, ["t2m"]),
+    ("SLP (ERA5 Targets)",      "slp_weekly_{year}.zarr",       False, ["slp"]),
 ]
 
 # Column widths for the table
