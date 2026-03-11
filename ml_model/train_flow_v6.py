@@ -244,17 +244,18 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             noise_base = noise_utils.generate_dynamic_multimodal_noise(
                 batch, num_base_members, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, val_year
             )
+            # noise_base is [vB*num_base_members, 2, H, W] from updated flow_matcher.eof_sample
             noise_anti = -noise_base
             
-            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
-            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
-            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 2, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 2, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 2, H, W)
         else:
-            noise_base = torch.randn((vB * num_base_members, 1, H, W), device=device)
+            noise_base = torch.randn((vB * num_base_members, 2, H, W), device=device)
             noise_anti = -noise_base
-            noise_base_reshaped = noise_base.view(vB, num_base_members, 1, H, W)
-            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 1, H, W)
-            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 1, H, W)
+            noise_base_reshaped = noise_base.view(vB, num_base_members, 2, H, W)
+            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 2, H, W)
+            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 2, H, W)
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         

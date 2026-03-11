@@ -625,8 +625,9 @@ class S2SHybridDataset(Dataset):
         target_raw_lead = torch.stack([gpcp_raw_lead, t2m_raw_lead], dim=0)
         target_raw_full = torch.stack([gpcp_raw_full, t2m_raw_full], dim=0)
 
-        # Retaining 'geos_ens_raw' dictionary key for backwards compatibility, providing just PR right now.
-        # But we also add the TAS one if needed by new models.
+        # Stack GEOS ensemble raw PR and TAS into [M, C=2, L, H, W]
+        geos_ens_stacked = torch.stack([cached_common["geos_ens_pr_raw"], cached_common["geos_ens_tas_raw"]], dim=1)
+        
         return {
             "x_geos": cached_common["geos_cond"], 
             "x_obs": cached_common["obs_tensor"],
@@ -635,7 +636,6 @@ class S2SHybridDataset(Dataset):
             "target_raw_full": target_raw_full,
             "month": meta['date'].month,
             "lead_idx": meta['lead_idx'],
-            "geos_ens_raw": cached_common["geos_ens_pr_raw"],
-            "geos_ens_tas_raw": cached_common["geos_ens_tas_raw"],
+            "geos_ens_raw": geos_ens_stacked,  # [M, 2, L, H, W]
             "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)
         }
