@@ -441,16 +441,16 @@ def train(args, accelerator):
             if accelerator.is_main_process:
                 print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
     
-    # ---------------------------------------------------------
-    # 1. Dataset Initialization & Global Stats Calculation
-    # ---------------------------------------------------------
+    # Get stats file from config (no fallback - must be specified)
+    stats_filename = config.get("stats_file", "v1_multi_global_stats.pt")
+    
     val_dataset = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=config["val_start_year"],
         end_year=config["val_end_year"],
         normalize=True,
         preload=config.get("preload", False),
-        stats_file="v5_global_stats.pt",
+        stats_file=stats_filename,
         subsample_monthly=True
     )
 
@@ -472,7 +472,7 @@ def train(args, accelerator):
             end_year=config["train_end_year"],
             normalize=True,
             preload=config.get("preload", False),
-            stats_file="v5_global_stats.pt"
+            stats_file=stats_filename
         )
         loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
@@ -480,9 +480,9 @@ def train(args, accelerator):
         )
 
     # Calculate Global Min-Max for Target GPCP Precipitation
-    stats_file = "ml_model/v5_global_stats.pt"
+    stats_file = os.path.join("ml_model", stats_filename)
     if not os.path.exists(stats_file):
-        raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_v5.py first!")
+        raise FileNotFoundError(f"CRITICAL: {stats_file} missing. Please run calculate_global_stats_multi_v1.py first!")
     
     global_bounds = torch.load(stats_file, weights_only=True)
     # Force robust physical range for Direct Power Transformed GPCP (sqrt)
@@ -490,8 +490,8 @@ def train(args, accelerator):
     target_sqrt_min = 0.0
     target_sqrt_max = 7.071
     
-    geos_min = global_bounds["geos_raw"]["min"]
-    geos_max = global_bounds["geos_raw"]["max"]
+    geos_min = global_bounds["geos_pr_raw"]["min"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["min"]
+    geos_max = global_bounds["geos_pr_raw"]["max"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["max"]
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -858,13 +858,14 @@ def train(args, accelerator):
         model.train()
         train_loss = 0.0
         for i, batch in enumerate(pbar):    
-            # Conditionals: [B, 35, H, W]
-            x_geos = batch['x_geos'].to(device) # [B, 2, 1, 4, H, W]  *(C=2 for pr and tas)*
-            x_obs  = batch['x_obs'].to(device)  # [B, 24, H, W]
+            # Conditionals
+            x_geos = batch['x_geos'].to(device)
+            x_obs  = batch['x_obs'].to(device)
             
-            B, C_geos, M, C_extra, L, H, W = x_geos.unsqueeze(2).shape if len(x_geos.shape) == 5 else x_geos.shape # Handle M dimension
+            B = x_geos.shape[0]
+            H, W = x_obs.shape[-2], x_obs.shape[-1]
             # Flatten GEOS variables and leads into channels
-            x_geos_flat = x_geos.contiguous().view(B, -1, H, W) # [B, 8, H, W] (2 vars * 4 leads)
+            x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
             
             months = batch['month'].to(device)
             sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
@@ -933,18 +934,18 @@ def train(args, accelerator):
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
-        # Phase 1 (epoch < 20):  No validation (model still warming up)
-        # Phase 2 (20-49):       Every 3 epochs (20, 23, 26, ...)
-        # Phase 3 (50-99):       Every 2 epochs (50, 52, 54, ...)
-        # Phase 4 (100+):        Every epoch (100, 101, 102, ...)
-        # Full 50-step val only fires if fast val finds a new absolute best.
+        # Phase 1 (epoch < 5):   No validation (model still warming up)
+        # Phase 2 (5-19):        Every 5 epochs
+        # Phase 3 (20-99):       Every 3 epochs
+        # Phase 4 (100+):        Every epoch
+        # MSE-only for first 100 epochs. Plotting starts at epoch 20 on new best.
         def should_validate(ep):
-            if ep < 20:
+            if ep < 5:
                 return False
-            elif ep < 50:
-                return (ep % 3 == 0)
+            elif ep < 20:
+                return (ep % 5 == 0)
             elif ep < 100:
-                return (ep % 2 == 0)
+                return (ep % 3 == 0)
             else:
                 return True
 
@@ -967,8 +968,9 @@ def train(args, accelerator):
                 x_geos = batch['x_geos'].to(device)
                 x_obs  = batch['x_obs'].to(device)
                 
-                B, M, C_extra, L, H, W = x_geos.shape
-                x_geos_flat = x_geos.view(B, -1, H, W)
+                B = x_geos.shape[0]
+                H, W = x_obs.shape[-2], x_obs.shape[-1]
+                x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
                 
                 months = batch['month'].to(device)
                 sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
@@ -979,7 +981,7 @@ def train(args, accelerator):
                 lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
                 
                 x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
-                target_norm = batch['y_target'].to(device)
+                target_norm = batch['y_target'].to(device)  # [B, 2, H, W]
                 
                 t = flow_matcher.sample_time_batch(B)
                 noise = torch.randn_like(target_norm)
@@ -988,7 +990,7 @@ def train(args, accelerator):
                 v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
                 
                 w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
-                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
                 
                 loss_val = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
                 val_loss_total += loss_val.item()
@@ -1041,6 +1043,22 @@ def train(args, accelerator):
                 # Keep a symlink or redundant copy for 'best_flow_ckpt.pt'
                 if is_new_best:
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
+                    
+                    # Generate validation plot only after epoch 20 on new absolute best
+                    if epoch >= 20:
+                        print(f"📊 Generating validation plot for new best at Epoch {epoch}...")
+                        val_outputs = run_val_inference(
+                            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+                            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
+                            is_test=False, is_fast_recon=True,
+                            use_flow_variance=False,
+                            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
+                        )
+                        v_met, v_pred, v_target, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, v_ai_res, v_geos_single, v_model_single, v_model_var = val_outputs
+                        save_val_plot(epoch, v_pred, v_target, v_met, v_rmse, v_geos_mean, v_geos_crps, v_geos_rmse, output_dir, 
+                                      ai_residual=v_ai_res, suffix="best", geos_single=v_geos_single, model_single=v_model_single, model_var=v_model_var)
+                        print(f"📸 Validation plot saved for Epoch {epoch}.")
 
             # Save Latest Checkpoint & Logs
             ckpt = {
