@@ -188,7 +188,7 @@ def main():
 
     strategies = [
         ("Pure Noise", noise_pure,    False),
-        ("EOF LHS",    noise_eof_lhs, True)
+        ("EOF LHS",    noise_eof_lhs, False)
     ]
     
     def fmt_row(label, pr_vals, t2m_vals):
