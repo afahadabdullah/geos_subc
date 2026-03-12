@@ -145,6 +145,11 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
     Generates dynamically weighted multi-modal blended noise for a batch.
     batch: data dict from dataloader
     E: number of ensemble members
+    Note: While some EOF bases (MJO, NAO, ENSO) may be derived from precipitation or OLR, 
+    they represent planetary-scale atmospheric teleconnections that modulate both 
+    Precipitation and Temperature. We use these as structured priors for all output 
+    channels by sampling independent coefficients (alpha) for each channel within 
+    the same physical EOF subspace.
     """
     vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
     C = batch['y_target'].shape[1] if 'y_target' in batch else batch['input_forecast'].shape[1]
@@ -183,8 +188,8 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
             
             if not use_lhs:
                 for j in range(E):
-                    field = sample_from_eof_basis(nao_bases, nao_phase, l, device, H, W)
                     for c in range(C):
+                        field = sample_from_eof_basis(nao_bases, nao_phase, l, device, H, W)
                         nao_noise[b_idx*E + j, c] = field
             else:
                 for c in range(C):
@@ -203,8 +208,8 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
             
             if not use_lhs:
                 for j in range(E):
-                    field = sample_from_eof_basis(enso_bases, enso_state, l, device, H, W)
                     for c in range(C):
+                        field = sample_from_eof_basis(enso_bases, enso_state, l, device, H, W)
                         enso_noise[b_idx*E + j, c] = field
             else:
                 for c in range(C):
