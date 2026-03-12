@@ -110,7 +110,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
 def main():
     parser = argparse.ArgumentParser(description="Multi-Variate Noise Comparison")
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--year", type=int, default=2022)
+    parser.add_argument("--year", type=int, default=2021)
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
