@@ -22,6 +22,7 @@ import json
 import warnings
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+import datetime
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
@@ -30,6 +31,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from train_flow_multiv1 import FlowMatchingModel, CustomFlowMatcher, compute_crps, compute_rmse
 from dataset_flow import S2SHybridDataset
 import noise_utils
+
+# Styling
+BLUE = '\033[94m'
+ORANGE = '\033[38;5;214m'
+BOLD = '\033[1m'
+RESET = '\033[0m'
 
 @torch.no_grad()
 def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_flow_variance=False):
@@ -103,8 +110,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     return {
         'pr_crps': crps_pr, 'pr_rmse': rmse_pr,
-        't2m_crps': crps_t2m, 't2m_rmse': rmse_t2m,
-        'pr_ens': ensemble_preds_pr, 't2m_ens': ensemble_preds_t2m
+        't2m_crps': crps_t2m, 't2m_rmse': rmse_t2m
     }
 
 def main():
@@ -136,7 +142,6 @@ def main():
         with open(registry_path, 'r') as f:
             registry = json.load(f)
         best_entry = registry[0]
-        # Use basename to be robust if the output_dir path changed
         ckpt_filename = os.path.basename(best_entry['path'])
         ckpt_path = os.path.join(args.output_dir, ckpt_filename)
         print(f"📂 Auto-selected best model from registry: {ckpt_path} (CRPS: {best_entry['val_loss']:.4f})")
@@ -186,9 +191,34 @@ def main():
         ("EOF LHS",    noise_eof_lhs, True)
     ]
     
-    print("\n" + "─"*100)
-    print(f"{'Month':<10} | {'PR GEOS':>12} {'PR Pure':>12} {'PR EOF':>12} | {'T2M GEOS':>12} {'T2M Pure':>12} {'T2M EOF':>12}")
-    print("─"*100)
+    def fmt_row(label, pr_vals, t2m_vals):
+        """
+        pr_vals, t2m_vals: list of tuples (CRPS, RMSE)
+        """
+        def format_col_group(vals):
+            crps_list = [v[0] for v in vals]
+            rmse_list = [v[1] for v in vals]
+            best_c = np.argmin(crps_list)
+            best_r = np.argmin(rmse_list)
+            
+            parts = []
+            for i, (c, r) in enumerate(vals):
+                sc = f"{c:>7.4f}"
+                sr = f"({r:>7.4f})"
+                if i == best_c: sc = f"{BLUE}{BOLD}{sc}{RESET}"
+                if i == best_r: sr = f"{ORANGE}{BOLD}{sr}{RESET}"
+                parts.append(f"{sc} {sr}")
+            return " | ".join(parts)
+
+        s_pr = format_col_group(pr_vals)
+        s_t2m = format_col_group(t2m_vals)
+        print(f"{label:<10} | {s_pr} | {s_t2m}")
+
+    print("\n" + "─"*180)
+    header_pr = f"{'PR GEOS':>17} | {'PR Pure':>17} | {'PR EOF':>17}"
+    header_t2m = f"{'T2M GEOS':>17} | {'T2M Pure':>17} | {'T2M EOF':>17}"
+    print(f"{'Month':<10} | {header_pr} | {header_t2m}")
+    print("─"*180)
     
     all_results = []
     
@@ -210,8 +240,12 @@ def main():
         geos_ens_sample = batch['geos_ens_raw'][0::4].to(device)
         
         geos_pr_crps = compute_crps(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_raw[:, 0], area_weights)
-        geos_t2m_crps = compute_crps(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_raw[:, 1], area_weights)
+        geos_pr_rmse = compute_rmse(geos_ens_sample[:, :, 0].transpose(0, 1).mean(dim=0), true_target_raw[:, 0], area_weights)
         
+        geos_t2m_crps = compute_crps(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_raw[:, 1], area_weights)
+        geos_t2m_rmse = compute_rmse(geos_ens_sample[:, :, 1].transpose(0, 1).mean(dim=0), true_target_raw[:, 1], area_weights)
+        
+        # Diagnostic
         if b_idx == 0:
             print(f"\n🔍 [Diagnostic - Month {month}]")
             print(f"   Target PR   : Min={true_target_raw[:, 0].min():.2f}, Max={true_target_raw[:, 0].max():.2f}, Mean={true_target_raw[:, 0].mean():.2f}")
@@ -221,37 +255,51 @@ def main():
             if geos_ens_sample[:, :, 1].max() < 1e-1:
                 print("   ⚠️ WARNING: GEOS T2M appears to be all zeros! Check dataset_flow.py variable detection.")
             print("   " + "─"*50 + "\n")
-        
-        row_vals = {'Month': month, 'PR_GEOS': geos_pr_crps, 'T2M_GEOS': geos_t2m_crps}
+
+        row_pr = [(geos_pr_crps, geos_pr_rmse)]
+        row_t2m = [(geos_t2m_crps, geos_t2m_rmse)]
         
         for name, fn, use_var in strategies:
             res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_flow_variance=use_var)
-            row_vals[f'PR_{name.split()[0]}'] = res['pr_crps']
-            row_vals[f'T2M_{name.split()[0]}'] = res['t2m_crps']
+            row_pr.append((res['pr_crps'], res['pr_rmse']))
+            row_t2m.append((res['t2m_crps'], res['t2m_rmse']))
             
-        all_results.append(row_vals)
-        
-        print(f"{month:<10} | {row_vals['PR_GEOS']:12.4f} {row_vals['PR_Pure']:12.4f} {row_vals['PR_EOF']:12.4f} | {row_vals['T2M_GEOS']:12.4f} {row_vals['T2M_Pure']:12.4f} {row_vals['T2M_EOF']:12.4f}")
+        all_results.append({'month': month, 'pr': row_pr, 't2m': row_t2m})
+        fmt_row(month, row_pr, row_t2m)
 
-    # Averages
-    print("─"*100)
-    avg_pr_geos = np.mean([r['PR_GEOS'] for r in all_results])
-    avg_pr_pure = np.mean([r['PR_Pure'] for r in all_results])
-    avg_pr_eof = np.mean([r['PR_EOF'] for r in all_results])
-    
-    avg_t2m_geos = np.mean([r['T2M_GEOS'] for r in all_results])
-    avg_t2m_pure = np.mean([r['T2M_Pure'] for r in all_results])
-    avg_t2m_eof = np.mean([r['T2M_EOF'] for r in all_results])
-    
-    print(f"{'AVERAGE':<10} | {avg_pr_geos:12.4f} {avg_pr_pure:12.4f} {avg_pr_eof:12.4f} | {avg_t2m_geos:12.4f} {avg_t2m_pure:12.4f} {avg_t2m_eof:12.4f}")
-    print("─"*100 + "\n")
+        # Running Average Row
+        if (b_idx + 1) % 1 == 0:
+            n = len(all_results)
+            avg_pr = []
+            avg_t2m = []
+            for i in range(3): # 3 strategies: GEOS, Pure, EOF
+                c_pr = np.mean([r['pr'][i][0] for r in all_results])
+                r_pr = np.mean([r['pr'][i][1] for r in all_results])
+                avg_pr.append((c_pr, r_pr))
+                
+                c_t2m = np.mean([r['t2m'][i][0] for r in all_results])
+                r_t2m = np.mean([r['t2m'][i][1] for r in all_results])
+                avg_t2m.append((c_t2m, r_t2m))
+            fmt_row(f"AVG({n})", avg_pr, avg_t2m)
+            print("─"*180)
 
-    # Save to CSV
+    # Final Save to CSV
     import pandas as pd
-    df = pd.DataFrame(all_results)
-    csv_path = os.path.join(args.output_dir, f"noise_comparison_v4_multi_{args.year}.csv")
+    csv_rows = []
+    for r in all_results:
+        d = {'month': r['month']}
+        strat_names = ['GEOS', 'Pure', 'EOF']
+        for i, name in enumerate(strat_names):
+            d[f'PR_{name}_CRPS'] = r['pr'][i][0]
+            d[f'PR_{name}_RMSE'] = r['pr'][i][1]
+            d[f'T2M_{name}_CRPS'] = r['t2m'][i][0]
+            d[f'T2M_{name}_RMSE'] = r['t2m'][i][1]
+        csv_rows.append(d)
+    
+    df = pd.DataFrame(csv_rows)
+    csv_path = os.path.join(args.output_dir, f"noise_comparison_v4_multi_results_{args.year}.csv")
     df.to_csv(csv_path, index=False)
-    print(f"💾 Results saved to: {csv_path}")
+    print(f"\n💾 Final results saved to: {csv_path}")
 
 if __name__ == "__main__":
     main()
