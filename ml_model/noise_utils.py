@@ -160,18 +160,14 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
         lead = batch['lead_idx'].clone().detach() if isinstance(batch['lead_idx'], torch.Tensor) else torch.tensor(batch['lead_idx']).to(device)
         
         if not use_lhs:
-            mjo_expanded = mjo.repeat_interleave(E)
-            lead_expanded = lead.repeat_interleave(E)
-            # eof_sample returns [vB*E, 1, H, W]
-            single_noise = flow_matcher.eof_sample(mjo_bases, mjo_expanded, vB * E, H, W, lead_ids=lead_expanded)
             for c in range(C):
-                mjo_noise[:, c] = single_noise[:, 0]
+                mjo_noise[:, c, :, :] = flow_matcher.eof_sample(mjo_bases, mjo.repeat_interleave(E), vB * E, H, W, lead_ids=lead.repeat_interleave(E))[:, 0]
         else:
             for b_idx in range(vB):
                 p = int(mjo[b_idx])
                 l = int(lead[b_idx])
-                fields = sample_batch_lhs(mjo_bases, p, l, device, H, W, E)
                 for c in range(C):
+                    fields = sample_batch_lhs(mjo_bases, p, l, device, H, W, E)
                     mjo_noise[b_idx*E:(b_idx+1)*E, c] = fields
     
     # ── NAO EOFs ──
@@ -191,8 +187,8 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
                     for c in range(C):
                         nao_noise[b_idx*E + j, c] = field
             else:
-                fields = sample_batch_lhs(nao_bases, nao_phase, l, device, H, W, E)
                 for c in range(C):
+                    fields = sample_batch_lhs(nao_bases, nao_phase, l, device, H, W, E)
                     nao_noise[b_idx*E:(b_idx+1)*E, c] = fields
             
     # ── ENSO EOFs ──
@@ -211,8 +207,8 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
                     for c in range(C):
                         enso_noise[b_idx*E + j, c] = field
             else:
-                fields = sample_batch_lhs(enso_bases, enso_state, l, device, H, W, E)
                 for c in range(C):
+                    fields = sample_batch_lhs(enso_bases, enso_state, l, device, H, W, E)
                     enso_noise[b_idx*E:(b_idx+1)*E, c] = fields
             
     # ── Compute Dynamic Amplitudes ──

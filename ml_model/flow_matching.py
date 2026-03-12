@@ -147,25 +147,19 @@ class CustomFlowMatcher:
             if key in eof_bases and 'eofs' in eof_bases[key]:
                 eofs = eof_bases[key]['eofs'].to(self.device)
                 eigenvals = eof_bases[key]['eigenvalues'].to(self.device)
-                K = eofs.shape[0]
-                
-                alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
-                noise_field = torch.einsum('k,khw->hw', alpha, eofs)
-                
-                # Normalize to unit variance
-                std = noise_field.std()
-                if std > 1e-6:
-                    noise_field = noise_field / std
-                
-                # Assign structured noise to both PR and T2M channels for now, 
-                # or random noise for T2M if we only have precip EOFs. 
-                # Currently using the same structured noise for both channels 
-                # since MJO affects large scale coupled patterns.
-                noise[i, 0] = noise_field
-                noise[i, 1] = noise_field.clone()
+                for c in range(2):
+                    alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
+                    noise_field = torch.einsum('k,khw->hw', alpha, eofs)
+                    
+                    # Normalize to unit variance
+                    std = noise_field.std()
+                    if std > 1e-6:
+                        noise_field = noise_field / std
+                    
+                    noise[i, c] = noise_field
             else:
-                noise[i, 0] = torch.randn(H, W, device=self.device)
-                noise[i, 1] = torch.randn(H, W, device=self.device)
+                for c in range(2):
+                    noise[i, c] = torch.randn(H, W, device=self.device)
         
         return noise
 
