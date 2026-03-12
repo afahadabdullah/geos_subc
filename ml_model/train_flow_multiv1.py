@@ -182,9 +182,12 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
             if l == 0: axes[row, 6].set_title("T2M Ens Variance")
 
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
-    plt.tight_layout()
+    combined_crps = (model_crps + model_crps_t2m) / 2.0 if has_t2m else model_crps
+    title = f"Epoch {epoch} | Combined CRPS: {combined_crps:.4f}  |  PR CRPS: {model_crps:.4f}  |  T2M CRPS: {model_crps_t2m:.4f}" if has_t2m else f"Epoch {epoch} | PR CRPS: {model_crps:.4f}"
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=1.01)
+    plt.tight_layout(rect=[0, 0, 1, 0.99])
     filename = f"epoch_{epoch}_{suffix}_score_{model_crps:.4f}.png" if suffix else f"epoch_{epoch}_score_{model_crps:.4f}.png"
-    plt.savefig(os.path.join(output_dir, "plots", filename))
+    plt.savefig(os.path.join(output_dir, "plots", filename), bbox_inches='tight')
     plt.close()
 
 @torch.no_grad()
