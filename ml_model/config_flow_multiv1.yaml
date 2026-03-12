@@ -2,7 +2,7 @@
 # Option A architecture: 37 input channels, 2 output channels per lead head
 batch_size: 4
 learning_rate: 5e-5
-epochs: 100
+epochs: 250
 output_dir: ml_output_flowmulti
 mixed_precision: fp16
 num_workers: 1
