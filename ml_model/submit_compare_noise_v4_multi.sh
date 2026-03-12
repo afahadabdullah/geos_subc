@@ -27,8 +27,8 @@ cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 # Automaticaly detects best model in output_dir
 python3 ml_model/compare_noise_v4_multi.py \
     --output_dir ml_output_flowmulti \
-    --year 2021 \
-    --num_ensemble 10 \
+    --year 2022 \
+    --num_ensemble 30 \
     --num_steps 10
 
 echo "Multi-variate noise comparison finished!"
