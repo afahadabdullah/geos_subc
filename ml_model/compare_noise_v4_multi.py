@@ -32,7 +32,7 @@ from dataset_flow import S2SHybridDataset
 import noise_utils
 
 @torch.no_grad()
-def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn):
+def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_flow_variance=False):
     model.eval()
     
     vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
@@ -66,7 +66,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Solve ODE
     p_x1_expanded = flow_matcher.euler_solve(
         model, noise_expanded, fx_cond_expanded,
-        num_steps=num_steps, lead_idx=lead_idx_expanded
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_flow_variance
     )
     
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
@@ -180,8 +180,8 @@ def main():
         return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
 
     strategies = [
-        ("Pure Noise", noise_pure),
-        ("EOF LHS",    noise_eof_lhs)
+        ("Pure Noise", noise_pure,    False),
+        ("EOF LHS",    noise_eof_lhs, True)
     ]
     
     print("\n" + "─"*100)
@@ -212,8 +212,8 @@ def main():
         
         row_vals = {'Month': month, 'PR_GEOS': geos_pr_crps, 'T2M_GEOS': geos_t2m_crps}
         
-        for name, fn in strategies:
-            res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn)
+        for name, fn, use_var in strategies:
+            res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_flow_variance=use_var)
             row_vals[f'PR_{name.split()[0]}'] = res['pr_crps']
             row_vals[f'T2M_{name.split()[0]}'] = res['t2m_crps']
             
