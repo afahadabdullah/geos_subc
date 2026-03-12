@@ -193,7 +193,9 @@ def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, 
 @torch.no_grad()
 def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
-                      cached_geos_crps=None, cached_geos_rmse=None, use_flow_variance=False, eof_bases=None,
+                      cached_geos_crps=None, cached_geos_rmse=None, 
+                      cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
+                      use_flow_variance=False, eof_bases=None,
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
@@ -405,8 +407,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     else:
         avg_geos_crps = cached_geos_crps
         avg_geos_rmse = cached_geos_rmse
-        avg_geos_crps_t2m = 0.0
-        avg_geos_rmse_t2m = 0.0
+        avg_geos_crps_t2m = cached_geos_crps_t2m if cached_geos_crps_t2m is not None else 0.0
+        avg_geos_rmse_t2m = cached_geos_rmse_t2m if cached_geos_rmse_t2m is not None else 0.0
     
     recon_type = f"Monthly (N={len(target_batches)}x{num_ensemble})"
     combined_crps = (avg_crps + avg_crps_t2m) / 2.0
@@ -784,6 +786,8 @@ def train(args, accelerator):
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
             use_flow_variance=True,
+            cached_geos_crps=None, cached_geos_rmse=None,
+            cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
         )
@@ -1006,6 +1010,8 @@ def train(args, accelerator):
 
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
+    global_cached_geos_crps_t2m = None
+    global_cached_geos_rmse_t2m = None
     
     for epoch in range(start_epoch, epochs + 1):
         if epochs_done_this_run >= max_epochs_this_run:
@@ -1146,6 +1152,7 @@ def train(args, accelerator):
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=False,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
+                cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                 enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
             )
@@ -1153,6 +1160,8 @@ def train(args, accelerator):
             if global_cached_geos_crps is None:
                 global_cached_geos_crps = val_result['avg_geos_crps_pr']
                 global_cached_geos_rmse = val_result['avg_geos_rmse_pr']
+                global_cached_geos_crps_t2m = val_result['avg_geos_crps_t2m']
+                global_cached_geos_rmse_t2m = val_result['avg_geos_rmse_t2m']
             if accelerator.is_main_process:
                 print(f"✅ CRPS Done. Combined: {current_val_metric:.4f} | PR: {val_result['avg_crps_pr']:.4f} | T2M: {val_result['avg_crps_t2m']:.4f}")
                 is_new_best = (current_val_metric < best_val_loss)
