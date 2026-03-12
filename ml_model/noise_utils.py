@@ -147,31 +147,35 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
     E: number of ensemble members
     """
     vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
+    C = batch['y_target'].shape[1] if 'y_target' in batch else batch['input_forecast'].shape[1]
     H, W = batch['x_obs'].shape[-2:]
     
-    pure_noise = torch.randn((vB * E, 2, H, W), device=device)
+    pure_noise = torch.randn((vB * E, C, H, W), device=device)
     
     # ── MJO EOFs ──
-    mjo_noise = torch.randn((vB * E, 2, H, W), device=device)
+    mjo_noise = torch.randn((vB * E, C, H, W), device=device)
     if mjo_bases is not None:
         mjo = batch.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-        if not isinstance(mjo, torch.Tensor): mjo = torch.tensor(mjo)
-        lead = batch['lead_idx'].clone().detach() if isinstance(batch['lead_idx'], torch.Tensor) else torch.tensor(batch['lead_idx'])
+        if not isinstance(mjo, torch.Tensor): mjo = torch.tensor(mjo).to(device)
+        lead = batch['lead_idx'].clone().detach() if isinstance(batch['lead_idx'], torch.Tensor) else torch.tensor(batch['lead_idx']).to(device)
         
         if not use_lhs:
             mjo_expanded = mjo.repeat_interleave(E)
             lead_expanded = lead.repeat_interleave(E)
-            mjo_noise = flow_matcher.eof_sample(mjo_bases, mjo_expanded, vB * E, H, W, lead_ids=lead_expanded)
+            # eof_sample returns [vB*E, 1, H, W]
+            single_noise = flow_matcher.eof_sample(mjo_bases, mjo_expanded, vB * E, H, W, lead_ids=lead_expanded)
+            for c in range(C):
+                mjo_noise[:, c] = single_noise[:, 0]
         else:
             for b_idx in range(vB):
                 p = int(mjo[b_idx])
                 l = int(lead[b_idx])
                 fields = sample_batch_lhs(mjo_bases, p, l, device, H, W, E)
-                mjo_noise[b_idx*E:(b_idx+1)*E, 0] = fields
-                mjo_noise[b_idx*E:(b_idx+1)*E, 1] = fields.clone()
+                for c in range(C):
+                    mjo_noise[b_idx*E:(b_idx+1)*E, c] = fields
     
     # ── NAO EOFs ──
-    nao_noise = torch.randn((vB * E, 2, H, W), device=device)
+    nao_noise = torch.randn((vB * E, C, H, W), device=device)
     if nao_bases is not None and nao_lookup is not None:
         months = batch['month']
         leads = batch['lead_idx']
@@ -184,15 +188,15 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
             if not use_lhs:
                 for j in range(E):
                     field = sample_from_eof_basis(nao_bases, nao_phase, l, device, H, W)
-                    nao_noise[b_idx*E + j, 0] = field
-                    nao_noise[b_idx*E + j, 1] = field.clone()
+                    for c in range(C):
+                        nao_noise[b_idx*E + j, c] = field
             else:
                 fields = sample_batch_lhs(nao_bases, nao_phase, l, device, H, W, E)
-                nao_noise[b_idx*E:(b_idx+1)*E, 0] = fields
-                nao_noise[b_idx*E:(b_idx+1)*E, 1] = fields.clone()
+                for c in range(C):
+                    nao_noise[b_idx*E:(b_idx+1)*E, c] = fields
             
     # ── ENSO EOFs ──
-    enso_noise = torch.randn((vB * E, 2, H, W), device=device)
+    enso_noise = torch.randn((vB * E, C, H, W), device=device)
     if enso_bases is not None and oni_lookup is not None:
         months = batch['month']
         leads = batch['lead_idx']
@@ -204,12 +208,12 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
             if not use_lhs:
                 for j in range(E):
                     field = sample_from_eof_basis(enso_bases, enso_state, l, device, H, W)
-                    enso_noise[b_idx*E + j, 0] = field
-                    enso_noise[b_idx*E + j, 1] = field.clone()
+                    for c in range(C):
+                        enso_noise[b_idx*E + j, c] = field
             else:
                 fields = sample_batch_lhs(enso_bases, enso_state, l, device, H, W, E)
-                enso_noise[b_idx*E:(b_idx+1)*E, 0] = fields
-                enso_noise[b_idx*E:(b_idx+1)*E, 1] = fields.clone()
+                for c in range(C):
+                    enso_noise[b_idx*E:(b_idx+1)*E, c] = fields
             
     # ── Compute Dynamic Amplitudes ──
     month_val = int(batch['month'][0])
