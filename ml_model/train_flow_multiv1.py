@@ -289,30 +289,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Generate antithetical dynamic multimodal noise (z and -z)
-        num_base_members = num_ensemble // 2
-        
-        # Try to dynamically fetch validation year from batch if available, fallback to 2021
-        val_year = 2021
-        if 'year' in batch:
-            val_year = int(batch['year'][0].item())
-            
-        if eof_bases is not None:
-            noise_base = noise_utils.generate_dynamic_multimodal_noise(
-                batch, num_base_members, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, val_year
-            )
-            # noise_base is [vB*num_base_members, 2, H, W] from updated flow_matcher.eof_sample
-            noise_anti = -noise_base
-            
-            noise_base_reshaped = noise_base.view(vB, num_base_members, 2, H, W)
-            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 2, H, W)
-            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 2, H, W)
-        else:
-            noise_base = torch.randn((vB * num_base_members, 2, H, W), device=device)
-            noise_anti = -noise_base
-            noise_base_reshaped = noise_base.view(vB, num_base_members, 2, H, W)
-            noise_anti_reshaped = noise_anti.view(vB, num_base_members, 2, H, W)
-            noise_expanded = torch.cat([noise_base_reshaped, noise_anti_reshaped], dim=1).reshape(vB * num_ensemble, 2, H, W)
+        # Gaussian noise matching the training distribution (pure i.i.d. noise)
+        noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
