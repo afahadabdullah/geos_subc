@@ -749,14 +749,17 @@ def train(args, accelerator):
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val Loss so far: {best_val_loss:.4f}")
-                    if start_epoch > 100:
-                        print(f"   ✅ Resuming in CRPS Phase (>100). best_val_loss is already CRPS-scale.")
+                    if start_epoch > 101:
+                        print(f"   ✅ Resuming deep in CRPS Phase (>101). best_val_loss is already CRPS-scale.")
+                    elif start_epoch == 101:
+                        print(f"   🔀 Resuming exactly at Phase Boundary (Epoch 101). Will reset best_val_loss.")
                     else:
-                        print(f"   📋 Resuming in MSE Phase (≤100). Will reset best_val_loss at epoch 101.")
+                        print(f"   📋 Resuming in MSE Phase (≤100). Will reset best_val_loss later.")
                     print()
             
-            # If resuming from Phase 2, skip the MSE→CRPS reset
-            if start_epoch > 100:
+            # If resuming AFTER the boundary (Phase 2), skip the MSE→CRPS reset
+            # But if we start exactly at 101, we MUST trigger the reset inside the loop!
+            if start_epoch > 101:
                 crps_phase_reset = True
                     
 
