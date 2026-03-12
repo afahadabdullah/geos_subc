@@ -136,7 +136,9 @@ def main():
         with open(registry_path, 'r') as f:
             registry = json.load(f)
         best_entry = registry[0]
-        ckpt_path = os.path.join(args.output_dir, best_entry['filename'])
+        # Use basename to be robust if the output_dir path changed
+        ckpt_filename = os.path.basename(best_entry['path'])
+        ckpt_path = os.path.join(args.output_dir, ckpt_filename)
         print(f"📂 Auto-selected best model from registry: {ckpt_path} (CRPS: {best_entry['val_loss']:.4f})")
     else:
         ckpt_path = os.path.join(args.output_dir, "best_flow_ckpt.pt")
