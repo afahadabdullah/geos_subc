@@ -856,7 +856,8 @@ def train(args, accelerator):
         gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
 
         # 6. GEOS TAS (conditioning channel, index 1 in geos channels)
-        geos_tas_norm_sample = np.nan_to_num(x_geos[sample_idx, 1, lead_idx].cpu().numpy(), nan=0.0)
+        # x_geos shape: [B, M=1, C=2, L, H, W] -> M=0 (only member), C=1 (TAS), L=lead_idx
+        geos_tas_norm_sample = np.nan_to_num(x_geos[sample_idx, 0, 1, lead_idx].cpu().numpy(), nan=0.0)
         if "geos_tas_raw" in global_bounds:
             tas_gmin, tas_gmax = global_bounds["geos_tas_raw"]["min"], global_bounds["geos_tas_raw"]["max"]
         else:
@@ -864,7 +865,8 @@ def train(args, accelerator):
         geos_tas_raw_sample = ((geos_tas_norm_sample + 1.0) / 2.0) * (tas_gmax - tas_gmin) + tas_gmin
 
         # 7. ERA5 T2M target (channel 1 of y_target)
-        t2m_norm_sample = np.nan_to_num(target_norm[sample_idx + 4, 1].cpu().numpy() if target_norm.shape[0] > sample_idx + 4 else target_norm[sample_idx, 1].cpu().numpy(), nan=0.0)
+        # target_norm shape: [B, C=2, H, W] -> C=1 is T2M for this lead
+        t2m_norm_sample = np.nan_to_num(target_norm[sample_idx, 1].cpu().numpy(), nan=0.0)
         if "target_t2m_raw" in global_bounds:
             t2m_tmin, t2m_tmax = global_bounds["target_t2m_raw"]["min"], global_bounds["target_t2m_raw"]["max"]
         else:
