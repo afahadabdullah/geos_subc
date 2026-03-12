@@ -677,7 +677,8 @@ def train(args, accelerator):
     
     start_epoch = 1
     best_val_loss = float('inf')
-    top_models = [] # List of {"path": str, "val_loss": float, "epoch": int}
+    crps_phase_reset = False  # Will be set True after MSE→CRPS transition (or if resuming from Phase 2)
+    top_models = []
     
     # Load latest checkpoint if it exists
     if args.test:
@@ -744,7 +745,16 @@ def train(args, accelerator):
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
-                    print(f"   Best Val Loss so far: {best_val_loss:.4f}\n")
+                    print(f"   Best Val Loss so far: {best_val_loss:.4f}")
+                    if start_epoch > 100:
+                        print(f"   ✅ Resuming in CRPS Phase (>100). best_val_loss is already CRPS-scale.")
+                    else:
+                        print(f"   📋 Resuming in MSE Phase (≤100). Will reset best_val_loss at epoch 101.")
+                    print()
+            
+            # If resuming from Phase 2, skip the MSE→CRPS reset
+            if start_epoch > 100:
+                crps_phase_reset = True
                     
 
         except Exception as e:
@@ -1084,6 +1094,17 @@ def train(args, accelerator):
         #   Every epoch: run_val_inference, periodic ckpt every 5 epochs
         
         use_crps_phase = (epoch > 100)
+        
+        # One-time reset: when transitioning from MSE (Phase 1) to CRPS (Phase 2),
+        # best_val_loss must be reset because MSE values (~0.06) are on a completely
+        # different scale than CRPS values (~5-20). Without this, no model would
+        # ever be saved as "new best" in Phase 2.
+        if use_crps_phase and not crps_phase_reset:
+            if accelerator.is_main_process:
+                print(f"\n🔄 PHASE TRANSITION: Epoch {epoch} → Switching to CRPS-based validation.")
+                print(f"   Resetting best_val_loss from {best_val_loss:.4f} (MSE) → inf (CRPS)")
+            best_val_loss = float('inf')
+            crps_phase_reset = True
         
         def should_validate(ep):
             if ep < 5:
