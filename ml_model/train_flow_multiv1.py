@@ -58,7 +58,8 @@ def compute_crps(ensemble_preds, target, area_weights):
     crps_map = mae_term - spread_term
     # Zero out NaNs in map for weighted mean
     crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
-    weights_clean = torch.where(mask, area_weights, torch.zeros_like(area_weights))
+    weights_expanded = area_weights.expand_as(crps_map_clean)
+    weights_clean = torch.where(mask, weights_expanded, torch.zeros_like(weights_expanded))
     
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()

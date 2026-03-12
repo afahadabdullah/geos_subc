@@ -335,7 +335,7 @@ class S2SHybridDataset(Dataset):
             
             # Robust Variable Detection: pr, precip, or PRECTOT
             geos_pr_var = next((v for v in ['pr', 'precip', 'PRECTOT', 'flux_precip'] if v in ds_geos), 'pr')
-            geos_tas_var = next((v for v in ['tas', 't2m', 'T2M', 'TAS'] if v in ds_geos), 'tas')
+            geos_tas_var = next((v for v in ['tas', 't2m', 'T2M', 'TAS', 'tempt2m', 'T2MS'] if v in ds_geos), 'tas')
             
             geos_pr_data = ds_geos[geos_pr_var].isel(S=meta['s_idx']).values 
             

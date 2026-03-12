@@ -212,6 +212,16 @@ def main():
         geos_pr_crps = compute_crps(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_raw[:, 0], area_weights)
         geos_t2m_crps = compute_crps(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_raw[:, 1], area_weights)
         
+        if b_idx == 0:
+            print(f"\n🔍 [Diagnostic - Month {month}]")
+            print(f"   Target PR   : Min={true_target_raw[:, 0].min():.2f}, Max={true_target_raw[:, 0].max():.2f}, Mean={true_target_raw[:, 0].mean():.2f}")
+            print(f"   Target T2M  : Min={true_target_raw[:, 1].min():.2f}, Max={true_target_raw[:, 1].max():.2f}, Mean={true_target_raw[:, 1].mean():.2f}")
+            print(f"   GEOS PR     : Min={geos_ens_sample[:, :, 0].min():.2f}, Max={geos_ens_sample[:, :, 0].max():.2f}, Mean={geos_ens_sample[:, :, 0].mean():.2f}")
+            print(f"   GEOS T2M    : Min={geos_ens_sample[:, :, 1].min():.2f}, Max={geos_ens_sample[:, :, 1].max():.2f}, Mean={geos_ens_sample[:, :, 1].mean():.2f}")
+            if geos_ens_sample[:, :, 1].max() < 1e-1:
+                print("   ⚠️ WARNING: GEOS T2M appears to be all zeros! Check dataset_flow.py variable detection.")
+            print("   " + "─"*50 + "\n")
+        
         row_vals = {'Month': month, 'PR_GEOS': geos_pr_crps, 'T2M_GEOS': geos_t2m_crps}
         
         for name, fn, use_var in strategies:
