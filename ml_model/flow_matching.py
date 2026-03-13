@@ -147,6 +147,7 @@ class CustomFlowMatcher:
             if key in eof_bases and 'eofs' in eof_bases[key]:
                 eofs = eof_bases[key]['eofs'].to(self.device)
                 eigenvals = eof_bases[key]['eigenvalues'].to(self.device)
+                K = eofs.shape[0]
                 for c in range(2):
                     alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
                     noise_field = torch.einsum('k,khw->hw', alpha, eofs)
