@@ -197,7 +197,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       cached_geos_crps=None, cached_geos_rmse=None, 
                       cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
                       use_flow_variance=False, eof_bases=None,
-                      nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None):
+                      nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
+                      t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -300,7 +301,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
         )
         ch1_noise = noise_utils.generate_dynamic_multimodal_noise(
-            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
+            batch, num_ensemble, device, t2m_eof_bases, t2m_nao_bases, nao_lookup, t2m_enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
         )
         noise_expanded = torch.cat([ch0_noise, ch1_noise], dim=1)  # [vB * E, 2, H, W]
             
@@ -657,6 +658,15 @@ def train(args, accelerator):
     eof_bases = torch.load(eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(eof_bases_path) else None
     nao_bases = torch.load(nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_bases_path) else None
     enso_bases = torch.load(enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_bases_path) else None
+
+    # Load T2M Dynamic Multi-Modal Bases
+    t2m_eof_bases_path = os.path.join(config["data_dir"], "mjo_t2m_eof_bases.pt")
+    t2m_nao_bases_path = os.path.join(config["data_dir"], "nao_t2m_eof_bases.pt")
+    t2m_enso_bases_path = os.path.join(config["data_dir"], "enso_t2m_eof_bases.pt")
+    
+    t2m_eof_bases = torch.load(t2m_eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_eof_bases_path) else None
+    t2m_nao_bases = torch.load(t2m_nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_nao_bases_path) else None
+    t2m_enso_bases = torch.load(t2m_enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_enso_bases_path) else None
     
     try:
         nao_lookup = noise_utils.parse_nao_index(os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii"))
@@ -1152,7 +1162,8 @@ def train(args, accelerator):
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
+                enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:

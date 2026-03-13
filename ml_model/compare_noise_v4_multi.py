@@ -286,6 +286,19 @@ def main():
         print(f"  ✅ ENSO EOFs loaded: {len(enso_bases)} categories")
     else:
         print(f"  ⚠️ ENSO EOFs not found.")
+        
+    # --- Load T2M EOF Bases ---
+    mjo_t2m_eof_path = os.path.join(ml_dir, "mjo_t2m_eof_bases.pt")
+    t2m_mjo_bases = torch.load(mjo_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(mjo_t2m_eof_path) else None
+
+    nao_t2m_eof_path = os.path.join(ml_dir, "nao_t2m_eof_bases.pt")
+    t2m_nao_bases = torch.load(nao_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_t2m_eof_path) else None
+
+    enso_t2m_eof_path = os.path.join(ml_dir, "enso_t2m_eof_bases.pt")
+    t2m_enso_bases = torch.load(enso_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_t2m_eof_path) else None
+    
+    if t2m_mjo_bases is not None:
+        print(f"  ✅ T2M MJO/NAO/ENSO EOFs loaded.")
     
     mjo_df = None
     mjo_csv_path = os.path.join(data_dir, "mjo_processed.csv")
@@ -398,7 +411,7 @@ def main():
         """
         import noise_utils
         ch0 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
-        ch1 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
+        ch1 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, t2m_mjo_bases, t2m_nao_bases, nao_lookup, t2m_enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
         return torch.cat([ch0, ch1], dim=1)  # [vB*E, 2, H, W]
     
     # ─── Build Strategy List ───
