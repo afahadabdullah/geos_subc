@@ -1067,12 +1067,13 @@ def train(args, accelerator):
             temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
             loss_vel = (area_weights * land_ocean_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
 
-            # 2. Variance MSE Loss
-            # We want the variance head to predict the RELATIVE spatial scaling of the error,
-            # so we normalize the absolute error by its spatial mean before squaring.
+            # 2. Variance MSE Loss (Precipitation Only!)
+            # T2M is highly deterministic; trying to predict its relative pixel variance destabilizes the shared UNet.
             abs_err = torch.abs(v_target - v_pred.detach())
             var_target = (abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6))**2
-            loss_var = (area_weights * land_ocean_weights * temp_weights_expanded * (var_pred - var_target)**2).mean()
+            
+            var_loss_map = area_weights * land_ocean_weights * temp_weights_expanded * (var_pred - var_target)**2
+            loss_var = var_loss_map[:, 0:1, :, :].mean()
 
             # 3. Weighted total loss (0.9 / 0.1 split)
             loss = 0.9 * loss_vel + 0.1 * loss_var
@@ -1240,7 +1241,9 @@ def train(args, accelerator):
                     loss_vel = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
                     abs_err = torch.abs(v_target - v_pred.detach())
                     var_target = (abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6))**2
-                    loss_var = (area_weights * land_ocean_weights * temp_weights * (var_pred - var_target)**2).mean()
+                    
+                    var_loss_map = area_weights * land_ocean_weights * temp_weights * (var_pred - var_target)**2
+                    loss_var = var_loss_map[:, 0:1, :, :].mean()
                     
                     loss_val = 0.9 * loss_vel + 0.1 * loss_var
                     val_loss_total += loss_val.item()
