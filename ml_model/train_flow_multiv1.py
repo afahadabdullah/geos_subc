@@ -290,8 +290,19 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        # Gaussian noise matching the training distribution (pure i.i.d. noise)
-        noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
+        
+        # --- Generate LHS EOF Noise instead of Pure Random ---
+        # Get the year (default to 2021 if not in batch) for indices
+        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        
+        import noise_utils
+        ch0_noise = noise_utils.generate_dynamic_multimodal_noise(
+            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
+        )
+        ch1_noise = noise_utils.generate_dynamic_multimodal_noise(
+            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
+        )
+        noise_expanded = torch.cat([ch0_noise, ch1_noise], dim=1)  # [vB * E, 2, H, W]
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
@@ -1137,7 +1148,7 @@ def train(args, accelerator):
             val_result = run_val_inference(
                 epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-                is_test=False, is_fast_recon=True, use_flow_variance=False,
+                is_test=False, is_fast_recon=True, use_flow_variance=True,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
