@@ -240,7 +240,7 @@ def main():
         ckpt_path = args.checkpoint
     else:
         # Use latest checkpoint instead of best
-        ckpt_path = os.path.join(args.output_dir, "latest_flow_ckpt.pt")
+        ckpt_path = os.path.join(args.output_dir, "best_flow_ckpt.pt")
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"Missing checkpoint: {ckpt_path}")
     
