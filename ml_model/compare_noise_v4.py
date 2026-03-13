@@ -210,6 +210,11 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Generate noise
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
+    # ─── DIAGNOSTIC: Print noise statistics for first batch ───
+    print(f"\n    📊 [Noise Diag] Shape: {list(noise_expanded.shape)}")
+    ch = noise_expanded[:, 0]
+    print(f"       Ch0: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
+    
     if perturb_cond:
         # Add structured physical perturbation to the Z500 (ch 4) and U250 (ch 5) atmospheric dynamics channels
         fx_cond_expanded[:, 4:6, :, :] += (noise_expanded * 0.10)
@@ -219,6 +224,11 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
         model, noise_expanded, fx_cond_expanded,
         num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
     )
+    
+    # ─── DIAGNOSTIC: Print ODE output statistics ───
+    print(f"    📊 [ODE Output] Shape: {list(p_x1_expanded.shape)}")
+    ch = p_x1_expanded[:, 0]
+    print(f"       Ch0: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
     
     # Denormalize
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
