@@ -195,8 +195,11 @@ class CustomFlowMatcher:
             # Clamp to prevent runaway ensemble divergence or collapse
             # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
             std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
+            
             # Flow-Dependent scaling of initial condition
-            x_t = noise * std_pred
+            # As requested, ONLY apply to Precipitation (Channel 0). Temperature (Channel 1) remains pure noise.
+            x_t = noise.clone()
+            x_t[:, 0:1] = noise[:, 0:1] * std_pred[:, 0:1]
         else:
             x_t = noise.clone()
             
