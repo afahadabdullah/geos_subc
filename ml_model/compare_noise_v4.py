@@ -184,13 +184,13 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     # Dataset now returns [2, 4, H, W] (PR+T2M) — take only PR (channel 0)
     target_raw = batch['target_raw_full'][0::4].to(device)
-    true_target_precip = target_raw[:, 0] if target_raw.dim() == 4 else target_raw
+    true_target_precip = target_raw[:, 0] if target_raw.dim() > 3 else target_raw
     
     fx_obs = batch['x_obs'].to(device)
     fx_geos = batch['x_geos'].to(device)
-    # Dataset now returns [1, 2, L, H, W] — take only PR (variable dim 2)
-    if fx_geos.dim() == 5:
-        fx_geos = fx_geos[:, :, 0:1]  # [vB, 1, 1, L, H, W] -> keep only PR
+    # Dataset returns multi-variate GEOS — extract PR only (dim > 4 means multi-var format)
+    if fx_geos.dim() > 4:
+        fx_geos = fx_geos[:, :, 0:1]  # Keep only PR variable
     fx_geos_cat = fx_geos.view(vB, -1, H, W)
     
     f_month = batch['month'].to(device).float()
@@ -575,13 +575,13 @@ def main():
         vB = batch['y_target'].shape[0]
         num_inits = vB // 4
         target_raw = batch['target_raw_full'][0::4].to(device)
-        true_tgt = target_raw[:, 0] if target_raw.dim() == 4 else target_raw
+        true_tgt = target_raw[:, 0] if target_raw.dim() > 3 else target_raw
         H, W = true_tgt.shape[-2:]
         
         if 'geos_ens_raw' in batch:
             geos_ens_full = batch['geos_ens_raw'][0::4].to(device)
-            # Dataset now returns [M, 2, L, H, W] — take only PR
-            geos_ens_sample = geos_ens_full[:, :, 0] if geos_ens_full.dim() == 5 else geos_ens_full
+            # Dataset returns multi-variate [M, 2, L, H, W] — take only PR
+            geos_ens_sample = geos_ens_full[:, :, 0] if geos_ens_full.dim() > 4 else geos_ens_full
             lats = np.linspace(-90, 90, H)
             cos_weights = np.maximum(np.cos(np.deg2rad(lats)), 0)
             area_weights = torch.from_numpy(cos_weights).float().to(device)
