@@ -1034,8 +1034,8 @@ def train(args, accelerator):
             noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
-            # Predict the velocity (routed through the correct per-week output head)
-            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
+            # Predict the velocity AND variance (routed through the correct per-week output head)
+            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -1043,12 +1043,18 @@ def train(args, accelerator):
             w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
             temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
 
-            # Loss computation (V6: area-weighted + land-ocean weighted + temporal weighted MSE)
-            # Both PR (Channel 0) and T2M (Channel 1) are treated with the MSE loss
-            # For PR, this is the transformed velocity. For T2M, it's the 200-320K standardized velocity.
-            # Expanding temp_weights for 2 channels
+            # --- Combined Loss Computation ---
+            # 1. Velocity MSE Loss
             temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
-            loss = (area_weights * land_ocean_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
+            loss_vel = (area_weights * land_ocean_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
+
+            # 2. Variance MSE Loss
+            # Target variance is proxy'd as the squared error of the current velocity prediction
+            var_target = (v_target - v_pred.detach())**2
+            loss_var = (area_weights * land_ocean_weights * temp_weights_expanded * (var_pred - var_target)**2).mean()
+
+            # 3. Weighted total loss (0.9 / 0.1 split)
+            loss = 0.9 * loss_vel + 0.1 * loss_var
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -1205,10 +1211,15 @@ def train(args, accelerator):
                     t = flow_matcher.sample_time_batch(B)
                     noise = torch.randn_like(target_norm)
                     x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
-                    v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
+                    v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
                     temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
-                    loss_val = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
+                    
+                    loss_vel = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
+                    var_target = (v_target - v_pred.detach())**2
+                    loss_var = (area_weights * land_ocean_weights * temp_weights * (var_pred - var_target)**2).mean()
+                    
+                    loss_val = 0.9 * loss_vel + 0.1 * loss_var
                     val_loss_total += loss_val.item()
                     val_steps += 1
         
