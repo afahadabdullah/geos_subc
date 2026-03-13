@@ -138,6 +138,8 @@ def sample_batch_lhs(eof_bases, phase, lead, device, H, W, E):
     mask = (std > 1e-6).squeeze()
     if mask.any():
         noise_fields[mask] = noise_fields[mask] / std[mask]
+    # Clamp to prevent extreme outliers that break the ODE solver
+    noise_fields = torch.clamp(noise_fields, -4.0, 4.0)
     return noise_fields
 
 def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, year, use_lhs=False):
@@ -237,7 +239,10 @@ def generate_dynamic_multimodal_noise(batch, E, device, mjo_bases, nao_bases, na
     
     blend = 0.90 * (w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise) + 0.10 * pure_noise
     std = blend.std(dim=(2, 3), keepdim=True)
-    return blend / (std + 1e-6)
+    blend = blend / (std + 1e-6)
+    # Clamp to prevent extreme outliers that break the ODE solver
+    blend = torch.clamp(blend, -4.0, 4.0)
+    return blend
 
 def orthogonalize_noise_batch(noise, vB, E):
     """
