@@ -160,6 +160,12 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Generate 2-channel noise
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
+    # ─── DIAGNOSTIC: Print noise statistics for first batch ───
+    print(f"\n    📊 [Noise Diag] Shape: {list(noise_expanded.shape)}")
+    for c in range(noise_expanded.shape[1]):
+        ch = noise_expanded[:, c]
+        print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
+    
     if perturb_cond:
         fx_cond_expanded[:, 4:6, :, :] += (noise_expanded[:, 0:1, :, :] * 0.10)
     
@@ -168,6 +174,12 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
         model, noise_expanded, fx_cond_expanded,
         num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
     )
+    
+    # ─── DIAGNOSTIC: Print ODE output statistics ───
+    print(f"    📊 [ODE Output] Shape: {list(p_x1_expanded.shape)}")
+    for c in range(p_x1_expanded.shape[1]):
+        ch = p_x1_expanded[:, c]
+        print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
     
     # Separate channels
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
