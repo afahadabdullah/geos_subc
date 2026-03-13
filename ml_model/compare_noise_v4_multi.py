@@ -213,7 +213,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-Variate Noise Comparison (v4-multi)")
     parser.add_argument("--output_dir", type=str, default="ml_output_flowmulti")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=30)
+    parser.add_argument("--num_ensemble", type=int, default=15)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
