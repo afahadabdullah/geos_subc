@@ -371,16 +371,15 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Keep strategy methodology aligned with compare_noise_v4.py.
+    # Match compare_noise_v4_multi.py so results are comparable to the earlier runs
+    # where EOF-based noise beat pure random.
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",      noise_pure,                   False, False)
+        ("1. Pure Random",      noise_pure,                       False, False),
+        ("2. EOF(LHS)+Var",     noise_multimodal_dynamic_lhs,     True,  False),
+        ("3. EOF(LHS) noVar",   noise_multimodal_dynamic_lhs,     False, False),
+        ("4. EOF PR + Rnd T2M", noise_multimodal_dynamic_lhs_pr_only, True, False),
     ]
-
-    if nao_bases is not None or enso_bases is not None:
-        strategies.append(("2. Dynamic MM",    noise_multimodal_dynamic,     True,  False))
-        strategies.append(("3. EOF Cent(LHS)", noise_multimodal_dynamic_lhs, True,  False))
-        strategies.append(("4. DynMM+CondP",   noise_multimodal_dynamic,     True,  True))
     
     n_ml = len(strategies)
     
