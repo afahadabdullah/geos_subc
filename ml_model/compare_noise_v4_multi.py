@@ -161,7 +161,6 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
     if perturb_cond:
-        # Perturb only channel 0 of noise (PR-like) onto atmospheric dynamics channels
         fx_cond_expanded[:, 4:6, :, :] += (noise_expanded[:, 0:1, :, :] * 0.10)
     
     # Solve ODE -> output [vB*E, 2, H, W]
@@ -173,7 +172,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Separate channels
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
     
-    # Denormalize PR (channel 0) - same as v4
+    # Denormalize PR (channel 0)
     target_sqrt_min, target_sqrt_max = 0.0, 7.071
     p_x1_pr = p_x1_batch[:, :, 0]
     week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
@@ -195,18 +194,36 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     area_weights = area_weights / area_weights.sum()
     area_weights = area_weights.view(1, 1, H, 1)
     
-    # PR metrics
+    # Total PR/T2M metrics
     pr_crps = compute_crps(ensemble_pr, true_target_pr, area_weights)
     pr_rmse = compute_rmse(ensemble_pr.mean(dim=0), true_target_pr, area_weights)
-    
-    # T2M metrics
     t2m_crps = compute_crps(ensemble_t2m, true_target_t2m, area_weights)
     t2m_rmse = compute_rmse(ensemble_t2m.mean(dim=0), true_target_t2m, area_weights)
     
-    return {
-        'pr_crps': pr_crps, 'pr_rmse': pr_rmse,
-        't2m_crps': t2m_crps, 't2m_rmse': t2m_rmse,
-    }
+    # Per-lead-week metrics (W1-W4)
+    pr_leads = []
+    t2m_leads = []
+    for l in range(4):
+        ens_pr_l = ensemble_pr[:, :, l:l+1, :, :]
+        tgt_pr_l = true_target_pr[:, l:l+1, :, :]
+        c_pr = compute_crps(ens_pr_l, tgt_pr_l, area_weights)
+        r_pr = compute_rmse(ens_pr_l.mean(dim=0), tgt_pr_l, area_weights)
+        pr_leads.append((c_pr, r_pr))
+        
+        ens_t2m_l = ensemble_t2m[:, :, l:l+1, :, :]
+        tgt_t2m_l = true_target_t2m[:, l:l+1, :, :]
+        c_t2m = compute_crps(ens_t2m_l, tgt_t2m_l, area_weights)
+        r_t2m = compute_rmse(ens_t2m_l.mean(dim=0), tgt_t2m_l, area_weights)
+        t2m_leads.append((c_t2m, r_t2m))
+    
+    # Return list of 5 dicts: [Total, W1, W2, W3, W4]
+    out = [{'pr_crps': pr_crps, 'pr_rmse': pr_rmse, 't2m_crps': t2m_crps, 't2m_rmse': t2m_rmse}]
+    for l in range(4):
+        out.append({
+            'pr_crps': pr_leads[l][0], 'pr_rmse': pr_leads[l][1],
+            't2m_crps': t2m_leads[l][0], 't2m_rmse': t2m_leads[l][1],
+        })
+    return out
 
 
 def main():
@@ -419,7 +436,7 @@ def main():
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
         ("1. Pure Random",      noise_pure,                  False, False),
-        ("2. EOF Cent(LHS)",    noise_multimodal_dynamic_lhs, True,  False),
+        ("2. EOF Cent(LHS)",    noise_multimodal_dynamic_lhs, False, False),
     ]
     
     n_ml = len(strategies)
@@ -433,7 +450,6 @@ def main():
     strat_names = ["0. GEOS"] + [s[0] for s in strategies]
     
     print(f"\n{'─'*180}")
-    # Two-row header: PR and T2M
     header_parts = [f"  {'Sample':<8} {'Mon':>4} |"]
     for nm in strat_names:
         header_parts.append(f" {nm + ' PR':>17} {nm + ' T2M':>17}")
@@ -460,22 +476,35 @@ def main():
         area_weights = area_weights / area_weights.sum()
         area_weights = area_weights.view(1, 1, H, 1)
         
-        # 0. GEOS Baseline
+        # 0. GEOS Baseline — compute total + per-lead metrics
         true_target_raw = batch['target_raw_full'][0::4].to(device)
         geos_ens_sample = batch['geos_ens_raw'][0::4].to(device)
         
-        geos_pr_crps = compute_crps(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_raw[:, 0], area_weights)
-        geos_pr_rmse = compute_rmse(geos_ens_sample[:, :, 0].transpose(0, 1).mean(dim=0), true_target_raw[:, 0], area_weights)
-        geos_t2m_crps = compute_crps(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_raw[:, 1], area_weights)
-        geos_t2m_rmse = compute_rmse(geos_ens_sample[:, :, 1].transpose(0, 1).mean(dim=0), true_target_raw[:, 1], area_weights)
+        geos_pr_ens = geos_ens_sample[:, :, 0].transpose(0, 1)  # [M, N, 4, H, W]
+        geos_t2m_ens = geos_ens_sample[:, :, 1].transpose(0, 1)
+        tgt_pr = true_target_raw[:, 0]
+        tgt_t2m = true_target_raw[:, 1]
         
-        geos_out = {'pr_crps': geos_pr_crps, 'pr_rmse': geos_pr_rmse, 't2m_crps': geos_t2m_crps, 't2m_rmse': geos_t2m_rmse}
+        geos_out_total = {
+            'pr_crps': compute_crps(geos_pr_ens, tgt_pr, area_weights),
+            'pr_rmse': compute_rmse(geos_pr_ens.mean(dim=0), tgt_pr, area_weights),
+            't2m_crps': compute_crps(geos_t2m_ens, tgt_t2m, area_weights),
+            't2m_rmse': compute_rmse(geos_t2m_ens.mean(dim=0), tgt_t2m, area_weights),
+        }
+        geos_out = [geos_out_total]
+        for l in range(4):
+            geos_out.append({
+                'pr_crps': compute_crps(geos_pr_ens[:, :, l:l+1], tgt_pr[:, l:l+1], area_weights),
+                'pr_rmse': compute_rmse(geos_pr_ens.mean(dim=0)[:, l:l+1], tgt_pr[:, l:l+1], area_weights),
+                't2m_crps': compute_crps(geos_t2m_ens[:, :, l:l+1], tgt_t2m[:, l:l+1], area_weights),
+                't2m_rmse': compute_rmse(geos_t2m_ens.mean(dim=0)[:, l:l+1], tgt_t2m[:, l:l+1], area_weights),
+            })
         
         # Diagnostic (first batch only)
         if b_idx == 0:
             print(f"\n🔍 [Diagnostic - Month {month}]")
-            print(f"   Target PR   : Min={true_target_raw[:, 0].min():.2f}, Max={true_target_raw[:, 0].max():.2f}, Mean={true_target_raw[:, 0].mean():.2f}")
-            print(f"   Target T2M  : Min={true_target_raw[:, 1].min():.2f}, Max={true_target_raw[:, 1].max():.2f}, Mean={true_target_raw[:, 1].mean():.2f}")
+            print(f"   Target PR   : Min={tgt_pr.min():.2f}, Max={tgt_pr.max():.2f}, Mean={tgt_pr.mean():.2f}")
+            print(f"   Target T2M  : Min={tgt_t2m.min():.2f}, Max={tgt_t2m.max():.2f}, Mean={tgt_t2m.mean():.2f}")
             print(f"   GEOS PR     : Min={geos_ens_sample[:, :, 0].min():.2f}, Max={geos_ens_sample[:, :, 0].max():.2f}, Mean={geos_ens_sample[:, :, 0].mean():.2f}")
             print(f"   GEOS T2M    : Min={geos_ens_sample[:, :, 1].min():.2f}, Max={geos_ens_sample[:, :, 1].max():.2f}, Mean={geos_ens_sample[:, :, 1].mean():.2f}")
             print("   " + "─"*50 + "\n")
@@ -507,12 +536,10 @@ def main():
             
             parts = []
             for j, v in enumerate(all_vals):
-                # PR
                 s_pc = f"{v['pr_crps']:>7.4f}"
                 s_pr = f"({v['pr_rmse']:>7.4f})"
                 if j == best_pr_c: s_pc = f"{BLUE}{BOLD}{s_pc}{RESET}"
                 if j == best_pr_r: s_pr = f"{ORANGE}{BOLD}{s_pr}{RESET}"
-                # T2M
                 s_tc = f"{v['t2m_crps']:>7.4f}"
                 s_tr = f"({v['t2m_rmse']:>7.4f})"
                 if j == best_t2m_c: s_tc = f"{BLUE}{BOLD}{s_tc}{RESET}"
@@ -520,35 +547,55 @@ def main():
                 parts.append(f"{s_pc} {s_pr} {s_tc} {s_tr}")
             print(f"  {label:<13} | {' | '.join(parts)}", flush=True)
         
-        all_vals = [geos_out] + [results[name][-1] for name, _, _, _ in strategies]
-        fmt_row(f"Batch {b_idx:<2} {month:>4}", all_vals)
+        # Total row
+        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _ in strategies]
+        fmt_row(f"Batch {b_idx:<2} {month:>4}", [c[0] for c in all_crps_out])
         
-        # Running average
+        # Per-lead breakdown (W1-W4)
+        for w in range(4):
+            lead_vals = [c[w+1] for c in all_crps_out]
+            fmt_row(f"    W{w+1}", lead_vals)
+        
+        # Running average (total)
         n_done = b_idx + 1
         all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
-        run_avg = []
+        run_avg_total = []
         for nm in all_names:
-            run_avg.append({
-                'pr_crps': np.mean([r['pr_crps'] for r in results[nm]]),
-                'pr_rmse': np.mean([r['pr_rmse'] for r in results[nm]]),
-                't2m_crps': np.mean([r['t2m_crps'] for r in results[nm]]),
-                't2m_rmse': np.mean([r['t2m_rmse'] for r in results[nm]]),
+            run_avg_total.append({
+                'pr_crps': np.mean([r[0]['pr_crps'] for r in results[nm]]),
+                'pr_rmse': np.mean([r[0]['pr_rmse'] for r in results[nm]]),
+                't2m_crps': np.mean([r[0]['t2m_crps'] for r in results[nm]]),
+                't2m_rmse': np.mean([r[0]['t2m_rmse'] for r in results[nm]]),
             })
-        fmt_row(f"  RunAvg({n_done})", run_avg)
+        fmt_row(f"  RunAvg({n_done})", run_avg_total)
+        
+        # Running average per-week
+        for w in range(4):
+            run_avg_w = []
+            for nm in all_names:
+                run_avg_w.append({
+                    'pr_crps': np.mean([r[w+1]['pr_crps'] for r in results[nm]]),
+                    'pr_rmse': np.mean([r[w+1]['pr_rmse'] for r in results[nm]]),
+                    't2m_crps': np.mean([r[w+1]['t2m_crps'] for r in results[nm]]),
+                    't2m_rmse': np.mean([r[w+1]['t2m_rmse'] for r in results[nm]]),
+                })
+            fmt_row(f"  AvgW{w+1}({n_done})", run_avg_w)
         print(f"  {'─'*180}")
     
     # Final CSV
     import pandas as pd
     csv_rows = []
     all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
+    lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
     for b_idx in range(len(results["0. GEOS Baseline"])):
         row = {'batch': b_idx}
         for nm in all_names:
-            r = results[nm][b_idx]
-            row[f'{nm} PR_CRPS'] = r['pr_crps']
-            row[f'{nm} PR_RMSE'] = r['pr_rmse']
-            row[f'{nm} T2M_CRPS'] = r['t2m_crps']
-            row[f'{nm} T2M_RMSE'] = r['t2m_rmse']
+            for i, suffix in enumerate(lead_suffixes):
+                r = results[nm][b_idx][i]
+                row[f'{nm}{suffix} PR_CRPS'] = r['pr_crps']
+                row[f'{nm}{suffix} PR_RMSE'] = r['pr_rmse']
+                row[f'{nm}{suffix} T2M_CRPS'] = r['t2m_crps']
+                row[f'{nm}{suffix} T2M_RMSE'] = r['t2m_rmse']
         csv_rows.append(row)
     
     df = pd.DataFrame(csv_rows)
