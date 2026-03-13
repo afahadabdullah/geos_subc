@@ -263,6 +263,8 @@ def orthogonalize_noise_batch(noise, vB, E):
             std = v.std()
             if std > 1e-6:
                 v = v / std
+            # Clamp after standardization to prevent extremes from re-emerging
+            v = torch.clamp(v, -4.0, 4.0)
             out[b, i] = v
             
     return out.view(noise.shape)
