@@ -9,6 +9,7 @@ Evaluates CRPS under 5 different ensemble noise strategies:
   4. Alpha-Scaled EOF:   MJO EOFs scaled by (0.7 + lead_week * 0.2)
   5. Model Var Head:     predicted variance scalar
 
+# dont cahnge or delete this file
 Also saves a visual comparison plot of the 5 strategies for the first sample.
 """
 

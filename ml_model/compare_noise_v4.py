@@ -11,7 +11,7 @@ Evaluates CRPS under 6 different ensemble noise strategies:
   5. Dynamic Multi-Modal:    Amplitude-weighted blend of MJO + NAO + ENSO EOFs
   
 Also saves a visual comparison plot for the first sample.
-
+##dont delete or change
 Usage:
   python compare_noise_v4.py --output_dir ml_output_flow4 --year 2022
 """
