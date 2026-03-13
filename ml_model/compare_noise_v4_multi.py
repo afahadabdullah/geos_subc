@@ -446,9 +446,12 @@ def main():
     
     # ─── Build Strategy List ───
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
+    # NOTE: v4 single-channel uses use_var_head=True for EOF LHS — the variance head
+    # scales structured noise by the model's learned spatial uncertainty pattern.
     strategies = [
         ("1. Pure Random",      noise_pure,                  False, False),
-        ("2. EOF Cent(LHS)",    noise_multimodal_dynamic_lhs, False, False),
+        ("2. EOF(LHS)+Var",     noise_multimodal_dynamic_lhs, True,  False),
+        ("3. EOF(LHS) noVar",   noise_multimodal_dynamic_lhs, False, False),
     ]
     
     n_ml = len(strategies)
