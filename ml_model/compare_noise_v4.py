@@ -186,7 +186,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     fx_obs = batch['x_obs'].to(device)
     fx_geos = batch['x_geos'].to(device)
-    fx_geos = fx_geos[:, :1, :, :]  # Take only PR channel (dataset now returns PR+T2M)
+    fx_geos = fx_geos[:, :, 0:1]  # Take only PR (dim2=variable: 0=PR, 1=T2M)
     fx_geos_cat = fx_geos.view(vB, -1, H, W)
     
     f_month = batch['month'].to(device).float()
