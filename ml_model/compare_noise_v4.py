@@ -394,7 +394,7 @@ def main():
         if isinstance(mjo, torch.Tensor): mjo = mjo.clone().detach()
         else: mjo = torch.tensor(mjo)
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
-        return flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)
+        return flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)[:, 0:1]  # Take PR channel only
     
     def noise_mjo_98(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)
