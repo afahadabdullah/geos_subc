@@ -11,7 +11,7 @@ Evaluates CRPS under 6 different ensemble noise strategies:
   5. Dynamic Multi-Modal:    Amplitude-weighted blend of MJO + NAO + ENSO EOFs
   
 Also saves a visual comparison plot for the first sample.
-##dont delete or change
+
 Usage:
   python compare_noise_v4.py --output_dir ml_output_flow4 --year 2022
 """
@@ -179,18 +179,13 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     model.eval()
     
     vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
-    H, W = batch['y_target'].shape[-2], batch['y_target'].shape[-1]
+    _, _, H, W = batch['y_target'].shape
     num_inits = vB // 4
     
-    # Dataset now returns [2, 4, H, W] (PR+T2M) — take only PR (channel 0)
-    target_raw = batch['target_raw_full'][0::4].to(device)
-    true_target_precip = target_raw[:, 0] if target_raw.dim() > 3 else target_raw
+    true_target_precip = batch['target_raw_full'][0::4].to(device)
     
     fx_obs = batch['x_obs'].to(device)
     fx_geos = batch['x_geos'].to(device)
-    # Dataset returns multi-variate GEOS — extract PR only (dim > 4 means multi-var format)
-    if fx_geos.dim() > 4:
-        fx_geos = fx_geos[:, :, 0:1]  # Keep only PR variable
     fx_geos_cat = fx_geos.view(vB, -1, H, W)
     
     f_month = batch['month'].to(device).float()
@@ -210,11 +205,6 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Generate noise
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
-    # ─── DIAGNOSTIC: Print noise statistics for first batch ───
-    print(f"\n    📊 [Noise Diag] Shape: {list(noise_expanded.shape)}")
-    ch = noise_expanded[:, 0]
-    print(f"       Ch0: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
-    
     if perturb_cond:
         # Add structured physical perturbation to the Z500 (ch 4) and U250 (ch 5) atmospheric dynamics channels
         fx_cond_expanded[:, 4:6, :, :] += (noise_expanded * 0.10)
@@ -224,11 +214,6 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
         model, noise_expanded, fx_cond_expanded,
         num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
     )
-    
-    # ─── DIAGNOSTIC: Print ODE output statistics ───
-    print(f"    📊 [ODE Output] Shape: {list(p_x1_expanded.shape)}")
-    ch = p_x1_expanded[:, 0]
-    print(f"       Ch0: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
     
     # Denormalize
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
@@ -584,14 +569,11 @@ def main():
         geos_crps_out = [0.0]*5
         vB = batch['y_target'].shape[0]
         num_inits = vB // 4
-        target_raw = batch['target_raw_full'][0::4].to(device)
-        true_tgt = target_raw[:, 0] if target_raw.dim() > 3 else target_raw
+        true_tgt = batch['target_raw_full'][0::4].to(device)
         H, W = true_tgt.shape[-2:]
         
         if 'geos_ens_raw' in batch:
-            geos_ens_full = batch['geos_ens_raw'][0::4].to(device)
-            # Dataset returns multi-variate [M, 2, L, H, W] — take only PR
-            geos_ens_sample = geos_ens_full[:, :, 0] if geos_ens_full.dim() > 4 else geos_ens_full
+            geos_ens_sample = batch['geos_ens_raw'][0::4].to(device)
             lats = np.linspace(-90, 90, H)
             cos_weights = np.maximum(np.cos(np.deg2rad(lats)), 0)
             area_weights = torch.from_numpy(cos_weights).float().to(device)
