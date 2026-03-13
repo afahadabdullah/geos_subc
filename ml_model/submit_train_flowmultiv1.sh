@@ -55,7 +55,7 @@ echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
 echo "📍 Working Dir: $PWD"
 
 CKPT_FILE="ml_output_flowmulti/latest_flow_ckpt.pt"
-MAX_EPOCHS=250
+MAX_EPOCHS=500
 
 if [ -f "$CKPT_FILE" ]; then
     # Safely get current epoch from checkpoint
