@@ -1070,8 +1070,7 @@ def train(args, accelerator):
             loss_vel = (area_weights * land_ocean_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
 
             # 2. Variance MSE Loss (both PR and T2M channels)
-            abs_err = torch.abs(v_target - v_pred.detach())
-            var_target = (abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6))**2
+            var_target = (v_target - v_pred.detach())**2
             loss_var = (area_weights * land_ocean_weights * temp_weights_expanded * (var_pred - var_target)**2).mean()
 
             # 3. Weighted total loss (0.9 / 0.1 split)
@@ -1237,9 +1236,8 @@ def train(args, accelerator):
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
                     temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
                     
-                    loss_vel = (area_weights * land_ocean_weights * temp_weights * (v_pred - v_target)**2).mean()
-                    abs_err = torch.abs(v_target - v_pred.detach())
-                    var_target = (abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6))**2
+                    # Variance target
+                    var_target = (v_target - v_pred.detach())**2
                     loss_var = (area_weights * land_ocean_weights * temp_weights * (var_pred - var_target)**2).mean()
                     
                     loss_val = 0.9 * loss_vel + 0.1 * loss_var
