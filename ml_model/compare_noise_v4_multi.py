@@ -183,11 +183,115 @@ def main():
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
     
+    # --- Inline EOF helpers (matching v4 exactly) ---
+    def _sample_eof_field(eof_bases, phase, lead, d, H, W):
+        """Sample a single noise field from an EOF basis dict (v4-compatible)."""
+        key = (phase, lead)
+        if key not in eof_bases: key = phase
+        if key not in eof_bases: key = (1, lead)
+        if key not in eof_bases: return torch.randn(H, W, device=d)
+        eofs = eof_bases[key]['eofs'].to(d)
+        K = eofs.shape[0]
+        alpha = torch.randn(K, device=d)
+        noise_field = torch.einsum('k,khw->hw', alpha, eofs)
+        std = noise_field.std()
+        if std > 1e-6: noise_field = noise_field / std
+        return noise_field
+    
+    def _get_mjo_eof_2ch(vB, E, H, W, b, d):
+        """MJO EOF noise, independent per channel (2-ch version of v4's _get_mjo_eof)."""
+        noise = torch.zeros((vB*E, 2, H, W), device=d)
+        mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
+        if isinstance(mjo, torch.Tensor): mjo = mjo.clone().detach()
+        else: mjo = torch.tensor(mjo)
+        lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
+        for i in range(vB * E):
+            b_idx = i // E
+            p = int(mjo[b_idx])
+            l = int(lead[b_idx])
+            for c in range(2):
+                noise[i, c] = _sample_eof_field(mjo_bases, p, l, d, H, W)
+        return noise
+    
+    def _get_nao_eof_2ch(vB, E, H, W, b, d):
+        """NAO EOF noise, independent per channel."""
+        noise = torch.zeros((vB*E, 2, H, W), device=d)
+        months = b['month']
+        leads = b['lead_idx']
+        for i in range(vB * E):
+            b_idx = i // E
+            month = int(months[b_idx])
+            lead = int(leads[b_idx])
+            init_date = datetime.date(args.year, month, 15)
+            nao_phase = noise_utils.get_nao_phase(init_date, nao_lookup)
+            for c in range(2):
+                noise[i, c] = _sample_eof_field(nao_bases, nao_phase, lead, d, H, W)
+        return noise
+    
+    def _get_enso_eof_2ch(vB, E, H, W, b, d):
+        """ENSO EOF noise, independent per channel."""
+        noise = torch.zeros((vB*E, 2, H, W), device=d)
+        months = b['month']
+        leads = b['lead_idx']
+        for i in range(vB * E):
+            b_idx = i // E
+            month = int(months[b_idx])
+            lead = int(leads[b_idx])
+            enso_state = noise_utils.get_enso_state(month, args.year, oni_lookup)
+            for c in range(2):
+                noise[i, c] = _sample_eof_field(enso_bases, enso_state, lead, d, H, W)
+        return noise
+
+    def noise_multimodal_dynamic(vB, E, H, W, b, d):
+        """
+        Dynamically weighted multi-modal blended noise (v4's winning strategy, ported to 2-ch).
+        90% amplitude-weighted EOF + 10% isotropic. Normalized to unit variance.
+        """
+        import pandas as pd
+        
+        mjo_noise = _get_mjo_eof_2ch(vB, E, H, W, b, d)
+        pure_noise = torch.randn((vB*E, 2, H, W), device=d)
+        
+        nao_noise = _get_nao_eof_2ch(vB, E, H, W, b, d) if (nao_bases is not None and nao_lookup is not None) else torch.randn((vB*E, 2, H, W), device=d)
+        enso_noise = _get_enso_eof_2ch(vB, E, H, W, b, d) if (enso_bases is not None and oni_lookup is not None) else torch.randn((vB*E, 2, H, W), device=d)
+        
+        month = int(b['month'][0])
+        init_date = datetime.date(args.year, month, 15)
+        
+        # MJO amplitude
+        mjo_amp = 1.0
+        date_str = init_date.strftime('%Y-%m-%d')
+        if mjo_df is not None and date_str in mjo_df.index:
+            row = mjo_df.loc[date_str]
+            if isinstance(row, pd.DataFrame): row = row.iloc[0]
+            r1, r2 = row.get('RMM1_lagged', 0.0), row.get('RMM2_lagged', 0.0)
+            if not (pd.isna(r1) or pd.isna(r2)):
+                mjo_amp = float(np.sqrt(r1**2 + r2**2))
+        
+        # NAO amplitude
+        nao_amp = abs(noise_utils.get_nao_value(init_date, nao_lookup)) if nao_lookup is not None else 0.5
+        
+        # ENSO amplitude
+        enso_amp = abs(noise_utils.get_enso_value(month, args.year, oni_lookup)) if oni_lookup is not None else 0.5
+        
+        # Cap / Floor
+        mjo_amp = max(min(mjo_amp, 3.0), 0.1)
+        nao_amp = max(min(nao_amp, 2.5), 0.1)
+        enso_amp = max(min(enso_amp, 2.5), 0.1)
+        
+        total = mjo_amp + nao_amp + enso_amp
+        w_mjo, w_nao, w_enso = mjo_amp / total, nao_amp / total, enso_amp / total
+        
+        blend = 0.90 * (w_mjo * mjo_noise + w_nao * nao_noise + w_enso * enso_noise) + 0.10 * pure_noise
+        std = blend.std(dim=(2, 3), keepdim=True)
+        return blend / (std + 1e-6)
+    
     def noise_eof_lhs(vB, E, H, W, b, d):
         return noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
 
     strategies = [
         ("Pure Noise", noise_pure,    False),
+        ("EOF Dyn",    noise_multimodal_dynamic, False),
         ("EOF LHS",    noise_eof_lhs, False)
     ]
     
@@ -214,11 +318,11 @@ def main():
         s_t2m = format_col_group(t2m_vals)
         print(f"{label:<10} | {s_pr} | {s_t2m}")
 
-    print("\n" + "─"*180)
-    header_pr = f"{'PR GEOS':>17} | {'PR Pure':>17} | {'PR EOF':>17}"
-    header_t2m = f"{'T2M GEOS':>17} | {'T2M Pure':>17} | {'T2M EOF':>17}"
+    print("\n" + "─"*220)
+    header_pr = f"{'PR GEOS':>17} | {'PR Pure':>17} | {'PR EOFDyn':>17} | {'PR EOFLHS':>17}"
+    header_t2m = f"{'T2M GEOS':>17} | {'T2M Pure':>17} | {'T2M EOFDyn':>17} | {'T2M EOFLHS':>17}"
     print(f"{'Month':<10} | {header_pr} | {header_t2m}")
-    print("─"*180)
+    print("─"*220)
     
     all_results = []
     
@@ -272,7 +376,7 @@ def main():
             n = len(all_results)
             avg_pr = []
             avg_t2m = []
-            for i in range(3): # 3 strategies: GEOS, Pure, EOF
+            for i in range(4): # 4 strategies: GEOS, Pure, EOF Dyn, EOF LHS
                 c_pr = np.mean([r['pr'][i][0] for r in all_results])
                 r_pr = np.mean([r['pr'][i][1] for r in all_results])
                 avg_pr.append((c_pr, r_pr))
@@ -281,14 +385,14 @@ def main():
                 r_t2m = np.mean([r['t2m'][i][1] for r in all_results])
                 avg_t2m.append((c_t2m, r_t2m))
             fmt_row(f"AVG({n})", avg_pr, avg_t2m)
-            print("─"*180)
+            print("─"*220)
 
     # Final Save to CSV
     import pandas as pd
     csv_rows = []
     for r in all_results:
         d = {'month': r['month']}
-        strat_names = ['GEOS', 'Pure', 'EOF']
+        strat_names = ['GEOS', 'Pure', 'EOFDyn', 'EOFLHS']
         for i, name in enumerate(strat_names):
             d[f'PR_{name}_CRPS'] = r['pr'][i][0]
             d[f'PR_{name}_RMSE'] = r['pr'][i][1]
