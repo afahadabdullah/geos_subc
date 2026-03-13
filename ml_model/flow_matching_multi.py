@@ -16,7 +16,7 @@ class FlowMatchingModel(nn.Module):
       - 4 dedicated Conv2d(HEAD_FEATURES, 1) output heads, one per forecast week.
       - Each head specializes in its own timescale without competing for filter capacity.
     """
-    def __init__(self, in_channels=36, out_channels=1):
+    def __init__(self, in_channels=37, out_channels=2):
         super().__init__()
         
         # Shared UNet backbone (outputs intermediate features, NOT final prediction)
@@ -41,26 +41,28 @@ class FlowMatchingModel(nn.Module):
         )
         
         # 4 dedicated mean output heads (Week 1, Week 2, Week 3, Week 4)
-        # Each is a lightweight 1x1 conv: [B, 64, H, W] -> [B, 1, H, W]
+        # Each is a lightweight 1x1 conv: [B, 64, H, W] -> [B, out_channels, H, W]
         self.heads = nn.ModuleList([
-            nn.Conv2d(HEAD_FEATURES, 1, kernel_size=1) for _ in range(4)
+            nn.Conv2d(HEAD_FEATURES, out_channels, kernel_size=1) for _ in range(4)
         ])
         
         # 4 dedicated variance output heads
         self.var_heads = nn.ModuleList([
-            nn.Conv2d(HEAD_FEATURES, 1, kernel_size=1) for _ in range(4)
+            nn.Conv2d(HEAD_FEATURES, out_channels, kernel_size=1) for _ in range(4)
         ])
+        
+        self.out_channels = out_channels
 
     def forward(self, x_t, x_cond, t, lead_idx=None):
         """
-        x_t:      [B, 1, H, W] - State at time t
+        x_t:      [B, out_channels, H, W] - State at time t
         x_cond:   [B, 35, H, W] - Conditioning variables
         t:        [B] or scalar in [0, 1]. Representing continuous flow time.
         lead_idx: [B] tensor with values in {0, 1, 2, 3} indicating forecast week.
                   If None, defaults to head 0 (backward compat).
         """
-        # Spatial concatenation
-        x = torch.cat([x_t, x_cond], dim=1)  # [B, 36, H, W]
+        # Spatial concatenation (x_t is [B, 2, H, W], x_cond is [B, 35, H, W] -> [B, 37, H, W])
+        x = torch.cat([x_t, x_cond], dim=1)
         
         # Pad to multiple of 16 for 4 down-blocks
         orig_H, orig_W = x.shape[2], x.shape[3]
@@ -86,8 +88,8 @@ class FlowMatchingModel(nn.Module):
             return self.heads[0](features), F.softplus(self.var_heads[0](features))
         
         B = features.shape[0]
-        output = torch.zeros(B, 1, orig_H, orig_W, device=features.device, dtype=features.dtype)
-        var_output = torch.zeros(B, 1, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        var_output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
         
         for week_idx in range(4):
             mask = (lead_idx == week_idx)
@@ -126,9 +128,9 @@ class CustomFlowMatcher:
             lead_ids: [B] tensor/list of lead indices (0-3). If None, falls back to phase-only.
         
         Returns:
-            noise: [num_samples, 1, H, W] structured noise tensor
+            noise: [num_samples, 2, H, W] structured noise tensor (PR and T2M channels)
         """
-        noise = torch.zeros((num_samples, 1, H, W), device=self.device)
+        noise = torch.zeros((num_samples, 2, H, W), device=self.device)
         
         for i in range(num_samples):
             b_idx = i % len(mjo_phases)
@@ -146,18 +148,19 @@ class CustomFlowMatcher:
                 eofs = eof_bases[key]['eofs'].to(self.device)
                 eigenvals = eof_bases[key]['eigenvalues'].to(self.device)
                 K = eofs.shape[0]
-                
-                alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
-                noise_field = torch.einsum('k,khw->hw', alpha, eofs)
-                
-                # Normalize to unit variance
-                std = noise_field.std()
-                if std > 1e-6:
-                    noise_field = noise_field / std
-                
-                noise[i, 0] = noise_field
+                for c in range(2):
+                    alpha = torch.randn(K, device=self.device) * torch.sqrt(eigenvals)
+                    noise_field = torch.einsum('k,khw->hw', alpha, eofs)
+                    
+                    # Normalize to unit variance
+                    std = noise_field.std()
+                    if std > 1e-6:
+                        noise_field = noise_field / std
+                    
+                    noise[i, c] = noise_field
             else:
-                noise[i, 0] = torch.randn(H, W, device=self.device)
+                for c in range(2):
+                    noise[i, c] = torch.randn(H, W, device=self.device)
         
         return noise
 

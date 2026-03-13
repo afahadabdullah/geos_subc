@@ -18,7 +18,7 @@ import pandas as pd
 
 # Local Modules
 from dataset_flow import S2SHybridDataset
-from flow_matching import FlowMatchingModel, CustomFlowMatcher
+from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 
 def get_area_weights(lats, device):

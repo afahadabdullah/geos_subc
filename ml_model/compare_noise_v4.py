@@ -186,7 +186,6 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     fx_obs = batch['x_obs'].to(device)
     fx_geos = batch['x_geos'].to(device)
-    fx_geos = fx_geos[:, :, 0:1]  # Take only PR (dim2=variable: 0=PR, 1=T2M)
     fx_geos_cat = fx_geos.view(vB, -1, H, W)
     
     f_month = batch['month'].to(device).float()
@@ -394,7 +393,7 @@ def main():
         if isinstance(mjo, torch.Tensor): mjo = mjo.clone().detach()
         else: mjo = torch.tensor(mjo)
         lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
-        return flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)[:, 0:1]  # Take PR channel only
+        return flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)
     
     def noise_mjo_98(vB, E, H, W, b, d):
         pure = torch.randn((vB*E, 1, H, W), device=d)

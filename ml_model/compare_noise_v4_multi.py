@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
-from flow_matching import FlowMatchingModel, CustomFlowMatcher
+from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
 from dataset_flow import S2SHybridDataset
 from train_flow_multiv1 import compute_crps, compute_rmse
 
