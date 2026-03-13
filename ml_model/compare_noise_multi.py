@@ -256,9 +256,11 @@ def main():
     if args.checkpoint:
         ckpt_path = args.checkpoint
     else:
-        ckpt_path = os.path.join(args.output_dir, "BEST_model.pt")
+        # Match compare_noise_v4_multi.py: use the latest flow checkpoint by default,
+        # because the EOF-favorable validation state came from that path.
+        ckpt_path = os.path.join(args.output_dir, "best_flow_ckpt.pt")
         if not os.path.exists(ckpt_path):
-            ckpt_path = os.path.join(args.output_dir, "best_flow_ckpt.pt")
+            ckpt_path = os.path.join(args.output_dir, "BEST_model.pt")
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"Missing checkpoint: {ckpt_path}")
     
