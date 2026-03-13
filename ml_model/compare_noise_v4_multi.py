@@ -131,7 +131,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     model.eval()
     
     vB = batch['y_target'].shape[0]
-    _, _, H, W = batch['y_target'].shape
+    H, W = batch['y_target'].shape[-2:]
     num_inits = vB // 4
     
     # Raw targets: [num_inits, 2, 4, H, W] -> separate PR and T2M
