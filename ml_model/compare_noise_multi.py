@@ -111,19 +111,6 @@ def get_enso_value(month, year, oni_lookup):
     if month == 1: lookup_year = year - 1
     return oni_lookup.get((lookup_year, seas), 0.0)
 
-def sample_from_eof_basis(eof_bases, phase, lead, device, H, W):
-    key = (phase, lead)
-    if key not in eof_bases: key = phase
-    if key not in eof_bases: key = (1, lead)
-    if key not in eof_bases: return torch.randn(H, W, device=device)
-    eofs = eof_bases[key]['eofs'].to(device)
-    K = eofs.shape[0]
-    alpha = torch.randn(K, device=device)
-    noise_field = torch.einsum('k,khw->hw', alpha, eofs)
-    std = noise_field.std()
-    if std > 1e-6: noise_field = noise_field / std
-    return noise_field
-
 
 # ─── Core Inference Runner (2-channel adaptation of v4) ───
 
@@ -347,49 +334,12 @@ def main():
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
     
-    def _get_mjo_eof_1ch(vB, E, H, W, b, d):
-        """v4's _get_mjo_eof — returns [vB*E, 1, H, W]."""
-        mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-        if isinstance(mjo, torch.Tensor): mjo = mjo.clone().detach()
-        else: mjo = torch.tensor(mjo)
-        lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
-        # flow_matcher.eof_sample returns [vB*E, 2, H, W] now, take only ch 0
-        eof_2ch = flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)
-        return eof_2ch[:, 0:1, :, :]  # [vB*E, 1, H, W]
-    
-    def _get_nao_eof_1ch(vB, E, H, W, b, d):
-        """v4's _get_nao_eof — returns [vB*E, 1, H, W]."""
-        noise = torch.zeros((vB*E, 1, H, W), device=d)
-        months = b['month']
-        leads = b['lead_idx']
-        for i in range(vB * E):
-            b_idx = i // E
-            month = int(months[b_idx])
-            lead = int(leads[b_idx])
-            init_date = datetime.date(args.year, month, 15)
-            nao_phase = get_nao_phase(init_date, nao_lookup)
-            noise[i, 0] = sample_from_eof_basis(nao_bases, nao_phase, lead, d, H, W)
-        return noise
-    
-    def _get_enso_eof_1ch(vB, E, H, W, b, d):
-        """v4's _get_enso_eof — returns [vB*E, 1, H, W]."""
-        noise = torch.zeros((vB*E, 1, H, W), device=d)
-        months = b['month']
-        leads = b['lead_idx']
-        for i in range(vB * E):
-            b_idx = i // E
-            month = int(months[b_idx])
-            lead = int(leads[b_idx])
-            enso_state = get_enso_state(month, args.year, oni_lookup)
-            noise[i, 0] = sample_from_eof_basis(enso_bases, enso_state, lead, d, H, W)
-        return noise
-    
     def noise_multimodal_dynamic(vB, E, H, W, b, d):
         return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
             b, E, d,
             mjo_bases, nao_bases, enso_bases,
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
-            nao_lookup, oni_lookup, mjo_df, flow_matcher, args.year,
+            nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=False,
         )
     
@@ -402,7 +352,7 @@ def main():
             b, E, d,
             mjo_bases, nao_bases, enso_bases,
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
-            nao_lookup, oni_lookup, mjo_df, flow_matcher, args.year,
+            nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
         )
         
@@ -415,7 +365,7 @@ def main():
             b, E, d,
             mjo_bases, nao_bases, enso_bases,
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
-            nao_lookup, oni_lookup, mjo_df, flow_matcher, args.year,
+            nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
             t2m_random_only=True,
         )
