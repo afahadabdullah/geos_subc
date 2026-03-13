@@ -357,6 +357,20 @@ def main():
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
         )
+
+    def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
+        """
+        Match run_val_inference in train_flow_multiv1.py:
+        LHS EOF noise for both PR and T2M, but no ensemble orthogonalization.
+        """
+        return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+            b, E, d,
+            mjo_bases, nao_bases, enso_bases,
+            t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
+            nao_lookup, oni_lookup, mjo_df, args.year,
+            use_lhs=True,
+            orthogonalize_lhs=False,
+        )
         
     def noise_multimodal_dynamic_lhs_pr_only(vB, E, H, W, b, d):
         """
@@ -371,16 +385,35 @@ def main():
             use_lhs=True,
             t2m_random_only=True,
         )
+
+    def noise_multimodal_dynamic_lhs_pr_blend(vB, E, H, W, b, d):
+        """
+        Softer PR ablation:
+        use validation-style non-orthogonalized LHS EOF noise for PR, blend in 2% random,
+        and keep T2M random so we isolate whether PR EOF tails are the main problem.
+        """
+        return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+            b, E, d,
+            mjo_bases, nao_bases, enso_bases,
+            t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
+            nao_lookup, oni_lookup, mjo_df, args.year,
+            use_lhs=True,
+            t2m_random_only=True,
+            orthogonalize_lhs=False,
+            pr_random_blend=0.02,
+        )
     
     # ─── Build Strategy List ───
     # Match compare_noise_v4_multi.py so results are comparable to the earlier runs
     # where EOF-based noise beat pure random.
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",      noise_pure,                       False, False),
-        ("2. EOF(LHS)+Var",     noise_multimodal_dynamic_lhs,     True,  False),
-        ("3. EOF(LHS) noVar",   noise_multimodal_dynamic_lhs,     False, False),
-        ("4. EOF PR + Rnd T2M", noise_multimodal_dynamic_lhs_pr_only, True, False),
+        ("1. Pure Random",        noise_pure,                           False, False),
+        ("2. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
+        ("3. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
+        ("4. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
+        ("5. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
+        ("6. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
     ]
     
     n_ml = len(strategies)

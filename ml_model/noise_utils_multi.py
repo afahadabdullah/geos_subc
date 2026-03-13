@@ -133,6 +133,8 @@ def generate_dynamic_multimodal_noise_multi(
     year,
     use_lhs=False,
     t2m_random_only=False,
+    orthogonalize_lhs=True,
+    pr_random_blend=0.0,
 ):
     """Generate 2-channel [PR, T2M] dynamic multimodal noise using per-variable EOF bases."""
     vB = batch['y_target'].shape[0] if 'y_target' in batch else batch['input_forecast'].shape[0]
@@ -152,6 +154,12 @@ def generate_dynamic_multimodal_noise_multi(
         use_lhs=use_lhs,
     )
 
+    if pr_random_blend > 0.0:
+        pr_random = torch.randn((vB * E, 1, H, W), device=device)
+        pr_noise = (1.0 - pr_random_blend) * pr_noise + pr_random_blend * pr_random
+        pr_std = pr_noise.std(dim=(2, 3), keepdim=True)
+        pr_noise = pr_noise / (pr_std + 1e-6)
+
     if t2m_random_only:
         t2m_noise = torch.randn((vB * E, 1, H, W), device=device)
     else:
@@ -169,7 +177,7 @@ def generate_dynamic_multimodal_noise_multi(
             use_lhs=use_lhs,
         )
 
-    if use_lhs:
+    if use_lhs and orthogonalize_lhs:
         pr_noise = noise_utils.orthogonalize_noise_batch(pr_noise, vB, E)
         t2m_noise = noise_utils.orthogonalize_noise_batch(t2m_noise, vB, E)
 
