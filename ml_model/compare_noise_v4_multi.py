@@ -408,10 +408,11 @@ def main():
     def noise_multimodal_dynamic_lhs(vB, E, H, W, b, d):
         """
         LHS version: run noise_utils for each channel independently, concat.
+        PR uses precipitation EOF bases, T2M uses temperature EOF bases.
         """
         import noise_utils
         ch0 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
-        ch1 = torch.randn((vB * E, 1, H, W), device=d)
+        ch1 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, t2m_mjo_bases, t2m_nao_bases, nao_lookup, t2m_enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
         return torch.cat([ch0, ch1], dim=1)  # [vB*E, 2, H, W]
     
     # ─── Build Strategy List ───
