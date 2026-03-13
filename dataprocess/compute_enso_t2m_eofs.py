@@ -154,7 +154,7 @@ def main(args):
         for s_idx, init_date in enumerate(init_dates):
             for lead_idx in range(4):
                 try:
-                    t2m = ds[t2m_var].isel(S=s_idx, L=lead_idx).values
+                    t2m = ds[t2m_var].isel(S=s_idx, L=lead_idx).values.T
                     if np.all(np.isnan(t2m)):
                         continue
                     t2m = np.nan_to_num(t2m, nan=0.0)
@@ -258,7 +258,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess")
     parser.add_argument("--start_year", type=int, default=1999)
-    parser.add_argument("--end_year", type=int, default=2020)
+    parser.add_argument("--end_year", type=int, default=2021)
     parser.add_argument("--n_eofs", type=int, default=30)
     args = parser.parse_args()
     main(args)
