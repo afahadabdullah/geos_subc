@@ -404,13 +404,9 @@ def main():
     # ─── Build Strategy List ───
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",      noise_pure,                  False, False)
+        ("1. Pure Random",      noise_pure,                  False, False),
+        ("2. EOF Cent(LHS)",    noise_multimodal_dynamic_lhs, True,  False),
     ]
-    
-    if nao_bases is not None or enso_bases is not None:
-        strategies.append(("2. Dynamic MM",     noise_multimodal_dynamic,      False, False))
-        strategies.append(("3. EOF Cent(LHS)",  noise_multimodal_dynamic_lhs,  False, False))
-        strategies.append(("4. DynMM+CondP",    noise_multimodal_dynamic,      False, True))
     
     n_ml = len(strategies)
     
