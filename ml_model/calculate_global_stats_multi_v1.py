@@ -6,7 +6,7 @@ import argparse
 import gc
 
 # Using dataset_flow directly since that's what train_flow_v6.py uses
-from dataset_flow import S2SHybridDataset
+from dataset_flow_multi import S2SHybridDataset
 
 def calculate_global_stats(data_root, out_path="v1_multi_global_stats.pt", batch_size=32):
     # Initialize the dataset with normalize=False so we get the pure physical arrays

@@ -28,7 +28,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
 from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
-from dataset_flow import S2SHybridDataset
+from dataset_flow_multi import S2SHybridDataset
 from train_flow_multiv1 import compute_crps, compute_rmse
 
 # ─── Index Parsers (same as v4) ───
