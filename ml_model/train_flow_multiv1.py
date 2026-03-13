@@ -300,9 +300,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         ch0_noise = noise_utils.generate_dynamic_multimodal_noise(
             batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
         )
-        ch1_noise = noise_utils.generate_dynamic_multimodal_noise(
-            batch, num_ensemble, device, t2m_eof_bases, t2m_nao_bases, nao_lookup, t2m_enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
-        )
+        ch1_noise = torch.randn((vB * num_ensemble, 1, H, W), device=device)
         noise_expanded = torch.cat([ch0_noise, ch1_noise], dim=1)  # [vB * E, 2, H, W]
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
