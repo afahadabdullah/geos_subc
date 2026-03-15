@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 Multi-Variate Noise Strategy Comparison (v4-multi)
-====================================================
-Direct adaptation of compare_noise_v4.py for the 2-channel (PR + T2M) model.
-Uses the SAME noise_utils.py (1-channel) by running each EOF pipeline
-independently for PR and T2M, then concatenating.
+==================================================
+Comparison script for the 2-channel (PR + T2M) flow model using:
+  0. GEOS baseline
+  1. Pure random noise
+  2. EOF(LHS)+Var
+  3. MJO EOF(95%)+Iso(5%)+Var
 
-Usage:
-  python compare_noise_v4_multi.py --output_dir ml_output_flowmulti --year 2021
+Uses best_flow_ckpt.pt by default.
 """
 
 import torch
@@ -345,15 +346,21 @@ def main():
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
     
-    def _get_mjo_eof_1ch(vB, E, H, W, b, d):
-        """v4's _get_mjo_eof — returns [vB*E, 1, H, W]."""
+    def _get_mjo_eof_1ch(eof_bases, vB, E, H, W, b, d):
+        """Sample one-channel MJO EOF noise using the variable-specific EOF basis."""
+        noise = torch.zeros((vB * E, 1, H, W), device=d)
         mjo = b.get('mjo_phase', torch.zeros(vB, dtype=torch.long))
-        if isinstance(mjo, torch.Tensor): mjo = mjo.clone().detach()
-        else: mjo = torch.tensor(mjo)
-        lead = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
-        # flow_matcher.eof_sample returns [vB*E, 2, H, W] now, take only ch 0
-        eof_2ch = flow_matcher.eof_sample(mjo_bases, mjo, vB*E, H, W, lead_ids=lead)
-        return eof_2ch[:, 0:1, :, :]  # [vB*E, 1, H, W]
+        if isinstance(mjo, torch.Tensor):
+            mjo = mjo.clone().detach()
+        else:
+            mjo = torch.tensor(mjo)
+        leads = b['lead_idx'].clone().detach() if isinstance(b['lead_idx'], torch.Tensor) else torch.tensor(b['lead_idx'])
+        for i in range(vB * E):
+            b_idx = i // E
+            phase = int(mjo[b_idx])
+            lead = int(leads[b_idx])
+            noise[i, 0] = sample_from_eof_basis(eof_bases, phase, lead, d, H, W)
+        return noise
     
     def _get_nao_eof_1ch(vB, E, H, W, b, d):
         """v4's _get_nao_eof — returns [vB*E, 1, H, W]."""
@@ -392,7 +399,7 @@ def main():
         # Run the ENTIRE v4 blend independently for each channel
         channels = []
         for _ch in range(2):
-            mjo_noise = _get_mjo_eof_1ch(vB, E, H, W, b, d)
+            mjo_noise = _get_mjo_eof_1ch(mjo_bases, vB, E, H, W, b, d)
             pure_noise = torch.randn((vB*E, 1, H, W), device=d)
             
             nao_noise = _get_nao_eof_1ch(vB, E, H, W, b, d) if (nao_bases is not None and nao_lookup is not None) else torch.randn((vB*E, 1, H, W), device=d)
@@ -448,29 +455,29 @@ def main():
         
         return torch.cat([ch0, ch1], dim=1)  # [vB*E, 2, H, W]
         
-    def noise_multimodal_dynamic_lhs_pr_only(vB, E, H, W, b, d):
+    def noise_mjo_eof_95_iso_5(vB, E, H, W, b, d):
         """
-        Exact replication of Epoch 187 validation state:
-        PR uses EOF LHS noise. T2M uses pure Random Gaussian noise.
+        MJO-only EOF blend modeled after compare_noise.py:
+        95% variable-specific MJO EOF + 5% isotropic noise, normalized per member.
         """
-        import noise_utils
-        ch0 = noise_utils.generate_dynamic_multimodal_noise(b, E, d, mjo_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, args.year, use_lhs=True)
-        ch0 = noise_utils.orthogonalize_noise_batch(ch0, vB, E)
-        
-        ch1 = torch.randn((vB*E, 1, H, W), device=d)
-        ch1 = noise_utils.orthogonalize_noise_batch(ch1, vB, E) # Even random noise is often orthogonalized for cleaner ensemble spread
-        
-        return torch.cat([ch0, ch1], dim=1)  # [vB*E, 2, H, W]
+        pr_pure = torch.randn((vB * E, 1, H, W), device=d)
+        pr_eof = _get_mjo_eof_1ch(mjo_bases, vB, E, H, W, b, d)
+        pr_blend = 0.95 * pr_eof + 0.05 * pr_pure
+        pr_blend = pr_blend / (pr_blend.std(dim=(2, 3), keepdim=True) + 1e-6)
+
+        t2m_pure = torch.randn((vB * E, 1, H, W), device=d)
+        t2m_eof = _get_mjo_eof_1ch(t2m_mjo_bases, vB, E, H, W, b, d)
+        t2m_blend = 0.95 * t2m_eof + 0.05 * t2m_pure
+        t2m_blend = t2m_blend / (t2m_blend.std(dim=(2, 3), keepdim=True) + 1e-6)
+
+        return torch.cat([pr_blend, t2m_blend], dim=1)
     
     # ─── Build Strategy List ───
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
-    # NOTE: v4 single-channel uses use_var_head=True for EOF LHS — the variance head
-    # scales structured noise by the model's learned spatial uncertainty pattern.
     strategies = [
-        ("1. Pure Random",      noise_pure,                  False, False),
-        ("2. EOF(LHS)+Var",     noise_multimodal_dynamic_lhs, True,  False),
-        ("3. EOF(LHS) noVar",   noise_multimodal_dynamic_lhs, False, False),
-        ("4. EOF PR + Rnd T2M", noise_multimodal_dynamic_lhs_pr_only, True, False),
+        ("1. Pure Random",             noise_pure,                  False, False),
+        ("2. EOF(LHS)+Var",            noise_multimodal_dynamic_lhs, True,  False),
+        ("3. MJO EOF95 + Iso5 + Var",  noise_mjo_eof_95_iso_5,     True,  False),
     ]
     
     n_ml = len(strategies)
