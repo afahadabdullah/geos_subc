@@ -322,7 +322,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
-        mode_tag = "pr_eof_t2m_random" if use_eof_lhs_noise else "pure_random"
+        mode_tag = "pr_t2m_eof_lhs" if use_eof_lhs_noise else "pure_random"
         cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
         cache_hit = False
 
@@ -348,7 +348,6 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     mjo_df=mjo_df,
                     year=current_year,
                     use_lhs=True,
-                    t2m_random_only=True,
                     orthogonalize_lhs=True,
                 )
             else:
@@ -359,21 +358,18 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
-        variance_channels = (True, False) if (use_flow_variance and use_eof_lhs_noise) else None
-
         # Single parallel ODE solve for the entire validation batch and ensemble
         p_x1_expanded = flow_matcher.euler_solve(
             unwrapped_model, noise_expanded, fx_cond_expanded, 
             num_steps=num_steps,
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
-            variance_channels=variance_channels,
         )
 
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
             import noise_utils_multi
 
-            mode_label = "PR EOF-LHS + Var / T2M Random + noVar" if use_eof_lhs_noise else "Pure Random"
+            mode_label = "PR EOF-LHS + Var / T2M EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
             print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
             noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
