@@ -224,7 +224,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       use_flow_variance=False, eof_bases=None,
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
                       t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
-                      use_eof_lhs_noise=False):
+                      use_eof_lhs_noise=False, validation_noise_cache=None,
+                      print_validation_noise_diag=False):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -258,6 +259,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     total_geos_crps_t2m = 0.0
     total_geos_rmse_t2m = 0.0
     count = 0
+    did_print_noise_diag = False
     
     # We will only save/return the tensors for the first batch (idx 0) so the plotting remains identical
     saved_tensors = {}
@@ -318,29 +320,41 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
         
-        if use_eof_lhs_noise:
-            import noise_utils_multi
+        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        current_month = int(batch['month'][0].item())
+        mode_tag = "eof_lhs" if use_eof_lhs_noise else "pure_random"
+        cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
+        cache_hit = False
 
-            current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
-            noise_expanded = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
-                batch=batch,
-                E=num_ensemble,
-                device=device,
-                pr_mjo_bases=eof_bases,
-                pr_nao_bases=nao_bases,
-                pr_enso_bases=enso_bases,
-                t2m_mjo_bases=t2m_eof_bases,
-                t2m_nao_bases=t2m_nao_bases,
-                t2m_enso_bases=t2m_enso_bases,
-                nao_lookup=nao_lookup,
-                oni_lookup=oni_lookup,
-                mjo_df=mjo_df,
-                year=current_year,
-                use_lhs=True,
-                orthogonalize_lhs=True,
-            )
+        if validation_noise_cache is not None and cache_key in validation_noise_cache:
+            noise_expanded = validation_noise_cache[cache_key].to(device)
+            cache_hit = True
         else:
-            noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
+            if use_eof_lhs_noise:
+                import noise_utils_multi
+
+                noise_expanded = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                    batch=batch,
+                    E=num_ensemble,
+                    device=device,
+                    pr_mjo_bases=eof_bases,
+                    pr_nao_bases=nao_bases,
+                    pr_enso_bases=enso_bases,
+                    t2m_mjo_bases=t2m_eof_bases,
+                    t2m_nao_bases=t2m_nao_bases,
+                    t2m_enso_bases=t2m_enso_bases,
+                    nao_lookup=nao_lookup,
+                    oni_lookup=oni_lookup,
+                    mjo_df=mjo_df,
+                    year=current_year,
+                    use_lhs=True,
+                    orthogonalize_lhs=True,
+                )
+            else:
+                noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
+
+            if validation_noise_cache is not None:
+                validation_noise_cache[cache_key] = noise_expanded.detach().cpu()
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
@@ -349,6 +363,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             unwrapped_model, noise_expanded, fx_cond_expanded, 
             num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_flow_variance
         )
+
+        if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
+            import noise_utils_multi
+
+            mode_label = "EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
+            source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
+            print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
+            noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
+            noise_utils_multi.print_noise_channel_stats(p_x1_expanded.float(), prefix="Val ODE Output")
+            did_print_noise_diag = True
         
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
 
@@ -723,6 +747,8 @@ def train(args, accelerator):
         
     if accelerator.is_main_process and eof_bases is not None:
         print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
+
+    validation_noise_cache = {}
     
     start_epoch = 1
     loaded_checkpoint_epoch = 0
@@ -872,6 +898,8 @@ def train(args, accelerator):
             is_test=True, is_fast_recon=False,
             use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
             use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
+            validation_noise_cache=validation_noise_cache,
+            print_validation_noise_diag=True,
             cached_geos_crps=None, cached_geos_rmse=None,
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
@@ -1255,6 +1283,8 @@ def train(args, accelerator):
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=use_flow_variance,
                 use_eof_lhs_noise=is_variance_phase,
+                validation_noise_cache=validation_noise_cache,
+                print_validation_noise_diag=True,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
@@ -1408,6 +1438,8 @@ def train(args, accelerator):
                             is_test=False, is_fast_recon=True,
                             use_flow_variance=is_variance_phase,
                             use_eof_lhs_noise=is_variance_phase,
+                            validation_noise_cache=validation_noise_cache,
+                            print_validation_noise_diag=False,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
                             t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
