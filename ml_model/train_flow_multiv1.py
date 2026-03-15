@@ -289,8 +289,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 10 ensemble members. Full validation: 10 members.
-        num_ensemble = 10
+        # Fast validation: 15 ensemble members. Full validation: 15 members.
+        num_ensemble = 15
         ensemble_preds_precip = [] # Will be [num_ensemble, num_inits, 4, H, W]
         ensemble_preds_t2m = []
 
@@ -322,7 +322,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
-        mode_tag = "eof_lhs" if use_eof_lhs_noise else "pure_random"
+        mode_tag = "pr_eof_t2m_random" if use_eof_lhs_noise else "pure_random"
         cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
         cache_hit = False
 
@@ -348,6 +348,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     mjo_df=mjo_df,
                     year=current_year,
                     use_lhs=True,
+                    t2m_random_only=True,
                     orthogonalize_lhs=True,
                 )
             else:
@@ -367,7 +368,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
             import noise_utils_multi
 
-            mode_label = "EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
+            mode_label = "PR EOF-LHS + Var / T2M Random" if use_eof_lhs_noise else "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
             print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
             noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
@@ -1234,7 +1235,7 @@ def train(args, accelerator):
         #   Epoch 5-19:  Every 5 epochs
         #   Epoch 20-69: Every 3 epochs
         #   Epoch 70+:   Every epoch
-        # Phase 2 (epoch 101+): CRPS-based validation (10 ens, 10 steps)
+        # CRPS-based validation (15 ens, 10 steps)
         #   Every epoch: run_val_inference, periodic ckpt every 5 epochs
         
         use_crps_phase = (epoch > 100)
@@ -1269,12 +1270,12 @@ def train(args, accelerator):
 
         if accelerator.is_main_process:
             if use_crps_phase:
-                print(f"\n⌛ Epoch {epoch} complete. Starting CRPS Validation (10 ens, 10 steps)...")
+                print(f"\n⌛ Epoch {epoch} complete. Starting CRPS Validation (15 ens, 10 steps)...")
             else:
                 print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
         # ============================================================
-        #  PHASE 2 (epoch > 100): CRPS-based validation
+        #  CRPS-based validation
         # ============================================================
         if use_crps_phase:
             use_flow_variance = is_variance_phase
