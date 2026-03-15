@@ -177,7 +177,8 @@ class CustomFlowMatcher:
         return x_t, v_target
 
     @torch.no_grad()
-    def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False):
+    def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False,
+                    variance_channels=None):
         """
         Inference routine using explicit Euler integration.
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
@@ -185,6 +186,8 @@ class CustomFlowMatcher:
         lead_idx: integer or [B] tensor indicating which week head to use.
         apply_flow_variance: If True, queries the model's var_head at t=0 and 
                              scales the initial noise by sqrt(var_pred).
+        variance_channels: Optional iterable of booleans with length equal to channel count.
+                           If provided, apply variance scaling only to selected channels.
         """
         if apply_flow_variance:
             # Query variance at t=0
@@ -195,8 +198,19 @@ class CustomFlowMatcher:
             # Clamp to prevent runaway ensemble divergence or collapse
             # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
             std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
+
+            if variance_channels is not None:
+                channel_mask = torch.as_tensor(
+                    variance_channels, device=std_pred.device, dtype=torch.bool
+                ).view(1, -1, 1, 1)
+                if channel_mask.shape[1] != std_pred.shape[1]:
+                    raise ValueError(
+                        f"variance_channels length {channel_mask.shape[1]} does not match "
+                        f"model channel count {std_pred.shape[1]}"
+                    )
+                std_pred = torch.where(channel_mask, std_pred, torch.ones_like(std_pred))
             
-            # Flow-Dependent scaling of initial condition (both PR and T2M channels)
+            # Flow-dependent scaling of the initial condition. Unselected channels keep unit scale.
             x_t = noise * std_pred
         else:
             x_t = noise.clone()
@@ -217,4 +231,3 @@ class CustomFlowMatcher:
             x_t = x_t + v_pred * dt
             
         return x_t  # This is the estimated x_1 (Data)
-
