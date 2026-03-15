@@ -17,6 +17,4 @@ stats_file: v1_multi_global_stats.pt
 
 reset_validation_history: True
 force_variance_phase: False
-variance_phase_epoch: 240
 variance_phase_lr: 1e-4
-variance_loss_weight: 0.1

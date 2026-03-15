@@ -598,11 +598,8 @@ def train(args, accelerator):
     geos_min = global_bounds["geos_pr_raw"]["min"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_pr_raw"]["max"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["max"]
 
-    variance_phase_epoch = int(config.get("variance_phase_epoch", 240))
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
-    variance_loss_weight = float(config.get("variance_loss_weight", 0.1))
     force_variance_phase = bool(config.get("force_variance_phase", False))
-    use_late_variance_phase = variance_phase_epoch > 0 and not force_variance_phase
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -610,11 +607,9 @@ def train(args, accelerator):
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
         if force_variance_phase:
-            print(f"   [Variance Phase]     : Forced ON from startup (lr={variance_phase_lr:.2e})")
-        elif use_late_variance_phase:
-            print(f"   [Variance Phase]     : Enabled at epoch {variance_phase_epoch} (lr={variance_phase_lr:.2e})")
+            print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
-            print(f"   [Variance Phase]     : Disabled (joint loss, weight={variance_loss_weight:.2f})")
+            print(f"   [Training Mode]      : Velocity-only")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -761,13 +756,12 @@ def train(args, accelerator):
             
             if not args.test:
                 start_epoch = loaded_checkpoint_epoch + 1
-                resume_into_variance_phase = force_variance_phase or (use_late_variance_phase and start_epoch >= variance_phase_epoch)
+                resume_into_variance_phase = force_variance_phase
                 
                 if resume_into_variance_phase:
                     if accelerator.is_main_process:
                         print(
-                            f"   ℹ️ Variance-phase resume detected "
-                            f"({'forced by config' if force_variance_phase else f'epoch {start_epoch} >= {variance_phase_epoch}'}). "
+                            "   ℹ️ Variance-only resume detected (forced by config). "
                             "Skipping optimizer state load and rebuilding a var-heads optimizer."
                         )
                 else:
@@ -827,7 +821,7 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print(f"\n🚀 Starting fresh training from Epoch 0\n")
 
-    start_in_variance_phase = force_variance_phase or (use_late_variance_phase and start_epoch >= variance_phase_epoch)
+    start_in_variance_phase = force_variance_phase
 
     if not args.test and start_in_variance_phase:
         if accelerator.is_main_process:
@@ -835,24 +829,6 @@ def train(args, accelerator):
                 print("🔒 Force-enabling variance phase from config. Freezing UNet + mean heads.")
                 if loaded_checkpoint_epoch == 0:
                     print("   ⚠️ No checkpoint was loaded. This will train only var_heads from scratch.")
-            else:
-                print(
-                    f"🔒 Resuming in variance phase (epoch {start_epoch} >= {variance_phase_epoch}). "
-                    "Freezing UNet + mean heads."
-                )
-
-            milestone_path = os.path.join(output_dir, f"unet_converged_epoch{variance_phase_epoch - 1}.pt")
-            if not force_variance_phase and not os.path.exists(milestone_path):
-                unwrapped_save = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': variance_phase_epoch - 1,
-                    'model': unwrapped_save.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'top_models': top_models,
-                    'is_variance_phase': False,
-                    'variance_phase_epoch': variance_phase_epoch,
-                }, milestone_path)
-                print(f"   💾 Saved milestone checkpoint: {milestone_path}")
 
         unwrapped = accelerator.unwrap_model(model)
         for param in unwrapped.unet.parameters():
@@ -882,12 +858,7 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=(
-                force_variance_phase
-                or loaded_is_variance_phase
-                or (not use_late_variance_phase)
-                or (loaded_checkpoint_epoch >= variance_phase_epoch)
-            ),
+            use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
             cached_geos_crps=None, cached_geos_rmse=None,
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
@@ -1122,42 +1093,9 @@ def train(args, accelerator):
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
 
-        if use_late_variance_phase and epoch == variance_phase_epoch and not is_variance_phase:
-            if accelerator.is_main_process:
-                unwrapped = accelerator.unwrap_model(model)
-                milestone_path = os.path.join(output_dir, f"unet_converged_epoch{epoch - 1}.pt")
-                torch.save({
-                    'epoch': epoch - 1,
-                    'model': unwrapped.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'top_models': top_models,
-                    'is_variance_phase': False,
-                    'variance_phase_epoch': variance_phase_epoch,
-                }, milestone_path)
-                print(f"\n🔒 Variance phase start at epoch {epoch}: saved milestone checkpoint {milestone_path}")
-                print("   Freezing UNet backbone + mean heads; training only var_heads from here.")
-
-            unwrapped = accelerator.unwrap_model(model)
-            for param in unwrapped.unet.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.heads.parameters():
-                param.requires_grad_(False)
-            for param in unwrapped.var_heads.parameters():
-                param.requires_grad_(True)
-
-            optimizer = torch.optim.AdamW(
-                [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-                lr=variance_phase_lr
-            )
-            model, optimizer, loader, val_loader = accelerator.prepare(
-                model, optimizer, loader, val_loader
-            )
-            is_variance_phase = True
-        
         model.train()
         train_loss = 0.0
-        phase_label = "Phase2-Var" if is_variance_phase else "Phase1-Vel"
+        phase_label = "VarOnly" if is_variance_phase else "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             # Conditionals
@@ -1217,10 +1155,8 @@ def train(args, accelerator):
 
             if is_variance_phase:
                 loss = loss_var
-            elif use_late_variance_phase:
-                loss = loss_vel
             else:
-                loss = (1.0 - variance_loss_weight) * loss_vel + variance_loss_weight * loss_var
+                loss = loss_vel
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -1247,7 +1183,6 @@ def train(args, accelerator):
                 'best_val_loss': best_val_loss,
                 'top_models': top_models,
                 'is_variance_phase': is_variance_phase,
-                'variance_phase_epoch': variance_phase_epoch,
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
@@ -1300,7 +1235,7 @@ def train(args, accelerator):
         #  PHASE 2 (epoch > 100): CRPS-based validation
         # ============================================================
         if use_crps_phase:
-            use_flow_variance = is_variance_phase or (not use_late_variance_phase)
+            use_flow_variance = is_variance_phase
             val_result = run_val_inference(
                 epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
@@ -1332,7 +1267,6 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'is_variance_phase': is_variance_phase,
-                        'variance_phase_epoch': variance_phase_epoch,
                     }
                     torch.save(best_ckpt, new_best_path)
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
@@ -1361,7 +1295,6 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'is_variance_phase': is_variance_phase,
-                        'variance_phase_epoch': variance_phase_epoch,
                     },
                                os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt"))
                     print(f"💾 Periodic checkpoint: periodic_ckpt_epoch_{epoch}.pt")
@@ -1372,7 +1305,6 @@ def train(args, accelerator):
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
                     'is_variance_phase': is_variance_phase,
-                    'variance_phase_epoch': variance_phase_epoch,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f: csv.writer(f).writerow([epoch, avg_train_loss, current_val_metric, val_result['avg_crps_pr']])
@@ -1417,10 +1349,8 @@ def train(args, accelerator):
 
                     if is_variance_phase:
                         loss_val = loss_var
-                    elif use_late_variance_phase:
-                        loss_val = loss_vel
                     else:
-                        loss_val = (1.0 - variance_loss_weight) * loss_vel + variance_loss_weight * loss_var
+                        loss_val = loss_vel
                     val_loss_total += loss_val.item()
                     val_steps += 1
         
@@ -1444,7 +1374,6 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'is_variance_phase': is_variance_phase,
-                        'variance_phase_epoch': variance_phase_epoch,
                     }
                     torch.save(best_ckpt, new_best_path)
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
@@ -1462,7 +1391,7 @@ def train(args, accelerator):
                             epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                             is_test=False, is_fast_recon=True,
-                            use_flow_variance=is_variance_phase or (not use_late_variance_phase),
+                            use_flow_variance=is_variance_phase,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
                         )
@@ -1485,7 +1414,6 @@ def train(args, accelerator):
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
                     'is_variance_phase': is_variance_phase,
-                    'variance_phase_epoch': variance_phase_epoch,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f:
