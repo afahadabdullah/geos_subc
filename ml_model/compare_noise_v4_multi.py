@@ -6,7 +6,7 @@ Comparison script for the 2-channel (PR + T2M) flow model using:
   0. GEOS baseline
   1. Pure random noise
   2. EOF(LHS)+Var
-  3. MJO EOF(95%)+Iso(5%)+Var
+  3. MJO EOF(98%)+Iso(2%)+Var
 
 Uses best_flow_ckpt.pt by default.
 """
@@ -455,19 +455,19 @@ def main():
         
         return torch.cat([ch0, ch1], dim=1)  # [vB*E, 2, H, W]
         
-    def noise_mjo_eof_95_iso_5(vB, E, H, W, b, d):
+    def noise_mjo_eof_98_iso_2(vB, E, H, W, b, d):
         """
         MJO-only EOF blend modeled after compare_noise.py:
-        95% variable-specific MJO EOF + 5% isotropic noise, normalized per member.
+        98% variable-specific MJO EOF + 2% isotropic noise, normalized per member.
         """
         pr_pure = torch.randn((vB * E, 1, H, W), device=d)
         pr_eof = _get_mjo_eof_1ch(mjo_bases, vB, E, H, W, b, d)
-        pr_blend = 0.95 * pr_eof + 0.05 * pr_pure
+        pr_blend = 0.98 * pr_eof + 0.02 * pr_pure
         pr_blend = pr_blend / (pr_blend.std(dim=(2, 3), keepdim=True) + 1e-6)
 
         t2m_pure = torch.randn((vB * E, 1, H, W), device=d)
         t2m_eof = _get_mjo_eof_1ch(t2m_mjo_bases, vB, E, H, W, b, d)
-        t2m_blend = 0.95 * t2m_eof + 0.05 * t2m_pure
+        t2m_blend = 0.98 * t2m_eof + 0.02 * t2m_pure
         t2m_blend = t2m_blend / (t2m_blend.std(dim=(2, 3), keepdim=True) + 1e-6)
 
         return torch.cat([pr_blend, t2m_blend], dim=1)
@@ -477,7 +477,7 @@ def main():
     strategies = [
         ("1. Pure Random",             noise_pure,                  False, False),
         ("2. EOF(LHS)+Var",            noise_multimodal_dynamic_lhs, True,  False),
-        ("3. MJO EOF95 + Iso5 + Var",  noise_mjo_eof_95_iso_5,     True,  False),
+        ("3. MJO EOF98 + Iso2 + Var",  noise_mjo_eof_98_iso_2,     True,  False),
     ]
     
     n_ml = len(strategies)
