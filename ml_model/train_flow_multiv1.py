@@ -317,18 +317,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
         
-        # --- Generate LHS EOF Noise instead of Pure Random ---
-        # Get the year (default to 2021 if not in batch) for indices
-        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
-        
-        import noise_utils
-        ch0_noise = noise_utils.generate_dynamic_multimodal_noise(
-            batch, num_ensemble, device, eof_bases, nao_bases, nao_lookup, enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
-        )
-        ch1_noise = noise_utils.generate_dynamic_multimodal_noise(
-            batch, num_ensemble, device, t2m_eof_bases, t2m_nao_bases, nao_lookup, t2m_enso_bases, oni_lookup, mjo_df, flow_matcher, current_year, use_lhs=True
-        )
-        noise_expanded = torch.cat([ch0_noise, ch1_noise], dim=1)  # [vB * E, 2, H, W]
+        # Validation now uses pure Gaussian noise for both PR and T2M.
+        noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
@@ -710,7 +700,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for dynamic validation noise.")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (validation now uses pure random noise).")
     
     start_epoch = 1
     loaded_checkpoint_epoch = 0
