@@ -35,6 +35,11 @@ git pull
 # Ensure output directory exists
 mkdir -p ml_output_flowmulti
 
+CONFIG_PATH="ml_model/config_flow_multiv1.yaml"
+CKPT_FILE="ml_output_flowmulti/latest_flow_ckpt.pt"
+MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))" 2>/dev/null || echo "500")
+echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
+
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/v1_multi_global_stats.pt"
 if [ ! -f "$STATS_PATH" ]; then
@@ -44,8 +49,17 @@ else
     echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
 fi
 
+if [ -f "$CKPT_FILE" ]; then
+    CURRENT_EPOCH=$(python -c "import torch; ckpt=torch.load('$CKPT_FILE', map_location='cpu', weights_only=True); print(int(ckpt.get('epoch', -1)))" 2>/dev/null || echo "-1")
+    if [ "$CURRENT_EPOCH" -ge "$MAX_EPOCHS" ]; then
+        echo "✅ Checkpoint already at Epoch $CURRENT_EPOCH / $MAX_EPOCHS. Skipping training and resubmission."
+        echo "🏁 Job finished at $(date)"
+        exit 0
+    fi
+fi
+
 echo "🔥 Launching Flow Matching Multi-Target Training (PR + T2M)..."
-accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_multiv1.py --config ml_model/config_flow_multiv1.yaml \
+accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_multiv1.py --config "$CONFIG_PATH" \
     --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
@@ -53,9 +67,6 @@ echo "🔄 Checking if we need to resubmit..."
 echo "📍 Current Host: $(hostname)"
 echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
 echo "📍 Working Dir: $PWD"
-
-CKPT_FILE="ml_output_flowmulti/latest_flow_ckpt.pt"
-MAX_EPOCHS=500
 
 if [ -f "$CKPT_FILE" ]; then
     # Safely get current epoch from checkpoint

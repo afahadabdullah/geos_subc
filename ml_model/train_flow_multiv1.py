@@ -865,6 +865,14 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print(f"\n🚀 Starting fresh training from Epoch 0\n")
 
+    if not args.test and start_epoch > epochs:
+        if accelerator.is_main_process:
+            print(
+                f"✅ Checkpoint already reached configured max epochs "
+                f"({start_epoch - 1} / {epochs}). Exiting without training."
+            )
+        return
+
     start_in_variance_phase = force_variance_phase
 
     if not args.test and start_in_variance_phase:
