@@ -189,9 +189,21 @@ def main():
     
     flow_matcher = CustomFlowMatcher(device=device)
     
-    eof_bases_path = os.path.join(os.path.dirname(__file__), "mjo_eof_bases.pt")
+    data_dir = config["data_dir"]
+    ml_dir = os.path.dirname(__file__)
+    eof_dir = os.path.join(data_dir, "eof")
+
+    def resolve_eof_path(filename):
+        for base_dir in (eof_dir, data_dir, ml_dir):
+            candidate = os.path.join(base_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(eof_dir, filename)
+
+    eof_bases_path = resolve_eof_path("mjo_eof_bases.pt")
     eof_data = torch.load(eof_bases_path, map_location='cpu', weights_only=False)
     eof_bases = eof_data['eof_bases']
+    print(f"  ✅ MJO EOFs loaded: {len(eof_bases)} categories from {eof_bases_path}")
     
     # Noise Functions
     def noise_pure(vB, E, H, W, b, d): return torch.randn((vB*E, 1, H, W), device=d)

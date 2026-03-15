@@ -337,36 +337,44 @@ def main():
     # ─── Load All EOF Bases ───
     ml_dir = os.path.dirname(__file__)
     data_dir = config["data_dir"]
+    eof_dir = os.path.join(data_dir, "eof")
+
+    def resolve_eof_path(filename):
+        for base_dir in (eof_dir, data_dir, ml_dir):
+            candidate = os.path.join(base_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(eof_dir, filename)
     
     # MJO EOFs (required)
-    mjo_eof_path = os.path.join(ml_dir, "mjo_eof_bases.pt")
+    mjo_eof_path = resolve_eof_path("mjo_eof_bases.pt")
     mjo_data = torch.load(mjo_eof_path, map_location='cpu', weights_only=False)
     mjo_bases = mjo_data['eof_bases']
-    print(f"  ✅ MJO EOFs loaded: {len(mjo_bases)} categories")
+    print(f"  ✅ MJO EOFs loaded: {len(mjo_bases)} categories from {mjo_eof_path}")
     
     # NAO EOFs (optional)
     nao_bases = None
     nao_lookup = None
-    nao_eof_path = os.path.join(ml_dir, "nao_eof_bases.pt")
+    nao_eof_path = resolve_eof_path("nao_eof_bases.pt")
     nao_idx_path = os.path.join(data_dir, "norm.daily.nao.index.b500101.current.ascii")
     if os.path.exists(nao_eof_path) and os.path.exists(nao_idx_path):
         nao_data = torch.load(nao_eof_path, map_location='cpu', weights_only=False)
         nao_bases = nao_data['eof_bases']
         nao_lookup = parse_nao_index(nao_idx_path)
-        print(f"  ✅ NAO EOFs loaded: {len(nao_bases)} categories")
+        print(f"  ✅ NAO EOFs loaded: {len(nao_bases)} categories from {nao_eof_path}")
     else:
         print(f"  ⚠️ NAO EOFs not found. Run compute_nao_eofs.py first. Skipping NAO strategies.")
     
     # ENSO EOFs (optional)
     enso_bases = None
     oni_lookup = None
-    enso_eof_path = os.path.join(ml_dir, "enso_eof_bases.pt")
+    enso_eof_path = resolve_eof_path("enso_eof_bases.pt")
     oni_idx_path = os.path.join(data_dir, "oni.ascii.txt")
     if os.path.exists(enso_eof_path) and os.path.exists(oni_idx_path):
         enso_data = torch.load(enso_eof_path, map_location='cpu', weights_only=False)
         enso_bases = enso_data['eof_bases']
         oni_lookup = parse_oni_index(oni_idx_path)
-        print(f"  ✅ ENSO EOFs loaded: {len(enso_bases)} categories")
+        print(f"  ✅ ENSO EOFs loaded: {len(enso_bases)} categories from {enso_eof_path}")
     else:
         print(f"  ⚠️ ENSO EOFs not found. Run compute_enso_eofs.py first. Skipping ENSO strategies.")
     

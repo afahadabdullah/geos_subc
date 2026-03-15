@@ -725,11 +725,15 @@ def train(args, accelerator):
     fixed_val_batch = next(iter(val_loader))
 
     def resolve_eof_path(filename):
-        for base_dir in (config["data_dir"], os.path.dirname(__file__)):
+        for base_dir in (
+            os.path.join(config["data_dir"], "eof"),
+            config["data_dir"],
+            os.path.dirname(__file__),
+        ):
             candidate = os.path.join(base_dir, filename)
             if os.path.exists(candidate):
                 return candidate
-        return os.path.join(config["data_dir"], filename)
+        return os.path.join(config["data_dir"], "eof", filename)
 
     # Load Dynamic Multi-Modal Bases
     eof_bases_path = resolve_eof_path("mjo_eof_bases.pt")

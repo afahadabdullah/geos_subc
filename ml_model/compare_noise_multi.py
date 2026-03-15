@@ -277,13 +277,14 @@ def main():
     # ─── Load All EOF Bases (identical to v4) ───
     ml_dir = os.path.dirname(__file__)
     data_dir = config["data_dir"]
+    eof_dir = os.path.join(data_dir, "eof")
 
     def resolve_eof_path(filename):
-        for base_dir in (data_dir, ml_dir):
+        for base_dir in (eof_dir, data_dir, ml_dir):
             candidate = os.path.join(base_dir, filename)
             if os.path.exists(candidate):
                 return candidate
-        return os.path.join(data_dir, filename)
+        return os.path.join(eof_dir, filename)
     
     mjo_eof_path = resolve_eof_path("mjo_eof_bases.pt")
     mjo_data = torch.load(mjo_eof_path, map_location='cpu', weights_only=False)
