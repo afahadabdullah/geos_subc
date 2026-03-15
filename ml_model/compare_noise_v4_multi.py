@@ -301,48 +301,55 @@ def main():
     # ─── Load All EOF Bases (identical to v4) ───
     ml_dir = os.path.dirname(__file__)
     data_dir = config["data_dir"]
+
+    def resolve_eof_path(filename):
+        for base_dir in (data_dir, ml_dir):
+            candidate = os.path.join(base_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(data_dir, filename)
     
-    mjo_eof_path = os.path.join(ml_dir, "mjo_eof_bases.pt")
+    mjo_eof_path = resolve_eof_path("mjo_eof_bases.pt")
     mjo_data = torch.load(mjo_eof_path, map_location='cpu', weights_only=False)
     mjo_bases = mjo_data['eof_bases']
-    print(f"  ✅ MJO EOFs loaded: {len(mjo_bases)} categories")
+    print(f"  ✅ MJO EOFs loaded: {len(mjo_bases)} categories from {mjo_eof_path}")
     
     nao_bases = None
     nao_lookup = None
-    nao_eof_path = os.path.join(ml_dir, "nao_eof_bases.pt")
+    nao_eof_path = resolve_eof_path("nao_eof_bases.pt")
     nao_idx_path = os.path.join(data_dir, "norm.daily.nao.index.b500101.current.ascii")
     if os.path.exists(nao_eof_path) and os.path.exists(nao_idx_path):
         nao_data = torch.load(nao_eof_path, map_location='cpu', weights_only=False)
         nao_bases = nao_data['eof_bases']
         nao_lookup = parse_nao_index(nao_idx_path)
-        print(f"  ✅ NAO EOFs loaded: {len(nao_bases)} categories")
+        print(f"  ✅ NAO EOFs loaded: {len(nao_bases)} categories from {nao_eof_path}")
     else:
         print(f"  ⚠️ NAO EOFs not found.")
     
     enso_bases = None
     oni_lookup = None
-    enso_eof_path = os.path.join(ml_dir, "enso_eof_bases.pt")
+    enso_eof_path = resolve_eof_path("enso_eof_bases.pt")
     oni_idx_path = os.path.join(data_dir, "oni.ascii.txt")
     if os.path.exists(enso_eof_path) and os.path.exists(oni_idx_path):
         enso_data = torch.load(enso_eof_path, map_location='cpu', weights_only=False)
         enso_bases = enso_data['eof_bases']
         oni_lookup = parse_oni_index(oni_idx_path)
-        print(f"  ✅ ENSO EOFs loaded: {len(enso_bases)} categories")
+        print(f"  ✅ ENSO EOFs loaded: {len(enso_bases)} categories from {enso_eof_path}")
     else:
         print(f"  ⚠️ ENSO EOFs not found.")
         
     # --- Load T2M EOF Bases ---
-    mjo_t2m_eof_path = os.path.join(ml_dir, "mjo_t2m_eof_bases.pt")
+    mjo_t2m_eof_path = resolve_eof_path("mjo_t2m_eof_bases.pt")
     t2m_mjo_bases = torch.load(mjo_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(mjo_t2m_eof_path) else None
 
-    nao_t2m_eof_path = os.path.join(ml_dir, "nao_t2m_eof_bases.pt")
+    nao_t2m_eof_path = resolve_eof_path("nao_t2m_eof_bases.pt")
     t2m_nao_bases = torch.load(nao_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_t2m_eof_path) else None
 
-    enso_t2m_eof_path = os.path.join(ml_dir, "enso_t2m_eof_bases.pt")
+    enso_t2m_eof_path = resolve_eof_path("enso_t2m_eof_bases.pt")
     t2m_enso_bases = torch.load(enso_t2m_eof_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_t2m_eof_path) else None
     
     if t2m_mjo_bases is not None:
-        print(f"  ✅ T2M MJO/NAO/ENSO EOFs loaded.")
+        print(f"  ✅ T2M MJO/NAO/ENSO EOFs loaded from {mjo_t2m_eof_path}, {nao_t2m_eof_path}, {enso_t2m_eof_path}.")
     
     mjo_df = None
     mjo_csv_path = os.path.join(data_dir, "mjo_processed.csv")
