@@ -724,19 +724,26 @@ def train(args, accelerator):
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader))
 
+    def resolve_eof_path(filename):
+        for base_dir in (config["data_dir"], os.path.dirname(__file__)):
+            candidate = os.path.join(base_dir, filename)
+            if os.path.exists(candidate):
+                return candidate
+        return os.path.join(config["data_dir"], filename)
+
     # Load Dynamic Multi-Modal Bases
-    eof_bases_path = os.path.join(config["data_dir"], "mjo_eof_bases.pt")
-    nao_bases_path = os.path.join(config["data_dir"], "nao_eof_bases.pt")
-    enso_bases_path = os.path.join(config["data_dir"], "enso_eof_bases.pt")
+    eof_bases_path = resolve_eof_path("mjo_eof_bases.pt")
+    nao_bases_path = resolve_eof_path("nao_eof_bases.pt")
+    enso_bases_path = resolve_eof_path("enso_eof_bases.pt")
     
     eof_bases = torch.load(eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(eof_bases_path) else None
     nao_bases = torch.load(nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(nao_bases_path) else None
     enso_bases = torch.load(enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(enso_bases_path) else None
 
     # Load T2M Dynamic Multi-Modal Bases
-    t2m_eof_bases_path = os.path.join(config["data_dir"], "mjo_t2m_eof_bases.pt")
-    t2m_nao_bases_path = os.path.join(config["data_dir"], "nao_t2m_eof_bases.pt")
-    t2m_enso_bases_path = os.path.join(config["data_dir"], "enso_t2m_eof_bases.pt")
+    t2m_eof_bases_path = resolve_eof_path("mjo_t2m_eof_bases.pt")
+    t2m_nao_bases_path = resolve_eof_path("nao_t2m_eof_bases.pt")
+    t2m_enso_bases_path = resolve_eof_path("enso_t2m_eof_bases.pt")
     
     t2m_eof_bases = torch.load(t2m_eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_eof_bases_path) else None
     t2m_nao_bases = torch.load(t2m_nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_nao_bases_path) else None
@@ -753,6 +760,8 @@ def train(args, accelerator):
         
     if accelerator.is_main_process and eof_bases is not None:
         print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
+        print(f"   PR EOF files : {eof_bases_path}, {nao_bases_path}, {enso_bases_path}")
+        print(f"   T2M EOF files: {t2m_eof_bases_path}, {t2m_nao_bases_path}, {t2m_enso_bases_path}")
 
     validation_noise_cache = {}
     
