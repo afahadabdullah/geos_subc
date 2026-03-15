@@ -67,6 +67,7 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Denormalize
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, H, W)
     target_sqrt_min, target_sqrt_max = 0.0, 7.071
+    p_x1_batch = torch.clamp(p_x1_batch, min=-1.0, max=1.0)
     week_sqrt = ((p_x1_batch + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
     week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
     

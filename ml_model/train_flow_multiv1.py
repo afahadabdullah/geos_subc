@@ -383,7 +383,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
 
         # Reverse PR (Channel 0)
-        p_x1_pr = p_x1_batch[:, :, 0] # [vB, E, H, W]
+        p_x1_pr = torch.clamp(p_x1_batch[:, :, 0], min=-1.0, max=1.0) # [vB, E, H, W]
         week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0) # [vB, num_ensemble, H, W]
         
