@@ -223,7 +223,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
                       use_flow_variance=False, eof_bases=None,
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
-                      t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None):
+                      t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
+                      use_eof_lhs_noise=False):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -317,8 +318,29 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
         
-        # Validation now uses pure Gaussian noise for both PR and T2M.
-        noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
+        if use_eof_lhs_noise:
+            import noise_utils_multi
+
+            current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
+            noise_expanded = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                batch=batch,
+                E=num_ensemble,
+                device=device,
+                pr_mjo_bases=eof_bases,
+                pr_nao_bases=nao_bases,
+                pr_enso_bases=enso_bases,
+                t2m_mjo_bases=t2m_eof_bases,
+                t2m_nao_bases=t2m_nao_bases,
+                t2m_enso_bases=t2m_enso_bases,
+                nao_lookup=nao_lookup,
+                oni_lookup=oni_lookup,
+                mjo_df=mjo_df,
+                year=current_year,
+                use_lhs=True,
+                orthogonalize_lhs=True,
+            )
+        else:
+            noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
             
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
@@ -700,7 +722,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (validation now uses pure random noise).")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
     
     start_epoch = 1
     loaded_checkpoint_epoch = 0
@@ -849,10 +871,12 @@ def train(args, accelerator):
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
             use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
+            use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
             cached_geos_crps=None, cached_geos_rmse=None,
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
+            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
         )
         t = val_result['tensors']
         
@@ -1230,6 +1254,7 @@ def train(args, accelerator):
                 epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=use_flow_variance,
+                use_eof_lhs_noise=is_variance_phase,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
@@ -1382,8 +1407,10 @@ def train(args, accelerator):
                             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                             is_test=False, is_fast_recon=True,
                             use_flow_variance=is_variance_phase,
+                            use_eof_lhs_noise=is_variance_phase,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df
+                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
