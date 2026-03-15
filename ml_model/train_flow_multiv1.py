@@ -598,7 +598,7 @@ def train(args, accelerator):
     geos_min = global_bounds["geos_pr_raw"]["min"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_pr_raw"]["max"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["max"]
 
-    variance_phase_epoch = int(config.get("variance_phase_epoch", 115))
+    variance_phase_epoch = int(config.get("variance_phase_epoch", 240))
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     variance_loss_weight = float(config.get("variance_loss_weight", 0.1))
     force_variance_phase = bool(config.get("force_variance_phase", False))
@@ -1215,8 +1215,10 @@ def train(args, accelerator):
                 temp_weights=temp_weights_expanded,
             )
 
-            if use_late_variance_phase:
-                loss = loss_var if is_variance_phase else loss_vel
+            if is_variance_phase:
+                loss = loss_var
+            elif use_late_variance_phase:
+                loss = loss_vel
             else:
                 loss = (1.0 - variance_loss_weight) * loss_vel + variance_loss_weight * loss_var
 
@@ -1413,8 +1415,10 @@ def train(args, accelerator):
                         temp_weights=temp_weights,
                     )
 
-                    if use_late_variance_phase:
-                        loss_val = loss_var if is_variance_phase else loss_vel
+                    if is_variance_phase:
+                        loss_val = loss_var
+                    elif use_late_variance_phase:
+                        loss_val = loss_vel
                     else:
                         loss_val = (1.0 - variance_loss_weight) * loss_vel + variance_loss_weight * loss_var
                     val_loss_total += loss_val.item()
