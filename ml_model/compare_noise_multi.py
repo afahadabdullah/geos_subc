@@ -230,7 +230,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-Variate Noise Comparison (multi)")
     parser.add_argument("--output_dir", type=str, default="ml_output_flowmulti")
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--num_ensemble", type=int, default=15)
+    parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
@@ -412,16 +412,13 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Match compare_noise_v4_multi.py so results are comparable to the earlier runs
-    # where EOF-based noise beat pure random.
+    # Match compare_noise_v4_multi.py for the EOF-LHS path:
+    # use_lhs=True with orthogonalized ensemble members.
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",        noise_pure,                           False, False),
-        ("2. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
-        ("3. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
-        ("4. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
-        ("5. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
-        ("6. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
+        ("1. Pure Noise",         noise_pure,                   False, False),
+        ("2. EOF LHS",            noise_multimodal_dynamic_lhs, False, False),
+        ("3. EOF LHS + Var",      noise_multimodal_dynamic_lhs, True,  False),
     ]
     
     n_ml = len(strategies)
