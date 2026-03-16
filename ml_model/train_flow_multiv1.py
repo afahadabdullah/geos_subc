@@ -469,8 +469,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         total_rmse_t2m += b_rmse_t2m * num_inits
         count += num_inits
         
-        # Save only the first batch for visual plotting consistency
-        if b_idx == 0:
+        # Save the first processed validation batch for plotting consistency.
+        # target_batches may skip batch 0 entirely, so guard on emptiness instead.
+        if not saved_tensors:
             true_target_precip_plot = torch.nan_to_num(true_target_precip[0], nan=0.0)
             true_target_t2m_plot = torch.nan_to_num(true_target_t2m[0], nan=280.0)
             ai_residual = full_pred_precip[0] - geos_mean_precip[0]
