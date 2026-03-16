@@ -50,18 +50,30 @@ class FlowMatchingModel(nn.Module):
         self.var_heads = nn.ModuleList([
             nn.Conv2d(HEAD_FEATURES, out_channels, kernel_size=1) for _ in range(4)
         ])
+        self.var_global_heads = nn.ModuleList([
+            nn.Linear(HEAD_FEATURES, out_channels) for _ in range(4)
+        ])
         
         self.out_channels = out_channels
 
-    def forward(self, x_t, x_cond, t, lead_idx=None):
+    def _build_variance_outputs(self, features, head_idx):
+        local_raw = F.softplus(self.var_heads[head_idx](features)).to(features.dtype) + 1e-4
+        pooled = features.mean(dim=(2, 3))
+        global_std = F.softplus(self.var_global_heads[head_idx](pooled)).to(features.dtype).view(-1, self.out_channels, 1, 1) + 1e-4
+        local_mean = local_raw.mean(dim=(2, 3), keepdim=True)
+        local_map = local_raw / (local_mean + 1e-6)
+        std_map = global_std * local_map
+        return std_map, global_std, local_map
+
+    def forward(self, x_t, x_cond, t, lead_idx=None, return_variance_components=False):
         """
         x_t:      [B, out_channels, H, W] - State at time t
-        x_cond:   [B, 35, H, W] - Conditioning variables
+        x_cond:   [B, C_cond, H, W] - Conditioning variables
         t:        [B] or scalar in [0, 1]. Representing continuous flow time.
         lead_idx: [B] tensor with values in {0, 1, 2, 3} indicating forecast week.
                   If None, defaults to head 0 (backward compat).
         """
-        # Spatial concatenation (x_t is [B, 2, H, W], x_cond is [B, 35, H, W] -> [B, 37, H, W])
+        # Spatial concatenation (x_t is [B, 2, H, W], x_cond is [B, C_cond, H, W]).
         x = torch.cat([x_t, x_cond], dim=1)
         
         # Pad to multiple of 16 for 4 down-blocks
@@ -85,21 +97,73 @@ class FlowMatchingModel(nn.Module):
         # Route through dedicated per-week output heads
         if lead_idx is None:
             # Backward compatibility: use head 0
-            return self.heads[0](features), F.softplus(self.var_heads[0](features))
+            mean_out = self.heads[0](features)
+            std_map, global_std, local_map = self._build_variance_outputs(features, 0)
+            if return_variance_components:
+                return mean_out, {"std": std_map, "global": global_std, "local": local_map}
+            return mean_out, std_map
         
         B = features.shape[0]
         output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
-        var_output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        std_output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        global_output = torch.zeros(B, self.out_channels, 1, 1, device=features.device, dtype=features.dtype)
+        local_output = torch.ones(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
         
         for week_idx in range(4):
             mask = (lead_idx == week_idx)
             if mask.any():
                 output[mask] = self.heads[week_idx](features[mask])
-                # Softplus ensures strict positive variance predictions, but usually upcasts to Float32.
-                # We force cast it back to the original mixed-precision format (fp16) to avoid assignment crashes.
-                var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask])).to(features.dtype)
+                std_map, global_std, local_map = self._build_variance_outputs(features[mask], week_idx)
+                std_output[mask] = std_map
+                global_output[mask] = global_std
+                local_output[mask] = local_map
         
-        return output, var_output
+        if return_variance_components:
+            return output, {"std": std_output, "global": global_output, "local": local_output}
+        return output, std_output
+
+
+def load_compatible_model_state(model, state_dict, verbose=False):
+    """Load older checkpoints into a model with expanded conditioning channels."""
+    current_state = model.state_dict()
+    adapted_state = {}
+    migrated = []
+
+    for key, value in state_dict.items():
+        if key not in current_state:
+            continue
+        target = current_state[key]
+        if target.shape == value.shape:
+            adapted_state[key] = value
+            continue
+
+        # Allow old checkpoints with fewer conditioning channels to warm-start the new input conv.
+        if (
+            key == "unet.conv_in.weight" and
+            value.ndim == 4 and target.ndim == 4 and
+            value.shape[0] == target.shape[0] and
+            value.shape[2:] == target.shape[2:] and
+            value.shape[1] < target.shape[1]
+        ):
+            padded = target.clone()
+            padded.zero_()
+            padded[:, :value.shape[1]] = value
+            adapted_state[key] = padded
+            migrated.append((key, tuple(value.shape), tuple(target.shape)))
+            continue
+
+    missing, unexpected = model.load_state_dict(adapted_state, strict=False)
+
+    if verbose:
+        if migrated:
+            for key, old_shape, new_shape in migrated:
+                print(f"   🔄 Migrated {key}: {old_shape} -> {new_shape} (zero-init extra channels)")
+        if missing:
+            print(f"   ℹ️ Missing keys on load: {len(missing)}")
+        if unexpected:
+            print(f"   ℹ️ Unexpected keys ignored: {len(unexpected)}")
+
+    return missing, unexpected
 
 
 class CustomFlowMatcher:
@@ -184,17 +248,15 @@ class CustomFlowMatcher:
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
         noise is x_0 standard normal initialization.
         lead_idx: integer or [B] tensor indicating which week head to use.
-        apply_flow_variance: If True, queries the model's var_head at t=0 and 
-                             scales the initial noise by sqrt(var_pred).
+        apply_flow_variance: If True, queries the model's variance branch at t=0 and
+                             scales the initial noise by the predicted standard deviation.
         variance_channels: Optional iterable of booleans with length equal to channel count.
                            If provided, apply variance scaling only to selected channels.
         """
         if apply_flow_variance:
             # Query variance at t=0
             t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
-            _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
-            # Standard Deviation = sqrt(Variance). Small epsilon for numerical stability.
-            std_pred = torch.sqrt(var_pred + 1e-6)
+            _, std_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
             # Clamp to prevent runaway ensemble divergence or collapse
             # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
             std_pred = torch.clamp(std_pred, min=0.1, max=2.0)

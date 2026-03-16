@@ -27,9 +27,9 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
-from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
+from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher, load_compatible_model_state
 from dataset_flow_multi import S2SHybridDataset
-from train_flow_multiv1 import compute_crps, compute_rmse
+from train_flow_multiv1 import build_multi_condition, compute_crps, compute_rmse
 import noise_utils_multi
 
 # ─── Index Parsers (same as v4) ───
@@ -138,20 +138,7 @@ def run_strategy(
     true_target_pr = true_target_raw[:, 0]    # [num_inits, 4, H, W]
     true_target_t2m = true_target_raw[:, 1]   # [num_inits, 4, H, W]
     
-    # Build conditioning (identical to v4)
-    fx_obs = batch['x_obs'].to(device)
-    fx_geos = batch['x_geos'].to(device)
-    fx_geos_cat = fx_geos.view(vB, -1, H, W)
-    
-    f_month = batch['month'].to(device).float()
-    fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
-    fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
-    
-    fl_idx = batch['lead_idx'].to(device).float()
-    f_lead_val = (fl_idx / 1.5) - 1.0
-    f_lead_channel = f_lead_val.view(vB, 1, 1, 1).expand(vB, 1, H, W)
-    
-    fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
+    fx_cond, _, _, _, _ = build_multi_condition(batch, device)
     
     fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W).clone()
     lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
@@ -255,7 +242,8 @@ def main():
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    regime_residual_scale = float(config.get("regime_residual_scale", 0.35))
+    pr_regime_residual_scale = float(config.get("pr_regime_residual_scale", config.get("regime_residual_scale", 0.35)))
+    t2m_regime_residual_scale = float(config.get("t2m_regime_residual_scale", 0.0))
     
     stats_file = config.get("stats_file", "v1_multi_global_stats.pt")
     test_dataset = S2SHybridDataset(
@@ -266,8 +254,8 @@ def main():
     )
     test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
     
-    # ─── Model Loading (41-in, 2-out for multi) ───
-    model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
+    # ─── Model Loading (49-in, 2-out for multi: obs + GEOS mean/spread + calendar + lead) ───
+    model = FlowMatchingModel(in_channels=49, out_channels=2).to(device)
     
     if args.checkpoint:
         ckpt_path = args.checkpoint
@@ -285,7 +273,7 @@ def main():
     print(f"   ► {os.path.abspath(ckpt_path)}")
     print("="*80 + "\n")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
-    model.load_state_dict(ckpt['model'])
+    load_compatible_model_state(model, ckpt['model'], verbose=True)
     model.eval()
     
     flow_matcher = CustomFlowMatcher(device=device)
@@ -352,7 +340,7 @@ def main():
         mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
-    print(f"  ✅ Regime residual scale: {regime_residual_scale:.2f}")
+    print(f"  ✅ Regime residual scales: PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
     
     # ─── Noise Functions ───
     # Strategy: run v4's 1-channel EOF pipeline independently for each channel,
@@ -394,7 +382,8 @@ def main():
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
-            regime_residual_scale=regime_residual_scale,
+            regime_residual_scale=pr_regime_residual_scale,
+            t2m_regime_residual_scale=t2m_regime_residual_scale,
         )
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):

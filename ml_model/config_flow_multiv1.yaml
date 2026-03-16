@@ -1,5 +1,5 @@
 # ML Training Config - Flow Matching Multi-Target (PR + T2M)
-# Option A architecture: 37 input channels, 2 output channels per lead head
+# Multi-v1 architecture: 49 input channels, 2 output channels per lead head
 batch_size: 4
 learning_rate: 5e-5
 epochs: 300
@@ -18,4 +18,13 @@ stats_file: v1_multi_global_stats.pt
 reset_validation_history: False
 force_variance_phase: True
 variance_phase_lr: 1e-5
-regime_residual_scale: 0.35
+pr_regime_residual_scale: 0.35
+t2m_regime_residual_scale: 0.00
+pr_variance_loss_weight: 1.00
+t2m_variance_loss_weight: 0.35
+validation_use_eof_noise: True
+validation_apply_variance_pr: True
+validation_apply_variance_t2m: False
+validation_match_inference: True
+validation_num_ensemble: 15
+validation_num_steps: 10
