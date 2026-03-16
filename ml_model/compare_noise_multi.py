@@ -338,8 +338,8 @@ def main():
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
     
     # ─── Noise Functions ───
-    # Strategy: run v4's 1-channel EOF pipeline independently for each channel,
-    # then concatenate to get [vB*E, 2, H, W].
+    # The sampler now resolves the exact init date from the batch metadata when
+    # year/month/day are present, and only falls back to args.year if needed.
     
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
@@ -449,7 +449,9 @@ def main():
         if b_idx >= 12:
             break
         
-        month = batch['month'][0].item()
+        current_year = int(batch['year'][0].item()) if 'year' in batch else args.year
+        month = int(batch['month'][0].item())
+        current_day = int(batch['day'][0].item()) if 'day' in batch else 15
         vB = batch['y_target'].shape[0]
         num_inits = vB // 4
         H, W = batch['y_target'].shape[-2:]
@@ -487,7 +489,7 @@ def main():
         
         # Diagnostic (first batch only)
         if b_idx == 0:
-            print(f"\n🔍 [Diagnostic - Month {month}]")
+            print(f"\n🔍 [Diagnostic - Init {current_year:04d}-{month:02d}-{current_day:02d}]")
             print(f"   Target PR   : Min={tgt_pr.min():.2f}, Max={tgt_pr.max():.2f}, Mean={tgt_pr.mean():.2f}")
             print(f"   Target T2M  : Min={tgt_t2m.min():.2f}, Max={tgt_t2m.max():.2f}, Mean={tgt_t2m.mean():.2f}")
             print(f"   GEOS PR     : Min={geos_ens_sample[:, :, 0].min():.2f}, Max={geos_ens_sample[:, :, 0].max():.2f}, Mean={geos_ens_sample[:, :, 0].mean():.2f}")
@@ -499,7 +501,8 @@ def main():
         print(f"  [Batch {b_idx}/11] Starting inference for {n_ml} ML methods ({args.num_ensemble} mem × {args.num_steps} steps)...", flush=True)
         
         from tqdm import tqdm
-        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
+        batch_desc = f"Batch {b_idx} ({current_year:04d}-{month:02d}-{current_day:02d})"
+        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
             res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var, perturb_cond)
             results[name].append(res)
             torch.cuda.empty_cache()

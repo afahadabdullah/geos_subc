@@ -634,7 +634,9 @@ class S2SHybridDataset(Dataset):
             "y_target": target_tensor,
             "target_raw": target_raw_lead,
             "target_raw_full": target_raw_full,
+            "year": meta['date'].year,
             "month": meta['date'].month,
+            "day": meta['date'].day,
             "lead_idx": meta['lead_idx'],
             "geos_ens_raw": geos_ens_stacked,  # [M, 2, L, H, W]
             "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)

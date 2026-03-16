@@ -322,8 +322,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
+        current_day = int(batch['day'][0].item()) if 'day' in batch else 15
         mode_tag = "pr_t2m_eof_lhs" if use_eof_lhs_noise else "pure_random"
-        cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
+        cache_key = (mode_tag, b_idx, current_year, current_month, current_day, num_ensemble, vB, H, W)
         cache_hit = False
 
         if validation_noise_cache is not None and cache_key in validation_noise_cache:
@@ -371,7 +372,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
 
             mode_label = "PR EOF-LHS + Var / T2M EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
-            print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
+            print(
+                f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} "
+                f"Init={current_year:04d}-{current_month:02d}-{current_day:02d} "
+                f"Mode={mode_label} Source={source_label}"
+            )
             noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
             noise_utils_multi.print_noise_channel_stats(p_x1_expanded.float(), prefix="Val ODE Output")
             did_print_noise_diag = True
