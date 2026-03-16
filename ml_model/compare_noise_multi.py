@@ -452,11 +452,6 @@ def main():
         ("3. Hybrid EOF Resid noVar",   noise_multimodal_dynamic_lhs_hybrid, False, False, None),
         ("4. Hybrid EOF Resid PR-var",  noise_multimodal_dynamic_lhs_hybrid, True,  False, (True, False)),
         ("5. Hybrid EOF Resid T2M-var", noise_multimodal_dynamic_lhs_hybrid, True,  False, (False, True)),
-        ("6. EOF(LHS)+Var",             noise_multimodal_dynamic_lhs,        True,  False, None),
-        ("7. EOF(LHS) noVar",           noise_multimodal_dynamic_lhs,        False, False, None),
-        ("8. EOF PR + Rnd T2M",         noise_multimodal_dynamic_lhs_pr_only, True, False, None),
-        ("9. ValReplay EOF+Var",        noise_multimodal_dynamic_lhs_val_replay, True, False, None),
-        ("10. PR EOF98 + Rnd T2M",      noise_multimodal_dynamic_lhs_pr_blend, False, False, None),
     ]
     
     n_ml = len(strategies)
