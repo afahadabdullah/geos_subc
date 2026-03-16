@@ -115,7 +115,18 @@ def get_enso_value(month, year, oni_lookup):
 # ─── Core Inference Runner (2-channel adaptation of v4) ───
 
 @torch.no_grad()
-def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_var_head=False, perturb_cond=False):
+def run_strategy(
+    model,
+    flow_matcher,
+    batch,
+    device,
+    num_ensemble,
+    num_steps,
+    noise_fn,
+    use_var_head=False,
+    perturb_cond=False,
+    variance_channels=None,
+):
     model.eval()
     
     vB = batch['y_target'].shape[0]
@@ -160,7 +171,10 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     # Solve ODE -> output [vB*E, 2, H, W]
     p_x1_expanded = flow_matcher.euler_solve(
         model, noise_expanded, fx_cond_expanded,
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
+        num_steps=num_steps,
+        lead_idx=lead_idx_expanded,
+        apply_flow_variance=use_var_head,
+        variance_channels=variance_channels,
     )
     
     # ─── DIAGNOSTIC: Print ODE output statistics ───
@@ -431,15 +445,18 @@ def main():
     # ─── Build Strategy List ───
     # Match compare_noise_v4_multi.py so results are comparable to the earlier runs
     # where EOF-based noise beat pure random.
-    # Format: (Name, noise_fn, use_var_head, perturb_cond)
+    # Format: (Name, noise_fn, use_var_head, perturb_cond, variance_channels)
     strategies = [
-        ("1. Pure Random",        noise_pure,                           False, False),
-        ("2. Hybrid EOF Resid+Var", noise_multimodal_dynamic_lhs_hybrid, True,  False),
-        ("3. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
-        ("4. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
-        ("5. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
-        ("6. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
-        ("7. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
+        ("1. Pure Random",              noise_pure,                          False, False, None),
+        ("2. Hybrid EOF Resid+Var",     noise_multimodal_dynamic_lhs_hybrid, True,  False, None),
+        ("3. Hybrid EOF Resid noVar",   noise_multimodal_dynamic_lhs_hybrid, False, False, None),
+        ("4. Hybrid EOF Resid PR-var",  noise_multimodal_dynamic_lhs_hybrid, True,  False, (True, False)),
+        ("5. Hybrid EOF Resid T2M-var", noise_multimodal_dynamic_lhs_hybrid, True,  False, (False, True)),
+        ("6. EOF(LHS)+Var",             noise_multimodal_dynamic_lhs,        True,  False, None),
+        ("7. EOF(LHS) noVar",           noise_multimodal_dynamic_lhs,        False, False, None),
+        ("8. EOF PR + Rnd T2M",         noise_multimodal_dynamic_lhs_pr_only, True, False, None),
+        ("9. ValReplay EOF+Var",        noise_multimodal_dynamic_lhs_val_replay, True, False, None),
+        ("10. PR EOF98 + Rnd T2M",      noise_multimodal_dynamic_lhs_pr_blend, False, False, None),
     ]
     
     n_ml = len(strategies)
@@ -460,7 +477,7 @@ def main():
     print(f"{'─'*180}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _, _ in strategies:
+    for name, _, _, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -517,8 +534,19 @@ def main():
         print(f"  [Batch {b_idx}/11] Starting inference for {n_ml} ML methods ({args.num_ensemble} mem × {args.num_steps} steps)...", flush=True)
         
         from tqdm import tqdm
-        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
-            res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var, perturb_cond)
+        for name, fn, use_var, perturb_cond, variance_channels in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
+            res = run_strategy(
+                model,
+                flow_matcher,
+                batch,
+                device,
+                args.num_ensemble,
+                args.num_steps,
+                fn,
+                use_var,
+                perturb_cond,
+                variance_channels,
+            )
             results[name].append(res)
             torch.cuda.empty_cache()
         
@@ -551,7 +579,7 @@ def main():
             print(f"  {label:<13} | {' | '.join(parts)}", flush=True)
         
         # Total row
-        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _ in strategies]
+        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _, _ in strategies]
         fmt_row(f"Batch {b_idx:<2} {month:>4}", [c[0] for c in all_crps_out])
         
         # Per-lead breakdown (W1-W4)
@@ -561,7 +589,7 @@ def main():
         
         # Running average (total)
         n_done = b_idx + 1
-        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
         run_avg_total = []
         for nm in all_names:
             run_avg_total.append({
@@ -588,7 +616,7 @@ def main():
     # Final CSV
     import pandas as pd
     csv_rows = []
-    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
+    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
     lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
     for b_idx in range(len(results["0. GEOS Baseline"])):
         row = {'batch': b_idx}
