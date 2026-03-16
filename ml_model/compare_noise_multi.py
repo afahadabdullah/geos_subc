@@ -445,7 +445,7 @@ def main():
     # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
     strategies = [
         ("1. Pure Noise",                 noise_pure,                        False, False, 0.0),
-        ("2. EOF LHS var off",            make_noise_multimodal_dynamic_lhs(0.25), False, False, 0.0),
+        ("2. EOF LHS rho0.25 var off",    make_noise_multimodal_dynamic_lhs(0.25), False, False, 0.0),
         ("3. EOF LHS rho0.25 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.25), True,  False, 0.5),
         ("4. EOF LHS rho0.75 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.75), True,  False, 0.5),
     ]
