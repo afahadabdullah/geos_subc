@@ -114,8 +114,16 @@ def get_enso_value(month, year, oni_lookup):
 
 # ─── Core Inference Runner (2-channel adaptation of v4) ───
 
+def print_channel_stats(name, tensor):
+    print(f"    📊 [{name}] Shape: {list(tensor.shape)}")
+    for c in range(tensor.shape[1]):
+        ch = tensor[:, c]
+        print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
+
+
 @torch.no_grad()
-def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_var_head=False, perturb_cond=False):
+def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn,
+                 use_var_head=False, perturb_cond=False, var_beta=1.0):
     model.eval()
     
     vB = batch['y_target'].shape[0]
@@ -149,25 +157,33 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     noise_expanded = noise_fn(vB, num_ensemble, H, W, batch, device)
     
     # ─── DIAGNOSTIC: Print noise statistics for first batch ───
-    print(f"\n    📊 [Noise Diag] Shape: {list(noise_expanded.shape)}")
-    for c in range(noise_expanded.shape[1]):
-        ch = noise_expanded[:, c]
-        print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
+    print()
+    print_channel_stats("Noise Diag", noise_expanded)
     
     if perturb_cond:
         fx_cond_expanded[:, 4:6, :, :] += (noise_expanded[:, 0:1, :, :] * 0.10)
     
     # Solve ODE -> output [vB*E, 2, H, W]
-    p_x1_expanded = flow_matcher.euler_solve(
-        model, noise_expanded, fx_cond_expanded,
-        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
-    )
+    if use_var_head:
+        p_x1_expanded, debug_info = flow_matcher.euler_solve(
+            model, noise_expanded, fx_cond_expanded,
+            num_steps=num_steps,
+            lead_idx=lead_idx_expanded,
+            apply_flow_variance=True,
+            variance_beta=var_beta,
+            return_debug=True,
+        )
+        print_channel_stats("Var Std Pred", debug_info["std_pred"])
+        print_channel_stats("Var Std Eff", debug_info["std_eff"])
+        print_channel_stats("Scaled Latent", debug_info["x_t_init"])
+    else:
+        p_x1_expanded = flow_matcher.euler_solve(
+            model, noise_expanded, fx_cond_expanded,
+            num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=False
+        )
     
     # ─── DIAGNOSTIC: Print ODE output statistics ───
-    print(f"    📊 [ODE Output] Shape: {list(p_x1_expanded.shape)}")
-    for c in range(p_x1_expanded.shape[1]):
-        ch = p_x1_expanded[:, c]
-        print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
+    print_channel_stats("ODE Output", p_x1_expanded)
     
     # Separate channels
     p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
@@ -235,6 +251,9 @@ def main():
     parser.add_argument("--eof_rho", type=float, default=1.0,
                         help="Variance-preserving EOF tempering weight. "
                              "1.0 = pure EOF-LHS, smaller values mix in more random noise.")
+    parser.add_argument("--var_beta", type=float, default=1.0,
+                        help="Variance-head tempering weight. "
+                             "1.0 = full variance scaling, smaller values pull scales toward 1.")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
     args = parser.parse_args()
@@ -340,11 +359,16 @@ def main():
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
     eof_rho = float(max(0.0, min(1.0, args.eof_rho)))
+    var_beta = float(max(0.0, min(1.0, args.var_beta)))
     if eof_rho < 1.0:
         rand_w = float(np.sqrt(max(0.0, 1.0 - eof_rho ** 2)))
         print(f"  ✅ EOF tempering enabled: rho={eof_rho:.3f} (random weight={rand_w:.3f})")
     else:
         print("  ✅ EOF tempering disabled: rho=1.000 (pure EOF-LHS)")
+    if var_beta < 1.0:
+        print(f"  ✅ Variance tempering enabled: beta={var_beta:.3f}")
+    else:
+        print("  ✅ Variance tempering disabled: beta=1.000 (full variance scaling)")
     
     # ─── Noise Functions ───
     # The sampler now resolves the exact init date from the batch metadata when
@@ -516,7 +540,18 @@ def main():
         from tqdm import tqdm
         batch_desc = f"Batch {b_idx} ({current_year:04d}-{month:02d}-{current_day:02d})"
         for name, fn, use_var, perturb_cond in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
-            res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var, perturb_cond)
+            res = run_strategy(
+                model,
+                flow_matcher,
+                batch,
+                device,
+                args.num_ensemble,
+                args.num_steps,
+                fn,
+                use_var,
+                perturb_cond,
+                var_beta,
+            )
             results[name].append(res)
             torch.cuda.empty_cache()
         

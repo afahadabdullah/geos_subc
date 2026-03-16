@@ -177,8 +177,54 @@ class CustomFlowMatcher:
         return x_t, v_target
 
     @torch.no_grad()
+    def prepare_initial_state(self, model, noise, x_cond, lead_idx=None, apply_flow_variance=False,
+                              variance_channels=None, variance_beta=1.0):
+        """
+        Build the solver initial state x_0.
+        If apply_flow_variance is enabled, query the variance head at t=0 and
+        temper its effect toward unit scale using variance_beta.
+        """
+        beta = float(max(0.0, min(1.0, variance_beta)))
+        debug = {
+            "apply_flow_variance": bool(apply_flow_variance),
+            "variance_beta": beta,
+        }
+
+        if not apply_flow_variance:
+            x_t = noise.clone()
+            debug["x_t_init"] = x_t
+            return x_t, debug
+
+        t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
+        _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
+
+        # Standard deviation from predicted variance, clamped for stability.
+        std_pred = torch.sqrt(var_pred + 1e-6)
+        std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
+
+        if variance_channels is not None:
+            channel_mask = torch.as_tensor(
+                variance_channels, device=std_pred.device, dtype=torch.bool
+            ).view(1, -1, 1, 1)
+            if channel_mask.shape[1] != std_pred.shape[1]:
+                raise ValueError(
+                    f"variance_channels length {channel_mask.shape[1]} does not match "
+                    f"model channel count {std_pred.shape[1]}"
+                )
+            std_pred = torch.where(channel_mask, std_pred, torch.ones_like(std_pred))
+
+        # beta=0 keeps unit scale, beta=1 applies the full variance head.
+        std_eff = 1.0 + beta * (std_pred - 1.0)
+        x_t = noise * std_eff
+
+        debug["std_pred"] = std_pred
+        debug["std_eff"] = std_eff
+        debug["x_t_init"] = x_t
+        return x_t, debug
+
+    @torch.no_grad()
     def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False,
-                    variance_channels=None):
+                    variance_channels=None, variance_beta=1.0, return_debug=False):
         """
         Inference routine using explicit Euler integration.
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
@@ -188,32 +234,19 @@ class CustomFlowMatcher:
                              scales the initial noise by sqrt(var_pred).
         variance_channels: Optional iterable of booleans with length equal to channel count.
                            If provided, apply variance scaling only to selected channels.
+        variance_beta: Temper variance scaling back toward 1.0. 0 disables the
+                       variance effect, 1 applies the full predicted scale.
+        return_debug: If True, also return initial-state diagnostics.
         """
-        if apply_flow_variance:
-            # Query variance at t=0
-            t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
-            _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
-            # Standard Deviation = sqrt(Variance). Small epsilon for numerical stability.
-            std_pred = torch.sqrt(var_pred + 1e-6)
-            # Clamp to prevent runaway ensemble divergence or collapse
-            # min=0.1 prevents ensemble collapse, max=2.0 prevents explosive noise
-            std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
-
-            if variance_channels is not None:
-                channel_mask = torch.as_tensor(
-                    variance_channels, device=std_pred.device, dtype=torch.bool
-                ).view(1, -1, 1, 1)
-                if channel_mask.shape[1] != std_pred.shape[1]:
-                    raise ValueError(
-                        f"variance_channels length {channel_mask.shape[1]} does not match "
-                        f"model channel count {std_pred.shape[1]}"
-                    )
-                std_pred = torch.where(channel_mask, std_pred, torch.ones_like(std_pred))
-            
-            # Flow-dependent scaling of the initial condition. Unselected channels keep unit scale.
-            x_t = noise * std_pred
-        else:
-            x_t = noise.clone()
+        x_t, debug = self.prepare_initial_state(
+            model,
+            noise,
+            x_cond,
+            lead_idx=lead_idx,
+            apply_flow_variance=apply_flow_variance,
+            variance_channels=variance_channels,
+            variance_beta=variance_beta,
+        )
             
         dt = 1.0 / num_steps
         
@@ -230,4 +263,7 @@ class CustomFlowMatcher:
             # Euler step
             x_t = x_t + v_pred * dt
             
+        if return_debug:
+            debug["x_t_final"] = x_t
+            return x_t, debug
         return x_t  # This is the estimated x_1 (Data)
