@@ -248,12 +248,6 @@ def main():
     parser.add_argument("--year", type=int, default=2021)
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
-    parser.add_argument("--eof_rho", type=float, default=1.0,
-                        help="Variance-preserving EOF tempering weight. "
-                             "1.0 = pure EOF-LHS, smaller values mix in more random noise.")
-    parser.add_argument("--var_beta", type=float, default=1.0,
-                        help="Variance-head tempering weight. "
-                             "1.0 = full variance scaling, smaller values pull scales toward 1.")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
     args = parser.parse_args()
@@ -358,17 +352,6 @@ def main():
         mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
-    eof_rho = float(max(0.0, min(1.0, args.eof_rho)))
-    var_beta = float(max(0.0, min(1.0, args.var_beta)))
-    if eof_rho < 1.0:
-        rand_w = float(np.sqrt(max(0.0, 1.0 - eof_rho ** 2)))
-        print(f"  ✅ EOF tempering enabled: rho={eof_rho:.3f} (random weight={rand_w:.3f})")
-    else:
-        print("  ✅ EOF tempering disabled: rho=1.000 (pure EOF-LHS)")
-    if var_beta < 1.0:
-        print(f"  ✅ Variance tempering enabled: beta={var_beta:.3f}")
-    else:
-        print("  ✅ Variance tempering disabled: beta=1.000 (full variance scaling)")
     
     # ─── Noise Functions ───
     # The sampler now resolves the exact init date from the batch metadata when
@@ -376,6 +359,15 @@ def main():
     
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
+
+    def _mix_with_random(eof_noise, rho):
+        rho = float(max(0.0, min(1.0, rho)))
+        if rho >= 0.999:
+            return eof_noise
+        rand_noise = torch.randn_like(eof_noise)
+        mixed_noise = np.sqrt(max(0.0, 1.0 - rho ** 2)) * rand_noise + rho * eof_noise
+        mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
+        return mixed_noise / (mixed_std + 1e-6)
     
     def noise_multimodal_dynamic(vB, E, H, W, b, d):
         return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
@@ -386,25 +378,21 @@ def main():
             use_lhs=False,
         )
     
-    def noise_multimodal_dynamic_lhs(vB, E, H, W, b, d):
+    def make_noise_multimodal_dynamic_lhs(rho):
         """
-        LHS version: run noise_utils for each channel independently, concat.
+        LHS EOF noise with variance-preserving random tempering.
         PR uses precipitation EOF bases, T2M uses temperature EOF bases.
         """
-        eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
-            b, E, d,
-            mjo_bases, nao_bases, enso_bases,
-            t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
-            nao_lookup, oni_lookup, mjo_df, args.year,
-            use_lhs=True,
-        )
-        if eof_rho >= 0.999:
-            return eof_noise
-
-        rand_noise = torch.randn_like(eof_noise)
-        mixed_noise = np.sqrt(max(0.0, 1.0 - eof_rho ** 2)) * rand_noise + eof_rho * eof_noise
-        mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
-        return mixed_noise / (mixed_std + 1e-6)
+        def _noise(vB, E, H, W, b, d):
+            eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                b, E, d,
+                mjo_bases, nao_bases, enso_bases,
+                t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
+                nao_lookup, oni_lookup, mjo_df, args.year,
+                use_lhs=True,
+            )
+            return _mix_with_random(eof_noise, rho)
+        return _noise
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
         """
@@ -452,13 +440,13 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Match compare_noise_v4_multi.py for the EOF-LHS path:
-    # use_lhs=True with orthogonalized ensemble members.
-    # Format: (Name, noise_fn, use_var_head, perturb_cond)
+    # Compare two tempered EOF-LHS settings side by side, both with the same
+    # variance tempering so rho is the main difference.
+    # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
     strategies = [
-        ("1. Pure Noise",         noise_pure,                   False, False),
-        ("2. EOF LHS",            noise_multimodal_dynamic_lhs, False, False),
-        ("3. EOF LHS + Var",      noise_multimodal_dynamic_lhs, True,  False),
+        ("1. Pure Noise",                 noise_pure,                        False, False, 0.0),
+        ("2. EOF LHS rho0.25 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.25), True,  False, 0.5),
+        ("3. EOF LHS rho0.75 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.75), True,  False, 0.5),
     ]
     
     n_ml = len(strategies)
@@ -479,7 +467,7 @@ def main():
     print(f"{'─'*180}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _, _ in strategies:
+    for name, _, _, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -539,7 +527,7 @@ def main():
         
         from tqdm import tqdm
         batch_desc = f"Batch {b_idx} ({current_year:04d}-{month:02d}-{current_day:02d})"
-        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
+        for name, fn, use_var, perturb_cond, strategy_var_beta in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
             res = run_strategy(
                 model,
                 flow_matcher,
@@ -550,7 +538,7 @@ def main():
                 fn,
                 use_var,
                 perturb_cond,
-                var_beta,
+                strategy_var_beta,
             )
             results[name].append(res)
             torch.cuda.empty_cache()
