@@ -369,43 +369,29 @@ class S2SHybridDataset(Dataset):
             geos_ens_pr_raw = geos_pr_tensor.clone()  
             geos_ens_tas_raw = geos_tas_tensor.clone()
                  
-            # Take the ensemble mean and spread across the members for model conditioning.
+            # Take the ensemble mean across the members for model conditioning
             geos_pr_mean = geos_pr_tensor.mean(dim=0) # [L, H, W]
             geos_tas_mean = geos_tas_tensor.mean(dim=0) # [L, H, W]
-            geos_pr_std = geos_pr_tensor.std(dim=0, unbiased=False) # [L, H, W]
-            geos_tas_std = geos_tas_tensor.std(dim=0, unbiased=False) # [L, H, W]
             
-            # Stack into multiple channels: [C=4, L, H, W]
+            # Stack into multiple channels: [C=2, L, H, W]
             geos_mean_tensor = torch.stack([geos_pr_mean, geos_tas_mean], dim=0) # [2, L, H, W]
-            geos_spread_tensor = torch.stack([geos_pr_std, geos_tas_std], dim=0) # [2, L, H, W]
-            geos_cond_full = torch.cat([geos_mean_tensor, geos_spread_tensor], dim=0) # [4, L, H, W]
                  
-            # Add Channel Dim for conditioning framework: (1, 4, L, H, W)
-            geos_cond_tensor = geos_cond_full.unsqueeze(0) # [1, 4, L, H, W]
+            # Add Channel Dim for conditioning framework: (1, 2, L, H, W)
+            geos_cond_tensor = geos_mean_tensor.unsqueeze(0) # [1, 2, L, H, W]
             
             # Standard pure copy of the mean for residual mapping (2, L, H, W)
             pure_geos_mean_raw = geos_mean_tensor.clone() 
             
             if self.normalize and self.bounds is not None:
-                geos_key = "geos_pr_raw" if "geos_pr_raw" in self.bounds else "geos_raw"
-                g_min = float(self.bounds[geos_key]["min"])
-                g_max = float(self.bounds[geos_key]["max"])
-                pr_spread_max = float(self.bounds.get("geos_pr_spread", {}).get("max", max(g_max, 5.0)))
-                tas_spread_max = float(self.bounds.get("geos_tas_spread", {}).get("max", 15.0))
-
-                def min_max_scale(val, vmin, vmax):
-                    return 2.0 * (torch.clamp(val, vmin, vmax) - vmin) / (vmax - vmin + 1e-6) - 1.0
-
+                g_min = self.bounds["geos_raw"]["min"]
+                g_max = self.bounds["geos_raw"]["max"]
                 # Normalize pr (channel 0)
-                geos_cond_tensor[:, 0] = min_max_scale(geos_cond_tensor[:, 0], g_min, g_max)
+                geos_cond_tensor[:, 0] = 2.0 * (torch.clamp(geos_cond_tensor[:, 0], g_min, g_max) - g_min) / (g_max - g_min + 1e-6) - 1.0
                 
                 # Normalize tas (channel 1) - using estimated physical bounds 200K to 320K for now
                 tas_min = 200.0
                 tas_max = 320.0
-                geos_cond_tensor[:, 1] = min_max_scale(geos_cond_tensor[:, 1], tas_min, tas_max)
-                # Normalize PR spread and T2M spread from 0 to a conservative upper bound.
-                geos_cond_tensor[:, 2] = min_max_scale(geos_cond_tensor[:, 2], 0.0, pr_spread_max)
-                geos_cond_tensor[:, 3] = min_max_scale(geos_cond_tensor[:, 3], 0.0, tas_spread_max)
+                geos_cond_tensor[:, 1] = 2.0 * (torch.clamp(geos_cond_tensor[:, 1], tas_min, tas_max) - tas_min) / (tas_max - tas_min + 1e-6) - 1.0
 
             # 2. Load Obs (Static/State)
             # SST (4, H, W)
@@ -648,9 +634,7 @@ class S2SHybridDataset(Dataset):
             "y_target": target_tensor,
             "target_raw": target_raw_lead,
             "target_raw_full": target_raw_full,
-            "year": meta['date'].year,
             "month": meta['date'].month,
-            "day": meta['date'].day,
             "lead_idx": meta['lead_idx'],
             "geos_ens_raw": geos_ens_stacked,  # [M, 2, L, H, W]
             "mjo_phase": self.mjo_phase_map.get(str(meta['date'])[:10], 0)

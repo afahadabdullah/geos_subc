@@ -18,7 +18,7 @@ import pandas as pd
 
 # Local Modules
 from dataset_flow_multi import S2SHybridDataset
-from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher, load_compatible_model_state
+from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 
 def get_area_weights(lats, device):
@@ -28,28 +28,6 @@ def get_area_weights(lats, device):
     weights_tensor = torch.from_numpy(weights).float().to(device)
     weights_tensor = weights_tensor.view(1, 1, len(lats), 1)
     return weights_tensor
-
-
-def build_multi_condition(batch, device, use_geos_spread_inputs=True):
-    x_geos = batch['x_geos'].to(device)
-    x_obs = batch['x_obs'].to(device)
-    if not use_geos_spread_inputs:
-        x_geos = x_geos[:, :, :2, ...]
-    B = x_geos.shape[0]
-    H, W = x_obs.shape[-2], x_obs.shape[-1]
-    x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
-    months = batch['month'].to(device).float()
-    sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
-    cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
-    lead_idx = batch['lead_idx'].to(device)
-    lead_val = (lead_idx.float() / 1.5) - 1.0
-    lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
-    x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
-    return x_cond, lead_idx, B, H, W
-
-
-def build_variance_channel_mask(apply_pr=True, apply_t2m=False):
-    return (bool(apply_pr), bool(apply_t2m))
 
 def compute_crps(ensemble_preds, target, area_weights):
     """
@@ -104,41 +82,28 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
 
 
 def compute_multi_variance_loss(
-    var_stats,
+    var_pred: torch.Tensor,
     v_pred: torch.Tensor,
     v_target: torch.Tensor,
     spatial_weights: torch.Tensor,
     temp_weights: torch.Tensor,
-    channel_weights: torch.Tensor,
 ):
     """
-    Train the variance head on the same object it serves at inference time:
-    a per-channel global sigma times a normalized local spread map, evaluated at t=0.
+    Match the v4 variance-head objective more closely:
+    learn a relative standard-deviation multiplier rather than a squared variance target.
     """
     abs_err = torch.abs(v_target - v_pred.detach())
-    channel_weights = channel_weights.view(1, -1, 1, 1)
-    weighted_map = spatial_weights * temp_weights * channel_weights
+    target_scale = abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6)
 
-    global_target = (weighted_map * abs_err).sum(dim=(2, 3), keepdim=True) / (weighted_map.sum(dim=(2, 3), keepdim=True) + 1e-6)
-    global_target = torch.clamp(global_target, min=0.05, max=2.5)
-    local_target = torch.clamp(abs_err / (global_target + 1e-6), min=0.25, max=4.0)
+    std_mult = torch.sqrt(var_pred + 1e-6)
+    loss_mse_var = (spatial_weights * temp_weights * (std_mult - target_scale) ** 2).mean()
 
-    pred_global = torch.clamp(var_stats["global"], min=0.05, max=2.5)
-    pred_local = torch.clamp(var_stats["local"], min=0.25, max=4.0)
-    pred_std = torch.clamp(var_stats["std"], min=0.05, max=4.0)
+    # Keep the multiplier near a physically reasonable range while gently pulling toward 1.0.
+    var_penalty = torch.relu(std_mult - 2.5) ** 2 + torch.relu(0.5 - std_mult) ** 2
+    identity_pull = (std_mult - 1.0) ** 2
+    loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
 
-    global_weights = channel_weights.expand_as(global_target)
-    loss_global = (global_weights * (torch.log(pred_global + 1e-6) - torch.log(global_target + 1e-6)) ** 2).sum() / global_weights.sum().clamp_min(1e-6)
-    loss_local = (weighted_map * (pred_local - local_target) ** 2).sum() / weighted_map.sum().clamp_min(1e-6)
-
-    std_target = torch.clamp(global_target * local_target, min=0.05, max=4.0)
-    loss_std = (weighted_map * (pred_std - std_target) ** 2).sum() / weighted_map.sum().clamp_min(1e-6)
-
-    smooth_y = torch.abs(pred_local[:, :, 1:, :] - pred_local[:, :, :-1, :]).mean()
-    smooth_x = torch.abs(pred_local[:, :, :, 1:] - pred_local[:, :, :, :-1]).mean()
-    loss_smooth = smooth_x + smooth_y
-
-    return loss_global + loss_local + (0.5 * loss_std) + (0.02 * loss_smooth)
+    return loss_mse_var + loss_reg
 
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, 
                   ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None,
@@ -260,11 +225,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
                       t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
                       use_eof_lhs_noise=False, validation_noise_cache=None,
-                      print_validation_noise_diag=False, pr_regime_residual_scale=0.35,
-                      t2m_regime_residual_scale=0.0, variance_channels=None,
-                      validation_num_ensemble=15, validation_num_steps=None,
-                      validation_t2m_random_only=False,
-                      use_geos_spread_inputs=True):
+                      print_validation_noise_diag=False):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -328,40 +289,41 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        num_ensemble = validation_num_ensemble
+        # Fast validation: 15 ensemble members. Full validation: 15 members.
+        num_ensemble = 15
         ensemble_preds_precip = [] # Will be [num_ensemble, num_inits, 4, H, W]
         ensemble_preds_t2m = []
 
-        num_steps = validation_num_steps if validation_num_steps is not None else (10 if is_fast_recon or is_test else 50)
+        # Progress bar for internal status during long samplings
+        # Fast: 10 Euler steps (rapid screening). Full: 50 steps (publication quality)
+        num_steps = 10 if is_fast_recon and not is_test else 50
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
         # With zombie processes gone, we can fit [vB * 12] through the UNet at once.
         vB = fb_target_norm.shape[0] 
         
-        fx_cond, _, _, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
+        fx_obs = batch['x_obs'].to(device) 
+        fx_geos = batch['x_geos'].to(device) 
+        fx_geos_cat = fx_geos.view(vB, -1, H, W)
         
-        # Expand for simultaneous ensemble generation.
+        f_month = batch['month'].to(device).float()
+        fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        
+        fl_idx = batch['lead_idx'].to(device).float()
+        f_lead_val = (fl_idx / 1.5) - 1.0 
+        f_lead_channel = f_lead_val.view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        
+        # [vB, 35, H, W]
+        fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1) 
+        
+        # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
         
-        batch_years = batch['year'] if 'year' in batch else torch.full_like(batch['month'], 2021)
-        batch_days = batch['day'] if 'day' in batch else torch.full_like(batch['month'], 15)
-        date_signature = tuple(
-            (
-                int(batch_years[i].item()),
-                int(batch['month'][i].item()),
-                int(batch_days[i].item()),
-                int(batch['lead_idx'][i].item()),
-            )
-            for i in range(vB)
-        )
-        current_year = date_signature[0][0] if date_signature else 2021
-        current_month = date_signature[0][1] if date_signature else int(batch['month'][0].item())
-        mode_tag = (
-            f"pr_{pr_regime_residual_scale:.2f}_t2m_{t2m_regime_residual_scale:.2f}_t2mrand_{validation_t2m_random_only}_var_{variance_channels}"
-            if use_eof_lhs_noise else
-            "pure_random"
-        )
-        cache_key = (mode_tag, b_idx, date_signature, num_ensemble, vB, H, W)
+        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        current_month = int(batch['month'][0].item())
+        mode_tag = "pr_t2m_eof_lhs" if use_eof_lhs_noise else "pure_random"
+        cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
         cache_hit = False
 
         if validation_noise_cache is not None and cache_key in validation_noise_cache:
@@ -387,9 +349,6 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     year=current_year,
                     use_lhs=True,
                     orthogonalize_lhs=True,
-                    t2m_random_only=validation_t2m_random_only,
-                    regime_residual_scale=pr_regime_residual_scale,
-                    t2m_regime_residual_scale=t2m_regime_residual_scale,
                 )
             else:
                 noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
@@ -405,21 +364,12 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             num_steps=num_steps,
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
-            variance_channels=variance_channels,
         )
 
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
             import noise_utils_multi
 
-            if use_eof_lhs_noise:
-                if use_flow_variance:
-                    t2m_label = "random" if validation_t2m_random_only else f"{t2m_regime_residual_scale:.2f}"
-                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_label}) + Var{variance_channels}"
-                else:
-                    t2m_label = "random" if validation_t2m_random_only else f"{t2m_regime_residual_scale:.2f}"
-                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_label})"
-            else:
-                mode_label = "Pure Random"
+            mode_label = "PR EOF-LHS + Var / T2M EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
             print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
             noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
@@ -476,9 +426,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         total_rmse_t2m += b_rmse_t2m * num_inits
         count += num_inits
         
-        # Save the first processed validation batch for plotting consistency.
-        # target_batches may skip batch 0 entirely, so guard on emptiness instead.
-        if not saved_tensors:
+        # Save only the first batch for visual plotting consistency
+        if b_idx == 0:
             true_target_precip_plot = torch.nan_to_num(true_target_precip[0], nan=0.0)
             true_target_t2m_plot = torch.nan_to_num(true_target_t2m[0], nan=280.0)
             ai_residual = full_pred_precip[0] - geos_mean_precip[0]
@@ -689,35 +638,6 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
-    variance_phase_unfreeze_mode = str(config.get("variance_phase_unfreeze_mode", "conv_in")).strip().lower()
-    variance_phase_train_mean_heads = bool(config.get("variance_phase_train_mean_heads", False))
-    variance_phase_velocity_weight = float(config.get("variance_phase_velocity_loss_weight", 0.7))
-    variance_phase_variance_weight = float(config.get("variance_phase_variance_loss_weight", 0.3))
-    pr_regime_residual_scale = float(config.get("pr_regime_residual_scale", config.get("regime_residual_scale", 0.35)))
-    t2m_regime_residual_scale = float(config.get("t2m_regime_residual_scale", 0.0))
-    pr_variance_loss_weight = float(config.get("pr_variance_loss_weight", 1.0))
-    t2m_variance_loss_weight = float(config.get("t2m_variance_loss_weight", 0.35))
-    validation_use_eof_noise = bool(config.get("validation_use_eof_noise", True))
-    validation_apply_variance_pr = bool(config.get("validation_apply_variance_pr", True))
-    validation_apply_variance_t2m = bool(config.get("validation_apply_variance_t2m", False))
-    validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
-    validation_num_steps = int(config.get("validation_num_steps", 10))
-    validation_match_inference = bool(config.get("validation_match_inference", True))
-    validation_t2m_random_only = bool(config.get("validation_t2m_random_only", False))
-    use_geos_spread_inputs = bool(config.get("use_geos_spread_inputs", True))
-    validation_variance_channels = build_variance_channel_mask(
-        apply_pr=validation_apply_variance_pr,
-        apply_t2m=validation_apply_variance_t2m,
-    )
-    validation_variance_enabled = any(validation_variance_channels)
-    variance_channel_weights = torch.tensor(
-        [pr_variance_loss_weight, t2m_variance_loss_weight],
-        device=device,
-        dtype=torch.float32,
-    )
-    total_phase_weight = max(variance_phase_velocity_weight + variance_phase_variance_weight, 1e-6)
-    variance_phase_velocity_weight /= total_phase_weight
-    variance_phase_variance_weight /= total_phase_weight
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -725,25 +645,15 @@ def train(args, accelerator):
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
         if force_variance_phase:
-            print(f"   [Training Mode]      : Joint variance fine-tune (lr={variance_phase_lr:.2e})")
+            print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
-        if force_variance_phase:
-            print(f"   [Variance Unfreeze]  : mode={variance_phase_unfreeze_mode} | mean_heads={variance_phase_train_mean_heads}")
-            print(f"   [Phase Loss Weights] : vel={variance_phase_velocity_weight:.2f}, var={variance_phase_variance_weight:.2f}")
-        print(f"   [Regime Residual]    : PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
-        print(f"   [Variance Weights]   : PR={pr_variance_loss_weight:.2f}, T2M={t2m_variance_loss_weight:.2f}")
-        print(f"   [GEOS Spread Inputs] : {use_geos_spread_inputs}")
-        print(f"   [Val Match Inference]: {validation_match_inference}")
-        print(f"   [Validation Var]     : PR={validation_apply_variance_pr}, T2M={validation_apply_variance_t2m}")
-        print(f"   [Validation EOF]     : {validation_use_eof_noise} | T2M random={validation_t2m_random_only} | Nens={validation_num_ensemble} | Steps={validation_num_steps}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model_in_channels = 49 if use_geos_spread_inputs else 41
-    model = FlowMatchingModel(in_channels=model_in_channels, out_channels=2).to(device)
+    model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -772,9 +682,8 @@ def train(args, accelerator):
 
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
-        print(f"   Total Input Channels: {model_in_channels}")
-        cond_channels = model_in_channels - 2
-        print(f"   --- Condition Channels (x_cond = {cond_channels}) ---")
+        print(f"   Total Input Channels: 41")
+        print(f"   --- Condition Channels (x_cond = 39) ---")
         print(f"     [00-03] x_obs: SST (L=1 to 4)")
         print(f"     [04-07] x_obs: SSS (L=1 to 4)")
         print(f"     [08-11] x_obs: Soil Moisture (L=1 to 4)")
@@ -782,22 +691,13 @@ def train(args, accelerator):
         print(f"     [16-19] x_obs: Z500 Zonal Dev (L=1 to 4)")
         print(f"     [20-23] x_obs: U250 (L=1 to 4)")
         print(f"     [24-27] x_obs: MJO Spatial Wave (L=1 to 4)")
-        print(f"     [28-31] x_geos: GEOS Precip Mean (L=1 to 4)")
-        print(f"     [32-35] x_geos: GEOS T2M Mean (L=1 to 4)")
-        if use_geos_spread_inputs:
-            print(f"     [36-39] x_geos: GEOS Precip Spread (L=1 to 4)")
-            print(f"     [40-43] x_geos: GEOS T2M Spread (L=1 to 4)")
-            print(f"     [    44] Month: Sine Temporal Embedding")
-            print(f"     [    45] Month: Cosine Temporal Embedding")
-            print(f"     [    46] Target Lead: Relative Index Tracking [-1 to +1]")
-            xt_labels = "47,48"
-        else:
-            print(f"     [    36] Month: Sine Temporal Embedding")
-            print(f"     [    37] Month: Cosine Temporal Embedding")
-            print(f"     [    38] Target Lead: Relative Index Tracking [-1 to +1]")
-            xt_labels = "39,40"
+        print(f"     [28-31] x_geos: GEOS Precipitation Forecast (L=1 to 4)")
+        print(f"     [32-35] x_geos: GEOS T2M Forecast (L=1 to 4)")
+        print(f"     [    36] Month: Sine Temporal Embedding")
+        print(f"     [    37] Month: Cosine Temporal Embedding")
+        print(f"     [    38] Target Lead: Relative Index Tracking [-1 to +1]")
         print(f"   --- Dynamic Flow Channel (x_t = 2) ---")
-        print(f"     [ {xt_labels}] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
+        print(f"     [ 39,40] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
         print(f"   --- Dedicated Output Heads (Multi-Task Architecture) ---")
         print(f"     Head 0: Week 1 (Conv2d 64→2)")
         print(f"     Head 1: Week 2 (Conv2d 64→2)")
@@ -859,7 +759,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for inference-style hybrid noise experiments.")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
         print(f"   PR EOF files : {eof_bases_path}, {nao_bases_path}, {enso_bases_path}")
         print(f"   T2M EOF files: {t2m_eof_bases_path}, {t2m_nao_bases_path}, {t2m_enso_bases_path}")
 
@@ -894,12 +794,7 @@ def train(args, accelerator):
         else:
             ckpt_path = os.path.join(output_dir, args.ckpt)
     else:
-        if getattr(args, "resume_ckpt", None):
-            ckpt_path = args.resume_ckpt
-            if not os.path.isabs(ckpt_path):
-                ckpt_path = os.path.join(output_dir, ckpt_path)
-        else:
-            ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
+        ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
 
     if os.path.exists(ckpt_path):
         try:
@@ -908,11 +803,7 @@ def train(args, accelerator):
             loaded_is_variance_phase = bool(checkpoint.get('is_variance_phase', False))
             # Unwrap for loading
             unwrapped_model = accelerator.unwrap_model(model)
-            load_compatible_model_state(
-                unwrapped_model,
-                checkpoint['model'],
-                verbose=accelerator.is_main_process,
-            )
+            unwrapped_model.load_state_dict(checkpoint['model'])
             if args.test:
                 start_epoch = loaded_checkpoint_epoch
             
@@ -923,8 +814,8 @@ def train(args, accelerator):
                 if resume_into_variance_phase:
                     if accelerator.is_main_process:
                         print(
-                            "   ℹ️ Fine-tune resume detected (forced by config). "
-                            "Skipping optimizer state load and rebuilding the configured fine-tune optimizer."
+                            "   ℹ️ Variance-only resume detected (forced by config). "
+                            "Skipping optimizer state load and rebuilding a var-heads optimizer."
                         )
                 else:
                     try:
@@ -954,28 +845,13 @@ def train(args, accelerator):
                         print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
                     best_val_loss = float('inf')
                     top_models = []
-
-                if (
-                    validation_match_inference and
-                    loaded_checkpoint_epoch > 0 and
-                    loaded_checkpoint_epoch <= 100 and
-                    not config.get("reset_validation_history", False)
-                ):
-                    if accelerator.is_main_process:
-                        print("   ℹ️ Inference-style validation is enabled during training.")
-                        print("      Resetting early-phase validation history so old MSE scores are not compared against CRPS.")
-                    best_val_loss = float('inf')
-                    top_models = []
-                    crps_phase_reset = True
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val Loss so far: {best_val_loss:.4f}")
-                    if validation_match_inference:
-                        print(f"   ✅ Training validation will use inference-style CRPS from here.")
-                    elif start_epoch > 101:
+                    if start_epoch > 101:
                         print(f"   ✅ Resuming deep in CRPS Phase (>101). best_val_loss is already CRPS-scale.")
                     elif start_epoch == 101:
                         print(f"   🔀 Resuming exactly at Phase Boundary (Epoch 101). Will reset best_val_loss.")
@@ -1007,15 +883,13 @@ def train(args, accelerator):
         return
 
     start_in_variance_phase = force_variance_phase
-    if validation_match_inference:
-        crps_phase_reset = True
 
     if not args.test and start_in_variance_phase:
         if accelerator.is_main_process:
             if force_variance_phase:
-                print("🔓 Force-enabling joint variance fine-tune phase from config.")
+                print("🔒 Force-enabling variance phase from config. Freezing UNet + mean heads.")
                 if loaded_checkpoint_epoch == 0:
-                    print("   ⚠️ No checkpoint was loaded. This will train the selected fine-tune modules from scratch.")
+                    print("   ⚠️ No checkpoint was loaded. This will train only var_heads from scratch.")
 
         unwrapped = accelerator.unwrap_model(model)
         for param in unwrapped.unet.parameters():
@@ -1024,28 +898,9 @@ def train(args, accelerator):
             param.requires_grad_(False)
         for param in unwrapped.var_heads.parameters():
             param.requires_grad_(True)
-        for param in unwrapped.var_global_heads.parameters():
-            param.requires_grad_(True)
-        if variance_phase_unfreeze_mode == "full_unet":
-            for param in unwrapped.unet.parameters():
-                param.requires_grad_(True)
-        elif variance_phase_unfreeze_mode == "conv_in":
-            for param in unwrapped.unet.conv_in.parameters():
-                param.requires_grad_(True)
-        elif variance_phase_unfreeze_mode not in {"none", "frozen"}:
-            raise ValueError(
-                f"Unsupported variance_phase_unfreeze_mode={variance_phase_unfreeze_mode!r}. "
-                "Use one of: none, conv_in, full_unet."
-            )
-        if variance_phase_train_mean_heads:
-            for param in unwrapped.heads.parameters():
-                param.requires_grad_(True)
 
         optimizer = torch.optim.AdamW(
-            [
-                p for p in unwrapped.parameters()
-                if p.requires_grad
-            ],
+            [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
             lr=variance_phase_lr
         )
         model, optimizer, loader, val_loader = accelerator.prepare(
@@ -1064,22 +919,15 @@ def train(args, accelerator):
             start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
             is_test=True, is_fast_recon=False,
-            use_flow_variance=validation_variance_enabled and (force_variance_phase or loaded_is_variance_phase),
-            use_eof_lhs_noise=validation_use_eof_noise,
+            use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
+            use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
             validation_noise_cache=validation_noise_cache,
             print_validation_noise_diag=True,
             cached_geos_crps=None, cached_geos_rmse=None,
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-            pr_regime_residual_scale=pr_regime_residual_scale,
-            t2m_regime_residual_scale=t2m_regime_residual_scale,
-            variance_channels=validation_variance_channels,
-            validation_num_ensemble=validation_num_ensemble,
-            validation_num_steps=validation_num_steps,
-            validation_t2m_random_only=validation_t2m_random_only,
-            use_geos_spread_inputs=use_geos_spread_inputs,
+            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
         )
         t = val_result['tensors']
         
@@ -1312,30 +1160,43 @@ def train(args, accelerator):
 
         model.train()
         train_loss = 0.0
-        phase_label = "JointVar" if is_variance_phase else "VelOnly"
+        phase_label = "VarOnly" if is_variance_phase else "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
-            x_cond, lead_idx, B, H, W = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
+            # Conditionals
+            x_geos = batch['x_geos'].to(device)
+            x_obs  = batch['x_obs'].to(device)
+            
+            B = x_geos.shape[0]
+            H, W = x_obs.shape[-2], x_obs.shape[-1]
+            # Flatten GEOS variables and leads into channels
+            x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
+            
+            months = batch['month'].to(device)
+            sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+            cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+
+            # --- Lead Embedding (NEW) ---
+            lead_idx = batch['lead_idx'].to(device) # [B]
+            # Map [0, 1, 2, 3] to [-1.0, -0.33, 0.33, 1.0]
+            lead_val = (lead_idx.float() / 1.5) - 1.0 
+            lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
+
+            # Total: 24 (Obs) + 4 (MJO) + 8 (GEOS [2 vars * 4 leads]) + 2 (Month) + 1 (Lead) = 39 channels out of which Obs/MJO combined is 28.
+            # So 28 + 8 + 2 + 1 = 39 ? Wait. x_obs earlier was 28. 28 + 8 + 2 + 1 = 39. Let's trace.
+            # x_obs shape in dataset_flow.py gives: SST(4)+SSS(4)+SM(4)+IVT(4)+Z500(4)+U250(4)+MJO(4) = 28.
+            x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
 
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
 
             # Flow Matching Interpolation
-            if is_variance_phase:
-                t = torch.zeros((B,), device=device)
-            else:
-                t = flow_matcher.sample_time_batch(B)
+            t = flow_matcher.sample_time_batch(B)
             noise = torch.randn_like(target_norm)
             x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
             # Predict the velocity AND variance (routed through the correct per-week output head)
-            v_pred, var_pred = model(
-                x_t,
-                x_cond,
-                t,
-                lead_idx=lead_idx,
-                return_variance_components=is_variance_phase,
-            )
+            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
 
             # --- Temporal Loss Weighting ---
             # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -1348,21 +1209,17 @@ def train(args, accelerator):
             temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
             loss_vel = (spatial_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
 
-            # 2. Variance loss in standard-deviation space at t=0
-            if is_variance_phase:
-                loss_var = compute_multi_variance_loss(
-                    var_stats=var_pred,
-                    v_pred=v_pred,
-                    v_target=v_target,
-                    spatial_weights=spatial_weights,
-                    temp_weights=temp_weights_expanded,
-                    channel_weights=variance_channel_weights,
-                )
-            else:
-                loss_var = torch.zeros((), device=device, dtype=loss_vel.dtype)
+            # 2. Variance loss in relative std-multiplier space (v4-style)
+            loss_var = compute_multi_variance_loss(
+                var_pred=var_pred,
+                v_pred=v_pred,
+                v_target=v_target,
+                spatial_weights=spatial_weights,
+                temp_weights=temp_weights_expanded,
+            )
 
             if is_variance_phase:
-                loss = (variance_phase_velocity_weight * loss_vel) + (variance_phase_variance_weight * loss_var)
+                loss = loss_var
             else:
                 loss = loss_vel
 
@@ -1395,9 +1252,6 @@ def train(args, accelerator):
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
-        # If validation_match_inference=True, all scheduled validation uses the
-        # same ensemble/ODE inference path as compare/test.
-        # Otherwise we retain the legacy split below:
         # Phase 1 (epoch 1-100):  MSE-based validation & best model tracking
         #   Epoch 1-4:   No validation
         #   Epoch 5-19:  Every 5 epochs
@@ -1406,7 +1260,7 @@ def train(args, accelerator):
         # CRPS-based validation (15 ens, 10 steps)
         #   Every epoch: run_val_inference, periodic ckpt every 5 epochs
         
-        use_crps_phase = validation_match_inference or (epoch > 100)
+        use_crps_phase = (epoch > 100)
         
         # One-time reset: when transitioning from MSE (Phase 1) to CRPS (Phase 2),
         # best_val_loss must be reset because MSE values (~0.06) are on a completely
@@ -1438,7 +1292,7 @@ def train(args, accelerator):
 
         if accelerator.is_main_process:
             if use_crps_phase:
-                print(f"\n⌛ Epoch {epoch} complete. Starting inference-style validation ({validation_num_ensemble} ens, {validation_num_steps} steps)...")
+                print(f"\n⌛ Epoch {epoch} complete. Starting CRPS Validation (15 ens, 10 steps)...")
             else:
                 print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
@@ -1446,26 +1300,19 @@ def train(args, accelerator):
         #  CRPS-based validation
         # ============================================================
         if use_crps_phase:
-            use_flow_variance = validation_variance_enabled and is_variance_phase
+            use_flow_variance = is_variance_phase
             val_result = run_val_inference(
                 epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=use_flow_variance,
-                use_eof_lhs_noise=validation_use_eof_noise,
+                use_eof_lhs_noise=is_variance_phase,
                 validation_noise_cache=validation_noise_cache,
                 print_validation_noise_diag=True,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                 enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-                pr_regime_residual_scale=pr_regime_residual_scale,
-                t2m_regime_residual_scale=t2m_regime_residual_scale,
-                variance_channels=validation_variance_channels,
-                validation_num_ensemble=validation_num_ensemble,
-                validation_num_steps=validation_num_steps,
-                validation_t2m_random_only=validation_t2m_random_only,
-                use_geos_spread_inputs=use_geos_spread_inputs,
+                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -1539,39 +1386,37 @@ def train(args, accelerator):
             
             with torch.no_grad():
                 for batch in val_loader:
-                    x_cond, lead_idx, B, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
+                    x_geos = batch['x_geos'].to(device)
+                    x_obs  = batch['x_obs'].to(device)
+                    B = x_geos.shape[0]
+                    H, W = x_obs.shape[-2], x_obs.shape[-1]
+                    x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
+                    months = batch['month'].to(device)
+                    sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                    cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                    lead_idx = batch['lead_idx'].to(device)
+                    lead_val = (lead_idx.float() / 1.5) - 1.0 
+                    lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
+                    x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
                     target_norm = batch['y_target'].to(device)
-                    if is_variance_phase:
-                        t = torch.zeros((B,), device=device)
-                    else:
-                        t = flow_matcher.sample_time_batch(B)
+                    t = flow_matcher.sample_time_batch(B)
                     noise = torch.randn_like(target_norm)
                     x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
-                    v_pred, var_pred = model(
-                        x_t,
-                        x_cond,
-                        t,
-                        lead_idx=lead_idx,
-                        return_variance_components=is_variance_phase,
-                    )
+                    v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
                     temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
                     
                     loss_vel = (spatial_weights * temp_weights * (v_pred - v_target)**2).mean()
-                    if is_variance_phase:
-                        loss_var = compute_multi_variance_loss(
-                            var_stats=var_pred,
-                            v_pred=v_pred,
-                            v_target=v_target,
-                            spatial_weights=spatial_weights,
-                            temp_weights=temp_weights,
-                            channel_weights=variance_channel_weights,
-                        )
-                    else:
-                        loss_var = torch.zeros((), device=device, dtype=loss_vel.dtype)
+                    loss_var = compute_multi_variance_loss(
+                        var_pred=var_pred,
+                        v_pred=v_pred,
+                        v_target=v_target,
+                        spatial_weights=spatial_weights,
+                        temp_weights=temp_weights,
+                    )
 
                     if is_variance_phase:
-                        loss_val = (variance_phase_velocity_weight * loss_vel) + (variance_phase_variance_weight * loss_var)
+                        loss_val = loss_var
                     else:
                         loss_val = loss_vel
                     val_loss_total += loss_val.item()
@@ -1614,20 +1459,13 @@ def train(args, accelerator):
                             epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
                             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                             is_test=False, is_fast_recon=True,
-                            use_flow_variance=validation_variance_enabled and is_variance_phase,
-                            use_eof_lhs_noise=validation_use_eof_noise,
+                            use_flow_variance=is_variance_phase,
+                            use_eof_lhs_noise=is_variance_phase,
                             validation_noise_cache=validation_noise_cache,
                             print_validation_noise_diag=False,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-                            pr_regime_residual_scale=pr_regime_residual_scale,
-                            t2m_regime_residual_scale=t2m_regime_residual_scale,
-                            variance_channels=validation_variance_channels,
-                            validation_num_ensemble=validation_num_ensemble,
-                            validation_num_steps=validation_num_steps,
-                            validation_t2m_random_only=validation_t2m_random_only,
-                            use_geos_spread_inputs=use_geos_spread_inputs,
+                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
@@ -1664,8 +1502,6 @@ def main():
                         help="Checkpoint filename in output_dir to load for testing (default: best_flow_ckpt.pt)")
     parser.add_argument("--ckpt-rank", type=int, default=None,
                         help="Load the Nth best model from model_registry.json (e.g., --ckpt-rank 1 for best, --ckpt-rank 3 for 3rd best)")
-    parser.add_argument("--resume-ckpt", type=str, default=None,
-                        help="Checkpoint filename or path to resume from during training (defaults to latest_flow_ckpt.pt)")
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     parser.add_argument("--epochs-per-run", type=int, default=10000, 
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")

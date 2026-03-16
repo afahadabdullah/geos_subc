@@ -27,9 +27,9 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
-from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher, load_compatible_model_state
+from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
 from dataset_flow_multi import S2SHybridDataset
-from train_flow_multiv1 import build_multi_condition, compute_crps, compute_rmse
+from train_flow_multiv1 import compute_crps, compute_rmse
 import noise_utils_multi
 
 # ─── Index Parsers (same as v4) ───
@@ -115,19 +115,7 @@ def get_enso_value(month, year, oni_lookup):
 # ─── Core Inference Runner (2-channel adaptation of v4) ───
 
 @torch.no_grad()
-def run_strategy(
-    model,
-    flow_matcher,
-    batch,
-    device,
-    num_ensemble,
-    num_steps,
-    noise_fn,
-    use_geos_spread_inputs,
-    use_var_head=False,
-    perturb_cond=False,
-    variance_channels=None,
-):
+def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn, use_var_head=False, perturb_cond=False):
     model.eval()
     
     vB = batch['y_target'].shape[0]
@@ -139,7 +127,20 @@ def run_strategy(
     true_target_pr = true_target_raw[:, 0]    # [num_inits, 4, H, W]
     true_target_t2m = true_target_raw[:, 1]   # [num_inits, 4, H, W]
     
-    fx_cond, _, _, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
+    # Build conditioning (identical to v4)
+    fx_obs = batch['x_obs'].to(device)
+    fx_geos = batch['x_geos'].to(device)
+    fx_geos_cat = fx_geos.view(vB, -1, H, W)
+    
+    f_month = batch['month'].to(device).float()
+    fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    
+    fl_idx = batch['lead_idx'].to(device).float()
+    f_lead_val = (fl_idx / 1.5) - 1.0
+    f_lead_channel = f_lead_val.view(vB, 1, 1, 1).expand(vB, 1, H, W)
+    
+    fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
     
     fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W).clone()
     lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
@@ -159,10 +160,7 @@ def run_strategy(
     # Solve ODE -> output [vB*E, 2, H, W]
     p_x1_expanded = flow_matcher.euler_solve(
         model, noise_expanded, fx_cond_expanded,
-        num_steps=num_steps,
-        lead_idx=lead_idx_expanded,
-        apply_flow_variance=use_var_head,
-        variance_channels=variance_channels,
+        num_steps=num_steps, lead_idx=lead_idx_expanded, apply_flow_variance=use_var_head
     )
     
     # ─── DIAGNOSTIC: Print ODE output statistics ───
@@ -242,11 +240,6 @@ def main():
     
     with open(args.config) as f:
         config = yaml.safe_load(f)
-
-    pr_regime_residual_scale = float(config.get("pr_regime_residual_scale", config.get("regime_residual_scale", 0.35)))
-    t2m_regime_residual_scale = float(config.get("t2m_regime_residual_scale", 0.0))
-    validation_t2m_random_only = bool(config.get("validation_t2m_random_only", False))
-    use_geos_spread_inputs = bool(config.get("use_geos_spread_inputs", True))
     
     stats_file = config.get("stats_file", "v1_multi_global_stats.pt")
     test_dataset = S2SHybridDataset(
@@ -257,9 +250,8 @@ def main():
     )
     test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
     
-    # ─── Model Loading (49-in, 2-out for multi: obs + GEOS mean/spread + calendar + lead) ───
-    model_in_channels = 49 if use_geos_spread_inputs else 41
-    model = FlowMatchingModel(in_channels=model_in_channels, out_channels=2).to(device)
+    # ─── Model Loading (41-in, 2-out for multi) ───
+    model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
     
     if args.checkpoint:
         ckpt_path = args.checkpoint
@@ -277,7 +269,7 @@ def main():
     print(f"   ► {os.path.abspath(ckpt_path)}")
     print("="*80 + "\n")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
-    load_compatible_model_state(model, ckpt['model'], verbose=True)
+    model.load_state_dict(ckpt['model'])
     model.eval()
     
     flow_matcher = CustomFlowMatcher(device=device)
@@ -344,8 +336,6 @@ def main():
         mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
-    print(f"  ✅ Regime residual scales: PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
-    print(f"  ✅ GEOS spread inputs: {use_geos_spread_inputs} | T2M random-only: {validation_t2m_random_only}")
     
     # ─── Noise Functions ───
     # Strategy: run v4's 1-channel EOF pipeline independently for each channel,
@@ -374,22 +364,6 @@ def main():
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
-        )
-
-    def noise_multimodal_dynamic_lhs_hybrid(vB, E, H, W, b, d):
-        """
-        Updated validation-style hybrid:
-        pure random base plus regime-conditioned EOF residual using exact batch dates.
-        """
-        return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
-            b, E, d,
-            mjo_bases, nao_bases, enso_bases,
-            t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
-            nao_lookup, oni_lookup, mjo_df, args.year,
-            use_lhs=True,
-            t2m_random_only=validation_t2m_random_only,
-            regime_residual_scale=pr_regime_residual_scale,
-            t2m_regime_residual_scale=t2m_regime_residual_scale,
         )
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
@@ -440,13 +414,14 @@ def main():
     # ─── Build Strategy List ───
     # Match compare_noise_v4_multi.py so results are comparable to the earlier runs
     # where EOF-based noise beat pure random.
-    # Format: (Name, noise_fn, use_var_head, perturb_cond, variance_channels)
+    # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
-        ("1. Pure Random",              noise_pure,                          False, False, None),
-        ("2. Hybrid EOF Resid+Var",     noise_multimodal_dynamic_lhs_hybrid, True,  False, None),
-        ("3. Hybrid EOF Resid noVar",   noise_multimodal_dynamic_lhs_hybrid, False, False, None),
-        ("4. Hybrid EOF Resid PR-var",  noise_multimodal_dynamic_lhs_hybrid, True,  False, (True, False)),
-        ("5. Hybrid EOF Resid T2M-var", noise_multimodal_dynamic_lhs_hybrid, True,  False, (False, True)),
+        ("1. Pure Random",        noise_pure,                           False, False),
+        ("2. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
+        ("3. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
+        ("4. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
+        ("5. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
+        ("6. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
     ]
     
     n_ml = len(strategies)
@@ -467,7 +442,7 @@ def main():
     print(f"{'─'*180}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _, _, _ in strategies:
+    for name, _, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -524,20 +499,8 @@ def main():
         print(f"  [Batch {b_idx}/11] Starting inference for {n_ml} ML methods ({args.num_ensemble} mem × {args.num_steps} steps)...", flush=True)
         
         from tqdm import tqdm
-        for name, fn, use_var, perturb_cond, variance_channels in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
-            res = run_strategy(
-                model,
-                flow_matcher,
-                batch,
-                device,
-                args.num_ensemble,
-                args.num_steps,
-                fn,
-                use_geos_spread_inputs,
-                use_var,
-                perturb_cond,
-                variance_channels,
-            )
+        for name, fn, use_var, perturb_cond in tqdm(strategies, desc=f"Batch {b_idx} (Month {month})", leave=False, ncols=100):
+            res = run_strategy(model, flow_matcher, batch, device, args.num_ensemble, args.num_steps, fn, use_var, perturb_cond)
             results[name].append(res)
             torch.cuda.empty_cache()
         
@@ -570,7 +533,7 @@ def main():
             print(f"  {label:<13} | {' | '.join(parts)}", flush=True)
         
         # Total row
-        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _, _ in strategies]
+        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _ in strategies]
         fmt_row(f"Batch {b_idx:<2} {month:>4}", [c[0] for c in all_crps_out])
         
         # Per-lead breakdown (W1-W4)
@@ -580,7 +543,7 @@ def main():
         
         # Running average (total)
         n_done = b_idx + 1
-        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
         run_avg_total = []
         for nm in all_names:
             run_avg_total.append({
@@ -607,7 +570,7 @@ def main():
     # Final CSV
     import pandas as pd
     csv_rows = []
-    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _ in strategies]
     lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
     for b_idx in range(len(results["0. GEOS Baseline"])):
         row = {'batch': b_idx}
