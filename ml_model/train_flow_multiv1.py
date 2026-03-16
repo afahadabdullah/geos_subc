@@ -681,6 +681,10 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
+    variance_phase_unfreeze_mode = str(config.get("variance_phase_unfreeze_mode", "conv_in")).strip().lower()
+    variance_phase_train_mean_heads = bool(config.get("variance_phase_train_mean_heads", False))
+    variance_phase_velocity_weight = float(config.get("variance_phase_velocity_loss_weight", 0.7))
+    variance_phase_variance_weight = float(config.get("variance_phase_variance_loss_weight", 0.3))
     pr_regime_residual_scale = float(config.get("pr_regime_residual_scale", config.get("regime_residual_scale", 0.35)))
     t2m_regime_residual_scale = float(config.get("t2m_regime_residual_scale", 0.0))
     pr_variance_loss_weight = float(config.get("pr_variance_loss_weight", 1.0))
@@ -701,6 +705,9 @@ def train(args, accelerator):
         device=device,
         dtype=torch.float32,
     )
+    total_phase_weight = max(variance_phase_velocity_weight + variance_phase_variance_weight, 1e-6)
+    variance_phase_velocity_weight /= total_phase_weight
+    variance_phase_variance_weight /= total_phase_weight
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -708,9 +715,12 @@ def train(args, accelerator):
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
         if force_variance_phase:
-            print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
+            print(f"   [Training Mode]      : Joint variance fine-tune (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
+        if force_variance_phase:
+            print(f"   [Variance Unfreeze]  : mode={variance_phase_unfreeze_mode} | mean_heads={variance_phase_train_mean_heads}")
+            print(f"   [Phase Loss Weights] : vel={variance_phase_velocity_weight:.2f}, var={variance_phase_variance_weight:.2f}")
         print(f"   [Regime Residual]    : PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
         print(f"   [Variance Weights]   : PR={pr_variance_loss_weight:.2f}, T2M={t2m_variance_loss_weight:.2f}")
         print(f"   [Val Match Inference]: {validation_match_inference}")
@@ -978,9 +988,9 @@ def train(args, accelerator):
     if not args.test and start_in_variance_phase:
         if accelerator.is_main_process:
             if force_variance_phase:
-                print("🔒 Force-enabling variance phase from config. Freezing UNet + mean heads.")
+                print("🔓 Force-enabling joint variance fine-tune phase from config.")
                 if loaded_checkpoint_epoch == 0:
-                    print("   ⚠️ No checkpoint was loaded. This will train only variance heads from scratch.")
+                    print("   ⚠️ No checkpoint was loaded. This will train the selected fine-tune modules from scratch.")
 
         unwrapped = accelerator.unwrap_model(model)
         for param in unwrapped.unet.parameters():
@@ -991,13 +1001,24 @@ def train(args, accelerator):
             param.requires_grad_(True)
         for param in unwrapped.var_global_heads.parameters():
             param.requires_grad_(True)
+        if variance_phase_unfreeze_mode == "full_unet":
+            for param in unwrapped.unet.parameters():
+                param.requires_grad_(True)
+        elif variance_phase_unfreeze_mode == "conv_in":
+            for param in unwrapped.unet.conv_in.parameters():
+                param.requires_grad_(True)
+        elif variance_phase_unfreeze_mode not in {"none", "frozen"}:
+            raise ValueError(
+                f"Unsupported variance_phase_unfreeze_mode={variance_phase_unfreeze_mode!r}. "
+                "Use one of: none, conv_in, full_unet."
+            )
+        if variance_phase_train_mean_heads:
+            for param in unwrapped.heads.parameters():
+                param.requires_grad_(True)
 
         optimizer = torch.optim.AdamW(
             [
-                p for p in (
-                    list(unwrapped.var_heads.parameters()) +
-                    list(unwrapped.var_global_heads.parameters())
-                )
+                p for p in unwrapped.parameters()
                 if p.requires_grad
             ],
             lr=variance_phase_lr
@@ -1264,7 +1285,7 @@ def train(args, accelerator):
 
         model.train()
         train_loss = 0.0
-        phase_label = "VarOnly" if is_variance_phase else "VelOnly"
+        phase_label = "JointVar" if is_variance_phase else "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             x_cond, lead_idx, B, H, W = build_multi_condition(batch, device)
@@ -1300,7 +1321,7 @@ def train(args, accelerator):
             temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
             loss_vel = (spatial_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
 
-            # 2. Variance loss in relative std-multiplier space (v4-style)
+            # 2. Variance loss in standard-deviation space at t=0
             if is_variance_phase:
                 loss_var = compute_multi_variance_loss(
                     var_stats=var_pred,
@@ -1314,7 +1335,7 @@ def train(args, accelerator):
                 loss_var = torch.zeros((), device=device, dtype=loss_vel.dtype)
 
             if is_variance_phase:
-                loss = loss_var
+                loss = (variance_phase_velocity_weight * loss_vel) + (variance_phase_variance_weight * loss_var)
             else:
                 loss = loss_vel
 
@@ -1521,7 +1542,7 @@ def train(args, accelerator):
                         loss_var = torch.zeros((), device=device, dtype=loss_vel.dtype)
 
                     if is_variance_phase:
-                        loss_val = loss_var
+                        loss_val = (variance_phase_velocity_weight * loss_vel) + (variance_phase_variance_weight * loss_var)
                     else:
                         loss_val = loss_vel
                     val_loss_total += loss_val.item()
