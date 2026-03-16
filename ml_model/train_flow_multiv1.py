@@ -30,9 +30,11 @@ def get_area_weights(lats, device):
     return weights_tensor
 
 
-def build_multi_condition(batch, device):
+def build_multi_condition(batch, device, use_geos_spread_inputs=True):
     x_geos = batch['x_geos'].to(device)
     x_obs = batch['x_obs'].to(device)
+    if not use_geos_spread_inputs:
+        x_geos = x_geos[:, :, :2, ...]
     B = x_geos.shape[0]
     H, W = x_obs.shape[-2], x_obs.shape[-1]
     x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
@@ -260,7 +262,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       use_eof_lhs_noise=False, validation_noise_cache=None,
                       print_validation_noise_diag=False, pr_regime_residual_scale=0.35,
                       t2m_regime_residual_scale=0.0, variance_channels=None,
-                      validation_num_ensemble=15, validation_num_steps=None):
+                      validation_num_ensemble=15, validation_num_steps=None,
+                      validation_t2m_random_only=False,
+                      use_geos_spread_inputs=True):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -334,7 +338,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # With zombie processes gone, we can fit [vB * 12] through the UNet at once.
         vB = fb_target_norm.shape[0] 
         
-        fx_cond, _, _, _, _ = build_multi_condition(batch, device)
+        fx_cond, _, _, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
         
         # Expand for simultaneous ensemble generation.
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
@@ -353,7 +357,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         current_year = date_signature[0][0] if date_signature else 2021
         current_month = date_signature[0][1] if date_signature else int(batch['month'][0].item())
         mode_tag = (
-            f"pr_{pr_regime_residual_scale:.2f}_t2m_{t2m_regime_residual_scale:.2f}_var_{variance_channels}"
+            f"pr_{pr_regime_residual_scale:.2f}_t2m_{t2m_regime_residual_scale:.2f}_t2mrand_{validation_t2m_random_only}_var_{variance_channels}"
             if use_eof_lhs_noise else
             "pure_random"
         )
@@ -383,6 +387,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     year=current_year,
                     use_lhs=True,
                     orthogonalize_lhs=True,
+                    t2m_random_only=validation_t2m_random_only,
                     regime_residual_scale=pr_regime_residual_scale,
                     t2m_regime_residual_scale=t2m_regime_residual_scale,
                 )
@@ -408,9 +413,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
 
             if use_eof_lhs_noise:
                 if use_flow_variance:
-                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}) + Var{variance_channels}"
+                    t2m_label = "random" if validation_t2m_random_only else f"{t2m_regime_residual_scale:.2f}"
+                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_label}) + Var{variance_channels}"
                 else:
-                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f})"
+                    t2m_label = "random" if validation_t2m_random_only else f"{t2m_regime_residual_scale:.2f}"
+                    mode_label = f"Hybrid EOF Residual (PR={pr_regime_residual_scale:.2f}, T2M={t2m_label})"
             else:
                 mode_label = "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
@@ -696,6 +703,8 @@ def train(args, accelerator):
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_match_inference = bool(config.get("validation_match_inference", True))
+    validation_t2m_random_only = bool(config.get("validation_t2m_random_only", False))
+    use_geos_spread_inputs = bool(config.get("use_geos_spread_inputs", True))
     validation_variance_channels = build_variance_channel_mask(
         apply_pr=validation_apply_variance_pr,
         apply_t2m=validation_apply_variance_t2m,
@@ -724,15 +733,17 @@ def train(args, accelerator):
             print(f"   [Phase Loss Weights] : vel={variance_phase_velocity_weight:.2f}, var={variance_phase_variance_weight:.2f}")
         print(f"   [Regime Residual]    : PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
         print(f"   [Variance Weights]   : PR={pr_variance_loss_weight:.2f}, T2M={t2m_variance_loss_weight:.2f}")
+        print(f"   [GEOS Spread Inputs] : {use_geos_spread_inputs}")
         print(f"   [Val Match Inference]: {validation_match_inference}")
         print(f"   [Validation Var]     : PR={validation_apply_variance_pr}, T2M={validation_apply_variance_t2m}")
-        print(f"   [Validation EOF]     : {validation_use_eof_noise} | Nens={validation_num_ensemble} | Steps={validation_num_steps}")
+        print(f"   [Validation EOF]     : {validation_use_eof_noise} | T2M random={validation_t2m_random_only} | Nens={validation_num_ensemble} | Steps={validation_num_steps}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=49, out_channels=2).to(device)
+    model_in_channels = 49 if use_geos_spread_inputs else 41
+    model = FlowMatchingModel(in_channels=model_in_channels, out_channels=2).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -761,8 +772,9 @@ def train(args, accelerator):
 
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
-        print(f"   Total Input Channels: 49")
-        print(f"   --- Condition Channels (x_cond = 47) ---")
+        print(f"   Total Input Channels: {model_in_channels}")
+        cond_channels = model_in_channels - 2
+        print(f"   --- Condition Channels (x_cond = {cond_channels}) ---")
         print(f"     [00-03] x_obs: SST (L=1 to 4)")
         print(f"     [04-07] x_obs: SSS (L=1 to 4)")
         print(f"     [08-11] x_obs: Soil Moisture (L=1 to 4)")
@@ -772,13 +784,20 @@ def train(args, accelerator):
         print(f"     [24-27] x_obs: MJO Spatial Wave (L=1 to 4)")
         print(f"     [28-31] x_geos: GEOS Precip Mean (L=1 to 4)")
         print(f"     [32-35] x_geos: GEOS T2M Mean (L=1 to 4)")
-        print(f"     [36-39] x_geos: GEOS Precip Spread (L=1 to 4)")
-        print(f"     [40-43] x_geos: GEOS T2M Spread (L=1 to 4)")
-        print(f"     [    44] Month: Sine Temporal Embedding")
-        print(f"     [    45] Month: Cosine Temporal Embedding")
-        print(f"     [    46] Target Lead: Relative Index Tracking [-1 to +1]")
+        if use_geos_spread_inputs:
+            print(f"     [36-39] x_geos: GEOS Precip Spread (L=1 to 4)")
+            print(f"     [40-43] x_geos: GEOS T2M Spread (L=1 to 4)")
+            print(f"     [    44] Month: Sine Temporal Embedding")
+            print(f"     [    45] Month: Cosine Temporal Embedding")
+            print(f"     [    46] Target Lead: Relative Index Tracking [-1 to +1]")
+            xt_labels = "47,48"
+        else:
+            print(f"     [    36] Month: Sine Temporal Embedding")
+            print(f"     [    37] Month: Cosine Temporal Embedding")
+            print(f"     [    38] Target Lead: Relative Index Tracking [-1 to +1]")
+            xt_labels = "39,40"
         print(f"   --- Dynamic Flow Channel (x_t = 2) ---")
-        print(f"     [ 47,48] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
+        print(f"     [ {xt_labels}] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
         print(f"   --- Dedicated Output Heads (Multi-Task Architecture) ---")
         print(f"     Head 0: Week 1 (Conv2d 64→2)")
         print(f"     Head 1: Week 2 (Conv2d 64→2)")
@@ -840,7 +859,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, hybrid random + regime residual in variance-only mode).")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices for inference-style hybrid noise experiments.")
         print(f"   PR EOF files : {eof_bases_path}, {nao_bases_path}, {enso_bases_path}")
         print(f"   T2M EOF files: {t2m_eof_bases_path}, {t2m_nao_bases_path}, {t2m_enso_bases_path}")
 
@@ -875,7 +894,12 @@ def train(args, accelerator):
         else:
             ckpt_path = os.path.join(output_dir, args.ckpt)
     else:
-        ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
+        if getattr(args, "resume_ckpt", None):
+            ckpt_path = args.resume_ckpt
+            if not os.path.isabs(ckpt_path):
+                ckpt_path = os.path.join(output_dir, ckpt_path)
+        else:
+            ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
 
     if os.path.exists(ckpt_path):
         try:
@@ -899,8 +923,8 @@ def train(args, accelerator):
                 if resume_into_variance_phase:
                     if accelerator.is_main_process:
                         print(
-                            "   ℹ️ Variance-only resume detected (forced by config). "
-                            "Skipping optimizer state load and rebuilding a var-heads optimizer."
+                            "   ℹ️ Fine-tune resume detected (forced by config). "
+                            "Skipping optimizer state load and rebuilding the configured fine-tune optimizer."
                         )
                 else:
                     try:
@@ -1054,6 +1078,8 @@ def train(args, accelerator):
             variance_channels=validation_variance_channels,
             validation_num_ensemble=validation_num_ensemble,
             validation_num_steps=validation_num_steps,
+            validation_t2m_random_only=validation_t2m_random_only,
+            use_geos_spread_inputs=use_geos_spread_inputs,
         )
         t = val_result['tensors']
         
@@ -1289,7 +1315,7 @@ def train(args, accelerator):
         phase_label = "JointVar" if is_variance_phase else "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
-            x_cond, lead_idx, B, H, W = build_multi_condition(batch, device)
+            x_cond, lead_idx, B, H, W = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
 
             # Targets are already residual normalized [-1, 1] by dataset_hybrid
             target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
@@ -1438,6 +1464,8 @@ def train(args, accelerator):
                 variance_channels=validation_variance_channels,
                 validation_num_ensemble=validation_num_ensemble,
                 validation_num_steps=validation_num_steps,
+                validation_t2m_random_only=validation_t2m_random_only,
+                use_geos_spread_inputs=use_geos_spread_inputs,
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -1511,7 +1539,7 @@ def train(args, accelerator):
             
             with torch.no_grad():
                 for batch in val_loader:
-                    x_cond, lead_idx, B, _, _ = build_multi_condition(batch, device)
+                    x_cond, lead_idx, B, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
                     target_norm = batch['y_target'].to(device)
                     if is_variance_phase:
                         t = torch.zeros((B,), device=device)
@@ -1598,6 +1626,8 @@ def train(args, accelerator):
                             variance_channels=validation_variance_channels,
                             validation_num_ensemble=validation_num_ensemble,
                             validation_num_steps=validation_num_steps,
+                            validation_t2m_random_only=validation_t2m_random_only,
+                            use_geos_spread_inputs=use_geos_spread_inputs,
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
@@ -1634,6 +1664,8 @@ def main():
                         help="Checkpoint filename in output_dir to load for testing (default: best_flow_ckpt.pt)")
     parser.add_argument("--ckpt-rank", type=int, default=None,
                         help="Load the Nth best model from model_registry.json (e.g., --ckpt-rank 1 for best, --ckpt-rank 3 for 3rd best)")
+    parser.add_argument("--resume-ckpt", type=str, default=None,
+                        help="Checkpoint filename or path to resume from during training (defaults to latest_flow_ckpt.pt)")
     parser.add_argument("--full-val", action="store_true", help="Force full reverse sampling validation (1000 steps) for all validation epochs.")
     parser.add_argument("--epochs-per-run", type=int, default=10000, 
                         help="Number of epochs to run before exiting gracefully (useful for job chaining)")

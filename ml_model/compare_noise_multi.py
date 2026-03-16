@@ -123,6 +123,7 @@ def run_strategy(
     num_ensemble,
     num_steps,
     noise_fn,
+    use_geos_spread_inputs,
     use_var_head=False,
     perturb_cond=False,
     variance_channels=None,
@@ -138,7 +139,7 @@ def run_strategy(
     true_target_pr = true_target_raw[:, 0]    # [num_inits, 4, H, W]
     true_target_t2m = true_target_raw[:, 1]   # [num_inits, 4, H, W]
     
-    fx_cond, _, _, _, _ = build_multi_condition(batch, device)
+    fx_cond, _, _, _, _ = build_multi_condition(batch, device, use_geos_spread_inputs=use_geos_spread_inputs)
     
     fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W).clone()
     lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
@@ -244,6 +245,8 @@ def main():
 
     pr_regime_residual_scale = float(config.get("pr_regime_residual_scale", config.get("regime_residual_scale", 0.35)))
     t2m_regime_residual_scale = float(config.get("t2m_regime_residual_scale", 0.0))
+    validation_t2m_random_only = bool(config.get("validation_t2m_random_only", False))
+    use_geos_spread_inputs = bool(config.get("use_geos_spread_inputs", True))
     
     stats_file = config.get("stats_file", "v1_multi_global_stats.pt")
     test_dataset = S2SHybridDataset(
@@ -255,7 +258,8 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False)
     
     # ─── Model Loading (49-in, 2-out for multi: obs + GEOS mean/spread + calendar + lead) ───
-    model = FlowMatchingModel(in_channels=49, out_channels=2).to(device)
+    model_in_channels = 49 if use_geos_spread_inputs else 41
+    model = FlowMatchingModel(in_channels=model_in_channels, out_channels=2).to(device)
     
     if args.checkpoint:
         ckpt_path = args.checkpoint
@@ -341,6 +345,7 @@ def main():
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
     print(f"  ✅ Regime residual scales: PR={pr_regime_residual_scale:.2f}, T2M={t2m_regime_residual_scale:.2f}")
+    print(f"  ✅ GEOS spread inputs: {use_geos_spread_inputs} | T2M random-only: {validation_t2m_random_only}")
     
     # ─── Noise Functions ───
     # Strategy: run v4's 1-channel EOF pipeline independently for each channel,
@@ -382,6 +387,7 @@ def main():
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
+            t2m_random_only=validation_t2m_random_only,
             regime_residual_scale=pr_regime_residual_scale,
             t2m_regime_residual_scale=t2m_regime_residual_scale,
         )
@@ -527,6 +533,7 @@ def main():
                 args.num_ensemble,
                 args.num_steps,
                 fn,
+                use_geos_spread_inputs,
                 use_var,
                 perturb_cond,
                 variance_channels,

@@ -142,15 +142,20 @@ def load_compatible_model_state(model, state_dict, verbose=False):
             key == "unet.conv_in.weight" and
             value.ndim == 4 and target.ndim == 4 and
             value.shape[0] == target.shape[0] and
-            value.shape[2:] == target.shape[2:] and
-            value.shape[1] < target.shape[1]
+            value.shape[2:] == target.shape[2:]
         ):
-            padded = target.clone()
-            padded.zero_()
-            padded[:, :value.shape[1]] = value
-            adapted_state[key] = padded
-            migrated.append((key, tuple(value.shape), tuple(target.shape)))
-            continue
+            if value.shape[1] < target.shape[1]:
+                padded = target.clone()
+                padded.zero_()
+                padded[:, :value.shape[1]] = value
+                adapted_state[key] = padded
+                migrated.append((key, tuple(value.shape), tuple(target.shape)))
+                continue
+            if value.shape[1] > target.shape[1]:
+                cropped = value[:, :target.shape[1]].clone()
+                adapted_state[key] = cropped
+                migrated.append((key, tuple(value.shape), tuple(target.shape)))
+                continue
 
     missing, unexpected = model.load_state_dict(adapted_state, strict=False)
 
