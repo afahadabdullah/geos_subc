@@ -240,6 +240,8 @@ def main():
     
     with open(args.config) as f:
         config = yaml.safe_load(f)
+
+    regime_residual_scale = float(config.get("regime_residual_scale", 0.35))
     
     stats_file = config.get("stats_file", "v1_multi_global_stats.pt")
     test_dataset = S2SHybridDataset(
@@ -336,6 +338,7 @@ def main():
         mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
+    print(f"  ✅ Regime residual scale: {regime_residual_scale:.2f}")
     
     # ─── Noise Functions ───
     # Strategy: run v4's 1-channel EOF pipeline independently for each channel,
@@ -364,6 +367,20 @@ def main():
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
+        )
+
+    def noise_multimodal_dynamic_lhs_hybrid(vB, E, H, W, b, d):
+        """
+        Updated validation-style hybrid:
+        pure random base plus regime-conditioned EOF residual using exact batch dates.
+        """
+        return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+            b, E, d,
+            mjo_bases, nao_bases, enso_bases,
+            t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
+            nao_lookup, oni_lookup, mjo_df, args.year,
+            use_lhs=True,
+            regime_residual_scale=regime_residual_scale,
         )
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
@@ -417,11 +434,12 @@ def main():
     # Format: (Name, noise_fn, use_var_head, perturb_cond)
     strategies = [
         ("1. Pure Random",        noise_pure,                           False, False),
-        ("2. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
-        ("3. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
-        ("4. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
-        ("5. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
-        ("6. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
+        ("2. Hybrid EOF Resid+Var", noise_multimodal_dynamic_lhs_hybrid, True,  False),
+        ("3. EOF(LHS)+Var",       noise_multimodal_dynamic_lhs,         True,  False),
+        ("4. EOF(LHS) noVar",     noise_multimodal_dynamic_lhs,         False, False),
+        ("5. EOF PR + Rnd T2M",   noise_multimodal_dynamic_lhs_pr_only, True,  False),
+        ("6. ValReplay EOF+Var",  noise_multimodal_dynamic_lhs_val_replay, True, False),
+        ("7. PR EOF98 + Rnd T2M", noise_multimodal_dynamic_lhs_pr_blend, False, False),
     ]
     
     n_ml = len(strategies)

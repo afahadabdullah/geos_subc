@@ -225,7 +225,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
                       t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
                       use_eof_lhs_noise=False, validation_noise_cache=None,
-                      print_validation_noise_diag=False):
+                      print_validation_noise_diag=False, regime_residual_scale=0.35):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -320,10 +320,25 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
         
-        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
-        current_month = int(batch['month'][0].item())
-        mode_tag = "pr_t2m_eof_lhs" if use_eof_lhs_noise else "pure_random"
-        cache_key = (mode_tag, b_idx, current_year, current_month, num_ensemble, vB, H, W)
+        batch_years = batch['year'] if 'year' in batch else torch.full_like(batch['month'], 2021)
+        batch_days = batch['day'] if 'day' in batch else torch.full_like(batch['month'], 15)
+        date_signature = tuple(
+            (
+                int(batch_years[i].item()),
+                int(batch['month'][i].item()),
+                int(batch_days[i].item()),
+                int(batch['lead_idx'][i].item()),
+            )
+            for i in range(vB)
+        )
+        current_year = date_signature[0][0] if date_signature else 2021
+        current_month = date_signature[0][1] if date_signature else int(batch['month'][0].item())
+        mode_tag = (
+            f"pr_t2m_hybrid_regime_{regime_residual_scale:.2f}"
+            if use_eof_lhs_noise else
+            "pure_random"
+        )
+        cache_key = (mode_tag, b_idx, date_signature, num_ensemble, vB, H, W)
         cache_hit = False
 
         if validation_noise_cache is not None and cache_key in validation_noise_cache:
@@ -349,6 +364,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     year=current_year,
                     use_lhs=True,
                     orthogonalize_lhs=True,
+                    regime_residual_scale=regime_residual_scale,
                 )
             else:
                 noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
@@ -369,7 +385,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
             import noise_utils_multi
 
-            mode_label = "PR EOF-LHS + Var / T2M EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
+            mode_label = (
+                f"Pure Random + Regime Residual ({regime_residual_scale:.2f}) + Var"
+                if use_eof_lhs_noise else
+                "Pure Random"
+            )
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
             print(f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} Month={current_month} Mode={mode_label} Source={source_label}")
             noise_utils_multi.print_noise_channel_stats(noise_expanded.float(), prefix="Val Noise")
@@ -638,6 +658,7 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
+    regime_residual_scale = float(config.get("regime_residual_scale", 0.35))
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -648,6 +669,7 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
+        print(f"   [Regime Residual]    : scale = {regime_residual_scale:.2f}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -759,7 +781,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, hybrid random + regime residual in variance-only mode).")
         print(f"   PR EOF files : {eof_bases_path}, {nao_bases_path}, {enso_bases_path}")
         print(f"   T2M EOF files: {t2m_eof_bases_path}, {t2m_nao_bases_path}, {t2m_enso_bases_path}")
 
@@ -927,7 +949,8 @@ def train(args, accelerator):
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+            regime_residual_scale=regime_residual_scale,
         )
         t = val_result['tensors']
         
@@ -1312,7 +1335,8 @@ def train(args, accelerator):
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                 enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                regime_residual_scale=regime_residual_scale,
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -1465,7 +1489,8 @@ def train(args, accelerator):
                             print_validation_noise_diag=False,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                            regime_residual_scale=regime_residual_scale,
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
