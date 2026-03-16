@@ -232,6 +232,9 @@ def main():
     parser.add_argument("--year", type=int, default=2021)
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
+    parser.add_argument("--eof_rho", type=float, default=1.0,
+                        help="Variance-preserving EOF tempering weight. "
+                             "1.0 = pure EOF-LHS, smaller values mix in more random noise.")
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
     args = parser.parse_args()
@@ -336,6 +339,12 @@ def main():
         mjo_df['date_str'] = mjo_df['S'].dt.strftime('%Y-%m-%d')
         mjo_df = mjo_df.set_index('date_str')
         print(f"  ✅ MJO RMM CSV loaded: {len(mjo_df)} entries")
+    eof_rho = float(max(0.0, min(1.0, args.eof_rho)))
+    if eof_rho < 1.0:
+        rand_w = float(np.sqrt(max(0.0, 1.0 - eof_rho ** 2)))
+        print(f"  ✅ EOF tempering enabled: rho={eof_rho:.3f} (random weight={rand_w:.3f})")
+    else:
+        print("  ✅ EOF tempering disabled: rho=1.000 (pure EOF-LHS)")
     
     # ─── Noise Functions ───
     # The sampler now resolves the exact init date from the batch metadata when
@@ -358,13 +367,20 @@ def main():
         LHS version: run noise_utils for each channel independently, concat.
         PR uses precipitation EOF bases, T2M uses temperature EOF bases.
         """
-        return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+        eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
             b, E, d,
             mjo_bases, nao_bases, enso_bases,
             t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
             nao_lookup, oni_lookup, mjo_df, args.year,
             use_lhs=True,
         )
+        if eof_rho >= 0.999:
+            return eof_noise
+
+        rand_noise = torch.randn_like(eof_noise)
+        mixed_noise = np.sqrt(max(0.0, 1.0 - eof_rho ** 2)) * rand_noise + eof_rho * eof_noise
+        mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
+        return mixed_noise / (mixed_std + 1e-6)
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
         """
