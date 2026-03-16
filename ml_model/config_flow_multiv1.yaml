@@ -19,12 +19,12 @@ reset_validation_history: False
 force_variance_phase: True
 variance_phase_lr: 1e-5
 pr_regime_residual_scale: 0.35
-t2m_regime_residual_scale: 0.00
+t2m_regime_residual_scale: 0.35
 pr_variance_loss_weight: 1.00
-t2m_variance_loss_weight: 0.35
+t2m_variance_loss_weight: 1.00
 validation_use_eof_noise: True
 validation_apply_variance_pr: True
-validation_apply_variance_t2m: False
+validation_apply_variance_t2m: True
 validation_match_inference: True
 validation_num_ensemble: 15
 validation_num_steps: 10
