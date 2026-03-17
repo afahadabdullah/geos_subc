@@ -440,14 +440,15 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Compare two tempered EOF-LHS settings side by side, both with the same
-    # variance tempering so rho is the main difference.
+    # Sweep tempered EOF-LHS priors with the variance head disabled so rho is
+    # the only thing changing relative to Pure Noise.
     # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
     strategies = [
-        ("1. Pure Noise",                 noise_pure,                        False, False, 0.0),
-        ("2. EOF LHS rho0.25 var off",    make_noise_multimodal_dynamic_lhs(0.25), False, False, 0.0),
-        ("3. EOF LHS rho0.25 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.25), True,  False, 0.5),
-        ("4. EOF LHS rho0.75 + Var0.5",   make_noise_multimodal_dynamic_lhs(0.75), True,  False, 0.5),
+        ("1. Pure Noise",              noise_pure,                        False, False, 0.0),
+        ("2. EOF LHS rho0.10 var off", make_noise_multimodal_dynamic_lhs(0.10), False, False, 0.0),
+        ("3. EOF LHS rho0.20 var off", make_noise_multimodal_dynamic_lhs(0.20), False, False, 0.0),
+        ("4. EOF LHS rho0.30 var off", make_noise_multimodal_dynamic_lhs(0.30), False, False, 0.0),
+        ("5. EOF LHS rho0.40 var off", make_noise_multimodal_dynamic_lhs(0.40), False, False, 0.0),
     ]
     
     n_ml = len(strategies)
