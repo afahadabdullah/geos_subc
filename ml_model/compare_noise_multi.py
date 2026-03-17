@@ -360,12 +360,24 @@ def main():
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
 
-    def _mix_with_random(eof_noise, rho):
-        rho = float(max(0.0, min(1.0, rho)))
-        if rho >= 0.999:
+    def _mix_with_random(eof_noise, rho_pr, rho_t2m=None):
+        if rho_t2m is None:
+            rho_t2m = rho_pr
+        rho_pr = float(max(0.0, min(1.0, rho_pr)))
+        rho_t2m = float(max(0.0, min(1.0, rho_t2m)))
+        if rho_pr >= 0.999 and rho_t2m >= 0.999:
             return eof_noise
+
         rand_noise = torch.randn_like(eof_noise)
-        mixed_noise = np.sqrt(max(0.0, 1.0 - rho ** 2)) * rand_noise + rho * eof_noise
+        mixed_noise = eof_noise.clone()
+        mixed_noise[:, 0:1] = (
+            np.sqrt(max(0.0, 1.0 - rho_pr ** 2)) * rand_noise[:, 0:1]
+            + rho_pr * eof_noise[:, 0:1]
+        )
+        mixed_noise[:, 1:2] = (
+            np.sqrt(max(0.0, 1.0 - rho_t2m ** 2)) * rand_noise[:, 1:2]
+            + rho_t2m * eof_noise[:, 1:2]
+        )
         mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
         return mixed_noise / (mixed_std + 1e-6)
     
@@ -392,6 +404,21 @@ def main():
                 use_lhs=True,
             )
             return _mix_with_random(eof_noise, rho)
+        return _noise
+
+    def make_noise_multimodal_dynamic_lhs_asym(rho_pr, rho_t2m):
+        """
+        LHS EOF noise with separate PR/T2M tempering in one forward pass.
+        """
+        def _noise(vB, E, H, W, b, d):
+            eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                b, E, d,
+                mjo_bases, nao_bases, enso_bases,
+                t2m_mjo_bases, t2m_nao_bases, t2m_enso_bases,
+                nao_lookup, oni_lookup, mjo_df, args.year,
+                use_lhs=True,
+            )
+            return _mix_with_random(eof_noise, rho_pr, rho_t2m)
         return _noise
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):
@@ -440,14 +467,17 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Shortlist a few rho/beta combinations around the promising low-rho range.
+    # Minimal comparison: baseline random prior versus one asymmetric EOF prior.
     # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
     strategies = [
-        ("1. Pure Noise",                 noise_pure,                        False, False, 0.0),
-        ("2. EOF LHS rho0.05 beta0.0",    make_noise_multimodal_dynamic_lhs(0.05), False, False, 0.0),
-        ("3. EOF LHS rho0.15 beta0.0",    make_noise_multimodal_dynamic_lhs(0.15), False, False, 0.0),
-        ("4. EOF LHS rho0.15 beta0.1",    make_noise_multimodal_dynamic_lhs(0.15), True,  False, 0.1),
-        ("5. EOF LHS rho0.15 beta0.3",    make_noise_multimodal_dynamic_lhs(0.15), True,  False, 0.3),
+        ("1. Pure Noise", noise_pure, False, False, 0.0),
+        (
+            "3. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.05",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.05),
+        ),
     ]
     
     n_ml = len(strategies)

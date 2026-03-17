@@ -184,10 +184,19 @@ class CustomFlowMatcher:
         If apply_flow_variance is enabled, query the variance head at t=0 and
         temper its effect toward unit scale using variance_beta.
         """
-        beta = float(max(0.0, min(1.0, variance_beta)))
+        if isinstance(variance_beta, (list, tuple)):
+            beta_vals = [float(max(0.0, min(1.0, b))) for b in variance_beta]
+            beta = torch.as_tensor(
+                beta_vals, device=noise.device, dtype=noise.dtype
+            ).view(1, -1, 1, 1)
+            beta_debug = beta_vals
+        else:
+            beta_scalar = float(max(0.0, min(1.0, variance_beta)))
+            beta = beta_scalar
+            beta_debug = beta_scalar
         debug = {
             "apply_flow_variance": bool(apply_flow_variance),
-            "variance_beta": beta,
+            "variance_beta": beta_debug,
         }
 
         if not apply_flow_variance:
