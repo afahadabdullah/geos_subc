@@ -1120,42 +1120,68 @@ def run_full_test_suite_multi(
         all_t2m_geos_crps_maps.append(t2m_geos_crps_map.detach().cpu().numpy())
         all_t2m_geos_mse_maps.append(t2m_geos_mse_map.detach().cpu().numpy())
 
-        should_save_sample_plot = (
-            accelerator.is_main_process
-            and (sample_plot_limit is None or sample_plots_written < sample_plot_limit)
-        )
-        if should_save_sample_plot:
-            init_label = f"{current_year:04d}-{current_month:02d}-{current_day:02d}"
-            save_test_plot_cartopy_multi(
-                batch_idx=b_idx,
-                init_label=init_label,
-                output_dir=output_dir,
-                lats=lats,
-                lons=lons,
-                full_pred_pr=full_pred_precip[0].detach().cpu().numpy(),
-                true_target_pr=torch.nan_to_num(true_target_precip[0], nan=0.0).detach().cpu().numpy(),
-                geos_mean_pr=torch.nan_to_num(geos_mean_precip[0], nan=0.0).detach().cpu().numpy(),
-                geos_single_pr=torch.nan_to_num(geos_ens_sample[0, 0, 0], nan=0.0).detach().cpu().numpy(),
-                model_single_pr=ensemble_preds_precip[0, 0].detach().cpu().numpy(),
-                model_crps_pr=pr_crps,
-                model_rmse_pr=pr_rmse,
-                geos_crps_pr=pr_geos_crps,
-                geos_rmse_pr=pr_geos_rmse,
-                full_pred_t2m=full_pred_t2m[0].detach().cpu().numpy(),
-                true_target_t2m=torch.nan_to_num(true_target_t2m[0], nan=280.0).detach().cpu().numpy(),
-                geos_mean_t2m=torch.nan_to_num(geos_mean_t2m[0], nan=280.0).detach().cpu().numpy(),
-                geos_single_t2m=torch.nan_to_num(geos_ens_sample[0, 0, 1], nan=280.0).detach().cpu().numpy(),
-                model_single_t2m=ensemble_preds_t2m[0, 0].detach().cpu().numpy(),
-                model_crps_t2m=t2m_crps,
-                model_rmse_t2m=t2m_rmse,
-                geos_crps_t2m=t2m_geos_crps,
-                geos_rmse_t2m=t2m_geos_rmse,
-            )
-            sample_plots_written += 1
-            print(
-                f"📸 Saved month plot immediately for {init_label} "
-                f"(batch {b_idx}, PR CRPS {pr_crps:.4f}, T2M CRPS {t2m_crps:.4f})"
-            )
+        if accelerator.is_main_process:
+            init_years = batch['year'][0::4].detach().cpu().numpy().astype(int) if 'year' in batch else np.full(num_inits, current_year, dtype=int)
+            init_months = batch['month'][0::4].detach().cpu().numpy().astype(int)
+            init_days = batch['day'][0::4].detach().cpu().numpy().astype(int) if 'day' in batch else np.full(num_inits, current_day, dtype=int)
+
+            for init_idx in range(num_inits):
+                if sample_plot_limit is not None and sample_plots_written >= sample_plot_limit:
+                    break
+
+                single_pr_ens = ensemble_preds_precip[:, init_idx:init_idx + 1]
+                single_pr_target = true_target_precip[init_idx:init_idx + 1]
+                single_pr_full = full_pred_precip[init_idx:init_idx + 1]
+                single_pr_geos_ens = geos_ens_sample[init_idx:init_idx + 1, :, 0].transpose(0, 1)
+                single_pr_geos_mean = geos_mean_precip[init_idx:init_idx + 1]
+
+                single_t2m_ens = ensemble_preds_t2m[:, init_idx:init_idx + 1]
+                single_t2m_target = true_target_t2m[init_idx:init_idx + 1]
+                single_t2m_full = full_pred_t2m[init_idx:init_idx + 1]
+                single_t2m_geos_ens = geos_ens_sample[init_idx:init_idx + 1, :, 1].transpose(0, 1)
+                single_t2m_geos_mean = geos_mean_t2m[init_idx:init_idx + 1]
+
+                pr_crps_init, _ = compute_crps_with_map(single_pr_ens, single_pr_target, area_weights)
+                pr_rmse_init = compute_rmse(single_pr_full, single_pr_target, area_weights)
+                pr_geos_crps_init, _ = compute_crps_with_map(single_pr_geos_ens, single_pr_target, area_weights)
+                pr_geos_rmse_init = compute_rmse(single_pr_geos_mean, single_pr_target, area_weights)
+
+                t2m_crps_init, _ = compute_crps_with_map(single_t2m_ens, single_t2m_target, area_weights)
+                t2m_rmse_init = compute_rmse(single_t2m_full, single_t2m_target, area_weights)
+                t2m_geos_crps_init, _ = compute_crps_with_map(single_t2m_geos_ens, single_t2m_target, area_weights)
+                t2m_geos_rmse_init = compute_rmse(single_t2m_geos_mean, single_t2m_target, area_weights)
+
+                init_label = f"{init_years[init_idx]:04d}-{init_months[init_idx]:02d}-{init_days[init_idx]:02d}"
+                save_test_plot_cartopy_multi(
+                    batch_idx=sample_plots_written,
+                    init_label=init_label,
+                    output_dir=output_dir,
+                    lats=lats,
+                    lons=lons,
+                    full_pred_pr=full_pred_precip[init_idx].detach().cpu().numpy(),
+                    true_target_pr=torch.nan_to_num(true_target_precip[init_idx], nan=0.0).detach().cpu().numpy(),
+                    geos_mean_pr=torch.nan_to_num(geos_mean_precip[init_idx], nan=0.0).detach().cpu().numpy(),
+                    geos_single_pr=torch.nan_to_num(geos_ens_sample[init_idx, 0, 0], nan=0.0).detach().cpu().numpy(),
+                    model_single_pr=ensemble_preds_precip[0, init_idx].detach().cpu().numpy(),
+                    model_crps_pr=pr_crps_init,
+                    model_rmse_pr=pr_rmse_init,
+                    geos_crps_pr=pr_geos_crps_init,
+                    geos_rmse_pr=pr_geos_rmse_init,
+                    full_pred_t2m=full_pred_t2m[init_idx].detach().cpu().numpy(),
+                    true_target_t2m=torch.nan_to_num(true_target_t2m[init_idx], nan=280.0).detach().cpu().numpy(),
+                    geos_mean_t2m=torch.nan_to_num(geos_mean_t2m[init_idx], nan=280.0).detach().cpu().numpy(),
+                    geos_single_t2m=torch.nan_to_num(geos_ens_sample[init_idx, 0, 1], nan=280.0).detach().cpu().numpy(),
+                    model_single_t2m=ensemble_preds_t2m[0, init_idx].detach().cpu().numpy(),
+                    model_crps_t2m=t2m_crps_init,
+                    model_rmse_t2m=t2m_rmse_init,
+                    geos_crps_t2m=t2m_geos_crps_init,
+                    geos_rmse_t2m=t2m_geos_rmse_init,
+                )
+                sample_plots_written += 1
+                print(
+                    f"📸 Saved month plot immediately for {init_label} "
+                    f"(PR CRPS {pr_crps_init:.4f}, T2M CRPS {t2m_crps_init:.4f})"
+                )
 
         if accelerator.is_main_process:
             done = max(1, total_inits)
@@ -1779,7 +1805,7 @@ def train(args, accelerator):
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
-            sample_plot_limit=None,
+            sample_plot_limit=24,
         )
         return
 
