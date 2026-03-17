@@ -420,6 +420,37 @@ def save_test_correlation_triplet(geos_map, model_map, title_prefix, filename, o
     plt.close()
 
 
+def load_plot_coords(data_dir, year_hint):
+    """
+    Match the older test scripts by reading the GEOS grid coordinates directly
+    from the source data. Fall back to a 0..359 longitude convention, which is
+    still safer than the incorrect -180..179 assumption for these files.
+    """
+    candidate_years = []
+    if year_hint is not None:
+        candidate_years.append(int(year_hint))
+    candidate_years.extend([2021, 2020, 2019])
+
+    seen = set()
+    for year in candidate_years:
+        if year in seen:
+            continue
+        seen.add(year)
+        geos_sample_path = os.path.join(data_dir, f"geos_subc_{year}.zarr")
+        if not os.path.exists(geos_sample_path):
+            continue
+        try:
+            ds_geos = xr.open_zarr(geos_sample_path, consolidated=False)
+            lats = ds_geos.Y.values
+            lons = ds_geos.X.values
+            ds_geos.close()
+            return lats, lons
+        except Exception:
+            continue
+
+    return np.linspace(-90, 90, 181), np.arange(360)
+
+
 def compute_multi_variance_loss(
     var_pred: torch.Tensor,
     v_pred: torch.Tensor,
@@ -866,6 +897,8 @@ def run_full_test_suite_multi(
     target_sqrt_min,
     target_sqrt_max,
     area_weights,
+    lats=None,
+    lons=None,
     use_flow_variance=False,
     eof_bases=None,
     nao_bases=None,
@@ -900,8 +933,10 @@ def run_full_test_suite_multi(
     if validation_var_beta_t2m is None:
         validation_var_beta_t2m = validation_var_beta_pr
 
-    lats = np.linspace(-90, 90, 181)
-    lons = np.linspace(-180, 179, 360)
+    if lats is None:
+        lats = np.linspace(-90, 90, 181)
+    if lons is None:
+        lons = np.arange(360)
     aw_np = area_weights.squeeze().detach().cpu().numpy()
     aw_2d = np.broadcast_to(aw_np[:, np.newaxis], (len(lats), len(lons)))
 
@@ -1406,6 +1441,7 @@ def train(args, accelerator):
     
     geos_min = global_bounds["geos_pr_raw"]["min"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_pr_raw"]["max"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["max"]
+    plot_lats, plot_lons = load_plot_coords(config["data_dir"], config.get("val_end_year"))
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
@@ -1422,6 +1458,7 @@ def train(args, accelerator):
         print(f"✅ Loaded Strict Global Stats: {stats_file}")
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
+        print(f"   [Plot Lon Range]     : {float(plot_lons.min()):.2f} .. {float(plot_lons.max()):.2f}")
         if force_variance_phase:
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
@@ -1709,6 +1746,8 @@ def train(args, accelerator):
             target_sqrt_min,
             target_sqrt_max,
             area_weights,
+            lats=plot_lats,
+            lons=plot_lons,
             use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
             eof_bases=eof_bases,
             nao_bases=nao_bases,
