@@ -1,36 +1,38 @@
 #!/bin/bash
-#SBATCH -J test_flow        # Job name
-#SBATCH -o test_flow_%j.log   # Combined Output and Error file name
-#SBATCH -p gh-dev           # partition
-#SBATCH -N 1                # Total number of nodes
-#SBATCH -n 1                # Number of tasks per node
-#SBATCH -t 02:00:00         # Run time (d-hh:mm:ss)
+#SBATCH -J test_flowmulti
+#SBATCH -o ml_output_flowmulti/test_flowmulti_%j.log
+#SBATCH -e ml_output_flowmulti/test_flowmulti_%j.log
+#SBATCH -p gh-dev
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 02:00:00
+#SBATCH -A ATM25008
+#SBATCH --mail-type=all
+#SBATCH --mail-user=a.fahad@nasa.gov
 
-echo "Starting testing script..."
-date
+echo "🧪 Multi-target test job started at $(date) on $(hostname)"
 
 source ~/.bashrc
 conda activate geossub_env
 
-# Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 
-# Move to Scratch storage
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
-# The optimal Phase 1 model before Variance Head pollution
-CKPT="ml_output_flow4/best_model_epoch_115_crps_1.3602.pt"
+echo "🔄 Pulling latest code..."
+git pull
 
-for YEAR in 2021; do
-    echo "--- Running Inference Validation for Year $YEAR ---"
-    python3 ml_model/test_flow.py --config ml_model/config_flow.yaml \
-        --ckpt $CKPT \
-        --year $YEAR \
-        --ensemble-size 15 \
-        --steps 10
-    echo "---------------------------------------------------"
-done
+mkdir -p ml_output_flowmulti
 
-echo "Testing finished!"
-date
+CONFIG_PATH="ml_model/config_flow_multiv1.yaml"
+CKPT_FILE="best_flow_ckpt.pt"
+
+echo "🚀 Running flow multi test mode with checkpoint ${CKPT_FILE}"
+accelerate launch --num_processes 1 --mixed_precision fp16 \
+    ml_model/train_flow_multiv1.py \
+    --config "$CONFIG_PATH" \
+    --test \
+    --ckpt "$CKPT_FILE"
+
+echo "🏁 Test job finished at $(date)"
