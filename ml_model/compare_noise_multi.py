@@ -440,15 +440,14 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Sweep tempered EOF-LHS priors with the variance head disabled so rho is
-    # the only thing changing relative to Pure Noise.
+    # Shortlist a few rho/beta combinations around the promising low-rho range.
     # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
     strategies = [
-        ("1. Pure Noise",              noise_pure,                        False, False, 0.0),
-        ("2. EOF LHS rho0.10 var off", make_noise_multimodal_dynamic_lhs(0.10), False, False, 0.0),
-        ("3. EOF LHS rho0.20 var off", make_noise_multimodal_dynamic_lhs(0.20), False, False, 0.0),
-        ("4. EOF LHS rho0.30 var off", make_noise_multimodal_dynamic_lhs(0.30), False, False, 0.0),
-        ("5. EOF LHS rho0.40 var off", make_noise_multimodal_dynamic_lhs(0.40), False, False, 0.0),
+        ("1. Pure Noise",                 noise_pure,                        False, False, 0.0),
+        ("2. EOF LHS rho0.05 beta0.0",    make_noise_multimodal_dynamic_lhs(0.05), False, False, 0.0),
+        ("3. EOF LHS rho0.15 beta0.0",    make_noise_multimodal_dynamic_lhs(0.15), False, False, 0.0),
+        ("4. EOF LHS rho0.15 beta0.1",    make_noise_multimodal_dynamic_lhs(0.15), True,  False, 0.1),
+        ("5. EOF LHS rho0.15 beta0.3",    make_noise_multimodal_dynamic_lhs(0.15), True,  False, 0.3),
     ]
     
     n_ml = len(strategies)
