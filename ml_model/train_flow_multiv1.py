@@ -367,7 +367,13 @@ def save_test_metric_map_triplet(geos_map, model_map, title_prefix, metric_name,
     panels = [
         (geos_map, f"{title_prefix} GEOS {metric_name}", "OrRd", vmin, vmax),
         (model_map, f"{title_prefix} Model {metric_name}", "OrRd", vmin, vmax),
-        (diff_map, f"{title_prefix} {metric_name} Impr: GEOS-Model", "PiYG", -diff_vmax, diff_vmax),
+        (
+            diff_map,
+            f"{title_prefix} {metric_name} Diff: GEOS-Model\nGreen (+) = Model Better | Magenta (-) = GEOS Better",
+            "PiYG",
+            -diff_vmax,
+            diff_vmax,
+        ),
     ]
     for i, (img, title, cmap, pmin, pmax) in enumerate(panels):
         ax = axes[i]
@@ -399,7 +405,13 @@ def save_test_correlation_triplet(geos_map, model_map, title_prefix, filename, o
     panels = [
         (geos_map, f"{title_prefix} GEOS Corr (Avg: {geos_avg:.3f})", "RdYlGn", -1, 1),
         (model_map, f"{title_prefix} Model Corr (Avg: {model_avg:.3f})", "RdYlGn", -1, 1),
-        (diff_map, f"{title_prefix} Corr Diff: Model-GEOS", "PuOr", -0.4, 0.4),
+        (
+            diff_map,
+            f"{title_prefix} Corr Diff: Model-GEOS\nOrange (+) = Model Better | Purple (-) = GEOS Better",
+            "PuOr",
+            -0.4,
+            0.4,
+        ),
     ]
     for i, (img, title, cmap, pmin, pmax) in enumerate(panels):
         ax = axes[i]
