@@ -21,7 +21,7 @@ export PYTHONUNBUFFERED=1
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
 echo "🔄 Pulling latest code..."
-git pull
+git pull --no-rebase origin flow_multi
 
 mkdir -p ml_output_flowmulti
 

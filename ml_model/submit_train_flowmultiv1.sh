@@ -30,7 +30,7 @@ pkill -9 -u $USER -f accelerate
 sleep 3
 
 echo "🔄 Pulling latest fixes from git..."
-git pull
+git pull --no-rebase origin flow_multi
 
 # Ensure output directory exists
 mkdir -p ml_output_flowmulti
