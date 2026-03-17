@@ -20,6 +20,7 @@ import pandas as pd
 from dataset_flow_multi import S2SHybridDataset
 from flow_matching_multi import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
+import noise_utils_multi
 
 def get_area_weights(lats, device):
     lats_rad = np.deg2rad(lats)
@@ -225,7 +226,13 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
                       t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
                       use_eof_lhs_noise=False, validation_noise_cache=None,
-                      print_validation_noise_diag=False):
+                      print_validation_noise_diag=False,
+                      validation_num_ensemble=15,
+                      validation_num_steps=None,
+                      validation_rho_pr=1.0,
+                      validation_rho_t2m=None,
+                      validation_var_beta_pr=1.0,
+                      validation_var_beta_t2m=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -260,6 +267,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     total_geos_rmse_t2m = 0.0
     count = 0
     did_print_noise_diag = False
+    if validation_rho_t2m is None:
+        validation_rho_t2m = validation_rho_pr
+    if validation_var_beta_t2m is None:
+        validation_var_beta_t2m = validation_var_beta_pr
     
     # We will only save/return the tensors for the first batch (idx 0) so the plotting remains identical
     saved_tensors = {}
@@ -289,14 +300,11 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Prepare 4-week prediction buffer
         pred_res_norm_agg = torch.zeros((4, H, W), device=device)
         
-        # Fast validation: 15 ensemble members. Full validation: 15 members.
-        num_ensemble = 15
+        num_ensemble = int(validation_num_ensemble)
         ensemble_preds_precip = [] # Will be [num_ensemble, num_inits, 4, H, W]
         ensemble_preds_t2m = []
 
-        # Progress bar for internal status during long samplings
-        # Fast: 10 Euler steps (rapid screening). Full: 50 steps (publication quality)
-        num_steps = 10 if is_fast_recon and not is_test else 50
+        num_steps = int(validation_num_steps) if validation_num_steps is not None else (10 if is_fast_recon and not is_test else 50)
         
         # --- VRAM GPU BATCHING: Solve all Lead Weeks and Ensemble members SIMULTANEOUSLY ---
         # With zombie processes gone, we can fit [vB * 12] through the UNet at once.
@@ -323,7 +331,13 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
         current_day = int(batch['day'][0].item()) if 'day' in batch else 15
-        mode_tag = "pr_t2m_eof_lhs" if use_eof_lhs_noise else "pure_random"
+        mode_tag = "pure_random"
+        if use_eof_lhs_noise:
+            mode_tag = (
+                f"pr_t2m_eof_lhs_rho_pr{validation_rho_pr:.2f}_rho_t2m{validation_rho_t2m:.2f}"
+            )
+        if use_flow_variance:
+            mode_tag += f"_beta_pr{validation_var_beta_pr:.2f}_beta_t2m{validation_var_beta_t2m:.2f}"
         cache_key = (mode_tag, b_idx, current_year, current_month, current_day, num_ensemble, vB, H, W)
         cache_hit = False
 
@@ -332,9 +346,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             cache_hit = True
         else:
             if use_eof_lhs_noise:
-                import noise_utils_multi
-
-                noise_expanded = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
                     batch=batch,
                     E=num_ensemble,
                     device=device,
@@ -351,6 +363,9 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     use_lhs=True,
                     orthogonalize_lhs=True,
                 )
+                noise_expanded = noise_utils_multi.mix_noise_with_random_multi(
+                    eof_noise, validation_rho_pr, validation_rho_t2m
+                )
             else:
                 noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
 
@@ -365,12 +380,17 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             num_steps=num_steps,
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
+            variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
         )
 
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
-            import noise_utils_multi
-
-            mode_label = "PR EOF-LHS + Var / T2M EOF-LHS + Var" if use_eof_lhs_noise else "Pure Random"
+            if use_eof_lhs_noise:
+                mode_label = (
+                    f"PR EOF-LHS rho={validation_rho_pr:.2f} beta={validation_var_beta_pr:.2f} / "
+                    f"T2M EOF-LHS rho={validation_rho_t2m:.2f} beta={validation_var_beta_t2m:.2f}"
+                )
+            else:
+                mode_label = "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
             print(
                 f"    📊 [Val Noise Debug] Epoch={epoch} Batch={b_idx} "
@@ -643,6 +663,12 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
+    validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
+    validation_num_steps = int(config.get("validation_num_steps", 10))
+    validation_rho_pr = float(config.get("validation_rho_pr", 1.0))
+    validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
+    validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
+    validation_var_beta_t2m = float(config.get("validation_var_beta_t2m", validation_var_beta_pr))
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -653,6 +679,10 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
+        print(f"   [Validation Ens]     : {validation_num_ensemble}")
+        print(f"   [Validation Steps]   : {validation_num_steps}")
+        print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
+        print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -932,7 +962,13 @@ def train(args, accelerator):
             cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+            validation_num_ensemble=validation_num_ensemble,
+            validation_num_steps=validation_num_steps,
+            validation_rho_pr=validation_rho_pr,
+            validation_rho_t2m=validation_rho_t2m,
+            validation_var_beta_pr=validation_var_beta_pr,
+            validation_var_beta_t2m=validation_var_beta_t2m,
         )
         t = val_result['tensors']
         
@@ -1297,7 +1333,7 @@ def train(args, accelerator):
 
         if accelerator.is_main_process:
             if use_crps_phase:
-                print(f"\n⌛ Epoch {epoch} complete. Starting CRPS Validation (15 ens, 10 steps)...")
+                print(f"\n⌛ Epoch {epoch} complete. Starting CRPS Validation ({validation_num_ensemble} ens, {validation_num_steps} steps)...")
             else:
                 print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
@@ -1317,7 +1353,13 @@ def train(args, accelerator):
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                 enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                validation_num_ensemble=validation_num_ensemble,
+                validation_num_steps=validation_num_steps,
+                validation_rho_pr=validation_rho_pr,
+                validation_rho_t2m=validation_rho_t2m,
+                validation_var_beta_pr=validation_var_beta_pr,
+                validation_var_beta_t2m=validation_var_beta_t2m,
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -1470,7 +1512,13 @@ def train(args, accelerator):
                             print_validation_noise_diag=False,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                             enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases
+                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                            validation_num_ensemble=validation_num_ensemble,
+                            validation_num_steps=validation_num_steps,
+                            validation_rho_pr=validation_rho_pr,
+                            validation_rho_t2m=validation_rho_t2m,
+                            validation_var_beta_pr=validation_var_beta_pr,
+                            validation_var_beta_t2m=validation_var_beta_t2m,
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 

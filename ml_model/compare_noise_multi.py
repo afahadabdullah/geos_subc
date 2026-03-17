@@ -360,27 +360,6 @@ def main():
     def noise_pure(vB, E, H, W, b, d):
         return torch.randn((vB*E, 2, H, W), device=d)
 
-    def _mix_with_random(eof_noise, rho_pr, rho_t2m=None):
-        if rho_t2m is None:
-            rho_t2m = rho_pr
-        rho_pr = float(max(0.0, min(1.0, rho_pr)))
-        rho_t2m = float(max(0.0, min(1.0, rho_t2m)))
-        if rho_pr >= 0.999 and rho_t2m >= 0.999:
-            return eof_noise
-
-        rand_noise = torch.randn_like(eof_noise)
-        mixed_noise = eof_noise.clone()
-        mixed_noise[:, 0:1] = (
-            np.sqrt(max(0.0, 1.0 - rho_pr ** 2)) * rand_noise[:, 0:1]
-            + rho_pr * eof_noise[:, 0:1]
-        )
-        mixed_noise[:, 1:2] = (
-            np.sqrt(max(0.0, 1.0 - rho_t2m ** 2)) * rand_noise[:, 1:2]
-            + rho_t2m * eof_noise[:, 1:2]
-        )
-        mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
-        return mixed_noise / (mixed_std + 1e-6)
-    
     def noise_multimodal_dynamic(vB, E, H, W, b, d):
         return noise_utils_multi.generate_dynamic_multimodal_noise_multi(
             b, E, d,
@@ -403,7 +382,7 @@ def main():
                 nao_lookup, oni_lookup, mjo_df, args.year,
                 use_lhs=True,
             )
-            return _mix_with_random(eof_noise, rho)
+            return noise_utils_multi.mix_noise_with_random_multi(eof_noise, rho)
         return _noise
 
     def make_noise_multimodal_dynamic_lhs_asym(rho_pr, rho_t2m):
@@ -418,7 +397,7 @@ def main():
                 nao_lookup, oni_lookup, mjo_df, args.year,
                 use_lhs=True,
             )
-            return _mix_with_random(eof_noise, rho_pr, rho_t2m)
+            return noise_utils_multi.mix_noise_with_random_multi(eof_noise, rho_pr, rho_t2m)
         return _noise
 
     def noise_multimodal_dynamic_lhs_val_replay(vB, E, H, W, b, d):

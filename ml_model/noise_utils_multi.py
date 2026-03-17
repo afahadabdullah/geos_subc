@@ -214,6 +214,31 @@ def generate_dynamic_multimodal_noise_multi(
     return torch.cat([pr_noise, t2m_noise], dim=1)
 
 
+def mix_noise_with_random_multi(eof_noise, rho_pr, rho_t2m=None):
+    """Temper EOF noise toward a Gaussian prior with separate PR/T2M weights."""
+    if rho_t2m is None:
+        rho_t2m = rho_pr
+
+    rho_pr = float(max(0.0, min(1.0, rho_pr)))
+    rho_t2m = float(max(0.0, min(1.0, rho_t2m)))
+
+    if rho_pr >= 0.999 and rho_t2m >= 0.999:
+        return eof_noise
+
+    rand_noise = torch.randn_like(eof_noise)
+    mixed_noise = eof_noise.clone()
+    mixed_noise[:, 0:1] = (
+        noise_utils.np.sqrt(max(0.0, 1.0 - rho_pr ** 2)) * rand_noise[:, 0:1]
+        + rho_pr * eof_noise[:, 0:1]
+    )
+    mixed_noise[:, 1:2] = (
+        noise_utils.np.sqrt(max(0.0, 1.0 - rho_t2m ** 2)) * rand_noise[:, 1:2]
+        + rho_t2m * eof_noise[:, 1:2]
+    )
+    mixed_std = mixed_noise.std(dim=(2, 3), keepdim=True)
+    return mixed_noise / (mixed_std + 1e-6)
+
+
 def print_noise_channel_stats(noise_tensor, prefix="Noise"):
     """Diagnostic stats for each noise channel."""
     print(f"    📊 [{prefix}] Shape: {list(noise_tensor.shape)}")
