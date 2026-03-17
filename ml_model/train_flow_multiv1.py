@@ -272,7 +272,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     if validation_var_beta_t2m is None:
         validation_var_beta_t2m = validation_var_beta_pr
     
-    # We will only save/return the tensors for the first batch (idx 0) so the plotting remains identical
+    # Save tensors for the first validation batch we actually process. The
+    # selected validation months may skip dataloader batch 0 entirely.
     saved_tensors = {}
     
     for b_idx, batch in enumerate(val_loader):
@@ -451,8 +452,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         total_rmse_t2m += b_rmse_t2m * num_inits
         count += num_inits
         
-        # Save only the first batch for visual plotting consistency
-        if b_idx == 0:
+        # Save only the first processed validation batch for visual plotting consistency
+        if not saved_tensors:
             true_target_precip_plot = torch.nan_to_num(true_target_precip[0], nan=0.0)
             true_target_t2m_plot = torch.nan_to_num(true_target_t2m[0], nan=280.0)
             ai_residual = full_pred_precip[0] - geos_mean_precip[0]
