@@ -885,7 +885,7 @@ def run_full_test_suite_multi(
     validation_rho_t2m=None,
     validation_var_beta_pr=1.0,
     validation_var_beta_t2m=None,
-    sample_plot_limit=5,
+    sample_plot_limit=None,
 ):
     if not HAS_CARTOPY:
         if accelerator.is_main_process:
@@ -1073,7 +1073,11 @@ def run_full_test_suite_multi(
         all_t2m_geos_crps_maps.append(t2m_geos_crps_map.detach().cpu().numpy())
         all_t2m_geos_mse_maps.append(t2m_geos_mse_map.detach().cpu().numpy())
 
-        if accelerator.is_main_process and sample_plots_written < sample_plot_limit:
+        should_save_sample_plot = (
+            accelerator.is_main_process
+            and (sample_plot_limit is None or sample_plots_written < sample_plot_limit)
+        )
+        if should_save_sample_plot:
             init_label = f"{current_year:04d}-{current_month:02d}-{current_day:02d}"
             save_test_plot_cartopy_multi(
                 batch_idx=b_idx,
@@ -1101,6 +1105,10 @@ def run_full_test_suite_multi(
                 geos_rmse_t2m=t2m_geos_rmse,
             )
             sample_plots_written += 1
+            print(
+                f"📸 Saved month plot immediately for {init_label} "
+                f"(batch {b_idx}, PR CRPS {pr_crps:.4f}, T2M CRPS {t2m_crps:.4f})"
+            )
 
         if accelerator.is_main_process:
             done = max(1, total_inits)
@@ -1688,41 +1696,7 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     if args.test:
         if accelerator.is_main_process:
-            print(f"\n🧪 RUNNING TEST MODE: Evaluating {ckpt_path}\n")
-        
-        val_result = run_val_inference(
-            start_epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
-            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-            is_test=True, is_fast_recon=False,
-            use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
-            use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
-            validation_noise_cache=validation_noise_cache,
-            print_validation_noise_diag=True,
-            cached_geos_crps=None, cached_geos_rmse=None,
-            cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
-            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-            validation_num_ensemble=validation_num_ensemble,
-            validation_num_steps=validation_num_steps,
-            validation_ode_batch_size=validation_ode_batch_size,
-            validation_rho_pr=validation_rho_pr,
-            validation_rho_t2m=validation_rho_t2m,
-            validation_var_beta_pr=validation_var_beta_pr,
-            validation_var_beta_t2m=validation_var_beta_t2m,
-        )
-        t = val_result['tensors']
-        
-        if accelerator.is_main_process:
-            save_val_plot(start_epoch, t['full_pred'], t['true_target'], 
-                          val_result['avg_crps_pr'], val_result['avg_rmse_pr'], 
-                          t['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], 
-                          output_dir, ai_residual=t['ai_res'], suffix="test_mode",
-                          geos_single=t['geos_single'], model_single=t['model_single'], model_var=t['model_var'],
-                          full_pred_t2m=t['full_pred_t2m'], true_target_t2m=t['true_target_t2m'],
-                          geos_pred_t2m=t['geos_mean_t2m'], model_var_t2m=t['model_var_t2m'],
-                          model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
-                          geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
+            print(f"\n🧪 RUNNING TEST MODE: Full multi-target test suite for {ckpt_path}\n")
 
         run_full_test_suite_multi(
             start_epoch,
@@ -1754,6 +1728,7 @@ def train(args, accelerator):
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
+            sample_plot_limit=None,
         )
         return
 
