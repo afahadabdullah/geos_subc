@@ -10,6 +10,14 @@ import xarray as xr
 from tqdm.auto import tqdm
 from PIL import Image
 import matplotlib.pyplot as plt
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAS_CARTOPY = True
+except Exception:
+    ccrs = None
+    cfeature = None
+    HAS_CARTOPY = False
 
 import argparse
 from accelerate import Accelerator
@@ -80,6 +88,291 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
     else:
         rmse = 0.0
     return rmse
+
+
+def compute_crps_with_map(ensemble_preds, target, area_weights):
+    """
+    Computes CRPS and returns both scalar and spatial CRPS map.
+    ensemble_preds: [E, B, C, H, W]
+    target: [B, C, H, W]
+    area_weights: [1, 1, H, 1]
+    """
+    mask = ~torch.isnan(target)
+    if not mask.any():
+        return 0.0, torch.zeros_like(target)
+
+    E = ensemble_preds.shape[0]
+    diff = torch.abs(ensemble_preds - target.unsqueeze(0))
+    mae_term = diff.mean(dim=0)
+
+    spread_term = torch.zeros_like(mae_term)
+    if E > 1:
+        for i in range(E):
+            for j in range(E):
+                spread_term += torch.abs(ensemble_preds[i] - ensemble_preds[j])
+        spread_term = spread_term / (2 * E * E)
+
+    crps_map = mae_term - spread_term
+    crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
+    weights_expanded = area_weights.expand_as(crps_map_clean)
+    weights_clean = torch.where(mask, weights_expanded, torch.zeros_like(weights_expanded))
+    weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
+    return weighted_crps.item(), crps_map
+
+
+def temporal_correlation_maps(x, y):
+    """
+    x, y: numpy arrays [T, 4, H, W]
+    returns: [4, H, W]
+    """
+    x_mean = np.mean(x, axis=0, keepdims=True)
+    y_mean = np.mean(y, axis=0, keepdims=True)
+    x_anom = x - x_mean
+    y_anom = y - y_mean
+    cov = np.sum(x_anom * y_anom, axis=0)
+    var_x = np.sum(x_anom ** 2, axis=0)
+    var_y = np.sum(y_anom ** 2, axis=0)
+    return cov / (np.sqrt(var_x * var_y) + 1e-8)
+
+
+def weighted_mean_2d(metric_map, aw_2d):
+    mask = ~np.isnan(metric_map)
+    if not np.any(mask):
+        return 0.0
+    return float(np.nansum(metric_map[mask] * aw_2d[mask]) / (np.nansum(aw_2d[mask]) + 1e-8))
+
+
+def style_cartopy_ax(ax, title, extent, show_left_labels=True):
+    ax.set_title(title, fontsize=10)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle=':')
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    gl = ax.gridlines(draw_labels=True, linewidth=0.4, color='gray', alpha=0.5, linestyle='--')
+    gl.top_labels = False
+    gl.right_labels = False
+    gl.left_labels = show_left_labels
+    gl.bottom_labels = True
+
+
+def save_test_plot_cartopy_multi(
+    batch_idx,
+    init_label,
+    output_dir,
+    lats,
+    lons,
+    full_pred_pr,
+    true_target_pr,
+    geos_mean_pr,
+    geos_single_pr,
+    model_single_pr,
+    model_crps_pr,
+    model_rmse_pr,
+    geos_crps_pr,
+    geos_rmse_pr,
+    full_pred_t2m,
+    true_target_t2m,
+    geos_mean_t2m,
+    geos_single_t2m,
+    model_single_t2m,
+    model_crps_t2m,
+    model_rmse_t2m,
+    geos_crps_t2m,
+    geos_rmse_t2m,
+):
+    if not HAS_CARTOPY:
+        return
+
+    proj = ccrs.PlateCarree()
+    extent = [float(lons.min()), float(lons.max()), float(lats.min()), float(lats.max())]
+    fig, axes = plt.subplots(8, 6, figsize=(31, 24), subplot_kw={"projection": proj})
+
+    def draw_panel(row, col, img, cmap, vmin, vmax, title, show_left, ylabel):
+        ax = axes[row, col]
+        im = ax.imshow(
+            img,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            origin="lower",
+            extent=extent,
+            transform=ccrs.PlateCarree(),
+        )
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        style_cartopy_ax(ax, title, extent, show_left_labels=show_left)
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+
+    for l in range(4):
+        pr_target = true_target_pr[l]
+        pr_geos_mean = geos_mean_pr[l]
+        pr_model_mean = full_pred_pr[l]
+        pr_geos_single = geos_single_pr[l]
+        pr_model_single = model_single_pr[l]
+        pr_title_suffix = f"Wk{l + 1}"
+        pr_vmin = float(np.nanmin(pr_target))
+        pr_vmax = float(np.nanmax(pr_target))
+
+        draw_panel(l, 0, pr_target, "Blues", pr_vmin, pr_vmax, "PR Target" if l == 0 else "", True, pr_title_suffix)
+        draw_panel(l, 1, pr_geos_single, "Blues", pr_vmin, pr_vmax, "PR GEOS Single" if l == 0 else "", False, "")
+        draw_panel(l, 2, pr_model_single, "Blues", pr_vmin, pr_vmax, "PR Model Single" if l == 0 else "", False, "")
+        draw_panel(
+            l,
+            3,
+            pr_geos_mean - pr_target,
+            "RdBu_r",
+            -30,
+            30,
+            f"PR GEOS Bias\nCRPS:{geos_crps_pr:.2f} RMSE:{geos_rmse_pr:.2f}" if l == 0 else "",
+            False,
+            "",
+        )
+        draw_panel(
+            l,
+            4,
+            pr_model_mean - pr_target,
+            "RdBu_r",
+            -30,
+            30,
+            f"PR Model Bias\nCRPS:{model_crps_pr:.2f} RMSE:{model_rmse_pr:.2f}" if l == 0 else "",
+            False,
+            "",
+        )
+        draw_panel(
+            l,
+            5,
+            np.abs(pr_geos_mean - pr_target) - np.abs(pr_model_mean - pr_target),
+            "PiYG",
+            -25,
+            25,
+            "PR Closeness\nGreen=Model Better" if l == 0 else "",
+            False,
+            "",
+        )
+
+    for l in range(4):
+        row = l + 4
+        t2m_target = true_target_t2m[l]
+        t2m_geos_mean = geos_mean_t2m[l]
+        t2m_model_mean = full_pred_t2m[l]
+        t2m_geos_single = geos_single_t2m[l]
+        t2m_model_single = model_single_t2m[l]
+        t2m_title_suffix = f"Wk{l + 1}"
+        t2m_vmin = float(np.nanmin(t2m_target))
+        t2m_vmax = float(np.nanmax(t2m_target))
+
+        draw_panel(row, 0, t2m_target, "RdYlBu_r", t2m_vmin, t2m_vmax, "T2M Target" if l == 0 else "", True, t2m_title_suffix)
+        draw_panel(row, 1, t2m_geos_single, "RdYlBu_r", t2m_vmin, t2m_vmax, "T2M GEOS Single" if l == 0 else "", False, "")
+        draw_panel(row, 2, t2m_model_single, "RdYlBu_r", t2m_vmin, t2m_vmax, "T2M Model Single" if l == 0 else "", False, "")
+        draw_panel(
+            row,
+            3,
+            t2m_geos_mean - t2m_target,
+            "RdBu_r",
+            -10,
+            10,
+            f"T2M GEOS Bias\nCRPS:{geos_crps_t2m:.2f} RMSE:{geos_rmse_t2m:.2f}" if l == 0 else "",
+            False,
+            "",
+        )
+        draw_panel(
+            row,
+            4,
+            t2m_model_mean - t2m_target,
+            "RdBu_r",
+            -10,
+            10,
+            f"T2M Model Bias\nCRPS:{model_crps_t2m:.2f} RMSE:{model_rmse_t2m:.2f}" if l == 0 else "",
+            False,
+            "",
+        )
+        draw_panel(
+            row,
+            5,
+            np.abs(t2m_geos_mean - t2m_target) - np.abs(t2m_model_mean - t2m_target),
+            "PiYG",
+            -5,
+            5,
+            "T2M Closeness\nGreen=Model Better" if l == 0 else "",
+            False,
+            "",
+        )
+
+    os.makedirs(os.path.join(output_dir, "test_plots_multi"), exist_ok=True)
+    fig.suptitle(
+        f"Multi Test Plot | Init {init_label} | PR CRPS {model_crps_pr:.4f} | T2M CRPS {model_crps_t2m:.4f}",
+        fontsize=16,
+        fontweight="bold",
+        y=0.995,
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.985])
+    filename = f"test_multi_idx{batch_idx:03d}_{init_label}_pr{model_crps_pr:.4f}_t2m{model_crps_t2m:.4f}.png"
+    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.close()
+
+
+def save_test_metric_map_triplet(geos_map, model_map, title_prefix, metric_name, filename, output_dir, lats, lons, vmin, vmax, diff_vmax):
+    if not HAS_CARTOPY:
+        return
+
+    proj = ccrs.PlateCarree()
+    extent = [float(lons.min()), float(lons.max()), float(lats.min()), float(lats.max())]
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={"projection": proj})
+
+    diff_map = geos_map - model_map
+    panels = [
+        (geos_map, f"{title_prefix} GEOS {metric_name}", "OrRd", vmin, vmax),
+        (model_map, f"{title_prefix} Model {metric_name}", "OrRd", vmin, vmax),
+        (diff_map, f"{title_prefix} {metric_name} Impr: GEOS-Model", "PiYG", -diff_vmax, diff_vmax),
+    ]
+    for i, (img, title, cmap, pmin, pmax) in enumerate(panels):
+        ax = axes[i]
+        im = ax.imshow(
+            img,
+            cmap=cmap,
+            vmin=pmin,
+            vmax=pmax,
+            origin="lower",
+            extent=extent,
+            transform=ccrs.PlateCarree(),
+        )
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        style_cartopy_ax(ax, title, extent, show_left_labels=(i == 0))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.close()
+
+
+def save_test_correlation_triplet(geos_map, model_map, title_prefix, filename, output_dir, lats, lons, geos_avg, model_avg):
+    if not HAS_CARTOPY:
+        return
+
+    proj = ccrs.PlateCarree()
+    extent = [float(lons.min()), float(lons.max()), float(lats.min()), float(lats.max())]
+    fig, axes = plt.subplots(1, 3, figsize=(24, 6), subplot_kw={"projection": proj})
+    diff_map = model_map - geos_map
+    panels = [
+        (geos_map, f"{title_prefix} GEOS Corr (Avg: {geos_avg:.3f})", "RdYlGn", -1, 1),
+        (model_map, f"{title_prefix} Model Corr (Avg: {model_avg:.3f})", "RdYlGn", -1, 1),
+        (diff_map, f"{title_prefix} Corr Diff: Model-GEOS", "PuOr", -0.4, 0.4),
+    ]
+    for i, (img, title, cmap, pmin, pmax) in enumerate(panels):
+        ax = axes[i]
+        im = ax.imshow(
+            img,
+            cmap=cmap,
+            vmin=pmin,
+            vmax=pmax,
+            origin="lower",
+            extent=extent,
+            transform=ccrs.PlateCarree(),
+        )
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        style_cartopy_ax(ax, title, extent, show_left_labels=(i == 0))
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.close()
 
 
 def compute_multi_variance_loss(
@@ -509,6 +802,396 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         'avg_geos_rmse_t2m': avg_geos_rmse_t2m,
         'tensors': saved_tensors,
     }
+
+
+@torch.no_grad()
+def run_full_test_suite_multi(
+    epoch,
+    model,
+    val_loader,
+    flow_matcher,
+    device,
+    accelerator,
+    output_dir,
+    target_sqrt_min,
+    area_weights,
+    use_flow_variance=False,
+    eof_bases=None,
+    nao_bases=None,
+    nao_lookup=None,
+    enso_bases=None,
+    oni_lookup=None,
+    mjo_df=None,
+    t2m_eof_bases=None,
+    t2m_nao_bases=None,
+    t2m_enso_bases=None,
+    use_eof_lhs_noise=False,
+    validation_noise_cache=None,
+    validation_num_ensemble=15,
+    validation_num_steps=10,
+    validation_rho_pr=1.0,
+    validation_rho_t2m=None,
+    validation_var_beta_pr=1.0,
+    validation_var_beta_t2m=None,
+    sample_plot_limit=5,
+):
+    if not HAS_CARTOPY:
+        if accelerator.is_main_process:
+            print("⚠️ Cartopy is unavailable. Skipping full multi-target test plot suite.")
+        return
+
+    model.eval()
+    unwrapped_model = accelerator.unwrap_model(model)
+
+    if validation_rho_t2m is None:
+        validation_rho_t2m = validation_rho_pr
+    if validation_var_beta_t2m is None:
+        validation_var_beta_t2m = validation_var_beta_pr
+
+    lats = np.linspace(-90, 90, 181)
+    lons = np.linspace(-180, 179, 360)
+    aw_np = area_weights.squeeze().detach().cpu().numpy()
+    aw_2d = np.broadcast_to(aw_np[:, np.newaxis], (len(lats), len(lons)))
+
+    plot_dir = os.path.join(output_dir, "test_plots_multi")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    all_pr_preds = []
+    all_pr_targets = []
+    all_pr_geos = []
+    all_pr_model_crps_maps = []
+    all_pr_model_mse_maps = []
+    all_pr_geos_crps_maps = []
+    all_pr_geos_mse_maps = []
+
+    all_t2m_preds = []
+    all_t2m_targets = []
+    all_t2m_geos = []
+    all_t2m_model_crps_maps = []
+    all_t2m_model_mse_maps = []
+    all_t2m_geos_crps_maps = []
+    all_t2m_geos_mse_maps = []
+
+    total_pr_crps = 0.0
+    total_pr_rmse = 0.0
+    total_pr_geos_crps = 0.0
+    total_pr_geos_rmse = 0.0
+    total_t2m_crps = 0.0
+    total_t2m_rmse = 0.0
+    total_t2m_geos_crps = 0.0
+    total_t2m_geos_rmse = 0.0
+    total_inits = 0
+
+    pbar = tqdm(val_loader, desc="Full Test Suite", disable=not accelerator.is_main_process)
+    sample_plots_written = 0
+
+    for b_idx, batch in enumerate(pbar):
+        fb_target_norm = batch['y_target'].to(device)
+        vB, _, H, W = fb_target_norm.shape
+        num_inits = vB // 4
+
+        true_target_raw = batch['target_raw_full'][0::4].to(device)
+        true_target_precip = true_target_raw[:, 0]
+        true_target_t2m = true_target_raw[:, 1]
+
+        geos_ens_raw = batch['geos_ens_raw'].to(device)
+        geos_ens_sample = geos_ens_raw[0::4]
+        geos_mean_raw = geos_ens_sample.mean(dim=1)
+        geos_mean_precip = geos_mean_raw[:, 0]
+        geos_mean_t2m = geos_mean_raw[:, 1]
+
+        fx_obs = batch['x_obs'].to(device)
+        fx_geos = batch['x_geos'].to(device)
+        fx_geos_cat = fx_geos.view(vB, -1, H, W)
+
+        f_month = batch['month'].to(device).float()
+        fsin_month = torch.sin(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        fcos_month = torch.cos(2 * np.pi * (f_month - 1) / 12).view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        fl_idx = batch['lead_idx'].to(device).float()
+        f_lead_val = (fl_idx / 1.5) - 1.0
+        f_lead_channel = f_lead_val.view(vB, 1, 1, 1).expand(vB, 1, H, W)
+        fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
+        num_ensemble = int(validation_num_ensemble)
+        fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+
+        current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
+        current_month = int(batch['month'][0].item())
+        current_day = int(batch['day'][0].item()) if 'day' in batch else 15
+        mode_tag = "pure_random"
+        if use_eof_lhs_noise:
+            mode_tag = f"pr_t2m_eof_lhs_rho_pr{validation_rho_pr:.2f}_rho_t2m{validation_rho_t2m:.2f}"
+        if use_flow_variance:
+            mode_tag += f"_beta_pr{validation_var_beta_pr:.2f}_beta_t2m{validation_var_beta_t2m:.2f}"
+        cache_key = ("testsuite", mode_tag, b_idx, current_year, current_month, current_day, num_ensemble, vB, H, W)
+
+        if validation_noise_cache is not None and cache_key in validation_noise_cache:
+            noise_expanded = validation_noise_cache[cache_key].to(device)
+        else:
+            if use_eof_lhs_noise:
+                eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+                    batch=batch,
+                    E=num_ensemble,
+                    device=device,
+                    pr_mjo_bases=eof_bases,
+                    pr_nao_bases=nao_bases,
+                    pr_enso_bases=enso_bases,
+                    t2m_mjo_bases=t2m_eof_bases,
+                    t2m_nao_bases=t2m_nao_bases,
+                    t2m_enso_bases=t2m_enso_bases,
+                    nao_lookup=nao_lookup,
+                    oni_lookup=oni_lookup,
+                    mjo_df=mjo_df,
+                    year=current_year,
+                    use_lhs=True,
+                    orthogonalize_lhs=True,
+                )
+                noise_expanded = noise_utils_multi.mix_noise_with_random_multi(
+                    eof_noise, validation_rho_pr, validation_rho_t2m
+                )
+            else:
+                noise_expanded = torch.randn((vB * num_ensemble, 2, H, W), device=device)
+
+            if validation_noise_cache is not None:
+                validation_noise_cache[cache_key] = noise_expanded.detach().cpu()
+
+        lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
+        p_x1_expanded = flow_matcher.euler_solve(
+            unwrapped_model,
+            noise_expanded,
+            fx_cond_expanded,
+            num_steps=int(validation_num_steps),
+            lead_idx=lead_idx_expanded,
+            apply_flow_variance=use_flow_variance,
+            variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+        )
+
+        p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
+        p_x1_pr = torch.clamp(p_x1_batch[:, :, 0], min=-1.0, max=1.0)
+        week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
+        week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
+
+        p_x1_t2m = p_x1_batch[:, :, 1]
+        t2m_min, t2m_max = 200.0, 320.0
+        week_t2m = ((p_x1_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
+
+        ensemble_preds_precip = week_precip.transpose(0, 1).view(num_ensemble, num_inits, 4, H, W)
+        ensemble_preds_t2m = week_t2m.transpose(0, 1).view(num_ensemble, num_inits, 4, H, W)
+        full_pred_precip = ensemble_preds_precip.mean(dim=0)
+        full_pred_t2m = ensemble_preds_t2m.mean(dim=0)
+
+        pr_crps, pr_crps_map = compute_crps_with_map(ensemble_preds_precip, true_target_precip, area_weights)
+        pr_rmse = compute_rmse(full_pred_precip, true_target_precip, area_weights)
+        pr_geos_crps, pr_geos_crps_map = compute_crps_with_map(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_precip, area_weights)
+        pr_geos_rmse = compute_rmse(geos_mean_precip, true_target_precip, area_weights)
+        pr_model_mse_map = (full_pred_precip - true_target_precip) ** 2
+        pr_geos_mse_map = (geos_mean_precip - true_target_precip) ** 2
+
+        t2m_crps, t2m_crps_map = compute_crps_with_map(ensemble_preds_t2m, true_target_t2m, area_weights)
+        t2m_rmse = compute_rmse(full_pred_t2m, true_target_t2m, area_weights)
+        t2m_geos_crps, t2m_geos_crps_map = compute_crps_with_map(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_t2m, area_weights)
+        t2m_geos_rmse = compute_rmse(geos_mean_t2m, true_target_t2m, area_weights)
+        t2m_model_mse_map = (full_pred_t2m - true_target_t2m) ** 2
+        t2m_geos_mse_map = (geos_mean_t2m - true_target_t2m) ** 2
+
+        total_pr_crps += pr_crps * num_inits
+        total_pr_rmse += pr_rmse * num_inits
+        total_pr_geos_crps += pr_geos_crps * num_inits
+        total_pr_geos_rmse += pr_geos_rmse * num_inits
+        total_t2m_crps += t2m_crps * num_inits
+        total_t2m_rmse += t2m_rmse * num_inits
+        total_t2m_geos_crps += t2m_geos_crps * num_inits
+        total_t2m_geos_rmse += t2m_geos_rmse * num_inits
+        total_inits += num_inits
+
+        all_pr_preds.append(full_pred_precip.detach().cpu().numpy())
+        all_pr_targets.append(torch.nan_to_num(true_target_precip, nan=0.0).detach().cpu().numpy())
+        all_pr_geos.append(torch.nan_to_num(geos_mean_precip, nan=0.0).detach().cpu().numpy())
+        all_pr_model_crps_maps.append(pr_crps_map.detach().cpu().numpy())
+        all_pr_model_mse_maps.append(pr_model_mse_map.detach().cpu().numpy())
+        all_pr_geos_crps_maps.append(pr_geos_crps_map.detach().cpu().numpy())
+        all_pr_geos_mse_maps.append(pr_geos_mse_map.detach().cpu().numpy())
+
+        all_t2m_preds.append(full_pred_t2m.detach().cpu().numpy())
+        all_t2m_targets.append(torch.nan_to_num(true_target_t2m, nan=280.0).detach().cpu().numpy())
+        all_t2m_geos.append(torch.nan_to_num(geos_mean_t2m, nan=280.0).detach().cpu().numpy())
+        all_t2m_model_crps_maps.append(t2m_crps_map.detach().cpu().numpy())
+        all_t2m_model_mse_maps.append(t2m_model_mse_map.detach().cpu().numpy())
+        all_t2m_geos_crps_maps.append(t2m_geos_crps_map.detach().cpu().numpy())
+        all_t2m_geos_mse_maps.append(t2m_geos_mse_map.detach().cpu().numpy())
+
+        if accelerator.is_main_process and sample_plots_written < sample_plot_limit:
+            init_label = f"{current_year:04d}-{current_month:02d}-{current_day:02d}"
+            save_test_plot_cartopy_multi(
+                batch_idx=b_idx,
+                init_label=init_label,
+                output_dir=output_dir,
+                lats=lats,
+                lons=lons,
+                full_pred_pr=full_pred_precip[0].detach().cpu().numpy(),
+                true_target_pr=torch.nan_to_num(true_target_precip[0], nan=0.0).detach().cpu().numpy(),
+                geos_mean_pr=torch.nan_to_num(geos_mean_precip[0], nan=0.0).detach().cpu().numpy(),
+                geos_single_pr=torch.nan_to_num(geos_ens_sample[0, 0, 0], nan=0.0).detach().cpu().numpy(),
+                model_single_pr=ensemble_preds_precip[0, 0].detach().cpu().numpy(),
+                model_crps_pr=pr_crps,
+                model_rmse_pr=pr_rmse,
+                geos_crps_pr=pr_geos_crps,
+                geos_rmse_pr=pr_geos_rmse,
+                full_pred_t2m=full_pred_t2m[0].detach().cpu().numpy(),
+                true_target_t2m=torch.nan_to_num(true_target_t2m[0], nan=280.0).detach().cpu().numpy(),
+                geos_mean_t2m=torch.nan_to_num(geos_mean_t2m[0], nan=280.0).detach().cpu().numpy(),
+                geos_single_t2m=torch.nan_to_num(geos_ens_sample[0, 0, 1], nan=280.0).detach().cpu().numpy(),
+                model_single_t2m=ensemble_preds_t2m[0, 0].detach().cpu().numpy(),
+                model_crps_t2m=t2m_crps,
+                model_rmse_t2m=t2m_rmse,
+                geos_crps_t2m=t2m_geos_crps,
+                geos_rmse_t2m=t2m_geos_rmse,
+            )
+            sample_plots_written += 1
+
+        if accelerator.is_main_process:
+            done = max(1, total_inits)
+            pbar.set_postfix({
+                "PR_CRPS": f"{total_pr_crps / done:.3f}",
+                "T2M_CRPS": f"{total_t2m_crps / done:.3f}",
+            })
+
+    if total_inits == 0:
+        if accelerator.is_main_process:
+            print("⚠️ Full test suite found no batches to process.")
+        return
+
+    pr_preds = np.concatenate(all_pr_preds, axis=0)
+    pr_targets = np.concatenate(all_pr_targets, axis=0)
+    pr_geos = np.concatenate(all_pr_geos, axis=0)
+    pr_model_crps_maps = np.concatenate(all_pr_model_crps_maps, axis=0)
+    pr_model_mse_maps = np.concatenate(all_pr_model_mse_maps, axis=0)
+    pr_geos_crps_maps = np.concatenate(all_pr_geos_crps_maps, axis=0)
+    pr_geos_mse_maps = np.concatenate(all_pr_geos_mse_maps, axis=0)
+
+    t2m_preds = np.concatenate(all_t2m_preds, axis=0)
+    t2m_targets = np.concatenate(all_t2m_targets, axis=0)
+    t2m_geos = np.concatenate(all_t2m_geos, axis=0)
+    t2m_model_crps_maps = np.concatenate(all_t2m_model_crps_maps, axis=0)
+    t2m_model_mse_maps = np.concatenate(all_t2m_model_mse_maps, axis=0)
+    t2m_geos_crps_maps = np.concatenate(all_t2m_geos_crps_maps, axis=0)
+    t2m_geos_mse_maps = np.concatenate(all_t2m_geos_mse_maps, axis=0)
+
+    pr_model_corr = temporal_correlation_maps(pr_preds, pr_targets)
+    pr_geos_corr = temporal_correlation_maps(pr_geos, pr_targets)
+    t2m_model_corr = temporal_correlation_maps(t2m_preds, t2m_targets)
+    t2m_geos_corr = temporal_correlation_maps(t2m_geos, t2m_targets)
+
+    pr_avg_model_crps_maps = np.nanmean(pr_model_crps_maps, axis=0)
+    pr_avg_geos_crps_maps = np.nanmean(pr_geos_crps_maps, axis=0)
+    pr_avg_model_rmse_maps = np.sqrt(np.nanmean(pr_model_mse_maps, axis=0))
+    pr_avg_geos_rmse_maps = np.sqrt(np.nanmean(pr_geos_mse_maps, axis=0))
+
+    t2m_avg_model_crps_maps = np.nanmean(t2m_model_crps_maps, axis=0)
+    t2m_avg_geos_crps_maps = np.nanmean(t2m_geos_crps_maps, axis=0)
+    t2m_avg_model_rmse_maps = np.sqrt(np.nanmean(t2m_model_mse_maps, axis=0))
+    t2m_avg_geos_rmse_maps = np.sqrt(np.nanmean(t2m_geos_mse_maps, axis=0))
+
+    if accelerator.is_main_process:
+        for wk in range(4):
+            save_test_correlation_triplet(
+                pr_geos_corr[wk],
+                pr_model_corr[wk],
+                f"PR Week {wk + 1}",
+                f"corr_pr_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                geos_avg=weighted_mean_2d(pr_geos_corr[wk], aw_2d),
+                model_avg=weighted_mean_2d(pr_model_corr[wk], aw_2d),
+            )
+            save_test_correlation_triplet(
+                t2m_geos_corr[wk],
+                t2m_model_corr[wk],
+                f"T2M Week {wk + 1}",
+                f"corr_t2m_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                geos_avg=weighted_mean_2d(t2m_geos_corr[wk], aw_2d),
+                model_avg=weighted_mean_2d(t2m_model_corr[wk], aw_2d),
+            )
+            save_test_metric_map_triplet(
+                pr_avg_geos_crps_maps[wk],
+                pr_avg_model_crps_maps[wk],
+                f"PR Week {wk + 1}",
+                "CRPS",
+                f"crps_pr_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                0,
+                8,
+                3,
+            )
+            save_test_metric_map_triplet(
+                pr_avg_geos_rmse_maps[wk],
+                pr_avg_model_rmse_maps[wk],
+                f"PR Week {wk + 1}",
+                "RMSE",
+                f"rmse_pr_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                0,
+                15,
+                5,
+            )
+            save_test_metric_map_triplet(
+                t2m_avg_geos_crps_maps[wk],
+                t2m_avg_model_crps_maps[wk],
+                f"T2M Week {wk + 1}",
+                "CRPS",
+                f"crps_t2m_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                0,
+                4,
+                1.5,
+            )
+            save_test_metric_map_triplet(
+                t2m_avg_geos_rmse_maps[wk],
+                t2m_avg_model_rmse_maps[wk],
+                f"T2M Week {wk + 1}",
+                "RMSE",
+                f"rmse_t2m_wk{wk + 1}.png",
+                output_dir,
+                lats,
+                lons,
+                0,
+                8,
+                3,
+            )
+
+        summary = {
+            "epoch": int(epoch),
+            "num_inits": int(total_inits),
+            "avg_crps_pr": total_pr_crps / total_inits,
+            "avg_rmse_pr": total_pr_rmse / total_inits,
+            "avg_geos_crps_pr": total_pr_geos_crps / total_inits,
+            "avg_geos_rmse_pr": total_pr_geos_rmse / total_inits,
+            "avg_crps_t2m": total_t2m_crps / total_inits,
+            "avg_rmse_t2m": total_t2m_rmse / total_inits,
+            "avg_geos_crps_t2m": total_t2m_geos_crps / total_inits,
+            "avg_geos_rmse_t2m": total_t2m_geos_rmse / total_inits,
+        }
+        with open(os.path.join(plot_dir, "test_summary_multi.json"), "w") as f:
+            json.dump(summary, f, indent=2)
+
+        print("\n==================================")
+        print("   FULL MULTI TEST SUITE DONE")
+        print("==================================")
+        print(f"PR   GEOS CRPS: {summary['avg_geos_crps_pr']:.4f} | Model CRPS: {summary['avg_crps_pr']:.4f}")
+        print(f"PR   GEOS RMSE: {summary['avg_geos_rmse_pr']:.4f} | Model RMSE: {summary['avg_rmse_pr']:.4f}")
+        print(f"T2M GEOS CRPS: {summary['avg_geos_crps_t2m']:.4f} | Model CRPS: {summary['avg_crps_t2m']:.4f}")
+        print(f"T2M GEOS RMSE: {summary['avg_geos_rmse_t2m']:.4f} | Model RMSE: {summary['avg_rmse_t2m']:.4f}")
+        print(f"📸 Cartopy test plots saved to {plot_dir}")
+        print("==================================")
 
 def train(args, accelerator):
     device = accelerator.device
@@ -983,6 +1666,36 @@ def train(args, accelerator):
                           geos_pred_t2m=t['geos_mean_t2m'], model_var_t2m=t['model_var_t2m'],
                           model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
                           geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
+
+        run_full_test_suite_multi(
+            start_epoch,
+            model,
+            val_loader,
+            flow_matcher,
+            device,
+            accelerator,
+            output_dir,
+            target_sqrt_min,
+            area_weights,
+            use_flow_variance=(force_variance_phase or loaded_is_variance_phase),
+            eof_bases=eof_bases,
+            nao_bases=nao_bases,
+            nao_lookup=nao_lookup,
+            enso_bases=enso_bases,
+            oni_lookup=oni_lookup,
+            mjo_df=mjo_df,
+            t2m_eof_bases=t2m_eof_bases,
+            t2m_nao_bases=t2m_nao_bases,
+            t2m_enso_bases=t2m_enso_bases,
+            use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
+            validation_noise_cache=validation_noise_cache,
+            validation_num_ensemble=validation_num_ensemble,
+            validation_num_steps=validation_num_steps,
+            validation_rho_pr=validation_rho_pr,
+            validation_rho_t2m=validation_rho_t2m,
+            validation_var_beta_pr=validation_var_beta_pr,
+            validation_var_beta_t2m=validation_var_beta_t2m,
+        )
         return
 
     # ---------------------------------------------------------
