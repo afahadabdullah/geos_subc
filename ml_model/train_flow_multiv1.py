@@ -90,6 +90,51 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
     return rmse
 
 
+@torch.no_grad()
+def euler_solve_chunked(
+    flow_matcher,
+    model,
+    noise,
+    x_cond,
+    num_steps,
+    lead_idx,
+    apply_flow_variance=False,
+    variance_beta=1.0,
+    chunk_size=None,
+):
+    """
+    Memory-safe wrapper for validation/test inference.
+    Splits the expanded ensemble batch into smaller chunks so ODE solves do not
+    blow up GPU memory when using large validation batches or ensembles.
+    """
+    if chunk_size is None or chunk_size <= 0 or noise.shape[0] <= chunk_size:
+        return flow_matcher.euler_solve(
+            model,
+            noise,
+            x_cond,
+            num_steps=num_steps,
+            lead_idx=lead_idx,
+            apply_flow_variance=apply_flow_variance,
+            variance_beta=variance_beta,
+        )
+
+    outputs = []
+    for start in range(0, noise.shape[0], chunk_size):
+        end = min(start + chunk_size, noise.shape[0])
+        outputs.append(
+            flow_matcher.euler_solve(
+                model,
+                noise[start:end],
+                x_cond[start:end],
+                num_steps=num_steps,
+                lead_idx=lead_idx[start:end] if lead_idx is not None else None,
+                apply_flow_variance=apply_flow_variance,
+                variance_beta=variance_beta,
+            )
+        )
+    return torch.cat(outputs, dim=0)
+
+
 def compute_crps_with_map(ensemble_preds, target, area_weights):
     """
     Computes CRPS and returns both scalar and spatial CRPS map.
@@ -522,6 +567,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       print_validation_noise_diag=False,
                       validation_num_ensemble=15,
                       validation_num_steps=None,
+                      validation_ode_batch_size=None,
                       validation_rho_pr=1.0,
                       validation_rho_t2m=None,
                       validation_var_beta_pr=1.0,
@@ -669,12 +715,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
         
         # Single parallel ODE solve for the entire validation batch and ensemble
-        p_x1_expanded = flow_matcher.euler_solve(
-            unwrapped_model, noise_expanded, fx_cond_expanded, 
+        p_x1_expanded = euler_solve_chunked(
+            flow_matcher,
+            unwrapped_model,
+            noise_expanded,
+            fx_cond_expanded,
             num_steps=num_steps,
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+            chunk_size=validation_ode_batch_size,
         )
 
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
@@ -829,6 +879,7 @@ def run_full_test_suite_multi(
     validation_noise_cache=None,
     validation_num_ensemble=15,
     validation_num_steps=10,
+    validation_ode_batch_size=None,
     validation_rho_pr=1.0,
     validation_rho_t2m=None,
     validation_var_beta_pr=1.0,
@@ -955,7 +1006,8 @@ def run_full_test_suite_multi(
                 validation_noise_cache[cache_key] = noise_expanded.detach().cpu()
 
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
-        p_x1_expanded = flow_matcher.euler_solve(
+        p_x1_expanded = euler_solve_chunked(
+            flow_matcher,
             unwrapped_model,
             noise_expanded,
             fx_cond_expanded,
@@ -963,6 +1015,7 @@ def run_full_test_suite_multi(
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+            chunk_size=validation_ode_batch_size,
         )
 
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
@@ -1349,6 +1402,7 @@ def train(args, accelerator):
     force_variance_phase = bool(config.get("force_variance_phase", False))
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
+    validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
     validation_rho_pr = float(config.get("validation_rho_pr", 1.0))
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
@@ -1365,6 +1419,7 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Velocity-only")
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
+        print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print("=======================================================\n")
@@ -1649,6 +1704,7 @@ def train(args, accelerator):
             t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
             validation_num_ensemble=validation_num_ensemble,
             validation_num_steps=validation_num_steps,
+            validation_ode_batch_size=validation_ode_batch_size,
             validation_rho_pr=validation_rho_pr,
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
@@ -1691,6 +1747,7 @@ def train(args, accelerator):
             validation_noise_cache=validation_noise_cache,
             validation_num_ensemble=validation_num_ensemble,
             validation_num_steps=validation_num_steps,
+            validation_ode_batch_size=validation_ode_batch_size,
             validation_rho_pr=validation_rho_pr,
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
@@ -2070,6 +2127,7 @@ def train(args, accelerator):
                 t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
                 validation_num_ensemble=validation_num_ensemble,
                 validation_num_steps=validation_num_steps,
+                validation_ode_batch_size=validation_ode_batch_size,
                 validation_rho_pr=validation_rho_pr,
                 validation_rho_t2m=validation_rho_t2m,
                 validation_var_beta_pr=validation_var_beta_pr,
@@ -2229,6 +2287,7 @@ def train(args, accelerator):
                             t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
                             validation_num_ensemble=validation_num_ensemble,
                             validation_num_steps=validation_num_steps,
+                            validation_ode_batch_size=validation_ode_batch_size,
                             validation_rho_pr=validation_rho_pr,
                             validation_rho_t2m=validation_rho_t2m,
                             validation_var_beta_pr=validation_var_beta_pr,
