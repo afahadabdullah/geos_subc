@@ -223,6 +223,7 @@ def save_test_plot_cartopy_multi(
     model_rmse_t2m,
     geos_crps_t2m,
     geos_rmse_t2m,
+    plot_subdir="test_plots_multi",
 ):
     if not HAS_CARTOPY:
         return
@@ -342,7 +343,7 @@ def save_test_plot_cartopy_multi(
             "",
         )
 
-    os.makedirs(os.path.join(output_dir, "test_plots_multi"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, plot_subdir), exist_ok=True)
     fig.suptitle(
         f"Multi Test Plot | Init {init_label} | PR CRPS {model_crps_pr:.4f} | T2M CRPS {model_crps_t2m:.4f}",
         fontsize=16,
@@ -351,11 +352,24 @@ def save_test_plot_cartopy_multi(
     )
     plt.tight_layout(rect=[0, 0, 1, 0.985])
     filename = f"test_multi_idx{batch_idx:03d}_{init_label}_pr{model_crps_pr:.4f}_t2m{model_crps_t2m:.4f}.png"
-    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.savefig(os.path.join(output_dir, plot_subdir, filename), bbox_inches="tight", dpi=150)
     plt.close()
 
 
-def save_test_metric_map_triplet(geos_map, model_map, title_prefix, metric_name, filename, output_dir, lats, lons, vmin, vmax, diff_vmax):
+def save_test_metric_map_triplet(
+    geos_map,
+    model_map,
+    title_prefix,
+    metric_name,
+    filename,
+    output_dir,
+    lats,
+    lons,
+    vmin,
+    vmax,
+    diff_vmax,
+    plot_subdir="test_plots_multi",
+):
     if not HAS_CARTOPY:
         return
 
@@ -390,11 +404,22 @@ def save_test_metric_map_triplet(geos_map, model_map, title_prefix, metric_name,
         style_cartopy_ax(ax, title, extent, show_left_labels=(i == 0))
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.savefig(os.path.join(output_dir, plot_subdir, filename), bbox_inches="tight", dpi=150)
     plt.close()
 
 
-def save_test_correlation_triplet(geos_map, model_map, title_prefix, filename, output_dir, lats, lons, geos_avg, model_avg):
+def save_test_correlation_triplet(
+    geos_map,
+    model_map,
+    title_prefix,
+    filename,
+    output_dir,
+    lats,
+    lons,
+    geos_avg,
+    model_avg,
+    plot_subdir="test_plots_multi",
+):
     if not HAS_CARTOPY:
         return
 
@@ -428,7 +453,7 @@ def save_test_correlation_triplet(geos_map, model_map, title_prefix, filename, o
         style_cartopy_ax(ax, title, extent, show_left_labels=(i == 0))
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "test_plots_multi", filename), bbox_inches="tight", dpi=150)
+    plt.savefig(os.path.join(output_dir, plot_subdir, filename), bbox_inches="tight", dpi=150)
     plt.close()
 
 
@@ -931,6 +956,7 @@ def run_full_test_suite_multi(
     validation_var_beta_pr=1.0,
     validation_var_beta_t2m=None,
     sample_plot_limit=None,
+    plot_subdir="test_plots_multi",
 ):
     if not HAS_CARTOPY:
         if accelerator.is_main_process:
@@ -952,7 +978,7 @@ def run_full_test_suite_multi(
     aw_np = area_weights.squeeze().detach().cpu().numpy()
     aw_2d = np.broadcast_to(aw_np[:, np.newaxis], (len(lats), len(lons)))
 
-    plot_dir = os.path.join(output_dir, "test_plots_multi")
+    plot_dir = os.path.join(output_dir, plot_subdir)
     os.makedirs(plot_dir, exist_ok=True)
 
     all_pr_preds = []
@@ -1176,6 +1202,7 @@ def run_full_test_suite_multi(
                     model_rmse_t2m=t2m_rmse_init,
                     geos_crps_t2m=t2m_geos_crps_init,
                     geos_rmse_t2m=t2m_geos_rmse_init,
+                    plot_subdir=plot_subdir,
                 )
                 sample_plots_written += 1
                 print(
@@ -1238,6 +1265,7 @@ def run_full_test_suite_multi(
                 lons,
                 geos_avg=weighted_mean_2d(pr_geos_corr[wk], aw_2d),
                 model_avg=weighted_mean_2d(pr_model_corr[wk], aw_2d),
+                plot_subdir=plot_subdir,
             )
             save_test_correlation_triplet(
                 t2m_geos_corr[wk],
@@ -1249,6 +1277,7 @@ def run_full_test_suite_multi(
                 lons,
                 geos_avg=weighted_mean_2d(t2m_geos_corr[wk], aw_2d),
                 model_avg=weighted_mean_2d(t2m_model_corr[wk], aw_2d),
+                plot_subdir=plot_subdir,
             )
             save_test_metric_map_triplet(
                 pr_avg_geos_crps_maps[wk],
@@ -1262,6 +1291,7 @@ def run_full_test_suite_multi(
                 0,
                 8,
                 3,
+                plot_subdir=plot_subdir,
             )
             save_test_metric_map_triplet(
                 pr_avg_geos_rmse_maps[wk],
@@ -1275,6 +1305,7 @@ def run_full_test_suite_multi(
                 0,
                 15,
                 5,
+                plot_subdir=plot_subdir,
             )
             save_test_metric_map_triplet(
                 t2m_avg_geos_crps_maps[wk],
@@ -1288,6 +1319,7 @@ def run_full_test_suite_multi(
                 0,
                 4,
                 1.5,
+                plot_subdir=plot_subdir,
             )
             save_test_metric_map_triplet(
                 t2m_avg_geos_rmse_maps[wk],
@@ -1301,6 +1333,7 @@ def run_full_test_suite_multi(
                 0,
                 8,
                 3,
+                plot_subdir=plot_subdir,
             )
 
         summary = {
@@ -1771,7 +1804,8 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     if args.test:
         if accelerator.is_main_process:
-            print(f"\n🧪 RUNNING TEST MODE: Full multi-target test suite for {ckpt_path}\n")
+            print(f"\n🧪 RUNNING TEST MODE: Full multi-target test suite for {ckpt_path}")
+            print("   Using 30 ensemble members, 50 ODE steps, output dir: test_plots_multi50\n")
 
         run_full_test_suite_multi(
             start_epoch,
@@ -1799,13 +1833,14 @@ def train(args, accelerator):
             use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
             validation_noise_cache=validation_noise_cache,
             validation_num_ensemble=validation_num_ensemble,
-            validation_num_steps=validation_num_steps,
+            validation_num_steps=50,
             validation_ode_batch_size=validation_ode_batch_size,
             validation_rho_pr=validation_rho_pr,
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
             sample_plot_limit=24,
+            plot_subdir="test_plots_multi50",
         )
         return
 
