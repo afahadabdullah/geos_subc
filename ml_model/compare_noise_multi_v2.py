@@ -458,7 +458,7 @@ def main():
     print(f"{'─'*180}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _, _, _ in strategies:
+    for name, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -561,7 +561,7 @@ def main():
             print(f"  {label:<13} | {' | '.join(parts)}", flush=True)
         
         # Total row
-        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _, _ in strategies]
+        all_crps_out = [geos_out] + [results[name][-1] for name, _, _ in strategies]
         fmt_row(f"Batch {b_idx:<2} {month:>4}", [c[0] for c in all_crps_out])
         
         # Per-lead breakdown (W1-W4)
@@ -571,7 +571,7 @@ def main():
         
         # Running average (total)
         n_done = b_idx + 1
-        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
         run_avg_total = []
         for nm in all_names:
             run_avg_total.append({
@@ -598,7 +598,7 @@ def main():
     # Final CSV
     import pandas as pd
     csv_rows = []
-    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+    all_names = ["0. GEOS Baseline"] + [n for n, _, _ in strategies]
     lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
     for b_idx in range(len(results["0. GEOS Baseline"])):
         row = {'batch': b_idx}
