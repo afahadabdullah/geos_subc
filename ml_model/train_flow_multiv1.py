@@ -172,6 +172,7 @@ def euler_solve_train_chunked(
     num_steps,
     lead_idx,
     chunk_size=None,
+    use_checkpoint=False,
 ):
     """
     Gradient-enabled chunked Euler solve for CRPS fine-tuning.
@@ -185,6 +186,7 @@ def euler_solve_train_chunked(
             x_cond,
             num_steps=num_steps,
             lead_idx=lead_idx,
+            use_checkpoint=use_checkpoint,
         )
 
     outputs = []
@@ -197,6 +199,7 @@ def euler_solve_train_chunked(
                 x_cond[start:end],
                 num_steps=num_steps,
                 lead_idx=lead_idx[start:end] if lead_idx is not None else None,
+                use_checkpoint=use_checkpoint,
             )
         )
     return torch.cat(outputs, dim=0)
@@ -610,6 +613,7 @@ def compute_multi_crps_training_loss(
     max_ensemble_per_chunk=None,
     pr_weight=1.0,
     t2m_weight=1.0,
+    use_checkpoint=False,
 ):
     """
     Fine-tuning loss that backpropagates through a short Euler rollout and
@@ -647,6 +651,7 @@ def compute_multi_crps_training_loss(
         num_steps=num_steps,
         lead_idx=lead_idx_expanded,
         chunk_size=chunk_size,
+        use_checkpoint=use_checkpoint,
     )
 
     pred_raw = decode_multi_forecast_raw(pred_norm, target_sqrt_min, target_sqrt_max)
@@ -1684,6 +1689,7 @@ def train(args, accelerator):
     crps_loss_pr_weight = float(config.get("crps_loss_pr_weight", 1.0))
     crps_loss_t2m_weight = float(config.get("crps_loss_t2m_weight", 1.0))
     crps_loss_use_land_ocean_weights = bool(config.get("crps_loss_use_land_ocean_weights", False))
+    crps_loss_use_gradient_checkpointing = bool(config.get("crps_loss_use_gradient_checkpointing", True))
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
@@ -1721,6 +1727,7 @@ def train(args, accelerator):
             print(f"   [CRPS Ens/Chunk]     : {crps_loss_max_ensemble_per_chunk}")
             print(f"   [CRPS Weights]       : PR={crps_loss_pr_weight:.2f}, T2M={crps_loss_t2m_weight:.2f}")
             print(f"   [CRPS Spatial Wt]    : {train_weight_mode}")
+            print(f"   [CRPS Grad Ckpt]     : {crps_loss_use_gradient_checkpointing}")
             print(f"   [CRPS Cost Hint]     : ~{rollout_states} states x {crps_loss_num_steps} Euler steps per batch")
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
@@ -1737,6 +1744,11 @@ def train(args, accelerator):
     # ---------------------------------------------------------
     model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
+    if crps_loss and crps_loss_use_gradient_checkpointing:
+        if hasattr(model.unet, "enable_gradient_checkpointing"):
+            model.unet.enable_gradient_checkpointing()
+        if accelerator.is_main_process:
+            print("   ✅ Enabled UNet gradient checkpointing for CRPS fine-tuning.")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     if not args.test:
@@ -2307,6 +2319,7 @@ def train(args, accelerator):
                     max_ensemble_per_chunk=crps_loss_max_ensemble_per_chunk,
                     pr_weight=crps_loss_pr_weight,
                     t2m_weight=crps_loss_t2m_weight,
+                    use_checkpoint=crps_loss_use_gradient_checkpointing,
                 )
                 train_crps_pr_total += float(crps_diag["crps_pr"].item())
                 train_crps_t2m_total += float(crps_diag["crps_t2m"].item())

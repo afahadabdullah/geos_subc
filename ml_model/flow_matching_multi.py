@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from diffusers import UNet2DModel
 from tqdm.auto import tqdm
 
@@ -286,7 +287,7 @@ class CustomFlowMatcher:
             return x_t, debug
         return x_t  # This is the estimated x_1 (Data)
 
-    def euler_solve_differentiable(self, model, noise, x_cond, num_steps=10, lead_idx=None):
+    def euler_solve_differentiable(self, model, noise, x_cond, num_steps=10, lead_idx=None, use_checkpoint=False):
         """
         Training-time Euler integration with gradients enabled.
         This always starts from pure Gaussian noise and skips variance-head work.
@@ -296,6 +297,25 @@ class CustomFlowMatcher:
         for step in range(num_steps):
             t_val = step * dt
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
-            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
+            if use_checkpoint:
+                def velocity_only(x_state, cond_state, t_state, lead_state):
+                    v_pred, _ = model(
+                        x_state,
+                        cond_state,
+                        t_state,
+                        lead_idx=lead_state,
+                        compute_variance=False,
+                    )
+                    return v_pred
+                v_pred = checkpoint(
+                    velocity_only,
+                    x_t,
+                    x_cond,
+                    t,
+                    lead_idx,
+                    use_reentrant=False,
+                )
+            else:
+                v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
             x_t = x_t + v_pred * dt
         return x_t
