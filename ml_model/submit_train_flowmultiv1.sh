@@ -60,7 +60,7 @@ fi
 
 echo "🔥 Launching Flow Matching Multi-Target Training (PR + T2M)..."
 accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_multiv1.py --config "$CONFIG_PATH" \
-    --epochs-per-run 20
+    --epochs-per-run 10
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."

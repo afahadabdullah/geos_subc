@@ -16,7 +16,7 @@ save_top_k: 4
 stats_file: v1_multi_global_stats.pt
 
 reset_validation_history: True
-force_variance_phase: True
+force_variance_phase: False
 variance_phase_lr: 1e-5
 validation_num_ensemble: 30
 validation_num_steps: 10
@@ -26,7 +26,7 @@ validation_rho_t2m: 0.05
 validation_var_beta_pr: 0.15
 validation_var_beta_t2m: 0.01
 
-crps_loss: False
+crps_loss: True
 crps_loss_num_ensemble: 4
 crps_loss_num_steps: 10
 crps_loss_ode_batch_size: 16
