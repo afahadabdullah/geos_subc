@@ -73,6 +73,35 @@ def compute_crps(ensemble_preds, target, area_weights):
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item()
 
+
+def compute_crps_tensor(ensemble_preds, target, spatial_weights):
+    """
+    Differentiable CRPS reduction for training.
+    ensemble_preds: [E, B, C, H, W]
+    target: [B, C, H, W]
+    spatial_weights: [1, 1, H, W] or broadcastable equivalent
+    """
+    mask = ~torch.isnan(target)
+    if not mask.any():
+        return ensemble_preds.sum() * 0.0
+
+    E = ensemble_preds.shape[0]
+    diff = torch.abs(ensemble_preds - target.unsqueeze(0))
+    mae_term = diff.mean(dim=0)
+
+    spread_term = torch.zeros_like(mae_term)
+    if E > 1:
+        for i in range(E - 1):
+            pairwise = torch.abs(ensemble_preds[i + 1:] - ensemble_preds[i:i + 1]).sum(dim=0)
+            spread_term = spread_term + pairwise
+        spread_term = spread_term / (E * E)
+
+    crps_map = mae_term - spread_term
+    crps_map_clean = torch.where(mask, crps_map, torch.zeros_like(crps_map))
+    weights_expanded = spatial_weights.expand_as(crps_map_clean)
+    weights_clean = torch.where(mask, weights_expanded, torch.zeros_like(weights_expanded))
+    return (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
+
 def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.Tensor):
     """
     Computes area-weighted RMSE.
@@ -135,6 +164,44 @@ def euler_solve_chunked(
     return torch.cat(outputs, dim=0)
 
 
+def euler_solve_train_chunked(
+    flow_matcher,
+    model,
+    noise,
+    x_cond,
+    num_steps,
+    lead_idx,
+    chunk_size=None,
+):
+    """
+    Gradient-enabled chunked Euler solve for CRPS fine-tuning.
+    Chunking reduces per-forward memory pressure, but total activation memory
+    still scales with ensemble size because all trajectories participate in CRPS.
+    """
+    if chunk_size is None or chunk_size <= 0 or noise.shape[0] <= chunk_size:
+        return flow_matcher.euler_solve_differentiable(
+            model,
+            noise,
+            x_cond,
+            num_steps=num_steps,
+            lead_idx=lead_idx,
+        )
+
+    outputs = []
+    for start in range(0, noise.shape[0], chunk_size):
+        end = min(start + chunk_size, noise.shape[0])
+        outputs.append(
+            flow_matcher.euler_solve_differentiable(
+                model,
+                noise[start:end],
+                x_cond[start:end],
+                num_steps=num_steps,
+                lead_idx=lead_idx[start:end] if lead_idx is not None else None,
+            )
+        )
+    return torch.cat(outputs, dim=0)
+
+
 def compute_crps_with_map(ensemble_preds, target, area_weights):
     """
     Computes CRPS and returns both scalar and spatial CRPS map.
@@ -163,6 +230,21 @@ def compute_crps_with_map(ensemble_preds, target, area_weights):
     weights_clean = torch.where(mask, weights_expanded, torch.zeros_like(weights_expanded))
     weighted_crps = (crps_map_clean * weights_clean).sum() / (weights_clean.sum() + 1e-8)
     return weighted_crps.item(), crps_map
+
+
+def decode_multi_forecast_raw(pred_norm, target_sqrt_min, target_sqrt_max, t2m_min=200.0, t2m_max=320.0):
+    """
+    Reverse the normalized flow output back to physical PR/T2M units.
+    pred_norm: [..., 2, H, W]
+    returns:   [..., 2, H, W]
+    """
+    pred_pr = torch.clamp(pred_norm[..., 0:1, :, :], min=-1.0, max=1.0)
+    pred_pr_sqrt = ((pred_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
+    pred_pr_raw = torch.clamp(pred_pr_sqrt ** 2, min=0.0)
+
+    pred_t2m = torch.clamp(pred_norm[..., 1:2, :, :], min=-1.0, max=1.0)
+    pred_t2m_raw = ((pred_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
+    return torch.cat([pred_pr_raw, pred_t2m_raw], dim=-3)
 
 
 def temporal_correlation_maps(x, y):
@@ -511,6 +593,78 @@ def compute_multi_variance_loss(
     loss_reg = (var_penalty * 10.0 + identity_pull * 0.5).mean()
 
     return loss_mse_var + loss_reg
+
+
+def compute_multi_crps_training_loss(
+    flow_matcher,
+    model,
+    x_cond,
+    lead_idx,
+    target_raw,
+    num_ensemble,
+    num_steps,
+    target_sqrt_min,
+    target_sqrt_max,
+    spatial_weights,
+    ode_chunk_size=None,
+    max_ensemble_per_chunk=None,
+    pr_weight=1.0,
+    t2m_weight=1.0,
+):
+    """
+    Fine-tuning loss that backpropagates through a short Euler rollout and
+    scores the resulting ensemble with differentiable CRPS in raw PR/T2M units.
+    Uses pure Gaussian noise only.
+    """
+    if num_ensemble < 1:
+        raise ValueError(f"num_ensemble must be >= 1, got {num_ensemble}")
+    if num_steps < 1:
+        raise ValueError(f"num_steps must be >= 1, got {num_steps}")
+
+    total_weight = float(pr_weight) + float(t2m_weight)
+    if total_weight <= 0.0:
+        raise ValueError("At least one of pr_weight or t2m_weight must be > 0.")
+
+    B, _, H, W = target_raw.shape
+    device = target_raw.device
+    dtype = target_raw.dtype
+
+    x_cond_expanded = x_cond.unsqueeze(1).expand(B, num_ensemble, -1, H, W).reshape(B * num_ensemble, -1, H, W)
+    lead_idx_expanded = lead_idx.unsqueeze(1).expand(B, num_ensemble).reshape(-1).long()
+    noise = torch.randn((B * num_ensemble, 2, H, W), device=device, dtype=dtype)
+
+    chunk_size = ode_chunk_size
+    if max_ensemble_per_chunk is not None:
+        max_ensemble_chunk = max(1, int(max_ensemble_per_chunk))
+        max_state_chunk = B * max_ensemble_chunk
+        chunk_size = max_state_chunk if chunk_size is None else min(chunk_size, max_state_chunk)
+
+    pred_norm = euler_solve_train_chunked(
+        flow_matcher,
+        model,
+        noise,
+        x_cond_expanded,
+        num_steps=num_steps,
+        lead_idx=lead_idx_expanded,
+        chunk_size=chunk_size,
+    )
+
+    pred_raw = decode_multi_forecast_raw(pred_norm, target_sqrt_min, target_sqrt_max)
+    pred_raw = pred_raw.view(B, num_ensemble, 2, H, W).transpose(0, 1).float()
+    target_raw = target_raw.float()
+    spatial_weights = spatial_weights.float()
+
+    pr_loss = compute_crps_tensor(pred_raw[:, :, 0:1], target_raw[:, 0:1], spatial_weights)
+    t2m_loss = compute_crps_tensor(pred_raw[:, :, 1:2], target_raw[:, 1:2], spatial_weights)
+    combined_loss = (float(pr_weight) * pr_loss + float(t2m_weight) * t2m_loss) / total_weight
+
+    return combined_loss, {
+        "crps_pr": pr_loss.detach(),
+        "crps_t2m": t2m_loss.detach(),
+        "ensemble_size": num_ensemble,
+        "num_steps": num_steps,
+        "chunk_size": chunk_size if chunk_size is not None else B * num_ensemble,
+    }
 
 def save_val_plot(epoch, full_pred, true_target_precip, model_crps, model_rmse, geos_pred, geos_crps, geos_rmse, output_dir, 
                   ai_residual=None, suffix="", geos_single=None, model_single=None, model_var=None,
@@ -1522,6 +1676,14 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
+    crps_loss = bool(config.get("crps_loss", False))
+    crps_loss_num_ensemble = int(config.get("crps_loss_num_ensemble", 4))
+    crps_loss_num_steps = int(config.get("crps_loss_num_steps", 10))
+    crps_loss_ode_batch_size = int(config.get("crps_loss_ode_batch_size", max(1, batch_size * crps_loss_num_ensemble)))
+    crps_loss_max_ensemble_per_chunk = int(config.get("crps_loss_max_ensemble_per_chunk", crps_loss_num_ensemble))
+    crps_loss_pr_weight = float(config.get("crps_loss_pr_weight", 1.0))
+    crps_loss_t2m_weight = float(config.get("crps_loss_t2m_weight", 1.0))
+    crps_loss_use_land_ocean_weights = bool(config.get("crps_loss_use_land_ocean_weights", False))
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
@@ -1532,6 +1694,11 @@ def train(args, accelerator):
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
     validation_var_beta_t2m = float(config.get("validation_var_beta_t2m", validation_var_beta_pr))
+
+    if crps_loss and force_variance_phase:
+        if accelerator.is_main_process:
+            print("   ℹ️ crps_loss=True overrides force_variance_phase=True. Using CRPS fine-tuning mode.")
+        force_variance_phase = False
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -1539,10 +1706,22 @@ def train(args, accelerator):
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
         print(f"   [Plot Lon Range]     : {float(plot_lons.min()):.2f} .. {float(plot_lons.max()):.2f}")
-        if force_variance_phase:
+        if crps_loss:
+            print(f"   [Training Mode]      : CRPS fine-tune (pure Gaussian rollout)")
+        elif force_variance_phase:
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
+        if crps_loss:
+            train_weight_mode = "area x land-ocean" if crps_loss_use_land_ocean_weights else "area-only"
+            rollout_states = batch_size * crps_loss_num_ensemble
+            print(f"   [CRPS Train Ens]     : {crps_loss_num_ensemble}")
+            print(f"   [CRPS Train Steps]   : {crps_loss_num_steps}")
+            print(f"   [CRPS Train Chunk]   : {crps_loss_ode_batch_size}")
+            print(f"   [CRPS Ens/Chunk]     : {crps_loss_max_ensemble_per_chunk}")
+            print(f"   [CRPS Weights]       : PR={crps_loss_pr_weight:.2f}, T2M={crps_loss_t2m_weight:.2f}")
+            print(f"   [CRPS Spatial Wt]    : {train_weight_mode}")
+            print(f"   [CRPS Cost Hint]     : ~{rollout_states} states x {crps_loss_num_steps} Euler steps per batch")
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
@@ -2077,7 +2256,13 @@ def train(args, accelerator):
 
         model.train()
         train_loss = 0.0
-        phase_label = "VarOnly" if is_variance_phase else "VelOnly"
+        train_crps_pr_total = 0.0
+        train_crps_t2m_total = 0.0
+        train_crps_steps = 0
+        if crps_loss:
+            phase_label = "CRPS"
+        else:
+            phase_label = "VarOnly" if is_variance_phase else "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             # Conditionals
@@ -2104,54 +2289,94 @@ def train(args, accelerator):
             # x_obs shape in dataset_flow.py gives: SST(4)+SSS(4)+SM(4)+IVT(4)+Z500(4)+U250(4)+MJO(4) = 28.
             x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
 
-            # Targets are already residual normalized [-1, 1] by dataset_hybrid
-            target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
-
-            # Flow Matching Interpolation
-            t = flow_matcher.sample_time_batch(B)
-            noise = torch.randn_like(target_norm)
-            x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
-
-            # Predict the velocity AND variance (routed through the correct per-week output head)
-            v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
-
-            # --- Temporal Loss Weighting ---
-            # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
-            # 0=Week1, 1=Week2, 2=Week3, 3=Week4
-            w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
-            temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
-
-            # --- Combined Loss Computation ---
-            # 1. Velocity MSE Loss
-            temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
-            loss_vel = (spatial_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
-
-            # 2. Variance loss in relative std-multiplier space (v4-style)
-            loss_var = compute_multi_variance_loss(
-                var_pred=var_pred,
-                v_pred=v_pred,
-                v_target=v_target,
-                spatial_weights=spatial_weights,
-                temp_weights=temp_weights_expanded,
-            )
-
-            if is_variance_phase:
-                loss = loss_var
+            if crps_loss:
+                target_raw = batch['target_raw'].to(device)
+                train_spatial_weights = spatial_weights if crps_loss_use_land_ocean_weights else area_weights
+                loss, crps_diag = compute_multi_crps_training_loss(
+                    flow_matcher=flow_matcher,
+                    model=model,
+                    x_cond=x_cond,
+                    lead_idx=lead_idx,
+                    target_raw=target_raw,
+                    num_ensemble=crps_loss_num_ensemble,
+                    num_steps=crps_loss_num_steps,
+                    target_sqrt_min=target_sqrt_min,
+                    target_sqrt_max=target_sqrt_max,
+                    spatial_weights=train_spatial_weights,
+                    ode_chunk_size=crps_loss_ode_batch_size,
+                    max_ensemble_per_chunk=crps_loss_max_ensemble_per_chunk,
+                    pr_weight=crps_loss_pr_weight,
+                    t2m_weight=crps_loss_t2m_weight,
+                )
+                train_crps_pr_total += float(crps_diag["crps_pr"].item())
+                train_crps_t2m_total += float(crps_diag["crps_t2m"].item())
+                train_crps_steps += 1
             else:
-                loss = loss_vel
+                # Targets are already residual normalized [-1, 1] by dataset_hybrid
+                target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
+
+                # Flow Matching Interpolation
+                t = flow_matcher.sample_time_batch(B)
+                noise = torch.randn_like(target_norm)
+                x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+
+                # Predict the velocity AND variance (routed through the correct per-week output head)
+                v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+
+                # --- Temporal Loss Weighting ---
+                # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
+                # 0=Week1, 1=Week2, 2=Week3, 3=Week4
+                w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
+                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+
+                # --- Combined Loss Computation ---
+                # 1. Velocity MSE Loss
+                temp_weights_expanded = temp_weights.expand(-1, 2, -1, -1)
+                loss_vel = (spatial_weights * temp_weights_expanded * (v_pred - v_target)**2).mean()
+
+                # 2. Variance loss in relative std-multiplier space (v4-style)
+                loss_var = compute_multi_variance_loss(
+                    var_pred=var_pred,
+                    v_pred=v_pred,
+                    v_target=v_target,
+                    spatial_weights=spatial_weights,
+                    temp_weights=temp_weights_expanded,
+                )
+
+                if is_variance_phase:
+                    loss = loss_var
+                else:
+                    loss = loss_vel
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             train_loss += loss.item()
-            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+            if crps_loss:
+                pbar.set_postfix({
+                    "loss": f"{loss.item():.4f}",
+                    "pr": f"{crps_diag['crps_pr'].item():.3f}",
+                    "t2m": f"{crps_diag['crps_t2m'].item():.3f}",
+                })
+            else:
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
         if accelerator.is_main_process:
-            print(f"📈 Epoch {epoch} Training Loss (Noise MSE): {avg_train_loss:.4f}")
+            if crps_loss and train_crps_steps > 0:
+                avg_train_crps_pr = train_crps_pr_total / train_crps_steps
+                avg_train_crps_t2m = train_crps_t2m_total / train_crps_steps
+                print(
+                    f"📈 Epoch {epoch} Training Loss (CRPS): {avg_train_loss:.4f} "
+                    f"| PR: {avg_train_crps_pr:.4f} | T2M: {avg_train_crps_t2m:.4f}"
+                )
+            elif is_variance_phase:
+                print(f"📈 Epoch {epoch} Training Loss (Variance): {avg_train_loss:.4f}")
+            else:
+                print(f"📈 Epoch {epoch} Training Loss (Noise MSE): {avg_train_loss:.4f}")
 
         # ---------------------------------------------------------
         # Unconditional Epoch-End Resume Checkpoint

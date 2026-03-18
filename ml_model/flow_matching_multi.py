@@ -53,13 +53,16 @@ class FlowMatchingModel(nn.Module):
         
         self.out_channels = out_channels
 
-    def forward(self, x_t, x_cond, t, lead_idx=None):
+    def forward(self, x_t, x_cond, t, lead_idx=None, compute_variance=True):
         """
         x_t:      [B, out_channels, H, W] - State at time t
         x_cond:   [B, 35, H, W] - Conditioning variables
         t:        [B] or scalar in [0, 1]. Representing continuous flow time.
         lead_idx: [B] tensor with values in {0, 1, 2, 3} indicating forecast week.
                   If None, defaults to head 0 (backward compat).
+        compute_variance: If False, skip the variance heads entirely and return
+                          ``(velocity, None)``. This preserves architecture while
+                          avoiding unnecessary work in pure-velocity rollouts.
         """
         # Spatial concatenation (x_t is [B, 2, H, W], x_cond is [B, 35, H, W] -> [B, 37, H, W])
         x = torch.cat([x_t, x_cond], dim=1)
@@ -85,19 +88,25 @@ class FlowMatchingModel(nn.Module):
         # Route through dedicated per-week output heads
         if lead_idx is None:
             # Backward compatibility: use head 0
-            return self.heads[0](features), F.softplus(self.var_heads[0](features))
+            output = self.heads[0](features)
+            if not compute_variance:
+                return output, None
+            return output, F.softplus(self.var_heads[0](features))
         
         B = features.shape[0]
         output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
-        var_output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
+        var_output = None
+        if compute_variance:
+            var_output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
         
         for week_idx in range(4):
             mask = (lead_idx == week_idx)
             if mask.any():
                 output[mask] = self.heads[week_idx](features[mask])
-                # Softplus ensures strict positive variance predictions, but usually upcasts to Float32.
-                # We force cast it back to the original mixed-precision format (fp16) to avoid assignment crashes.
-                var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask])).to(features.dtype)
+                if compute_variance:
+                    # Softplus ensures strict positive variance predictions, but usually upcasts to Float32.
+                    # We force cast it back to the original mixed-precision format (fp16) to avoid assignment crashes.
+                    var_output[mask] = F.softplus(self.var_heads[week_idx](features[mask])).to(features.dtype)
         
         return output, var_output
 
@@ -267,7 +276,7 @@ class CustomFlowMatcher:
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
             
             # Predict velocity through the correct per-week head (we ignore variance during integration)
-            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx)
+            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
             
             # Euler step
             x_t = x_t + v_pred * dt
@@ -276,3 +285,17 @@ class CustomFlowMatcher:
             debug["x_t_final"] = x_t
             return x_t, debug
         return x_t  # This is the estimated x_1 (Data)
+
+    def euler_solve_differentiable(self, model, noise, x_cond, num_steps=10, lead_idx=None):
+        """
+        Training-time Euler integration with gradients enabled.
+        This always starts from pure Gaussian noise and skips variance-head work.
+        """
+        x_t = noise
+        dt = 1.0 / num_steps
+        for step in range(num_steps):
+            t_val = step * dt
+            t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
+            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
+            x_t = x_t + v_pred * dt
+        return x_t
