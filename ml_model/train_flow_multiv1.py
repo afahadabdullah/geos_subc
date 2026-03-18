@@ -951,6 +951,7 @@ def run_full_test_suite_multi(
     validation_num_ensemble=15,
     validation_num_steps=10,
     validation_ode_batch_size=None,
+    validation_max_ensemble_per_chunk=None,
     validation_rho_pr=1.0,
     validation_rho_t2m=None,
     validation_var_beta_pr=1.0,
@@ -1080,6 +1081,11 @@ def run_full_test_suite_multi(
                 validation_noise_cache[cache_key] = noise_expanded.detach().cpu()
 
         lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
+        chunk_size = validation_ode_batch_size
+        if validation_max_ensemble_per_chunk is not None:
+            max_ensemble_chunk = max(1, int(validation_max_ensemble_per_chunk))
+            max_state_chunk = vB * max_ensemble_chunk
+            chunk_size = max_state_chunk if chunk_size is None else min(chunk_size, max_state_chunk)
         p_x1_expanded = euler_solve_chunked(
             flow_matcher,
             unwrapped_model,
@@ -1089,7 +1095,7 @@ def run_full_test_suite_multi(
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
-            chunk_size=validation_ode_batch_size,
+            chunk_size=chunk_size,
         )
 
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
@@ -1519,6 +1525,9 @@ def train(args, accelerator):
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
+    test_num_ensemble = int(config.get("test_num_ensemble", 90))
+    test_num_steps = int(config.get("test_num_steps", 10))
+    test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
     validation_rho_pr = float(config.get("validation_rho_pr", 1.0))
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
@@ -1539,6 +1548,9 @@ def train(args, accelerator):
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
+        print(f"   [Test Ens]           : {test_num_ensemble}")
+        print(f"   [Test Steps]         : {test_num_steps}")
+        print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -1805,7 +1817,10 @@ def train(args, accelerator):
     if args.test:
         if accelerator.is_main_process:
             print(f"\n🧪 RUNNING TEST MODE: Full multi-target test suite for {ckpt_path}")
-            print("   Using 30 ensemble members, 50 ODE steps, output dir: test_plots_multi50\n")
+            print(
+                f"   Using {test_num_ensemble} ensemble members, {test_num_steps} ODE steps, "
+                f"max {test_max_ensemble_per_chunk} ensembles/forward chunk.\n"
+            )
 
         run_full_test_suite_multi(
             start_epoch,
@@ -1832,15 +1847,16 @@ def train(args, accelerator):
             t2m_enso_bases=t2m_enso_bases,
             use_eof_lhs_noise=(force_variance_phase or loaded_is_variance_phase),
             validation_noise_cache=validation_noise_cache,
-            validation_num_ensemble=validation_num_ensemble,
-            validation_num_steps=50,
+            validation_num_ensemble=test_num_ensemble,
+            validation_num_steps=test_num_steps,
             validation_ode_batch_size=validation_ode_batch_size,
+            validation_max_ensemble_per_chunk=test_max_ensemble_per_chunk,
             validation_rho_pr=validation_rho_pr,
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
             sample_plot_limit=24,
-            plot_subdir="test_plots_multi50",
+            plot_subdir=f"test_plots_multi_e{test_num_ensemble}_s{test_num_steps}",
         )
         return
 
