@@ -509,6 +509,16 @@ def main():
             "identity",
             4,
         ),
+        (
+            "6. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.1 + coarse var4",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.1),
+            "clamp",
+            "identity",
+            4,
+        ),
     ]
     
     n_ml = len(strategies)
