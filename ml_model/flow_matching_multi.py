@@ -188,11 +188,13 @@ class CustomFlowMatcher:
 
     @torch.no_grad()
     def prepare_initial_state(self, model, noise, x_cond, lead_idx=None, apply_flow_variance=False,
-                              variance_channels=None, variance_beta=1.0):
+                              variance_channels=None, variance_beta=1.0,
+                              variance_coarse_kernel=None):
         """
         Build the solver initial state x_0.
         If apply_flow_variance is enabled, query the variance head at t=0 and
-        temper its effect toward unit scale using variance_beta.
+        temper its effect toward unit scale using variance_beta. Optionally
+        replace the raw pixel-scale std field with a coarse averaged mask.
         """
         if isinstance(variance_beta, (list, tuple)):
             beta_vals = [float(max(0.0, min(1.0, b))) for b in variance_beta]
@@ -207,6 +209,7 @@ class CustomFlowMatcher:
         debug = {
             "apply_flow_variance": bool(apply_flow_variance),
             "variance_beta": beta_debug,
+            "variance_coarse_kernel": variance_coarse_kernel,
         }
 
         if not apply_flow_variance:
@@ -220,6 +223,7 @@ class CustomFlowMatcher:
         # Standard deviation from predicted variance, clamped for stability.
         std_pred = torch.sqrt(var_pred + 1e-6)
         std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
+        std_pred_raw = std_pred
 
         if variance_channels is not None:
             channel_mask = torch.as_tensor(
@@ -232,10 +236,29 @@ class CustomFlowMatcher:
                 )
             std_pred = torch.where(channel_mask, std_pred, torch.ones_like(std_pred))
 
+        if variance_coarse_kernel is not None:
+            kernel = int(variance_coarse_kernel)
+            if kernel > 1:
+                coarse = F.avg_pool2d(
+                    std_pred.float(),
+                    kernel_size=kernel,
+                    stride=kernel,
+                    ceil_mode=True,
+                    count_include_pad=False,
+                )
+                std_pred = F.interpolate(
+                    coarse,
+                    size=std_pred.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                ).to(std_pred.dtype)
+                std_pred = torch.clamp(std_pred, min=0.1, max=2.0)
+
         # beta=0 keeps unit scale, beta=1 applies the full variance head.
         std_eff = 1.0 + beta * (std_pred - 1.0)
         x_t = noise * std_eff
 
+        debug["std_pred_raw"] = std_pred_raw
         debug["std_pred"] = std_pred
         debug["std_eff"] = std_eff
         debug["x_t_init"] = x_t
@@ -243,7 +266,8 @@ class CustomFlowMatcher:
 
     @torch.no_grad()
     def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False,
-                    variance_channels=None, variance_beta=1.0, return_debug=False):
+                    variance_channels=None, variance_beta=1.0,
+                    variance_coarse_kernel=None, return_debug=False):
         """
         Inference routine using explicit Euler integration.
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
@@ -255,6 +279,8 @@ class CustomFlowMatcher:
                            If provided, apply variance scaling only to selected channels.
         variance_beta: Temper variance scaling back toward 1.0. 0 disables the
                        variance effect, 1 applies the full predicted scale.
+        variance_coarse_kernel: If provided and > 1, average-pool the predicted
+                       std field onto a coarser grid, then upsample it back.
         return_debug: If True, also return initial-state diagnostics.
         """
         x_t, debug = self.prepare_initial_state(
@@ -265,6 +291,7 @@ class CustomFlowMatcher:
             apply_flow_variance=apply_flow_variance,
             variance_channels=variance_channels,
             variance_beta=variance_beta,
+            variance_coarse_kernel=variance_coarse_kernel,
         )
             
         dt = 1.0 / num_steps
