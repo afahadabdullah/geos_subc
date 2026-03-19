@@ -490,14 +490,24 @@ def main():
             None,
         ),
         (
-            "4. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.01 + coarse var16",
+            "4. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.01 + coarse var8",
             make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
             True,
             False,
             (0.3, 0.01),
             "clamp",
             "identity",
-            16,
+            8,
+        ),
+        (
+            "5. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.01 + coarse var4",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.01),
+            "clamp",
+            "identity",
+            4,
         ),
     ]
     
