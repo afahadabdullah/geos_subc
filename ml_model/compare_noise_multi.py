@@ -121,9 +121,33 @@ def print_channel_stats(name, tensor):
         print(f"       Ch{c}: Mean={ch.mean():.4f}, Std={ch.std():.4f}, Min={ch.min():.4f}, Max={ch.max():.4f}")
 
 
+def bound_normalized_field(field, mode="clamp"):
+    """
+    Map a normalized channel back into [-1, 1] using either the current
+    hard clamp, smoother inference-time alternatives, or no bounding.
+    """
+    if mode == "identity":
+        return field
+    work = field.float()
+    if mode == "clamp":
+        return torch.clamp(field, min=-1.0, max=1.0)
+    if mode == "tanh":
+        return torch.tanh(work).to(field.dtype)
+    if mode == "erf":
+        # Choose the scale so the local slope around 0 stays close to 1.
+        return torch.erf(work * (np.sqrt(np.pi) / 2.0)).to(field.dtype)
+    if mode == "q99_tanh":
+        flat_abs = work.abs().flatten(start_dim=2)
+        scale = torch.quantile(flat_abs, 0.99, dim=2, keepdim=True)
+        scale = torch.clamp(scale, min=1.0).unsqueeze(-1)
+        return torch.tanh(work / scale).to(field.dtype)
+    raise ValueError(f"Unknown normalized bound mode: {mode}")
+
+
 @torch.no_grad()
 def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, noise_fn,
-                 use_var_head=False, perturb_cond=False, var_beta=1.0):
+                 use_var_head=False, perturb_cond=False, var_beta=1.0,
+                 pr_bound_mode="clamp", t2m_bound_mode="identity"):
     model.eval()
     
     vB = batch['y_target'].shape[0]
@@ -190,13 +214,13 @@ def run_strategy(model, flow_matcher, batch, device, num_ensemble, num_steps, no
     
     # Denormalize PR (channel 0)
     target_sqrt_min, target_sqrt_max = 0.0, 7.071
-    p_x1_pr = torch.clamp(p_x1_batch[:, :, 0], min=-1.0, max=1.0)
+    p_x1_pr = bound_normalized_field(p_x1_batch[:, :, 0], mode=pr_bound_mode)
     week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
     week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
     
     # Denormalize T2M (channel 1)
     t2m_min, t2m_max = 200.0, 320.0
-    p_x1_t2m = p_x1_batch[:, :, 1]
+    p_x1_t2m = bound_normalized_field(p_x1_batch[:, :, 1], mode=t2m_bound_mode)
     week_t2m = ((p_x1_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
     
     # Reshape to [E, num_inits, 4, H, W]
@@ -446,16 +470,45 @@ def main():
         )
     
     # ─── Build Strategy List ───
-    # Minimal comparison: baseline random prior versus one asymmetric EOF prior.
-    # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta)
+    # Compare the existing priors plus smooth normalized-field bounding alternatives.
+    # Format: (Name, noise_fn, use_var_head, perturb_cond, var_beta, pr_bound_mode, t2m_bound_mode)
     strategies = [
-        ("1. Pure Noise", noise_pure, False, False, 0.0),
+        ("1. Pure Noise", noise_pure, False, False, 0.0, "clamp", "identity"),
         (
             "3. EOF LHS PR rho0.15 beta0.3 / T2M rho0.05 beta0.01",
             make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
             True,
             False,
             (0.3, 0.01),
+            "clamp",
+            "identity",
+        ),
+        (
+            "4. EOF LHS + Var + PR+T2M tanh",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.3),
+            "tanh",
+            "tanh",
+        ),
+        (
+            "5. EOF LHS + Var + PR+T2M erf",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.3),
+            "erf",
+            "erf",
+        ),
+        (
+            "6. EOF LHS + Var + PR+T2M q99-tanh",
+            make_noise_multimodal_dynamic_lhs_asym(0.15, 0.05),
+            True,
+            False,
+            (0.3, 0.3),
+            "q99_tanh",
+            "q99_tanh",
         ),
     ]
     
@@ -477,7 +530,7 @@ def main():
     print(f"{'─'*180}")
     
     results = {"0. GEOS Baseline": []}
-    for name, _, _, _, _ in strategies:
+    for name, _, _, _, _, _, _ in strategies:
         results[name] = []
     
     for b_idx, batch in enumerate(test_loader):
@@ -537,7 +590,7 @@ def main():
         
         from tqdm import tqdm
         batch_desc = f"Batch {b_idx} ({current_year:04d}-{month:02d}-{current_day:02d})"
-        for name, fn, use_var, perturb_cond, strategy_var_beta in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
+        for name, fn, use_var, perturb_cond, strategy_var_beta, pr_bound_mode, t2m_bound_mode in tqdm(strategies, desc=batch_desc, leave=False, ncols=100):
             res = run_strategy(
                 model,
                 flow_matcher,
@@ -549,6 +602,8 @@ def main():
                 use_var,
                 perturb_cond,
                 strategy_var_beta,
+                pr_bound_mode,
+                t2m_bound_mode,
             )
             results[name].append(res)
             torch.cuda.empty_cache()
@@ -582,7 +637,7 @@ def main():
             print(f"  {label:<13} | {' | '.join(parts)}", flush=True)
         
         # Total row
-        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _, _ in strategies]
+        all_crps_out = [geos_out] + [results[name][-1] for name, _, _, _, _, _, _ in strategies]
         fmt_row(f"Batch {b_idx:<2} {month:>4}", [c[0] for c in all_crps_out])
         
         # Per-lead breakdown (W1-W4)
@@ -592,7 +647,7 @@ def main():
         
         # Running average (total)
         n_done = b_idx + 1
-        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+        all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _, _, _ in strategies]
         run_avg_total = []
         for nm in all_names:
             run_avg_total.append({
@@ -619,7 +674,7 @@ def main():
     # Final CSV
     import pandas as pd
     csv_rows = []
-    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _ in strategies]
+    all_names = ["0. GEOS Baseline"] + [n for n, _, _, _, _, _, _ in strategies]
     lead_suffixes = [" (Total)", " (W1)", " (W2)", " (W3)", " (W4)"]
     for b_idx in range(len(results["0. GEOS Baseline"])):
         row = {'batch': b_idx}
