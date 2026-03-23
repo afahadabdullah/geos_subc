@@ -74,6 +74,13 @@ def parse_args():
         default=10,
         help="Number of uPIT histogram bins.",
     )
+    parser.add_argument(
+        "--init_months",
+        type=int,
+        nargs="+",
+        default=[7],
+        help="Only evaluate init dates from these calendar months. Defaults to July only.",
+    )
     return parser.parse_args()
 
 
@@ -404,6 +411,7 @@ def main():
     data_dir = args.data_dir or config["data_dir"]
     start_year = int(args.start_year if args.start_year is not None else config.get("val_start_year", 2020))
     end_year = int(args.end_year if args.end_year is not None else config.get("val_end_year", 2021))
+    init_months = sorted(set(int(month) for month in args.init_months))
     os.makedirs(args.output_dir, exist_ok=True)
 
     summary_path = os.path.join(args.output_dir, "t2m_dispersion_summary.csv")
@@ -424,6 +432,10 @@ def main():
         ml_path = os.path.join(args.ml_dir, f"{year}.zarr")
         geos_path = os.path.join(data_dir, f"geos_subc_{year}.zarr")
         obs_path = os.path.join(data_dir, f"t2m_weekly_{year}.zarr")
+        print(f"\n[{year}] Opening datasets")
+        print(f"  ML  : {ml_path}")
+        print(f"  GEOS: {geos_path}")
+        print(f"  OBS : {obs_path}")
 
         ml_ds = open_year_dataset(ml_path)
         geos_ds = open_year_dataset(geos_path)
@@ -434,10 +446,12 @@ def main():
             obs_layout = infer_layout(obs_ds, "OBS")
 
             common_dates = prepare_common_dates(ml_ds, ml_layout, geos_ds, geos_layout, obs_ds, obs_layout)
+            common_dates = [date for date in common_dates if int(date.month) in init_months]
             if not common_dates:
-                raise ValueError(f"No common init dates found for {year}.")
+                raise ValueError(f"No common init dates found for {year} after filtering to months {init_months}.")
             year_common_counts[year] = len(common_dates)
             total_common_inits += len(common_dates)
+            print(f"[{year}] Found {len(common_dates)} common init dates after month filter {init_months}")
 
             ml_indices = exact_indices_for_dates(ml_ds[ml_layout["s_dim"]].values, common_dates)
             geos_indices = exact_indices_for_dates(geos_ds[geos_layout["s_dim"]].values, common_dates)
@@ -452,12 +466,19 @@ def main():
                 int(obs_ds.sizes[obs_layout["lead_dim"]]),
                 4,
             )
+            total_chunks = (len(common_dates) + args.sample_chunk_size - 1) // args.sample_chunk_size
+            print(f"[{year}] Evaluating {lead_count} leads with chunk_size={args.sample_chunk_size} ({total_chunks} chunks)")
 
             for chunk_start in range(0, len(common_dates), args.sample_chunk_size):
                 chunk_end = min(len(common_dates), chunk_start + args.sample_chunk_size)
                 ml_chunk_idx = ml_indices[chunk_start:chunk_end]
                 geos_chunk_idx = geos_indices[chunk_start:chunk_end]
                 obs_chunk_idx = obs_indices[chunk_start:chunk_end]
+                chunk_number = chunk_start // args.sample_chunk_size + 1
+                if total_chunks <= 10 or chunk_number == 1 or chunk_number == total_chunks or (chunk_number % 5 == 0):
+                    date_lo = common_dates[chunk_start].strftime("%Y-%m-%d")
+                    date_hi = common_dates[chunk_end - 1].strftime("%Y-%m-%d")
+                    print(f"[{year}] Chunk {chunk_number}/{total_chunks}: init dates {date_lo} .. {date_hi}")
 
                 for lead_idx in range(lead_count):
                     ml_chunk = extract_tas_chunk(ml_ds, ml_layout, ml_chunk_idx, lead_idx)
@@ -474,6 +495,7 @@ def main():
                     accumulators["ML-120"][lead_idx].update(ml_chunk, obs_chunk, lat_weights)
                     accumulators["ML-4"][lead_idx].update(ml_fair_chunk, obs_chunk, lat_weights)
                     accumulators["GEOS"][lead_idx].update(geos_chunk, obs_chunk, lat_weights)
+            print(f"[{year}] Done")
         finally:
             ml_ds.close()
             geos_ds.close()
@@ -483,6 +505,7 @@ def main():
     pit_rows: List[Dict[str, object]] = []
     report_lines = [
         f"Held-out T2M dispersion evaluation for years {start_year}-{end_year}",
+        f"Init months: {init_months}",
         f"Fair ML member count: {args.fair_member_count}",
         f"Total common init dates: {total_common_inits}",
         "Common init dates by year: " + ", ".join(f"{year}={count}" for year, count in sorted(year_common_counts.items())),
@@ -491,6 +514,7 @@ def main():
 
     for model_name, lead_accs in accumulators.items():
         report_lines.append(f"[{model_name}]")
+        print(f"\n[{model_name}] Final lead summaries")
         for lead_idx, acc in enumerate(lead_accs, start=1):
             metrics = acc.finalize()
             metrics["model"] = model_name
@@ -519,6 +543,13 @@ def main():
                 f"width80={metrics['width80']:.3f} K, mean_spread={metrics['mean_spread']:.3f} K, "
                 f"rmse_mean={metrics['rmse_mean']:.3f} K, ssr={metrics['spread_skill_ratio']:.3f}, "
                 f"spread_err_corr={metrics['spread_error_corr']:.3f}, pit_l1={metrics['pit_l1_uniform']:.3f}, "
+                f"state={metrics['dispersion_state']}"
+            )
+            print(
+                "  "
+                f"W{lead_idx}: cov80={metrics['coverage80']:.3f}, cov50={metrics['coverage50']:.3f}, "
+                f"width80={metrics['width80']:.3f} K, spread={metrics['mean_spread']:.3f} K, "
+                f"rmse={metrics['rmse_mean']:.3f} K, ssr={metrics['spread_skill_ratio']:.3f}, "
                 f"state={metrics['dispersion_state']}"
             )
         report_lines.append("")
