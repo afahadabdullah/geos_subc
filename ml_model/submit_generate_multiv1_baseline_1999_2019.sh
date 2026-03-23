@@ -10,7 +10,7 @@
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
 
-echo "🚀 Multi-v1 baseline generation job started at $(date) on $(hostname)"
+echo "🚀 Multi-v1 ML hindcast generation job started at $(date) on $(hostname)"
 
 source ~/.bashrc
 conda activate geossub_env
@@ -24,34 +24,37 @@ echo "🔄 Pulling latest code..."
 git pull --no-rebase origin flow_multi
 
 mkdir -p ml_output_flowmulti
-mkdir -p dataprocess/gen_multiv1_baseline_1999_2019
+mkdir -p dataprocess/gen_multiv1_hindcast_1999_2019
 
 CONFIG_PATH="ml_model/config_flow_multiv1.yaml"
 START_YEAR=1999
 END_YEAR=2019
-MAX_NEW_INITS=720
+MAX_NEW_INITS=540
 AUTO_RESUBMIT="${AUTO_RESUBMIT:-1}"
 
-echo "🎯 Generating 3-member GEOS baseline ensembles for ${START_YEAR}-${END_YEAR}"
+echo "🎯 Generating 4-member ML hindcast ensembles for ${START_YEAR}-${END_YEAR}"
 echo "   Session limit: ${MAX_NEW_INITS} new init dates per job"
-python3 ml_model/generate_multiv1_baseline_1999_2019.py \
+accelerate launch --num_processes 1 --mixed_precision fp16 \
+    ml_model/generate_multiv1_baseline_1999_2019.py \
     --config "$CONFIG_PATH" \
     --start_year "$START_YEAR" \
     --end_year "$END_YEAR" \
-    --num_ensemble 3 \
+    --num_ensemble 4 \
     --batch_size 40 \
+    --ensemble_chunk_size 4 \
+    --num_steps 50 \
     --max_new_init_dates "$MAX_NEW_INITS" \
-    --out_dir dataprocess/gen_multiv1_baseline_1999_2019
+    --out_dir dataprocess/gen_multiv1_hindcast_1999_2019
 status=$?
 
 if [ "$status" -ne 0 ]; then
-    echo "❌ Baseline generation failed with exit code $status. Not auto-resubmitting."
+    echo "❌ ML hindcast generation failed with exit code $status. Not auto-resubmitting."
     exit "$status"
 fi
 
 all_done=1
 for year in $(seq "$START_YEAR" "$END_YEAR"); do
-    final_store="dataprocess/gen_multiv1_baseline_1999_2019/${year}.zarr"
+    final_store="dataprocess/gen_multiv1_hindcast_1999_2019/${year}.zarr"
     if [ ! -d "$final_store" ]; then
         all_done=0
         echo "⏳ ${year} is not finished yet. Final store missing: ${final_store}"
@@ -80,4 +83,4 @@ else
     echo "⏸️ AUTO_RESUBMIT=${AUTO_RESUBMIT}. Leaving follow-up submission to the user."
 fi
 
-echo "🏁 Multi-v1 baseline generation job finished at $(date)"
+echo "🏁 Multi-v1 ML hindcast generation job finished at $(date)"
