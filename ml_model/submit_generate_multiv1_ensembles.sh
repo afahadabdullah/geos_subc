@@ -73,7 +73,18 @@ done
 if [ "$all_done" -eq 1 ]; then
     echo "🎉 All requested years are complete. No resubmission needed."
 elif [ "$AUTO_RESUBMIT" = "1" ]; then
-    next_job_id=$(sbatch --parsable ml_model/submit_generate_multiv1_ensembles.sh)
+    echo "🔄 Preparing TACC-safe resubmission..."
+    echo "📍 Current Host: $(hostname)"
+    echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
+    echo "📍 Working Dir: $PWD"
+
+    SUBMIT_TARGET="${SLURM_SUBMIT_HOST}.vista.tacc.utexas.edu"
+    if [[ "$SLURM_SUBMIT_HOST" == *"vista"* ]]; then
+        SUBMIT_TARGET="$SLURM_SUBMIT_HOST"
+    fi
+
+    echo "📡 Attempting SSH resubmission to $SUBMIT_TARGET..."
+    next_job_id=$(ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch --parsable ml_model/submit_generate_multiv1_ensembles.sh")
     echo "🔁 Auto-resubmitted next continuation job: ${next_job_id}"
 else
     echo "⏸️ AUTO_RESUBMIT=${AUTO_RESUBMIT}. Leaving follow-up submission to the user."
