@@ -308,6 +308,25 @@ def make_output_batch_dataset(pr_batch, tas_batch, s_values, layout, dataset_att
     return ds_batch
 
 
+def inspect_tmp_store(tmp_path, layout):
+    ds_tmp = xr.open_zarr(tmp_path, consolidated=False)
+    try:
+        s_dim = choose_name(ds_tmp.dims, [layout["s_dim"], "S", "time", "init_time"], "init dimension")
+        member_dim = choose_name(ds_tmp.dims, [layout["member_dim"], "M"], "member dimension")
+        lead_dim = choose_name(ds_tmp.dims, [layout["lead_dim"], "L", "lead", "lead_time"], "lead dimension")
+        written_s_values = np.array(ds_tmp[s_dim].values)
+        member_size = int(ds_tmp.sizes[member_dim])
+        lead_size = int(ds_tmp.sizes[lead_dim])
+    finally:
+        ds_tmp.close()
+
+    return {
+        "written_s_values": written_s_values,
+        "member_size": member_size,
+        "lead_size": lead_size,
+    }
+
+
 def generate_noise(batch, num_ensemble, device, year, use_eof_lhs_noise, noise_context, rho_pr, rho_t2m):
     vB = batch["y_target"].shape[0]
     H, W = batch["x_obs"].shape[-2:]
@@ -356,16 +375,63 @@ def write_year(
         accelerator.print(f"♻️ {year}: removing existing output at {out_path}")
         remove_path(out_path)
 
-    if os.path.exists(tmp_path):
-        accelerator.print(f"🧹 {year}: removing stale temp store at {tmp_path}")
-        remove_path(tmp_path)
-
     layout = infer_reference_layout(
         data_dir=args.data_dir,
         year=year,
         num_ensemble=args.num_ensemble,
         member_chunk=args.member_chunk,
     )
+    total_expected_inits = len(layout["s_values"])
+
+    resume_offset = 0
+    wrote_any = False
+    if os.path.exists(tmp_path):
+        if args.overwrite:
+            accelerator.print(f"🧹 {year}: removing existing temp store at {tmp_path}")
+            remove_path(tmp_path)
+        else:
+            tmp_info = inspect_tmp_store(tmp_path, layout)
+            written_s_values = tmp_info["written_s_values"]
+            resume_offset = len(written_s_values)
+
+            if tmp_info["member_size"] != int(args.num_ensemble):
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store has member dimension {tmp_info['member_size']}, "
+                    f"but current run expects {args.num_ensemble}."
+                )
+            if tmp_info["lead_size"] != len(layout["lead_values"]):
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store has lead dimension {tmp_info['lead_size']}, "
+                    f"but current run expects {len(layout['lead_values'])}."
+                )
+            if resume_offset > total_expected_inits:
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store already contains {resume_offset} init dates, "
+                    f"but reference layout only expects {total_expected_inits}."
+                )
+
+            expected_prefix = pd.to_datetime(layout["s_values"][:resume_offset]).normalize()
+            actual_prefix = pd.to_datetime(written_s_values).normalize()
+            if not np.array_equal(expected_prefix.values, actual_prefix.values):
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store init dates do not match the expected prefix of the year."
+                )
+
+            if resume_offset == 0:
+                accelerator.print(f"🧹 {year}: temp store exists but has no written init dates. Restarting from scratch.")
+                remove_path(tmp_path)
+            elif resume_offset == total_expected_inits:
+                accelerator.print(
+                    f"✅ {year}: temp store already has all {total_expected_inits} init dates. Finalizing {out_path}."
+                )
+                os.rename(tmp_path, out_path)
+                return
+            else:
+                wrote_any = True
+                accelerator.print(
+                    f"♻️ {year}: resuming temp store at {tmp_path} "
+                    f"from {resume_offset}/{total_expected_inits} init dates."
+                )
 
     dataset = S2SHybridDataset(
         data_root=args.data_dir,
@@ -380,7 +446,6 @@ def write_year(
         accelerator.print(f"⚠️ {year}: no samples were indexed. Skipping.")
         return
 
-    total_expected_inits = len(layout["s_values"])
     indexed_inits = len(dataset) // 4
     if indexed_inits != total_expected_inits:
         accelerator.print(
@@ -433,11 +498,11 @@ def write_year(
         f"🚀 {year}: generating {total_expected_inits} init dates with "
         f"{args.num_ensemble} members, {args.num_steps} steps, "
         f"use_flow_variance={use_flow_variance}, use_eof_lhs_noise={use_eof_lhs_noise}, "
-        f"ensemble_chunk_size={ensemble_chunk_size}"
+        f"ensemble_chunk_size={ensemble_chunk_size}, resume_offset={resume_offset}"
     )
 
-    offset = 0
-    wrote_any = False
+    offset = resume_offset
+    seen_offset = 0
     for batch_idx, batch in enumerate(loader):
         vB = batch["y_target"].shape[0]
         if vB % 4 != 0:
@@ -447,11 +512,23 @@ def write_year(
             )
 
         num_inits = vB // 4
-        expected_s_values = layout["s_values"][offset: offset + num_inits]
+        batch_start = seen_offset
+        batch_end = batch_start + num_inits
+        seen_offset = batch_end
+
+        if batch_end <= resume_offset:
+            continue
+        if batch_start < resume_offset < batch_end:
+            raise RuntimeError(
+                f"Cannot safely resume {year}: temp store ends at init index {resume_offset}, "
+                f"which falls inside batch {batch_idx} covering init indices [{batch_start}, {batch_end})."
+            )
+
+        expected_s_values = layout["s_values"][batch_start: batch_end]
         if len(expected_s_values) != num_inits:
             raise ValueError(
                 f"Year {year} batch {batch_idx} would write beyond the expected S coordinate range "
-                f"(offset={offset}, num_inits={num_inits}, total={len(layout['s_values'])})."
+                f"(offset={batch_start}, num_inits={num_inits}, total={len(layout['s_values'])})."
             )
         verify_batch_dates(expected_s_values, batch)
 
@@ -550,7 +627,7 @@ def write_year(
             ds_batch.to_zarr(tmp_path, mode="a", append_dim=layout["s_dim"])
         ds_batch.close()
 
-        offset += num_inits
+        offset = batch_end
         accelerator.print(f"  {year}: wrote {offset}/{total_expected_inits} init dates")
 
     if offset != total_expected_inits:
