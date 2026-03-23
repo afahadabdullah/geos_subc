@@ -381,21 +381,36 @@ def compute_obs_climatology(
     clim_samples = []
     slip_days = []
     used_years = []
+    skipped_years = []
 
     for year in range(clim_start_year, clim_end_year + 1):
         obs_path = os.path.join(data_dir, f"t2m_weekly_{year}.zarr")
+        if not os.path.exists(obs_path):
+            skipped_years.append(f"{year}:missing_file")
+            continue
         obs_ds = get_or_open_dataset(ds_cache, ("clim_obs", year), obs_path)
         obs_layout = infer_layout(obs_ds, "CLIM OBS")
         target_init = replace_year_safe(reference_init, year)
-        init_idx, _, slip = nearest_init_index(
-            obs_ds[obs_layout["s_dim"]].values,
-            target_date=target_init,
-            max_slip_days=clim_max_init_slip_days,
-        )
+        try:
+            init_idx, _, slip = nearest_init_index(
+                obs_ds[obs_layout["s_dim"]].values,
+                target_date=target_init,
+                max_slip_days=clim_max_init_slip_days,
+            )
+        except ValueError:
+            skipped_years.append(f"{year}:init_mismatch")
+            continue
         obs_series = extract_obs_series(obs_ds, obs_layout, init_idx, event)[:lead_count]
         clim_samples.append(obs_series)
         slip_days.append(slip)
         used_years.append(year)
+
+    if not clim_samples:
+        raise ValueError(
+            f"Could not build climatology for {event.name}. "
+            f"No valid years remained between {clim_start_year} and {clim_end_year}. "
+            f"Skipped={skipped_years}"
+        )
 
     clim_arr = np.asarray(clim_samples, dtype=np.float64)
     return {
@@ -403,6 +418,7 @@ def compute_obs_climatology(
         "p90": np.nanpercentile(clim_arr, 90, axis=0),
         "samples": clim_arr,
         "used_years": np.asarray(used_years, dtype=np.int32),
+        "skipped_years": skipped_years,
         "mean_slip_days": float(np.mean(slip_days)) if slip_days else 0.0,
         "max_slip_days": int(np.max(slip_days)) if slip_days else 0,
     }
