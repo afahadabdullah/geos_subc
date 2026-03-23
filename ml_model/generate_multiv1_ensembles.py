@@ -48,6 +48,12 @@ def parse_args():
     parser.add_argument("--ensemble_chunk_size", type=int, default=None, help="Generate this many ensemble members at a time.")
     parser.add_argument("--ode_batch_size", type=int, default=None, help="Max state batch passed through the ODE solver at once.")
     parser.add_argument("--member_chunk", type=int, default=10, help="Chunk size along ensemble member dimension in the output Zarr.")
+    parser.add_argument(
+        "--max_new_init_dates",
+        type=int,
+        default=None,
+        help="Write at most this many new init dates across the run, then exit cleanly for scheduler-driven resume.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Regenerate years even if the final yearly Zarr already exists.")
     return parser.parse_args()
 
@@ -364,6 +370,7 @@ def write_year(
     checkpoint_path,
     checkpoint_meta,
     noise_context,
+    max_new_init_dates=None,
 ):
     out_path = os.path.join(args.out_dir, f"{year}.zarr")
     tmp_path = out_path + ".tmp"
@@ -498,11 +505,14 @@ def write_year(
         f"🚀 {year}: generating {total_expected_inits} init dates with "
         f"{args.num_ensemble} members, {args.num_steps} steps, "
         f"use_flow_variance={use_flow_variance}, use_eof_lhs_noise={use_eof_lhs_noise}, "
-        f"ensemble_chunk_size={ensemble_chunk_size}, resume_offset={resume_offset}"
+        f"ensemble_chunk_size={ensemble_chunk_size}, resume_offset={resume_offset}, "
+        f"max_new_init_dates={max_new_init_dates}"
     )
 
     offset = resume_offset
     seen_offset = 0
+    new_written = 0
+    stopped_due_to_limit = False
     for batch_idx, batch in enumerate(loader):
         vB = batch["y_target"].shape[0]
         if vB % 4 != 0:
@@ -518,6 +528,13 @@ def write_year(
 
         if batch_end <= resume_offset:
             continue
+        if max_new_init_dates is not None and (new_written + num_inits) > max_new_init_dates:
+            stopped_due_to_limit = True
+            accelerator.print(
+                f"⏸️ {year}: reached per-run limit before batch {batch_idx}. "
+                f"Written {new_written}/{max_new_init_dates} new init dates this run."
+            )
+            break
         if batch_start < resume_offset < batch_end:
             raise RuntimeError(
                 f"Cannot safely resume {year}: temp store ends at init index {resume_offset}, "
@@ -628,9 +645,23 @@ def write_year(
         ds_batch.close()
 
         offset = batch_end
+        new_written += num_inits
         accelerator.print(f"  {year}: wrote {offset}/{total_expected_inits} init dates")
 
     if offset != total_expected_inits:
+        if stopped_due_to_limit:
+            accelerator.print(
+                f"⏸️ {year}: leaving temp store at {tmp_path} after writing "
+                f"{new_written} new init dates this run ({offset}/{total_expected_inits} total)."
+            )
+            return {
+                "year": year,
+                "completed": False,
+                "new_written": new_written,
+                "offset": offset,
+                "total_expected_inits": total_expected_inits,
+                "stopped_due_to_limit": True,
+            }
         raise RuntimeError(
             f"Year {year} generation ended with {offset} written init dates, expected {total_expected_inits}. "
             f"Leaving temp store at {tmp_path} for inspection."
@@ -638,6 +669,14 @@ def write_year(
 
     os.rename(tmp_path, out_path)
     accelerator.print(f"✅ {year}: saved {out_path}")
+    return {
+        "year": year,
+        "completed": True,
+        "new_written": new_written,
+        "offset": offset,
+        "total_expected_inits": total_expected_inits,
+        "stopped_due_to_limit": False,
+    }
 
 
 def main():
@@ -669,6 +708,7 @@ def main():
     accelerator.print(f"Checkpoint  : {os.path.abspath(checkpoint_path)}")
     accelerator.print(f"Device      : {device}")
     accelerator.print(f"Precision   : {accelerator.mixed_precision}")
+    accelerator.print(f"Run Init Cap: {args.max_new_init_dates}")
     accelerator.print("=" * 80)
 
     model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
@@ -678,8 +718,14 @@ def main():
     flow_matcher = CustomFlowMatcher(device=device)
     noise_context = load_noise_context(args.data_dir, accelerator)
 
+    remaining_init_budget = args.max_new_init_dates
+    total_new_written = 0
+    stopped_due_to_limit = False
     for year in range(args.start_year, args.end_year + 1):
-        write_year(
+        if remaining_init_budget is not None and remaining_init_budget <= 0:
+            stopped_due_to_limit = True
+            break
+        result = write_year(
             year=year,
             args=args,
             config=config,
@@ -689,7 +735,21 @@ def main():
             checkpoint_path=checkpoint_path,
             checkpoint_meta=checkpoint,
             noise_context=noise_context,
+            max_new_init_dates=remaining_init_budget,
         )
+        if result is None:
+            continue
+        total_new_written += int(result["new_written"])
+        if remaining_init_budget is not None:
+            remaining_init_budget -= int(result["new_written"])
+        if not result["completed"]:
+            stopped_due_to_limit = bool(result.get("stopped_due_to_limit", False))
+            break
+
+    accelerator.print(
+        f"Run summary: wrote {total_new_written} new init dates; "
+        f"stopped_due_to_limit={stopped_due_to_limit}"
+    )
 
 
 if __name__ == "__main__":
