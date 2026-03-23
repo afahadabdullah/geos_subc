@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Evaluate held-out 2020-2021 T2M ensemble dispersiveness for ML and GEOS.
+Evaluate held-out T2M ensemble dispersiveness for ML and GEOS.
 
 This script compares:
 - ML full ensemble (e.g. 120 members)
 - ML downsampled to a fair member count (default 4)
 - Raw GEOS ensemble
 
-using only the held-out forecast years specified on the command line.
+using only the held-out forecast years specified on the command line. The
+script can work in raw-T2M mode or anomaly mode using saved weekly
+climatologies.
 
 Outputs:
 - lead-wise CSV summary
@@ -15,6 +17,7 @@ Outputs:
 - text report
 - summary metric PNG
 - uPIT histogram PNG
+- per-lead uPIT histogram PNGs
 """
 
 import argparse
@@ -75,11 +78,41 @@ def parse_args():
         help="Number of uPIT histogram bins.",
     )
     parser.add_argument(
+        "--pit_seed",
+        type=int,
+        default=7,
+        help="Random seed used for randomized ensemble uPIT.",
+    )
+    parser.add_argument(
         "--init_months",
         type=int,
         nargs="+",
         default=[7],
         help="Only evaluate init dates from these calendar months. Defaults to July only.",
+    )
+    parser.add_argument(
+        "--anomaly_mode",
+        choices=["none", "system", "obs"],
+        default="system",
+        help="Evaluate raw T2M (`none`), anomalies using each system's own climatology (`system`), or anomalies using obs climatology for all (`obs`).",
+    )
+    parser.add_argument(
+        "--ml_clim_path",
+        type=str,
+        default="dataprocess/clim/ml_weekly_ensmean_clim_1999_2021.zarr",
+        help="Weekly ML climatology path used when anomaly_mode=system.",
+    )
+    parser.add_argument(
+        "--geos_clim_path",
+        type=str,
+        default="dataprocess/clim/geos_weekly_ensmean_clim_1999_2021.zarr",
+        help="Weekly GEOS climatology path used when anomaly_mode=system.",
+    )
+    parser.add_argument(
+        "--obs_clim_path",
+        type=str,
+        default="dataprocess/clim/obs_weekly_clim_1999_2021.zarr",
+        help="Weekly OBS climatology path used when anomaly_mode=system or anomaly_mode=obs.",
     )
     return parser.parse_args()
 
@@ -129,6 +162,56 @@ def infer_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
         "member_dim": member_dim,
         "tas_var": tas_var,
     }
+
+
+def infer_clim_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
+    week_dim = choose_name(ds.dims, ["init_week", "week", "W"], f"{kind} init-week dimension")
+    lead_dim = choose_name(ds.dims, ["L", "lead", "lead_time"], f"{kind} lead dimension")
+    y_dim = choose_name(set(ds.dims) | set(ds.coords), ["Y", "latitude", "lat", "y"], f"{kind} latitude dimension")
+    x_dim = choose_name(set(ds.dims) | set(ds.coords), ["X", "longitude", "lon", "x"], f"{kind} longitude dimension")
+    tas_var = choose_data_var(ds, ["tas", "t2m", "T2M", "TAS", "tempt2m", "T2MS"], f"{kind} tas variable")
+    return {
+        "week_dim": week_dim,
+        "lead_dim": lead_dim,
+        "y_dim": y_dim,
+        "x_dim": x_dim,
+        "tas_var": tas_var,
+    }
+
+
+def load_weekly_climatology(path: str, kind: str) -> Dict[str, np.ndarray]:
+    ds = open_year_dataset(path)
+    try:
+        layout = infer_clim_layout(ds, kind)
+        da = ds[layout["tas_var"]].transpose(layout["week_dim"], layout["lead_dim"], layout["y_dim"], layout["x_dim"])
+        return {
+            "path": path,
+            "values": np.asarray(da.values, dtype=np.float64),
+        }
+    finally:
+        ds.close()
+
+
+def anomaly_label(anomaly_mode: str) -> str:
+    if anomaly_mode == "none":
+        return "Raw T2M"
+    if anomaly_mode == "system":
+        return "System-Climatology Anomaly T2M"
+    if anomaly_mode == "obs":
+        return "Obs-Climatology Anomaly T2M"
+    raise ValueError(f"Unsupported anomaly mode: {anomaly_mode}")
+
+
+def subtract_weekly_climatology(values: np.ndarray, clim_values: np.ndarray, week_indices: np.ndarray, lead_idx: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    clim_values = np.asarray(clim_values, dtype=np.float64)
+    week_indices = np.asarray(week_indices, dtype=np.int64)
+
+    if values.ndim == 4:
+        return values - clim_values[week_indices, lead_idx][:, None, :, :]
+    if values.ndim == 3:
+        return values - clim_values[week_indices, lead_idx]
+    raise ValueError(f"Expected values rank 3 or 4, got shape {values.shape}")
 
 
 def downsample_member_axis(data: np.ndarray, count: int) -> np.ndarray:
@@ -204,7 +287,7 @@ class DispersionAccumulator:
         self.pit_hist = np.zeros(self.pit_bins, dtype=np.float64)
         self.pit_edges = np.linspace(0.0, 1.0, self.pit_bins + 1)
 
-    def update(self, forecast: np.ndarray, obs: np.ndarray, lat_weights: np.ndarray):
+    def update(self, forecast: np.ndarray, obs: np.ndarray, lat_weights: np.ndarray, rng: np.random.Generator):
         # forecast: [B, M, Y, X], obs: [B, Y, X], lat_weights: [Y]
         forecast = np.asarray(forecast, dtype=np.float64)
         obs = np.asarray(obs, dtype=np.float64)
@@ -260,7 +343,9 @@ class DispersionAccumulator:
 
         less_count = np.sum(forecast < obs[:, None, :, :], axis=1)
         equal_count = np.sum(forecast == obs[:, None, :, :], axis=1)
-        pit = (less_count + 0.5 * equal_count) / float(forecast.shape[1])
+        lower = less_count / float(forecast.shape[1] + 1)
+        upper = (less_count + equal_count + 1.0) / float(forecast.shape[1] + 1)
+        pit = rng.uniform(lower, upper)
         pit_valid = pit[valid]
         self.pit_hist += np.histogram(pit_valid, bins=self.pit_edges, weights=weights)[0]
 
@@ -338,7 +423,7 @@ def extract_tas_chunk(ds: xr.Dataset, layout: Dict[str, str], s_indices: Sequenc
     return np.asarray(da.values, dtype=np.float64)
 
 
-def make_summary_figure(rows: List[Dict[str, object]], output_path: str):
+def make_summary_figure(rows: List[Dict[str, object]], output_path: str, figure_title: str):
     metrics = [
         ("coverage80", "Coverage q10-q90", 0.80),
         ("coverage50", "Coverage q25-q75", 0.50),
@@ -368,12 +453,12 @@ def make_summary_figure(rows: List[Dict[str, object]], output_path: str):
         ax.grid(True, linestyle=":", alpha=0.5)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.02))
-    fig.suptitle("Held-Out 2020-2021 T2M Dispersion Diagnostics", fontsize=15, y=1.04)
+    fig.suptitle(figure_title, fontsize=15, y=1.04)
     fig.savefig(output_path, dpi=170, bbox_inches="tight")
     plt.close(fig)
 
 
-def make_pit_figure(hist_rows: List[Dict[str, object]], pit_bins: int, output_path: str):
+def make_pit_figure(hist_rows: List[Dict[str, object]], pit_bins: int, output_path: str, figure_title: str):
     model_order = ["ML-120", "ML-4", "GEOS"]
     color_map = {"ML-120": "#08306b", "ML-4": "#2171b5", "GEOS": "#d94801"}
     bin_centers = np.linspace(0.5 / pit_bins, 1.0 - 0.5 / pit_bins, pit_bins)
@@ -393,9 +478,33 @@ def make_pit_figure(hist_rows: List[Dict[str, object]], pit_bins: int, output_pa
     axes[-1].set_xlabel("uPIT")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.01))
-    fig.suptitle("Held-Out 2020-2021 T2M uPIT Histograms", fontsize=15, y=1.03)
+    fig.suptitle(figure_title, fontsize=15, y=1.03)
     fig.savefig(output_path, dpi=170, bbox_inches="tight")
     plt.close(fig)
+
+
+def make_individual_pit_figures(hist_rows: List[Dict[str, object]], pit_bins: int, output_dir: str, title_prefix: str):
+    model_order = ["ML-120", "ML-4", "GEOS"]
+    color_map = {"ML-120": "#08306b", "ML-4": "#2171b5", "GEOS": "#d94801"}
+    bin_centers = np.linspace(0.5 / pit_bins, 1.0 - 0.5 / pit_bins, pit_bins)
+
+    for lead_idx in range(1, 5):
+        fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.8), constrained_layout=True)
+        ax.axhline(1.0 / pit_bins, color="#7f7f7f", linestyle="--", linewidth=1.0)
+        for model_name in model_order:
+            rows = [row for row in hist_rows if row["model"] == model_name and int(row["lead_week"]) == lead_idx]
+            if not rows:
+                continue
+            rows = sorted(rows, key=lambda item: int(item["bin_index"]))
+            densities = [float(row["density"]) for row in rows]
+            ax.plot(bin_centers, densities, marker="o", linewidth=2.0, color=color_map[model_name], label=model_name)
+        ax.set_title(f"{title_prefix} W{lead_idx}")
+        ax.set_xlabel("uPIT")
+        ax.set_ylabel("Density")
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.10))
+        fig.savefig(os.path.join(output_dir, f"t2m_dispersion_pit_W{lead_idx}.png"), dpi=170, bbox_inches="tight")
+        plt.close(fig)
 
 
 def write_csv(path: str, fieldnames: Sequence[str], rows: List[Dict[str, object]]):
@@ -413,12 +522,31 @@ def main():
     end_year = int(args.end_year if args.end_year is not None else config.get("val_end_year", 2021))
     init_months = sorted(set(int(month) for month in args.init_months))
     os.makedirs(args.output_dir, exist_ok=True)
+    mode_label = anomaly_label(args.anomaly_mode)
+    figure_title = f"{mode_label} Dispersion Diagnostics ({start_year}-{end_year})"
+    pit_title = f"{mode_label} uPIT Histograms ({start_year}-{end_year})"
 
     summary_path = os.path.join(args.output_dir, "t2m_dispersion_summary.csv")
     pit_path = os.path.join(args.output_dir, "t2m_dispersion_pit.csv")
     report_path = os.path.join(args.output_dir, "t2m_dispersion_report.txt")
     plot_path = os.path.join(args.output_dir, "t2m_dispersion_summary.png")
     pit_plot_path = os.path.join(args.output_dir, "t2m_dispersion_pit.png")
+    rng = np.random.default_rng(args.pit_seed)
+
+    obs_clim = None
+    ml_clim = None
+    geos_clim = None
+    if args.anomaly_mode != "none":
+        print("\n[CLIM] Loading weekly climatology stores")
+        print(f"  OBS : {args.obs_clim_path}")
+        obs_clim = load_weekly_climatology(args.obs_clim_path, "OBS CLIM")
+        if args.anomaly_mode == "system":
+            print(f"  ML  : {args.ml_clim_path}")
+            print(f"  GEOS: {args.geos_clim_path}")
+            ml_clim = load_weekly_climatology(args.ml_clim_path, "ML CLIM")
+            geos_clim = load_weekly_climatology(args.geos_clim_path, "GEOS CLIM")
+        else:
+            print("  Using OBS climatology for ML, GEOS, and OBS anomaly subtraction")
 
     accumulators = {
         "ML-120": [DispersionAccumulator(args.pit_bins) for _ in range(4)],
@@ -479,6 +607,8 @@ def main():
                     date_lo = common_dates[chunk_start].strftime("%Y-%m-%d")
                     date_hi = common_dates[chunk_end - 1].strftime("%Y-%m-%d")
                     print(f"[{year}] Chunk {chunk_number}/{total_chunks}: init dates {date_lo} .. {date_hi}")
+                chunk_weeks = np.asarray([int(date.isocalendar().week) for date in common_dates[chunk_start:chunk_end]], dtype=np.int32)
+                week_indices = np.clip(chunk_weeks - 1, 0, 52)
 
                 for lead_idx in range(lead_count):
                     ml_chunk = extract_tas_chunk(ml_ds, ml_layout, ml_chunk_idx, lead_idx)
@@ -491,10 +621,19 @@ def main():
                     if ml_chunk.ndim != 4:
                         raise ValueError(f"Expected ML chunk rank 4, got shape {ml_chunk.shape}")
 
+                    if args.anomaly_mode != "none":
+                        obs_chunk = subtract_weekly_climatology(obs_chunk, obs_clim["values"], week_indices, lead_idx)
+                        if args.anomaly_mode == "system":
+                            ml_chunk = subtract_weekly_climatology(ml_chunk, ml_clim["values"], week_indices, lead_idx)
+                            geos_chunk = subtract_weekly_climatology(geos_chunk, geos_clim["values"], week_indices, lead_idx)
+                        else:
+                            ml_chunk = subtract_weekly_climatology(ml_chunk, obs_clim["values"], week_indices, lead_idx)
+                            geos_chunk = subtract_weekly_climatology(geos_chunk, obs_clim["values"], week_indices, lead_idx)
+
                     ml_fair_chunk = downsample_member_axis(ml_chunk, args.fair_member_count)
-                    accumulators["ML-120"][lead_idx].update(ml_chunk, obs_chunk, lat_weights)
-                    accumulators["ML-4"][lead_idx].update(ml_fair_chunk, obs_chunk, lat_weights)
-                    accumulators["GEOS"][lead_idx].update(geos_chunk, obs_chunk, lat_weights)
+                    accumulators["ML-120"][lead_idx].update(ml_chunk, obs_chunk, lat_weights, rng)
+                    accumulators["ML-4"][lead_idx].update(ml_fair_chunk, obs_chunk, lat_weights, rng)
+                    accumulators["GEOS"][lead_idx].update(geos_chunk, obs_chunk, lat_weights, rng)
             print(f"[{year}] Done")
         finally:
             ml_ds.close()
@@ -504,13 +643,25 @@ def main():
     summary_rows: List[Dict[str, object]] = []
     pit_rows: List[Dict[str, object]] = []
     report_lines = [
-        f"Held-out T2M dispersion evaluation for years {start_year}-{end_year}",
+        f"{mode_label} dispersion evaluation for years {start_year}-{end_year}",
         f"Init months: {init_months}",
         f"Fair ML member count: {args.fair_member_count}",
+        f"Anomaly mode: {args.anomaly_mode}",
+        f"Randomized uPIT seed: {args.pit_seed}",
         f"Total common init dates: {total_common_inits}",
         "Common init dates by year: " + ", ".join(f"{year}={count}" for year, count in sorted(year_common_counts.items())),
-        "",
     ]
+    if args.anomaly_mode == "system":
+        report_lines.extend(
+            [
+                f"ML weekly climatology: {args.ml_clim_path}",
+                f"GEOS weekly climatology: {args.geos_clim_path}",
+                f"OBS weekly climatology: {args.obs_clim_path}",
+            ]
+        )
+    elif args.anomaly_mode == "obs":
+        report_lines.append(f"OBS weekly climatology: {args.obs_clim_path}")
+    report_lines.append("")
 
     for model_name, lead_accs in accumulators.items():
         report_lines.append(f"[{model_name}]")
@@ -574,8 +725,9 @@ def main():
     pit_fields = ["model", "lead_week", "bin_index", "bin_left", "bin_right", "density"]
     write_csv(summary_path, summary_fields, summary_rows)
     write_csv(pit_path, pit_fields, pit_rows)
-    make_summary_figure(summary_rows, plot_path)
-    make_pit_figure(pit_rows, args.pit_bins, pit_plot_path)
+    make_summary_figure(summary_rows, plot_path, figure_title)
+    make_pit_figure(pit_rows, args.pit_bins, pit_plot_path, pit_title)
+    make_individual_pit_figures(pit_rows, args.pit_bins, args.output_dir, pit_title)
     with open(report_path, "w") as f:
         f.write("\n".join(report_lines).rstrip() + "\n")
 
@@ -584,6 +736,7 @@ def main():
     print(f"✅ Saved dispersion report: {report_path}")
     print(f"✅ Saved dispersion summary plot: {plot_path}")
     print(f"✅ Saved dispersion uPIT plot: {pit_plot_path}")
+    print(f"✅ Saved per-lead uPIT plots: {args.output_dir}/t2m_dispersion_pit_W*.png")
 
 
 if __name__ == "__main__":

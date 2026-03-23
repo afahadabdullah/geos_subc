@@ -76,7 +76,9 @@ def choose_data_var(ds: xr.Dataset, candidates: Sequence[str], label: str) -> st
 def open_zarr_required(path: str) -> xr.Dataset:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Missing dataset: {path}")
-    return xr.open_zarr(path, consolidated=False)
+    # Keep climatology builders off the Dask threaded scheduler so they can run
+    # reliably on TACC nodes with tighter thread limits.
+    return xr.open_zarr(path, consolidated=False, chunks=None)
 
 
 def infer_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
