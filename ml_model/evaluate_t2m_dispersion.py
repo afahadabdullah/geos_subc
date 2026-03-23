@@ -23,6 +23,7 @@ Outputs:
 import argparse
 import csv
 import os
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -282,6 +283,7 @@ class DispersionAccumulator:
     corr_sum_y2: float = 0.0
     corr_sum_xy: float = 0.0
     sample_count: int = 0
+    all_nan_member_points: int = 0
 
     def __post_init__(self):
         self.pit_hist = np.zeros(self.pit_bins, dtype=np.float64)
@@ -292,17 +294,25 @@ class DispersionAccumulator:
         forecast = np.asarray(forecast, dtype=np.float64)
         obs = np.asarray(obs, dtype=np.float64)
         lat_weights = np.asarray(lat_weights, dtype=np.float64)
+        finite_member_mask = np.isfinite(forecast)
+        any_member_finite = np.any(finite_member_mask, axis=1)
+        self.all_nan_member_points += int(np.count_nonzero(~any_member_finite))
 
-        ens_mean = np.nanmean(forecast, axis=1)
-        ens_std = np.nanstd(forecast, axis=1)
-        q10 = np.nanpercentile(forecast, 10, axis=1)
-        q25 = np.nanpercentile(forecast, 25, axis=1)
-        q75 = np.nanpercentile(forecast, 75, axis=1)
-        q90 = np.nanpercentile(forecast, 90, axis=1)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Mean of empty slice")
+            warnings.filterwarnings("ignore", message="Degrees of freedom <= 0 for slice.")
+            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+            ens_mean = np.nanmean(forecast, axis=1)
+            ens_std = np.nanstd(forecast, axis=1)
+            q10 = np.nanpercentile(forecast, 10, axis=1)
+            q25 = np.nanpercentile(forecast, 25, axis=1)
+            q75 = np.nanpercentile(forecast, 75, axis=1)
+            q90 = np.nanpercentile(forecast, 90, axis=1)
 
         weight_grid = np.broadcast_to(lat_weights[None, :, None], obs.shape)
         valid = (
-            np.isfinite(obs)
+            any_member_finite
+            & np.isfinite(obs)
             & np.isfinite(ens_mean)
             & np.isfinite(ens_std)
             & np.isfinite(q10)
@@ -364,6 +374,7 @@ class DispersionAccumulator:
                 "spread_error_corr": float("nan"),
                 "pit_l1_uniform": float("nan"),
                 "sample_count": 0,
+                "all_nan_member_points": int(self.all_nan_member_points),
             }
 
         rmse_mean = float(np.sqrt(self.sum_sq_error / self.sum_w))
@@ -393,6 +404,7 @@ class DispersionAccumulator:
             "spread_error_corr": float(spread_error_corr),
             "pit_l1_uniform": pit_l1_uniform,
             "sample_count": int(self.sample_count),
+            "all_nan_member_points": int(self.all_nan_member_points),
         }
 
 
@@ -694,6 +706,7 @@ def main():
                 f"width80={metrics['width80']:.3f} K, mean_spread={metrics['mean_spread']:.3f} K, "
                 f"rmse_mean={metrics['rmse_mean']:.3f} K, ssr={metrics['spread_skill_ratio']:.3f}, "
                 f"spread_err_corr={metrics['spread_error_corr']:.3f}, pit_l1={metrics['pit_l1_uniform']:.3f}, "
+                f"all_nan_member_points={metrics['all_nan_member_points']}, "
                 f"state={metrics['dispersion_state']}"
             )
             print(
@@ -701,6 +714,7 @@ def main():
                 f"W{lead_idx}: cov80={metrics['coverage80']:.3f}, cov50={metrics['coverage50']:.3f}, "
                 f"width80={metrics['width80']:.3f} K, spread={metrics['mean_spread']:.3f} K, "
                 f"rmse={metrics['rmse_mean']:.3f} K, ssr={metrics['spread_skill_ratio']:.3f}, "
+                f"all_nan={metrics['all_nan_member_points']}, "
                 f"state={metrics['dispersion_state']}"
             )
         report_lines.append("")
@@ -709,6 +723,7 @@ def main():
         "model",
         "lead_week",
         "sample_count",
+        "all_nan_member_points",
         "coverage80",
         "coverage50",
         "below_q10",

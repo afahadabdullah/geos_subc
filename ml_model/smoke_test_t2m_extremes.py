@@ -12,6 +12,8 @@ For each event, the script:
 - extracts all four weekly lead forecasts from that init
 - computes a latitude-weighted regional mean T2M
 - plots ML, GEOS, and observation time series over weeks 1-4
+- optionally evaluates anomaly versions using either historical obs climatology
+  or saved weekly climatology stores
 
 The goal is quick smoke testing, not a full verification suite.
 """
@@ -141,6 +143,30 @@ def parse_args():
         default=4,
         help="Maximum allowed init-date mismatch when aligning historical climatology years by month-day.",
     )
+    parser.add_argument(
+        "--anomaly_mode",
+        choices=["obs_hist", "obs_store", "system_store"],
+        default="obs_hist",
+        help="Use raw historical obs climatology (`obs_hist`), saved obs weekly climatology (`obs_store`), or saved system-specific weekly climatologies (`system_store`) for anomaly evaluation.",
+    )
+    parser.add_argument(
+        "--ml_clim_path",
+        type=str,
+        default="dataprocess/clim/ml_weekly_ensmean_clim_1999_2021.zarr",
+        help="Weekly ML climatology path used when anomaly_mode=system_store.",
+    )
+    parser.add_argument(
+        "--geos_clim_path",
+        type=str,
+        default="dataprocess/clim/geos_weekly_ensmean_clim_1999_2021.zarr",
+        help="Weekly GEOS climatology path used when anomaly_mode=system_store.",
+    )
+    parser.add_argument(
+        "--obs_clim_path",
+        type=str,
+        default="dataprocess/clim/obs_weekly_clim_1999_2021.zarr",
+        help="Weekly OBS climatology path used when anomaly_mode=obs_store or anomaly_mode=system_store.",
+    )
     return parser.parse_args()
 
 
@@ -202,7 +228,7 @@ def build_event_specs(event_names: Sequence[str] = None) -> List[EventSpec]:
 def open_year_dataset(path: str) -> xr.Dataset:
     if not os.path.exists(path):
         raise FileNotFoundError(f"Missing dataset: {path}")
-    return xr.open_zarr(path, consolidated=False)
+    return xr.open_zarr(path, consolidated=False, chunks=None)
 
 
 def infer_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
@@ -226,6 +252,23 @@ def infer_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
         "x_dim": x_dim,
         "member_dim": member_dim,
         "tas_var": tas_var,
+    }
+
+
+def infer_clim_layout(ds: xr.Dataset, kind: str) -> Dict[str, str]:
+    week_dim = choose_name(ds.dims, ["init_week", "week", "W"], f"{kind} init-week dimension")
+    lead_dim = choose_name(ds.dims, ["L", "lead", "lead_time"], f"{kind} lead dimension")
+    y_dim = choose_name(set(ds.dims) | set(ds.coords), ["Y", "latitude", "lat", "y"], f"{kind} latitude dimension")
+    x_dim = choose_name(set(ds.dims) | set(ds.coords), ["X", "longitude", "lon", "x"], f"{kind} longitude dimension")
+    tas_var = choose_data_var(ds, ["tas", "t2m", "T2M", "TAS", "tempt2m", "T2MS"], f"{kind} tas variable")
+    n_init_var = "n_init_tas" if "n_init_tas" in ds.data_vars else None
+    return {
+        "week_dim": week_dim,
+        "lead_dim": lead_dim,
+        "y_dim": y_dim,
+        "x_dim": x_dim,
+        "tas_var": tas_var,
+        "n_init_var": n_init_var,
     }
 
 
@@ -444,6 +487,91 @@ def exceedance_probabilities(series: np.ndarray, threshold: np.ndarray) -> np.nd
     return 100.0 * np.mean(series > threshold[None, :], axis=0)
 
 
+def anomaly_mode_label(mode: str) -> str:
+    if mode == "obs_hist":
+        return "Obs-Historical Anomaly"
+    if mode == "obs_store":
+        return "Obs-Weekly-Climatology Anomaly"
+    if mode == "system_store":
+        return "System-Weekly-Climatology Anomaly"
+    raise ValueError(f"Unsupported anomaly mode: {mode}")
+
+
+def extract_store_climatology_mean(ds: xr.Dataset, layout: Dict[str, str], event: EventSpec, init_date: pd.Timestamp, lead_count: int) -> Dict[str, object]:
+    week_idx = max(0, min(52, int(init_date.isocalendar().week) - 1))
+    da = ds[layout["tas_var"]].isel({layout["week_dim"]: week_idx, layout["lead_dim"]: slice(0, lead_count)})
+    da = da.transpose(layout["lead_dim"], layout["y_dim"], layout["x_dim"])
+    lat_vals = get_coord_values(da, layout["y_dim"])
+    lon_vals = get_coord_values(da, layout["x_dim"])
+    mean_series = np.asarray(weighted_region_mean(np.asarray(da.values), lat_vals, lon_vals, event), dtype=np.float64)
+    n_init = None
+    if layout["n_init_var"] is not None:
+        n_init = int(np.asarray(ds[layout["n_init_var"]].isel({layout["week_dim"]: week_idx}).values).item())
+    return {
+        "mean": mean_series,
+        "init_week": week_idx + 1,
+        "n_init": n_init,
+    }
+
+
+def compute_anomaly_context(
+    args,
+    ds_cache: Dict[Tuple[str, object], xr.Dataset],
+    data_dir: str,
+    event: EventSpec,
+    chosen_init: pd.Timestamp,
+    lead_count: int,
+    clim_start_year: int,
+    clim_end_year: int,
+) -> Dict[str, object]:
+    obs_hist = compute_obs_climatology(
+        ds_cache=ds_cache,
+        data_dir=data_dir,
+        event=event,
+        reference_init=chosen_init,
+        lead_count=lead_count,
+        clim_start_year=clim_start_year,
+        clim_end_year=clim_end_year,
+        clim_max_init_slip_days=args.clim_max_init_slip_days,
+    )
+
+    obs_clim_mean = np.asarray(obs_hist["mean"][:lead_count], dtype=np.float64)
+    ml_clim_mean = np.asarray(obs_clim_mean, dtype=np.float64)
+    geos_clim_mean = np.asarray(obs_clim_mean, dtype=np.float64)
+    obs_store_meta = None
+    ml_store_meta = None
+    geos_store_meta = None
+
+    if args.anomaly_mode in {"obs_store", "system_store"}:
+        obs_clim_ds = get_or_open_dataset(ds_cache, ("obs_clim_store", args.obs_clim_path), args.obs_clim_path)
+        obs_clim_layout = infer_clim_layout(obs_clim_ds, "OBS CLIM")
+        obs_store_meta = extract_store_climatology_mean(obs_clim_ds, obs_clim_layout, event, chosen_init, lead_count)
+        obs_clim_mean = np.asarray(obs_store_meta["mean"], dtype=np.float64)
+        ml_clim_mean = np.asarray(obs_clim_mean, dtype=np.float64)
+        geos_clim_mean = np.asarray(obs_clim_mean, dtype=np.float64)
+
+    if args.anomaly_mode == "system_store":
+        ml_clim_ds = get_or_open_dataset(ds_cache, ("ml_clim_store", args.ml_clim_path), args.ml_clim_path)
+        geos_clim_ds = get_or_open_dataset(ds_cache, ("geos_clim_store", args.geos_clim_path), args.geos_clim_path)
+        ml_store_meta = extract_store_climatology_mean(ml_clim_ds, infer_clim_layout(ml_clim_ds, "ML CLIM"), event, chosen_init, lead_count)
+        geos_store_meta = extract_store_climatology_mean(geos_clim_ds, infer_clim_layout(geos_clim_ds, "GEOS CLIM"), event, chosen_init, lead_count)
+        ml_clim_mean = np.asarray(ml_store_meta["mean"], dtype=np.float64)
+        geos_clim_mean = np.asarray(geos_store_meta["mean"], dtype=np.float64)
+
+    return {
+        "mode": args.anomaly_mode,
+        "mode_label": anomaly_mode_label(args.anomaly_mode),
+        "obs_hist": obs_hist,
+        "obs_clim_mean": obs_clim_mean,
+        "ml_clim_mean": ml_clim_mean,
+        "geos_clim_mean": geos_clim_mean,
+        "obs_clim_p90": np.asarray(obs_hist["p90"][:lead_count], dtype=np.float64),
+        "obs_store_meta": obs_store_meta,
+        "ml_store_meta": ml_store_meta,
+        "geos_store_meta": geos_store_meta,
+    }
+
+
 def plot_event_panel(
     ax,
     event: EventSpec,
@@ -503,14 +631,21 @@ def write_summary_csv(path: str, rows: List[Dict[str, object]]):
         "init_slip_days",
         "focus_lead_week",
         "region_box",
+        "anomaly_mode",
         "fair_member_count",
         "ml_full_member_count",
         "geos_member_count",
         "clim_year_count",
         "clim_mean_init_slip_days",
         "clim_max_init_slip_days",
+        "obs_clim_init_count",
+        "ml_clim_init_count",
+        "geos_clim_init_count",
         "lead_week",
         "clim_mean_k",
+        "obs_clim_mean_k",
+        "ml_clim_mean_k",
+        "geos_clim_mean_k",
         "clim_p90_k",
         "obs_anom_k",
         "ml_mean_k",
@@ -574,27 +709,37 @@ def build_event_report(
     region_box: str,
     ml_stats: Dict[str, np.ndarray],
     geos_stats: Dict[str, np.ndarray],
-    clim_mean: np.ndarray,
+    obs_clim_mean: np.ndarray,
+    ml_clim_mean: np.ndarray,
+    geos_clim_mean: np.ndarray,
     clim_p90: np.ndarray,
     obs_series: np.ndarray,
+    obs_series_anom: np.ndarray,
+    ml_stats_anom: Dict[str, np.ndarray],
+    geos_stats_anom: Dict[str, np.ndarray],
     ml_prob_gt_obs: np.ndarray,
     geos_prob_gt_obs: np.ndarray,
     ml_prob_gt_p90: np.ndarray,
     geos_prob_gt_p90: np.ndarray,
     ml_full_mean: np.ndarray,
+    anomaly_mode_label_text: str,
 ) -> List[str]:
     lines = [
         f"[{event.name}] {event.title}",
-        f"  Event date: {event.event_date.strftime('%Y-%m-%d')} | target init: {target_init.strftime('%Y-%m-%d')} | chosen init: {chosen_init.strftime('%Y-%m-%d')} | slip={slip_days}d | focus=W{focus_lead} | box={region_box}",
+        f"  Event date: {event.event_date.strftime('%Y-%m-%d')} | target init: {target_init.strftime('%Y-%m-%d')} | chosen init: {chosen_init.strftime('%Y-%m-%d')} | slip={slip_days}d | focus=W{focus_lead} | box={region_box} | anomaly={anomaly_mode_label_text}",
     ]
     for lead_idx in range(len(obs_series)):
         obs = float(obs_series[lead_idx])
-        clim = float(clim_mean[lead_idx])
-        obs_anom = obs - clim
+        obs_clim = float(obs_clim_mean[lead_idx])
+        ml_clim = float(ml_clim_mean[lead_idx])
+        geos_clim = float(geos_clim_mean[lead_idx])
+        obs_anom = float(obs_series_anom[lead_idx])
         ml_mean = float(ml_stats["mean"][lead_idx])
         geos_mean = float(geos_stats["mean"][lead_idx])
         ml_p50 = float(ml_stats["p50"][lead_idx])
         geos_p50 = float(geos_stats["p50"][lead_idx])
+        ml_mean_anom = float(ml_stats_anom["mean"][lead_idx])
+        geos_mean_anom = float(geos_stats_anom["mean"][lead_idx])
         ml_err_mean = abs(ml_mean - obs)
         geos_err_mean = abs(geos_mean - obs)
         ml_err_p50 = abs(ml_p50 - obs)
@@ -603,10 +748,12 @@ def build_event_report(
         p50_winner = pick_winner(ml_err_p50, geos_err_p50)
         lines.append(
             "  "
-            f"W{lead_idx + 1}: obs={obs:.2f} K (anom={obs_anom:+.2f}, clim={clim:.2f}, p90={float(clim_p90[lead_idx]):.2f}) | "
+            f"W{lead_idx + 1}: obs={obs:.2f} K (anom={obs_anom:+.2f}, obs_clim={obs_clim:.2f}, ml_clim={ml_clim:.2f}, geos_clim={geos_clim:.2f}, p90={float(clim_p90[lead_idx]):.2f}) | "
             f"ML-4 mean={ml_mean:.2f}, q10/q50/q90={float(ml_stats['p10'][lead_idx]):.2f}/{ml_p50:.2f}/{float(ml_stats['p90'][lead_idx]):.2f}, "
+            f"mean_anom={ml_mean_anom:+.2f}, "
             f"P>Tobs={float(ml_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(ml_prob_gt_p90[lead_idx]):.1f}% | "
             f"GEOS mean={geos_mean:.2f}, q10/q50/q90={float(geos_stats['p10'][lead_idx]):.2f}/{geos_p50:.2f}/{float(geos_stats['p90'][lead_idx]):.2f}, "
+            f"mean_anom={geos_mean_anom:+.2f}, "
             f"P>Tobs={float(geos_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(geos_prob_gt_p90[lead_idx]):.1f}% | "
             f"winner(mean)={mean_winner}, winner(q50)={p50_winner}"
         )
@@ -663,7 +810,7 @@ def main():
     csv_path = os.path.join(args.output_dir, "t2m_extreme_smoke_tests.csv")
     report_path = os.path.join(args.output_dir, "t2m_extreme_smoke_tests.txt")
 
-    ds_cache: Dict[Tuple[str, int], xr.Dataset] = {}
+    ds_cache: Dict[Tuple[str, object], xr.Dataset] = {}
     summary_rows: List[Dict[str, object]] = []
     report_lines: List[str] = []
     fig, axes = plt.subplots(len(events), 2, figsize=(18, 4.8 * len(events)), constrained_layout=True)
@@ -712,23 +859,26 @@ def main():
             ml_series = downsample_members(ml_series_full, args.fair_member_count)
             ml_full_mean = np.nanmean(ml_series_full, axis=0)
 
-            climatology = compute_obs_climatology(
+            anomaly_context = compute_anomaly_context(
+                args=args,
                 ds_cache=ds_cache,
                 data_dir=data_dir,
                 event=event,
-                reference_init=chosen_init,
+                chosen_init=chosen_init,
                 lead_count=lead_count,
                 clim_start_year=clim_start_year,
                 clim_end_year=clim_end_year,
-                clim_max_init_slip_days=args.clim_max_init_slip_days,
             )
-            clim_mean = np.asarray(climatology["mean"][:lead_count], dtype=np.float64)
-            clim_p90 = np.asarray(climatology["p90"][:lead_count], dtype=np.float64)
+            climatology = anomaly_context["obs_hist"]
+            obs_clim_mean = np.asarray(anomaly_context["obs_clim_mean"], dtype=np.float64)
+            ml_clim_mean = np.asarray(anomaly_context["ml_clim_mean"], dtype=np.float64)
+            geos_clim_mean = np.asarray(anomaly_context["geos_clim_mean"], dtype=np.float64)
+            clim_p90 = np.asarray(anomaly_context["obs_clim_p90"], dtype=np.float64)
 
-            ml_series_anom = ml_series - clim_mean[None, :]
-            geos_series_anom = geos_series - clim_mean[None, :]
-            obs_series_anom = obs_series - clim_mean
-            ml_full_mean_anom = ml_full_mean - clim_mean
+            ml_series_anom = ml_series - ml_clim_mean[None, :]
+            geos_series_anom = geos_series - geos_clim_mean[None, :]
+            obs_series_anom = obs_series - obs_clim_mean
+            ml_full_mean_anom = ml_full_mean - ml_clim_mean
 
             lead_labels = [f"W{i}" for i in range(1, lead_count + 1)]
             focus_lead = infer_event_lead(event.event_date, chosen_init)
@@ -746,7 +896,7 @@ def main():
                 chosen_lead=focus_lead,
                 panel_title="raw",
                 ylabel="Regional Mean T2M [K]",
-                clim_mean=clim_mean,
+                clim_mean=obs_clim_mean,
                 ml_full_mean=ml_full_mean,
             )
             plot_event_panel(
@@ -758,7 +908,7 @@ def main():
                 obs_series=obs_series_anom,
                 init_date=chosen_init,
                 chosen_lead=focus_lead,
-                panel_title="anomaly",
+                panel_title=f"anomaly ({anomaly_context['mode_label']})",
                 ylabel="Regional Mean T2M Anomaly [K]",
                 ml_full_mean=ml_full_mean_anom,
                 zero_line=True,
@@ -782,14 +932,20 @@ def main():
                 region_box=region_box,
                 ml_stats=ml_stats,
                 geos_stats=geos_stats,
-                clim_mean=clim_mean,
+                obs_clim_mean=obs_clim_mean,
+                ml_clim_mean=ml_clim_mean,
+                geos_clim_mean=geos_clim_mean,
                 clim_p90=clim_p90,
                 obs_series=obs_series,
+                obs_series_anom=obs_series_anom,
+                ml_stats_anom=ml_stats_anom,
+                geos_stats_anom=geos_stats_anom,
                 ml_prob_gt_obs=ml_prob_gt_obs,
                 geos_prob_gt_obs=geos_prob_gt_obs,
                 ml_prob_gt_p90=ml_prob_gt_p90,
                 geos_prob_gt_p90=geos_prob_gt_p90,
                 ml_full_mean=ml_full_mean,
+                anomaly_mode_label_text=anomaly_context["mode_label"],
             )
             for line in event_report:
                 print(line)
@@ -813,14 +969,21 @@ def main():
                         "init_slip_days": slip_days,
                         "focus_lead_week": focus_lead,
                         "region_box": region_box,
+                        "anomaly_mode": anomaly_context["mode"],
                         "fair_member_count": int(ml_series.shape[0]),
                         "ml_full_member_count": int(ml_series_full.shape[0]),
                         "geos_member_count": int(geos_series.shape[0]),
                         "clim_year_count": int(len(climatology["used_years"])),
                         "clim_mean_init_slip_days": float(climatology["mean_slip_days"]),
                         "clim_max_init_slip_days": int(climatology["max_slip_days"]),
+                        "obs_clim_init_count": anomaly_context["obs_store_meta"]["n_init"] if anomaly_context["obs_store_meta"] is not None else "",
+                        "ml_clim_init_count": anomaly_context["ml_store_meta"]["n_init"] if anomaly_context["ml_store_meta"] is not None else "",
+                        "geos_clim_init_count": anomaly_context["geos_store_meta"]["n_init"] if anomaly_context["geos_store_meta"] is not None else "",
                         "lead_week": lead_idx + 1,
-                        "clim_mean_k": float(clim_mean[lead_idx]),
+                        "clim_mean_k": float(obs_clim_mean[lead_idx]),
+                        "obs_clim_mean_k": float(obs_clim_mean[lead_idx]),
+                        "ml_clim_mean_k": float(ml_clim_mean[lead_idx]),
+                        "geos_clim_mean_k": float(geos_clim_mean[lead_idx]),
                         "clim_p90_k": float(clim_p90[lead_idx]),
                         "obs_anom_k": float(obs_series_anom[lead_idx]),
                         "ml_mean_k": float(ml_stats["mean"][lead_idx]),
@@ -871,7 +1034,7 @@ def main():
 
         handles, labels = axes[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="upper center", ncol=8, frameon=False, bbox_to_anchor=(0.5, 1.01))
-        fig.suptitle("Smoke Test: Regional Mean T2M for 2020-2021 Extreme Heat Events", fontsize=15, y=1.04)
+        fig.suptitle(f"Smoke Test: Regional Mean T2M for 2020-2021 Extreme Heat Events ({anomaly_mode_label(args.anomaly_mode)})", fontsize=15, y=1.04)
         fig.savefig(figure_path, dpi=170, bbox_inches="tight")
         write_summary_csv(csv_path, summary_rows)
         with open(report_path, "w") as f:
