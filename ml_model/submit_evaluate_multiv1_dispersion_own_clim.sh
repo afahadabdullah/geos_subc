@@ -29,15 +29,15 @@ git pull --no-rebase origin flow_multi
 
 mkdir -p ml_output_flowmulti
 
-OUTPUT_DIR="ml_output_flowmulti/multiv1_dispersion_own_clim_jja_2020_2021"
+OUTPUT_DIR="ml_output_flowmulti/multiv1_dispersion_own_clim_mjja_2020_2021"
 
-echo "🎯 Evaluating JJA 2020-2021 own-climatology anomaly dispersion for T2M and PR"
+echo "🎯 Evaluating MJJA 2020-2021 own-climatology anomaly dispersion for T2M and PR"
 python3 ml_model/evaluate_multiv1_dispersion_own_clim.py \
     --data_dir /home1/11353/afahad/geos_subc/dataprocess \
     --ml_dir dataprocess/gen_multiv1 \
     --start_year 2020 \
     --end_year 2021 \
-    --init_months 6 7 8 \
+    --init_months 5 6 7 8 \
     --variables tas pr \
     --fair_member_count 4 \
     --sample_chunk_size 2 \

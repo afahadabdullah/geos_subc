@@ -115,8 +115,8 @@ def parse_args():
         "--init_months",
         type=int,
         nargs="+",
-        default=[6, 7, 8],
-        help="Only evaluate init dates from these calendar months. Defaults to June-July-August.",
+        default=[5, 6, 7, 8],
+        help="Only evaluate init dates from these calendar months. Defaults to May-August.",
     )
     parser.add_argument(
         "--ml_clim_path",
