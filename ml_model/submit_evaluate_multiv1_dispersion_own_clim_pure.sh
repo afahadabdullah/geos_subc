@@ -29,11 +29,14 @@ git pull --no-rebase origin flow_multi
 
 mkdir -p ml_output_flowmulti
 
-OUTPUT_DIR="ml_output_flowmulti/multiv1_dispersion_own_clim_pure_2021_2022"
+OUTPUT_DIR="ml_output_flowmulti/multiv1_dispersion_own_clim_pure_2020_june"
 
-echo "🎯 Evaluating pure-noise own-climatology anomaly dispersion for 2021 init dates"
+echo "🎯 Evaluating pure-noise own-climatology anomaly dispersion for June 2020 init dates"
 python3 ml_model/evaluate_multiv1_dispersion_own_clim_pure.py \
     --data_dir /home1/11353/afahad/geos_subc/dataprocess \
+    --start_year 2020 \
+    --end_year 2020 \
+    --init_months 6 \
     --output_dir "$OUTPUT_DIR"
 status=$?
 
