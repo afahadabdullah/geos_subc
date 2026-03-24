@@ -49,6 +49,11 @@ def parse_args():
     parser.add_argument("--ode_batch_size", type=int, default=None, help="Max state batch passed through the ODE solver at once.")
     parser.add_argument("--member_chunk", type=int, default=10, help="Chunk size along ensemble member dimension in the output Zarr.")
     parser.add_argument(
+        "--pure_noise",
+        action="store_true",
+        help="Use iid Gaussian initial noise only and disable EOF-LHS sampling plus variance-head scaling.",
+    )
+    parser.add_argument(
         "--max_new_init_dates",
         type=int,
         default=None,
@@ -471,12 +476,12 @@ def write_year(
 
     target_sqrt_min = 0.0
     target_sqrt_max = 7.071
-    use_flow_variance = True
-    use_eof_lhs_noise = True
-    rho_pr = float(config.get("validation_rho_pr", 1.0))
-    rho_t2m = float(config.get("validation_rho_t2m", rho_pr))
-    beta_pr = float(config.get("validation_var_beta_pr", 1.0))
-    beta_t2m = float(config.get("validation_var_beta_t2m", beta_pr))
+    use_flow_variance = not args.pure_noise
+    use_eof_lhs_noise = not args.pure_noise
+    rho_pr = float(config.get("validation_rho_pr", 1.0)) if use_eof_lhs_noise else 0.0
+    rho_t2m = float(config.get("validation_rho_t2m", rho_pr)) if use_eof_lhs_noise else 0.0
+    beta_pr = float(config.get("validation_var_beta_pr", 1.0)) if use_flow_variance else 0.0
+    beta_t2m = float(config.get("validation_var_beta_t2m", beta_pr)) if use_flow_variance else 0.0
     ode_batch_size = args.ode_batch_size if args.ode_batch_size is not None else int(config.get("validation_ode_batch_size", 120))
     ensemble_chunk_size = (
         args.ensemble_chunk_size
@@ -493,6 +498,7 @@ def write_year(
         "source_reference_geos": os.path.abspath(layout["ref_path"]),
         "num_ensemble": int(args.num_ensemble),
         "num_steps": int(args.num_steps),
+        "generation_mode": "pure_noise" if args.pure_noise else "eof_lhs_plus_variance",
         "use_flow_variance": bool(use_flow_variance),
         "use_eof_lhs_noise": bool(use_eof_lhs_noise),
         "validation_rho_pr": float(rho_pr),
@@ -504,6 +510,7 @@ def write_year(
     accelerator.print(
         f"🚀 {year}: generating {total_expected_inits} init dates with "
         f"{args.num_ensemble} members, {args.num_steps} steps, "
+        f"generation_mode={'pure_noise' if args.pure_noise else 'eof_lhs_plus_variance'}, "
         f"use_flow_variance={use_flow_variance}, use_eof_lhs_noise={use_eof_lhs_noise}, "
         f"ensemble_chunk_size={ensemble_chunk_size}, resume_offset={resume_offset}, "
         f"max_new_init_dates={max_new_init_dates}"
@@ -716,7 +723,7 @@ def main():
     model.eval()
 
     flow_matcher = CustomFlowMatcher(device=device)
-    noise_context = load_noise_context(args.data_dir, accelerator)
+    noise_context = load_noise_context(args.data_dir, accelerator) if not args.pure_noise else {}
 
     remaining_init_budget = args.max_new_init_dates
     total_new_written = 0
