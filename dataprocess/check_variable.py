@@ -2,7 +2,7 @@
 check_variable.py
 =================
 Audits the availability of all weekly Zarr files required by the training
-pipeline (dataset_flow.py / S2SHybridDataset) for years 1999-2025.
+pipeline (dataset_flow.py / S2SHybridDataset) for a configurable year range.
 
 Variables checked (mirrors dataset_flow.py file loading logic):
     - geos_subc        : GEOS S2S Forecast    [CORE - required]
@@ -17,6 +17,7 @@ Variables checked (mirrors dataset_flow.py file loading logic):
 Usage:
     python dataprocess/check_variable.py
     python dataprocess/check_variable.py --data_root /path/to/dataprocess
+    python dataprocess/check_variable.py --start_year 2022 --end_year 2025
     python dataprocess/check_variable.py --data_root /path/to/dataprocess --open  # Also open Zarrs to verify dims
 """
 import os
@@ -25,7 +26,8 @@ import argparse
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration – mirrors dataset_flow.py file naming conventions
 # ─────────────────────────────────────────────────────────────────────────────
-YEAR_RANGE = range(1999, 2022)  # 1999 to 2021 inclusive
+DEFAULT_START_YEAR = 1999
+DEFAULT_END_YEAR = 2021
 
 # (display_name, file_template, is_core, required_vars)
 VARIABLES = [
@@ -93,10 +95,20 @@ def colored(text: str, color: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Main audit
 # ─────────────────────────────────────────────────────────────────────────────
-def audit(data_root: str = "dataprocess", open_zarr: bool = False):
+def audit(
+    data_root: str = "dataprocess",
+    open_zarr: bool = False,
+    start_year: int = DEFAULT_START_YEAR,
+    end_year: int = DEFAULT_END_YEAR,
+):
+    if end_year < start_year:
+        raise ValueError(f"end_year must be >= start_year, got {start_year}..{end_year}")
+
+    year_range = range(start_year, end_year + 1)
+
     print(f"\n{'='*80}")
     print(f"  Data Availability Audit  |  root: {os.path.abspath(data_root)}")
-    print(f"  Years checked: {YEAR_RANGE.start} – {YEAR_RANGE.stop - 1}")
+    print(f"  Years checked: {start_year} – {end_year}")
     print(f"{'='*80}\n")
 
     # ── Table header ──────────────────────────────────────────────────────────
@@ -110,7 +122,7 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
         ok_years, missing_years, missing_var_years = [], [], []
         missing_var_reasons = {}
 
-        for year in YEAR_RANGE:
+        for year in year_range:
             path = os.path.join(data_root, template.format(year=year))
             status = check_file(path, open_zarr, required_vars=required_vars)
             if status.startswith("OK"):
@@ -125,7 +137,7 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
                 missing_years.append(year)
 
         n_ok = len(ok_years)
-        n_total = len(list(YEAR_RANGE))
+        n_total = len(list(year_range))
 
         # Format missing years as compact ranges, e.g. 2017-2025
         missing_str = _format_year_list(missing_years)
@@ -160,7 +172,7 @@ def audit(data_root: str = "dataprocess", open_zarr: bool = False):
     print(header_row)
     print("─" * (8 + len(VARIABLES) * 8))
 
-    for year in YEAR_RANGE:
+    for year in year_range:
         row = f"  {year:<6}"
         for display, template, is_core, _ in VARIABLES:
             is_ok = year in summary[display]["ok"]
@@ -241,5 +253,18 @@ if __name__ == "__main__":
         "--open", action="store_true",
         help="Actually open each Zarr store to verify readability and print dimension sizes (slower)."
     )
+    parser.add_argument(
+        "--start_year", type=int, default=DEFAULT_START_YEAR,
+        help=f"First year to audit (default: {DEFAULT_START_YEAR})"
+    )
+    parser.add_argument(
+        "--end_year", type=int, default=DEFAULT_END_YEAR,
+        help=f"Last year to audit (default: {DEFAULT_END_YEAR})"
+    )
     args = parser.parse_args()
-    audit(data_root=args.data_root, open_zarr=args.open)
+    audit(
+        data_root=args.data_root,
+        open_zarr=args.open,
+        start_year=args.start_year,
+        end_year=args.end_year,
+    )
