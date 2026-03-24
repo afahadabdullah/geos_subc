@@ -497,6 +497,10 @@ def anomaly_mode_label(mode: str) -> str:
     raise ValueError(f"Unsupported anomaly mode: {mode}")
 
 
+def ml_label_from_count(count: int) -> str:
+    return f"ML-{int(count)}"
+
+
 def extract_store_climatology_mean(ds: xr.Dataset, layout: Dict[str, str], event: EventSpec, init_date: pd.Timestamp, lead_count: int) -> Dict[str, object]:
     week_idx = max(0, min(52, int(init_date.isocalendar().week) - 1))
     da = ds[layout["tas_var"]].isel({layout["week_dim"]: week_idx, layout["lead_dim"]: slice(0, lead_count)})
@@ -585,6 +589,7 @@ def plot_event_panel(
     ylabel: str,
     clim_mean: np.ndarray = None,
     ml_full_mean: np.ndarray = None,
+    ml_full_label: str = "ML-all",
     zero_line: bool = False,
 ):
     x = np.arange(1, len(lead_labels) + 1)
@@ -596,7 +601,7 @@ def plot_event_panel(
     ax.plot(x, ml_stats["mean"], color="#08519c", linewidth=2.5, marker="o", label="ML-4 mean")
     ax.plot(x, ml_stats["p50"], color="#2171b5", linewidth=1.8, marker="o", linestyle="--", label="ML-4 q50")
     if ml_full_mean is not None:
-        ax.plot(x, ml_full_mean, color="#08306b", linewidth=1.1, linestyle=":", label="ML-all mean")
+        ax.plot(x, ml_full_mean, color="#08306b", linewidth=1.1, linestyle=":", label=f"{ml_full_label} mean")
 
     ax.fill_between(x, geos_stats["p10"], geos_stats["p90"], color="#fdd0a2", alpha=0.35, label="GEOS p10-p90")
     ax.fill_between(x, geos_stats["p25"], geos_stats["p75"], color="#fdae6b", alpha=0.35, label="GEOS p25-p75")
@@ -649,6 +654,14 @@ def write_summary_csv(path: str, rows: List[Dict[str, object]]):
         "clim_p90_k",
         "obs_anom_k",
         "ml_mean_k",
+        "ml_full_mean_k",
+        "ml_full_p05_k",
+        "ml_full_p10_k",
+        "ml_full_p25_k",
+        "ml_full_p50_k",
+        "ml_full_p75_k",
+        "ml_full_p90_k",
+        "ml_full_p95_k",
         "ml_p05_k",
         "ml_p10_k",
         "ml_p25_k",
@@ -657,6 +670,8 @@ def write_summary_csv(path: str, rows: List[Dict[str, object]]):
         "ml_p90_k",
         "ml_p95_k",
         "ml_mean_anom_k",
+        "ml_full_mean_anom_k",
+        "ml_full_p50_anom_k",
         "ml_p50_anom_k",
         "geos_mean_k",
         "geos_p05_k",
@@ -670,18 +685,25 @@ def write_summary_csv(path: str, rows: List[Dict[str, object]]):
         "geos_p50_anom_k",
         "obs_k",
         "ml_abs_err_mean_k",
+        "ml_full_abs_err_mean_k",
         "geos_abs_err_mean_k",
         "ml_abs_err_p50_k",
+        "ml_full_abs_err_p50_k",
         "geos_abs_err_p50_k",
         "winner_mean_fair",
         "winner_p50_fair",
         "ml_prob_gt_obs_pct",
+        "ml_full_prob_gt_obs_pct",
         "geos_prob_gt_obs_pct",
         "ml_prob_gt_clim_p90_pct",
+        "ml_full_prob_gt_clim_p90_pct",
         "geos_prob_gt_clim_p90_pct",
         "winner_mean",
+        "winner_mean_full",
         "winner_p50",
+        "winner_p50_full",
         "ml_contains_obs_p10_p90",
+        "ml_full_contains_obs_p10_p90",
         "geos_contains_obs_p10_p90",
     ]
     with open(path, "w", newline="") as f:
@@ -723,6 +745,11 @@ def build_event_report(
     geos_prob_gt_p90: np.ndarray,
     ml_full_mean: np.ndarray,
     anomaly_mode_label_text: str,
+    ml_full_stats: Dict[str, np.ndarray],
+    ml_full_stats_anom: Dict[str, np.ndarray],
+    ml_full_prob_gt_obs: np.ndarray,
+    ml_full_prob_gt_p90: np.ndarray,
+    ml_full_label: str,
 ) -> List[str]:
     lines = [
         f"[{event.name}] {event.title}",
@@ -735,14 +762,19 @@ def build_event_report(
         geos_clim = float(geos_clim_mean[lead_idx])
         obs_anom = float(obs_series_anom[lead_idx])
         ml_mean = float(ml_stats["mean"][lead_idx])
+        ml_full_mean = float(ml_full_stats["mean"][lead_idx])
         geos_mean = float(geos_stats["mean"][lead_idx])
         ml_p50 = float(ml_stats["p50"][lead_idx])
+        ml_full_p50 = float(ml_full_stats["p50"][lead_idx])
         geos_p50 = float(geos_stats["p50"][lead_idx])
         ml_mean_anom = float(ml_stats_anom["mean"][lead_idx])
+        ml_full_mean_anom = float(ml_full_stats_anom["mean"][lead_idx])
         geos_mean_anom = float(geos_stats_anom["mean"][lead_idx])
         ml_err_mean = abs(ml_mean - obs)
+        ml_full_err_mean = abs(ml_full_mean - obs)
         geos_err_mean = abs(geos_mean - obs)
         ml_err_p50 = abs(ml_p50 - obs)
+        ml_full_err_p50 = abs(ml_full_p50 - obs)
         geos_err_p50 = abs(geos_p50 - obs)
         mean_winner = pick_winner(ml_err_mean, geos_err_mean)
         p50_winner = pick_winner(ml_err_p50, geos_err_p50)
@@ -752,6 +784,9 @@ def build_event_report(
             f"ML-4 mean={ml_mean:.2f}, q10/q50/q90={float(ml_stats['p10'][lead_idx]):.2f}/{ml_p50:.2f}/{float(ml_stats['p90'][lead_idx]):.2f}, "
             f"mean_anom={ml_mean_anom:+.2f}, "
             f"P>Tobs={float(ml_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(ml_prob_gt_p90[lead_idx]):.1f}% | "
+            f"{ml_full_label} mean={ml_full_mean:.2f}, q10/q50/q90={float(ml_full_stats['p10'][lead_idx]):.2f}/{ml_full_p50:.2f}/{float(ml_full_stats['p90'][lead_idx]):.2f}, "
+            f"mean_anom={ml_full_mean_anom:+.2f}, "
+            f"P>Tobs={float(ml_full_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(ml_full_prob_gt_p90[lead_idx]):.1f}% | "
             f"GEOS mean={geos_mean:.2f}, q10/q50/q90={float(geos_stats['p10'][lead_idx]):.2f}/{geos_p50:.2f}/{float(geos_stats['p90'][lead_idx]):.2f}, "
             f"mean_anom={geos_mean_anom:+.2f}, "
             f"P>Tobs={float(geos_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(geos_prob_gt_p90[lead_idx]):.1f}% | "
@@ -759,8 +794,10 @@ def build_event_report(
         )
     focus_idx = focus_lead - 1
     ml_focus_mean_err = abs(float(ml_stats["mean"][focus_idx]) - float(obs_series[focus_idx]))
+    ml_full_focus_mean_err = abs(float(ml_full_stats["mean"][focus_idx]) - float(obs_series[focus_idx]))
     geos_focus_mean_err = abs(float(geos_stats["mean"][focus_idx]) - float(obs_series[focus_idx]))
     ml_focus_p50_err = abs(float(ml_stats["p50"][focus_idx]) - float(obs_series[focus_idx]))
+    ml_full_focus_p50_err = abs(float(ml_full_stats["p50"][focus_idx]) - float(obs_series[focus_idx]))
     geos_focus_p50_err = abs(float(geos_stats["p50"][focus_idx]) - float(obs_series[focus_idx]))
     lines.append(
         "  "
@@ -771,20 +808,30 @@ def build_event_report(
     )
     lines.append(
         "  "
-        f"Focus lead W{focus_lead}: ML-all mean={float(ml_full_mean[focus_idx]):.2f} K "
+        f"Focus lead W{focus_lead}: {ml_full_label} mean={float(ml_full_mean[focus_idx]):.2f} K "
         f"vs ML-4 mean={float(ml_stats['mean'][focus_idx]):.2f} K vs GEOS mean={float(geos_stats['mean'][focus_idx]):.2f} K"
     )
     lines.append(
         "  "
         f"Focus lead W{focus_lead}: obs in ML q10-q90={within_interval(float(obs_series[focus_idx]), float(ml_stats['p10'][focus_idx]), float(ml_stats['p90'][focus_idx]))}, "
+        f"obs in {ml_full_label} q10-q90={within_interval(float(obs_series[focus_idx]), float(ml_full_stats['p10'][focus_idx]), float(ml_full_stats['p90'][focus_idx]))}, "
         f"obs in GEOS q10-q90={within_interval(float(obs_series[focus_idx]), float(geos_stats['p10'][focus_idx]), float(geos_stats['p90'][focus_idx]))}"
     )
     lines.append(
         "  "
         f"Focus lead W{focus_lead}: P(ML-4 > obs)={float(ml_prob_gt_obs[focus_idx]):.1f}%, "
+        f"P({ml_full_label} > obs)={float(ml_full_prob_gt_obs[focus_idx]):.1f}%, "
         f"P(GEOS > obs)={float(geos_prob_gt_obs[focus_idx]):.1f}%, "
         f"P(ML-4 > clim p90)={float(ml_prob_gt_p90[focus_idx]):.1f}%, "
+        f"P({ml_full_label} > clim p90)={float(ml_full_prob_gt_p90[focus_idx]):.1f}%, "
         f"P(GEOS > clim p90)={float(geos_prob_gt_p90[focus_idx]):.1f}%"
+    )
+    lines.append(
+        "  "
+        f"Focus lead W{focus_lead}: {ml_full_label} winner(mean)={pick_winner(ml_full_focus_mean_err, geos_focus_mean_err, label_a=ml_full_label)} "
+        f"({ml_full_focus_mean_err:.2f}K vs {geos_focus_mean_err:.2f}K), "
+        f"{ml_full_label} winner(q50)={pick_winner(ml_full_focus_p50_err, geos_focus_p50_err, label_a=ml_full_label)} "
+        f"({ml_full_focus_p50_err:.2f}K vs {geos_focus_p50_err:.2f}K)"
     )
     return lines
 
@@ -858,6 +905,7 @@ def main():
 
             ml_series = downsample_members(ml_series_full, args.fair_member_count)
             ml_full_mean = np.nanmean(ml_series_full, axis=0)
+            ml_full_label = ml_label_from_count(ml_series_full.shape[0])
 
             anomaly_context = compute_anomaly_context(
                 args=args,
@@ -898,6 +946,7 @@ def main():
                 ylabel="Regional Mean T2M [K]",
                 clim_mean=obs_clim_mean,
                 ml_full_mean=ml_full_mean,
+                ml_full_label=ml_full_label,
             )
             plot_event_panel(
                 ax=ax_anom,
@@ -911,16 +960,21 @@ def main():
                 panel_title=f"anomaly ({anomaly_context['mode_label']})",
                 ylabel="Regional Mean T2M Anomaly [K]",
                 ml_full_mean=ml_full_mean_anom,
+                ml_full_label=ml_full_label,
                 zero_line=True,
             )
 
             ml_stats = summarize_ensemble(ml_series)
+            ml_full_stats = summarize_ensemble(ml_series_full)
             geos_stats = summarize_ensemble(geos_series)
             ml_stats_anom = summarize_ensemble(ml_series_anom)
+            ml_full_stats_anom = summarize_ensemble(ml_series_full - ml_clim_mean[None, :])
             geos_stats_anom = summarize_ensemble(geos_series_anom)
             ml_prob_gt_obs = exceedance_probabilities(ml_series, obs_series)
+            ml_full_prob_gt_obs = exceedance_probabilities(ml_series_full, obs_series)
             geos_prob_gt_obs = exceedance_probabilities(geos_series, obs_series)
             ml_prob_gt_p90 = exceedance_probabilities(ml_series, clim_p90)
+            ml_full_prob_gt_p90 = exceedance_probabilities(ml_series_full, clim_p90)
             geos_prob_gt_p90 = exceedance_probabilities(geos_series, clim_p90)
 
             event_report = build_event_report(
@@ -939,13 +993,18 @@ def main():
                 obs_series=obs_series,
                 obs_series_anom=obs_series_anom,
                 ml_stats_anom=ml_stats_anom,
+                ml_full_stats=ml_full_stats,
+                ml_full_stats_anom=ml_full_stats_anom,
                 geos_stats_anom=geos_stats_anom,
                 ml_prob_gt_obs=ml_prob_gt_obs,
+                ml_full_prob_gt_obs=ml_full_prob_gt_obs,
                 geos_prob_gt_obs=geos_prob_gt_obs,
                 ml_prob_gt_p90=ml_prob_gt_p90,
+                ml_full_prob_gt_p90=ml_full_prob_gt_p90,
                 geos_prob_gt_p90=geos_prob_gt_p90,
                 ml_full_mean=ml_full_mean,
                 anomaly_mode_label_text=anomaly_context["mode_label"],
+                ml_full_label=ml_full_label,
             )
             for line in event_report:
                 print(line)
@@ -955,8 +1014,10 @@ def main():
             for lead_idx in range(lead_count):
                 obs_value = float(obs_series[lead_idx])
                 ml_err_mean = abs(float(ml_stats["mean"][lead_idx]) - obs_value)
+                ml_full_err_mean = abs(float(ml_full_stats["mean"][lead_idx]) - obs_value)
                 geos_err_mean = abs(float(geos_stats["mean"][lead_idx]) - obs_value)
                 ml_err_p50 = abs(float(ml_stats["p50"][lead_idx]) - obs_value)
+                ml_full_err_p50 = abs(float(ml_full_stats["p50"][lead_idx]) - obs_value)
                 geos_err_p50 = abs(float(geos_stats["p50"][lead_idx]) - obs_value)
                 summary_rows.append(
                     {
@@ -987,6 +1048,14 @@ def main():
                         "clim_p90_k": float(clim_p90[lead_idx]),
                         "obs_anom_k": float(obs_series_anom[lead_idx]),
                         "ml_mean_k": float(ml_stats["mean"][lead_idx]),
+                        "ml_full_mean_k": float(ml_full_stats["mean"][lead_idx]),
+                        "ml_full_p05_k": float(ml_full_stats["p05"][lead_idx]),
+                        "ml_full_p10_k": float(ml_full_stats["p10"][lead_idx]),
+                        "ml_full_p25_k": float(ml_full_stats["p25"][lead_idx]),
+                        "ml_full_p50_k": float(ml_full_stats["p50"][lead_idx]),
+                        "ml_full_p75_k": float(ml_full_stats["p75"][lead_idx]),
+                        "ml_full_p90_k": float(ml_full_stats["p90"][lead_idx]),
+                        "ml_full_p95_k": float(ml_full_stats["p95"][lead_idx]),
                         "ml_p05_k": float(ml_stats["p05"][lead_idx]),
                         "ml_p10_k": float(ml_stats["p10"][lead_idx]),
                         "ml_p25_k": float(ml_stats["p25"][lead_idx]),
@@ -995,6 +1064,8 @@ def main():
                         "ml_p90_k": float(ml_stats["p90"][lead_idx]),
                         "ml_p95_k": float(ml_stats["p95"][lead_idx]),
                         "ml_mean_anom_k": float(ml_stats_anom["mean"][lead_idx]),
+                        "ml_full_mean_anom_k": float(ml_full_stats_anom["mean"][lead_idx]),
+                        "ml_full_p50_anom_k": float(ml_full_stats_anom["p50"][lead_idx]),
                         "ml_p50_anom_k": float(ml_stats_anom["p50"][lead_idx]),
                         "geos_mean_k": float(geos_stats["mean"][lead_idx]),
                         "geos_p05_k": float(geos_stats["p05"][lead_idx]),
@@ -1008,21 +1079,32 @@ def main():
                         "geos_p50_anom_k": float(geos_stats_anom["p50"][lead_idx]),
                         "obs_k": obs_value,
                         "ml_abs_err_mean_k": ml_err_mean,
+                        "ml_full_abs_err_mean_k": ml_full_err_mean,
                         "geos_abs_err_mean_k": geos_err_mean,
                         "ml_abs_err_p50_k": ml_err_p50,
+                        "ml_full_abs_err_p50_k": ml_full_err_p50,
                         "geos_abs_err_p50_k": geos_err_p50,
                         "winner_mean_fair": pick_winner(ml_err_mean, geos_err_mean),
                         "winner_p50_fair": pick_winner(ml_err_p50, geos_err_p50),
                         "ml_prob_gt_obs_pct": float(ml_prob_gt_obs[lead_idx]),
+                        "ml_full_prob_gt_obs_pct": float(ml_full_prob_gt_obs[lead_idx]),
                         "geos_prob_gt_obs_pct": float(geos_prob_gt_obs[lead_idx]),
                         "ml_prob_gt_clim_p90_pct": float(ml_prob_gt_p90[lead_idx]),
+                        "ml_full_prob_gt_clim_p90_pct": float(ml_full_prob_gt_p90[lead_idx]),
                         "geos_prob_gt_clim_p90_pct": float(geos_prob_gt_p90[lead_idx]),
                         "winner_mean": pick_winner(ml_err_mean, geos_err_mean),
+                        "winner_mean_full": pick_winner(ml_full_err_mean, geos_err_mean, label_a=ml_full_label),
                         "winner_p50": pick_winner(ml_err_p50, geos_err_p50),
+                        "winner_p50_full": pick_winner(ml_full_err_p50, geos_err_p50, label_a=ml_full_label),
                         "ml_contains_obs_p10_p90": within_interval(
                             obs_value,
                             float(ml_stats["p10"][lead_idx]),
                             float(ml_stats["p90"][lead_idx]),
+                        ),
+                        "ml_full_contains_obs_p10_p90": within_interval(
+                            obs_value,
+                            float(ml_full_stats["p10"][lead_idx]),
+                            float(ml_full_stats["p90"][lead_idx]),
                         ),
                         "geos_contains_obs_p10_p90": within_interval(
                             obs_value,
