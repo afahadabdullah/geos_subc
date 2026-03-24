@@ -135,6 +135,12 @@ def parse_args():
         default="dataprocess/clim/obs_weekly_clim_1999_2021.zarr",
         help="Obs weekly climatology path used for anomaly RMSE / correlation.",
     )
+    parser.add_argument(
+        "--deterministic_space",
+        choices=["anomaly", "raw"],
+        default="anomaly",
+        help="Whether RMSE/correlation are computed in anomaly space or raw-value space.",
+    )
     return parser.parse_args()
 
 
@@ -268,6 +274,10 @@ def weighted_mean_2d(metric_map: np.ndarray, aw_2d: np.ndarray) -> float:
     if not np.any(mask):
         return float("nan")
     return float(np.nansum(metric_map[mask] * aw_2d[mask]) / (np.nansum(aw_2d[mask]) + 1e-8))
+
+
+def deterministic_space_label(mode: str) -> str:
+    return "Raw" if mode == "raw" else "Anomaly"
 
 
 def get_plot_coords(data_dir: str, year_hint: int = 2021) -> Tuple[np.ndarray, np.ndarray]:
@@ -802,13 +812,18 @@ def evaluate_season_variable(
                     update_mean_acc(model_accs["ML"], ml_mean_raw, lead_idx)
                     update_mean_acc(model_accs["GEOS"], geos_mean_raw, lead_idx)
 
-                    obs_clim_slice = obs_clim["values"][week_indices, lead_idx]
-                    obs_anom = obs_chunk - obs_clim_slice
-                    ml_anom = ml_mean_raw - obs_clim_slice
-                    geos_anom = geos_mean_raw - obs_clim_slice
+                    if args.deterministic_space == "raw":
+                        obs_det = obs_chunk
+                        ml_det = ml_mean_raw
+                        geos_det = geos_mean_raw
+                    else:
+                        obs_clim_slice = obs_clim["values"][week_indices, lead_idx]
+                        obs_det = obs_chunk - obs_clim_slice
+                        ml_det = ml_mean_raw - obs_clim_slice
+                        geos_det = geos_mean_raw - obs_clim_slice
 
-                    update_det_acc(model_accs["ML"], ml_anom, obs_anom, lead_idx)
-                    update_det_acc(model_accs["GEOS"], geos_anom, obs_anom, lead_idx)
+                    update_det_acc(model_accs["ML"], ml_det, obs_det, lead_idx)
+                    update_det_acc(model_accs["GEOS"], geos_det, obs_det, lead_idx)
 
                     update_prob_acc(
                         model_accs["ML"],
@@ -861,6 +876,7 @@ def evaluate_season_variable(
         f"Eval years: {args.start_year}-{args.end_year}",
         f"Season months: {list(months)}",
         f"Threshold years: {args.threshold_start_year}-{args.threshold_end_year}",
+        f"Deterministic metrics: {deterministic_space_label(args.deterministic_space)}",
         f"Total common init dates: {total_common_inits}",
         "Common init dates by year: " + ", ".join(f"{year}={count}" for year, count in sorted(year_common_counts.items())),
         f"Obs weekly climatology: {args.obs_clim_path}",
@@ -979,6 +995,7 @@ def evaluate_season_variable(
                 "variable_label": label,
                 "lead_week": lead_idx + 1,
                 "model": model_name,
+                "deterministic_space": args.deterministic_space,
                 "domain_obs_mean": obs_avg,
                 "domain_forecast_mean": geos_avg if model_name == "GEOS" else ml_avg,
                 "domain_rmse": geos_rmse_avg if model_name == "GEOS" else ml_rmse_avg,
@@ -1009,6 +1026,7 @@ def evaluate_season_variable(
             "variable_label",
             "lead_week",
             "model",
+            "deterministic_space",
             "domain_obs_mean",
             "domain_forecast_mean",
             "domain_rmse",
@@ -1055,6 +1073,7 @@ def main():
     print(f"Threshold Years : {args.threshold_start_year}-{args.threshold_end_year}")
     print(f"Seasons         : {args.seasons}")
     print(f"Variables       : {args.variables}")
+    print(f"Deterministic   : {deterministic_space_label(args.deterministic_space)}")
     print(f"Data Dir        : {args.data_dir}")
     print(f"ML Dir          : {args.ml_dir}")
     print(f"Output Dir      : {os.path.abspath(args.output_dir)}")
@@ -1082,6 +1101,7 @@ def main():
             "variable_label",
             "lead_week",
             "model",
+            "deterministic_space",
             "domain_obs_mean",
             "domain_forecast_mean",
             "domain_rmse",
