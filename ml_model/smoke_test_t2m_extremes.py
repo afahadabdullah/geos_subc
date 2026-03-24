@@ -762,7 +762,7 @@ def build_event_report(
         geos_clim = float(geos_clim_mean[lead_idx])
         obs_anom = float(obs_series_anom[lead_idx])
         ml_mean = float(ml_stats["mean"][lead_idx])
-        ml_full_mean = float(ml_full_stats["mean"][lead_idx])
+        ml_full_mean_lead = float(ml_full_stats["mean"][lead_idx])
         geos_mean = float(geos_stats["mean"][lead_idx])
         ml_p50 = float(ml_stats["p50"][lead_idx])
         ml_full_p50 = float(ml_full_stats["p50"][lead_idx])
@@ -771,7 +771,7 @@ def build_event_report(
         ml_full_mean_anom = float(ml_full_stats_anom["mean"][lead_idx])
         geos_mean_anom = float(geos_stats_anom["mean"][lead_idx])
         ml_err_mean = abs(ml_mean - obs)
-        ml_full_err_mean = abs(ml_full_mean - obs)
+        ml_full_err_mean = abs(ml_full_mean_lead - obs)
         geos_err_mean = abs(geos_mean - obs)
         ml_err_p50 = abs(ml_p50 - obs)
         ml_full_err_p50 = abs(ml_full_p50 - obs)
@@ -784,7 +784,7 @@ def build_event_report(
             f"ML-4 mean={ml_mean:.2f}, q10/q50/q90={float(ml_stats['p10'][lead_idx]):.2f}/{ml_p50:.2f}/{float(ml_stats['p90'][lead_idx]):.2f}, "
             f"mean_anom={ml_mean_anom:+.2f}, "
             f"P>Tobs={float(ml_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(ml_prob_gt_p90[lead_idx]):.1f}% | "
-            f"{ml_full_label} mean={ml_full_mean:.2f}, q10/q50/q90={float(ml_full_stats['p10'][lead_idx]):.2f}/{ml_full_p50:.2f}/{float(ml_full_stats['p90'][lead_idx]):.2f}, "
+            f"{ml_full_label} mean={ml_full_mean_lead:.2f}, q10/q50/q90={float(ml_full_stats['p10'][lead_idx]):.2f}/{ml_full_p50:.2f}/{float(ml_full_stats['p90'][lead_idx]):.2f}, "
             f"mean_anom={ml_full_mean_anom:+.2f}, "
             f"P>Tobs={float(ml_full_prob_gt_obs[lead_idx]):.1f}%, P>Tp90={float(ml_full_prob_gt_p90[lead_idx]):.1f}% | "
             f"GEOS mean={geos_mean:.2f}, q10/q50/q90={float(geos_stats['p10'][lead_idx]):.2f}/{geos_p50:.2f}/{float(geos_stats['p90'][lead_idx]):.2f}, "
