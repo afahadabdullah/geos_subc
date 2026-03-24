@@ -20,6 +20,9 @@ import xarray as xr
 import yaml
 
 
+PR_MAX_VALID_MM_DAY = 100.0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Build weekly lead-specific climatology for ML, GEOS, and observations.")
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
@@ -163,14 +166,33 @@ def extract_standard_coords(ds: xr.Dataset, layout: Dict[str, str]) -> Tuple[np.
     return lead_values, y_values, x_values
 
 
-def standardize_var(ds: xr.Dataset, layout: Dict[str, str], var_name: str, ensemble_mean_first: bool) -> Tuple[np.ndarray, np.ndarray]:
+def sanitize_pr_values(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    values = np.where(np.isfinite(values), values, np.nan)
+    values = np.where(values < 0.0, 0.0, values)
+    # Weekly-mean precipitation above this range is almost certainly packed/fill
+    # corruption rather than a real meteorological signal.
+    values = np.where(values > PR_MAX_VALID_MM_DAY, np.nan, values)
+    return values
+
+
+def standardize_var(
+    ds: xr.Dataset,
+    layout: Dict[str, str],
+    var_name: str,
+    ensemble_mean_first: bool,
+    var_key: str,
+) -> Tuple[np.ndarray, np.ndarray]:
     da = ds[var_name]
     if ensemble_mean_first and layout["member_dim"] is not None:
         da = da.mean(dim=layout["member_dim"])
     da = da.transpose(layout["s_dim"], layout["lead_dim"], layout["y_dim"], layout["x_dim"])
     s_values = pd.to_datetime(da[layout["s_dim"]].values).normalize()
     init_weeks = np.asarray([int(item.isocalendar().week) for item in s_values], dtype=np.int32)
-    return np.asarray(da.values, dtype=np.float64), init_weeks
+    values = np.asarray(da.values, dtype=np.float64)
+    if var_key == "pr":
+        values = sanitize_pr_values(values)
+    return values, init_weeks
 
 
 def write_climatology_store(
@@ -243,8 +265,8 @@ def build_ml_climatology(args, data_dir: str):
             if acc is None:
                 lead_values, y_values, x_values = extract_standard_coords(ds, layout)
                 acc = init_accumulator(lead_values, y_values, x_values)
-            pr_values, init_weeks = standardize_var(ds, layout, layout["pr_var"], ensemble_mean_first=True)
-            tas_values, init_weeks_tas = standardize_var(ds, layout, layout["tas_var"], ensemble_mean_first=True)
+            pr_values, init_weeks = standardize_var(ds, layout, layout["pr_var"], ensemble_mean_first=True, var_key="pr")
+            tas_values, init_weeks_tas = standardize_var(ds, layout, layout["tas_var"], ensemble_mean_first=True, var_key="tas")
             if not np.array_equal(init_weeks, init_weeks_tas):
                 raise ValueError(f"ML init-week alignment mismatch in {path}")
             update_weekly_accumulator(acc, pr_values, init_weeks, "pr")
@@ -291,8 +313,8 @@ def build_geos_climatology(args, data_dir: str):
             if acc is None:
                 lead_values, y_values, x_values = extract_standard_coords(ds, layout)
                 acc = init_accumulator(lead_values, y_values, x_values)
-            pr_values, init_weeks = standardize_var(ds, layout, layout["pr_var"], ensemble_mean_first=True)
-            tas_values, init_weeks_tas = standardize_var(ds, layout, layout["tas_var"], ensemble_mean_first=True)
+            pr_values, init_weeks = standardize_var(ds, layout, layout["pr_var"], ensemble_mean_first=True, var_key="pr")
+            tas_values, init_weeks_tas = standardize_var(ds, layout, layout["tas_var"], ensemble_mean_first=True, var_key="tas")
             if not np.array_equal(init_weeks, init_weeks_tas):
                 raise ValueError(f"GEOS init-week alignment mismatch in {path}")
             update_weekly_accumulator(acc, pr_values, init_weeks, "pr")
@@ -346,8 +368,8 @@ def build_obs_climatology(args, data_dir: str):
                 lead_values, y_values, x_values = extract_standard_coords(ds_tas, layout_tas)
                 acc = init_accumulator(lead_values, y_values, x_values)
 
-            pr_values, init_weeks = standardize_var(ds_pr, layout_pr, layout_pr["pr_var"], ensemble_mean_first=False)
-            tas_values, init_weeks_tas = standardize_var(ds_tas, layout_tas, layout_tas["tas_var"], ensemble_mean_first=False)
+            pr_values, init_weeks = standardize_var(ds_pr, layout_pr, layout_pr["pr_var"], ensemble_mean_first=False, var_key="pr")
+            tas_values, init_weeks_tas = standardize_var(ds_tas, layout_tas, layout_tas["tas_var"], ensemble_mean_first=False, var_key="tas")
             if not np.array_equal(init_weeks, init_weeks_tas):
                 raise ValueError(f"Obs init-week alignment mismatch in {year}")
             update_weekly_accumulator(acc, pr_values, init_weeks, "pr")

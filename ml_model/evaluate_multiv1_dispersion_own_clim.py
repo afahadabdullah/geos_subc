@@ -34,6 +34,9 @@ import xarray as xr
 import yaml
 
 
+PR_MAX_VALID_MM_DAY = 100.0
+
+
 VAR_SPECS = {
     "tas": {
         "label": "T2M",
@@ -201,9 +204,12 @@ def load_weekly_climatology(path: str, kind: str, var_key: str) -> Dict[str, np.
     try:
         layout = infer_clim_layout(ds, kind, var_key)
         da = ds[layout["var_name"]].transpose(layout["week_dim"], layout["lead_dim"], layout["y_dim"], layout["x_dim"])
+        values = np.asarray(da.values, dtype=np.float64)
+        if var_key == "pr":
+            values = sanitize_pr_values(values)
         return {
             "path": path,
-            "values": np.asarray(da.values, dtype=np.float64),
+            "values": values,
         }
     finally:
         ds.close()
@@ -261,6 +267,16 @@ def classify_dispersion(coverage80: float, ssr: float) -> str:
 
 def own_clim_label(var_key: str) -> str:
     return f"System-Climatology Anomaly {VAR_SPECS[var_key]['label']}"
+
+
+def sanitize_pr_values(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    values = np.where(np.isfinite(values), values, np.nan)
+    values = np.where(values < 0.0, 0.0, values)
+    # Raw GPCP/forecast PR occasionally carries packed/fill-like outliers that
+    # blow up anomaly RMSE while leaving spread metrics looking normal.
+    values = np.where(values > PR_MAX_VALID_MM_DAY, np.nan, values)
+    return values
 
 
 def subtract_weekly_climatology(values: np.ndarray, clim_values: np.ndarray, week_indices: np.ndarray, lead_idx: int) -> np.ndarray:
@@ -435,13 +451,23 @@ def exact_indices_for_dates(s_values: np.ndarray, dates: Sequence[pd.Timestamp])
     return [int(index_map[pd.Timestamp(date)]) for date in dates]
 
 
-def extract_var_chunk(ds: xr.Dataset, layout: Dict[str, str], var_name: str, s_indices: Sequence[int], lead_idx: int) -> np.ndarray:
+def extract_var_chunk(
+    ds: xr.Dataset,
+    layout: Dict[str, str],
+    var_name: str,
+    s_indices: Sequence[int],
+    lead_idx: int,
+    var_key: str,
+) -> np.ndarray:
     da = ds[var_name].isel({layout["s_dim"]: list(s_indices), layout["lead_dim"]: int(lead_idx)})
     if layout["member_dim"] is None:
         da = da.transpose(layout["s_dim"], layout["y_dim"], layout["x_dim"])
     else:
         da = da.transpose(layout["s_dim"], layout["member_dim"], layout["y_dim"], layout["x_dim"])
-    return np.asarray(da.values, dtype=np.float64)
+    values = np.asarray(da.values, dtype=np.float64)
+    if var_key == "pr":
+        values = sanitize_pr_values(values)
+    return values
 
 
 def make_summary_figure(rows: List[Dict[str, object]], output_path: str, figure_title: str, unit: str):
@@ -627,9 +653,9 @@ def evaluate_variable(args, config: Dict, data_dir: str, start_year: int, end_ye
                 week_indices = np.clip(chunk_weeks - 1, 0, 52)
 
                 for lead_idx in range(lead_count):
-                    ml_chunk = extract_var_chunk(ml_ds, ml_layout, ml_var_name, ml_chunk_idx, lead_idx)
-                    geos_chunk = extract_var_chunk(geos_ds, geos_layout, geos_var_name, geos_chunk_idx, lead_idx)
-                    obs_chunk = extract_var_chunk(obs_ds, obs_layout, obs_var_name, obs_chunk_idx, lead_idx)
+                    ml_chunk = extract_var_chunk(ml_ds, ml_layout, ml_var_name, ml_chunk_idx, lead_idx, var_key)
+                    geos_chunk = extract_var_chunk(geos_ds, geos_layout, geos_var_name, geos_chunk_idx, lead_idx, var_key)
+                    obs_chunk = extract_var_chunk(obs_ds, obs_layout, obs_var_name, obs_chunk_idx, lead_idx, var_key)
                     if obs_chunk.ndim != 3:
                         raise ValueError(f"Expected OBS chunk rank 3, got shape {obs_chunk.shape}")
                     if geos_chunk.ndim != 4:
