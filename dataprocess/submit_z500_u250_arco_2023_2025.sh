@@ -8,7 +8,7 @@
 #SBATCH -t 06:00:00
 #SBATCH -A ATM25008
 
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -18,7 +18,7 @@ CONDA_ENV_NAME="${CONDA_ENV_NAME:-geossub_env}"
 
 echo "Job started at $(date) on $(hostname)"
 
-source ~/.bashrc || true
+source ~/.bashrc
 
 if command -v conda >/dev/null 2>&1; then
     conda activate "$CONDA_ENV_NAME"
@@ -28,6 +28,8 @@ else
     echo "Conda environment setup failed. 'conda' was not found and fallback activate script is missing at $CONDA_DIR/bin/activate"
     exit 1
 fi
+
+set -u
 
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
