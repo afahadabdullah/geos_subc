@@ -6,26 +6,41 @@ This is the first stage of the legacy two-step T2M target pipeline:
 2. ``process_t2m_weekly.py`` converts those daily files into weekly lead targets
    aligned with GEOS init dates.
 
-The ARCO ERA5 source used here currently spans 1959-2022.
+By default this script uses the newer ARCO ERA5 analysis-ready v3 store:
+``gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3``
+
+The script clips to the stable ERA5 range advertised by the store metadata
+(`valid_time_start`, `valid_time_stop`) when those attributes are present.
 """
 
 import xarray as xr
-import gcsfs
 import os
-import pandas as pd
 import numpy as np
 import dask
 import argparse
 
-def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m", overwrite=False):
-    # Define the GCS path to the Zarr store
-    zarr_path = 'gs://gcp-public-data-arco-era5/ar/1959-2022-6h-512x256_equiangular_conservative.zarr'
+DEFAULT_ZARR_PATH = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+
+
+def process_era5_t2m_yearly(
+    start_year=2022,
+    end_year=2025,
+    output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m",
+    overwrite=False,
+    zarr_path=DEFAULT_ZARR_PATH,
+):
     
     print(f"Connecting to {zarr_path}...")
     
     # Open the dataset lazily with Dask (ignoring chunks warnings if any)
     try:
-        ds = xr.open_zarr(zarr_path, chunks={'time': 240, 'longitude': 256, 'latitude': 256}, consolidated=True)
+        ds = xr.open_zarr(
+            zarr_path,
+            chunks={'time': 48, 'longitude': 256, 'latitude': 256},
+            storage_options={'token': 'anon'},
+        )
+        if "valid_time_start" in ds.attrs and "valid_time_stop" in ds.attrs and "time" in ds.coords:
+            ds = ds.sel(time=slice(ds.attrs["valid_time_start"], ds.attrs["valid_time_stop"]))
         print("Dataset opened successfully.")
     except Exception as e:
         print(f"Error opening dataset: {e}")
@@ -97,9 +112,11 @@ def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/ho
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process ARCO-ERA5 2m_temperature to daily 1-degree GEOS grid.")
-    parser.add_argument("--start_year", type=int, default=1999)
-    parser.add_argument("--end_year", type=int, default=2022)
+    parser.add_argument("--start_year", type=int, default=2022)
+    parser.add_argument("--end_year", type=int, default=2025)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m")
+    parser.add_argument("--zarr_path", type=str, default=DEFAULT_ZARR_PATH,
+                        help="ARCO ERA5 Zarr source. Defaults to the public v3 full 37-variable hourly store.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing era5_t2m_<year>.zarr files.")
     args = parser.parse_args()
@@ -109,4 +126,5 @@ if __name__ == "__main__":
         end_year=args.end_year,
         output_base_dir=args.output_dir,
         overwrite=args.overwrite,
+        zarr_path=args.zarr_path,
     )

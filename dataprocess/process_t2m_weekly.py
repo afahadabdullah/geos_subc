@@ -169,7 +169,7 @@ if __name__ == "__main__":
                         help="Overwrite existing t2m_weekly_<year>.zarr files.")
     args = parser.parse_args()
     
-    years = args.years if args.years else list(range(1999, 2023))
+    years = args.years if args.years else list(range(2022, 2026))
     
     for year in years:
         process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir, overwrite=args.overwrite)
