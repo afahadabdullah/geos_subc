@@ -80,21 +80,76 @@ def compute_climatology(da, window=121):
     Follows Wheeler & Hendon (2004) methodology.
     """
     print("  Calculating daily climatology (this takes a moment)...")
-    # Group by day of year and compute mean
     clim = da.groupby('time.dayofyear').mean('time')
-    
-    # Pad for rolling mean to prevent edge effects at year boundary
-    clim_padded = xr.concat([clim[-window//2:], clim, clim[:window//2]], dim='dayofyear')
-    clim_smooth = clim_padded.rolling(dayofyear=window, center=True).mean()[window//2:-window//2]
-    
-    # Map back to original time coordinates
-    # We must explicitly cast dayofyear to int to avoid xarray typing issues
-    day_indices = da.time.dt.dayofyear.values.astype(int)
-    climatology_timeseries = clim_smooth.sel(dayofyear=day_indices)
-    
-    # Drop the dayofyear coord
-    climatology_timeseries = climatology_timeseries.drop_vars('dayofyear')
-    return climatology_timeseries
+    half_window = window // 2
+
+    # Pad cyclically to smooth across the year boundary.
+    clim_padded = xr.concat(
+        [
+            clim.isel(dayofyear=slice(-half_window, None)),
+            clim,
+            clim.isel(dayofyear=slice(0, half_window)),
+        ],
+        dim='dayofyear'
+    )
+    clim_smooth = clim_padded.rolling(dayofyear=window, center=True).mean()
+    clim_smooth = clim_smooth.isel(dayofyear=slice(half_window, half_window + clim.sizes['dayofyear']))
+    clim_smooth = clim_smooth.assign_coords(dayofyear=clim.dayofyear)
+    return clim_smooth
+
+
+def normalize_olr_grid(da_olr):
+    lat_name = 'lat' if 'lat' in da_olr.coords else 'latitude'
+    lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
+    da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
+
+    # Convert any -180..180 longitudes to 0..360 to match the GEOS convention.
+    if float(da_olr.longitude.min()) < 0.0:
+        da_olr = da_olr.assign_coords(longitude=(da_olr.longitude % 360)).sortby('longitude')
+
+    # xarray interpolation expects monotonic coordinates.
+    da_olr = da_olr.sortby('latitude').sortby('longitude')
+    return da_olr
+
+
+def load_or_build_climatology(da_olr, clim_path):
+    rebuild = True
+    climatology = None
+
+    if os.path.exists(clim_path):
+        try:
+            print(f"  Loading cached climatology from {clim_path}...")
+            climatology = xr.open_dataarray(clim_path).compute()
+            rebuild = False
+
+            expected_sizes = {
+                'dayofyear': 366 if 366 in da_olr.time.dt.dayofyear.values else 365,
+                'latitude': da_olr.sizes['latitude'],
+                'longitude': da_olr.sizes['longitude'],
+            }
+            for dim, size in expected_sizes.items():
+                if climatology.sizes.get(dim) != size:
+                    print(f"  Cached climatology dimension mismatch on {dim}: {climatology.sizes.get(dim)} vs {size}")
+                    rebuild = True
+                    break
+
+            if not rebuild:
+                if not np.array_equal(climatology.latitude.values, da_olr.latitude.values):
+                    print("  Cached climatology latitude grid mismatch. Rebuilding.")
+                    rebuild = True
+                elif not np.array_equal(climatology.longitude.values, da_olr.longitude.values):
+                    print("  Cached climatology longitude grid mismatch. Rebuilding.")
+                    rebuild = True
+        except Exception as exc:
+            print(f"  Failed to load cached climatology ({exc}). Rebuilding.")
+            rebuild = True
+
+    if rebuild:
+        climatology = compute_climatology(da_olr).compute()
+        print(f"  Saving climatology cache to {clim_path}...")
+        climatology.to_netcdf(clim_path, mode='w')
+
+    return climatology
 
 
 def spacetime_filter(da_anom, time_dim='time', lon_dim='longitude'):
@@ -193,23 +248,14 @@ def process_mjo_wave(olr_paths, years, output_dir):
     print("Slicing base dataset to 1998-01-01 onwards for faster computation...")
     da_olr = da_olr.sel(time=slice('1998-01-01', None))
     
-    # Ensure lat/lon are standard
-    lat_name = 'lat' if 'lat' in da_olr.coords else 'latitude'
-    lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
-    da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
+    da_olr = normalize_olr_grid(da_olr)
     olr_start = pd.to_datetime(da_olr.time.values[0])
     olr_end = pd.to_datetime(da_olr.time.values[-1])
     print(f"Available OLR coverage: {olr_start.date()} -> {olr_end.date()}")
     
-    # 1. Compute or Load Climatology using the entire record on native 2.5° grid
+    # 1. Compute or load climatology on the native OLR grid.
     clim_path = os.path.join(output_dir, "olr_climatology.nc")
-    if os.path.exists(clim_path):
-        print(f"  Loading cached climatology from {clim_path}...")
-        climatology = xr.open_dataarray(clim_path).compute()
-    else:
-        climatology = compute_climatology(da_olr).compute()
-        print(f"  Saving climatology cache to {clim_path}...")
-        climatology.to_netcdf(clim_path)
+    climatology = load_or_build_climatology(da_olr, clim_path)
     
     all_years_mjo = []
     processed_years = []
@@ -240,24 +286,15 @@ def process_mjo_wave(olr_paths, years, output_dir):
             print(f"  Only {da_padded.sizes['time']} days available for {target_year}; need a longer OLR record. Skipping.")
             continue
         
-        # 3. Compute Anomalies FOR THE SLICE ONLY
-        print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
-        padded_days = da_padded.time.dt.dayofyear.values.astype(int)
-        padded_vals = da_padded.values
-        clim_vals = climatology.values
-        clim_days = climatology.dayofyear.values.astype(int)
-        anom_vals = np.zeros_like(padded_vals)
-        
-        for i, doy in enumerate(padded_days):
-            if doy not in clim_days:
-                idx = np.where(clim_days == 365)[0][0]
-            else:
-                idx = np.where(clim_days == doy)[0][0]
-            anom_vals[i, :, :] = padded_vals[i, :, :] - clim_vals[idx, :, :]
-            
-        da_anom_padded = xr.DataArray(
-            anom_vals, coords=da_padded.coords, dims=da_padded.dims, name='olr_anomaly'
+        # 3. Compute anomalies on the native OLR grid.
+        print("  Calculating OLR anomalies on native grid...")
+        day_selector = xr.DataArray(
+            da_padded.time.dt.dayofyear.values.astype(int),
+            coords={'time': da_padded.time},
+            dims='time'
         )
+        clim_for_slice = climatology.sel(dayofyear=day_selector)
+        da_anom_padded = (da_padded - clim_for_slice).rename('olr_anomaly')
         
         # 4. Apply Space-Time Wavenumber-Frequency Filter
         da_mjo_padded = spacetime_filter(da_anom_padded)
