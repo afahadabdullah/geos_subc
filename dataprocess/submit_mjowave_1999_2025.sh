@@ -44,7 +44,8 @@ python3 dataprocess/extract_mjo_wave.py \
     --start_year 1999 \
     --end_year 2025 \
     --olr_glob "dataprocess/olr/OLR-Daily_v02r00*.nc" \
-    --output_dir dataprocess
+    --output_dir dataprocess \
+    --overwrite
 
 echo "[$(date)] Starting MJO wave weekly processing for 1999-2025"
 python3 dataprocess/process_mjowave.py \

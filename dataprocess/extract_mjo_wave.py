@@ -3,7 +3,7 @@
 MJO Wave Spatial Extraction Engine
 ====================================
 This script isolates the Madden-Julian Oscillation (MJO) spatial signal from raw
-daily Outgoing Longwave Radiation (OLR) fields using Space-Time (Wavenumber-Frequency) filtering.
+daily Outgoing Longwave Radiation (OLR) fields using a causal, past-only filter.
 
 The MJO is mathematically defined in atmospheric dynamics as an eastward-propagating
 equatorially-trapped wave envelope with:
@@ -12,13 +12,16 @@ equatorially-trapped wave envelope with:
 
 Pipeline:
     1. Load daily NOAA interpolated OLR (olr.day.mean.nc)
-    2. Interpolate to target GEOS 1° grid (181x360)
-    3. Remove the seasonal cycle (climatology) to get OLR anomalies
-    4. Apply 2D FFT (Space-Time) along the longitudes.
-    5. Zero out all frequencies and wavenumbers EXCEPT those matching the MJO profile
-    6. Apply Inverse 2D FFT to recover the isolated MJO wave in the spatial domain
-    7. Save the 1999 MJO wave spatial map to Zarr
-    8. Generate a diagnostic plot comparing Raw OLR vs. MJO Wave
+    2. Remove the seasonal cycle using a fixed historical climatology
+    3. Keep only zonal wavenumbers 1 to 5 at each day
+    4. Apply a causal 30-90 day bandpass approximation using trailing means only
+    5. Interpolate to the target GEOS 1° grid (181x360)
+    6. Save the daily MJO-like spatial map to Zarr
+    7. Generate a diagnostic plot comparing Raw OLR vs. filtered MJO wave
+
+This causal implementation is designed for forecast-input generation. It avoids
+future-data leakage that occurs when a two-sided space-time FFT is used to build
+predictors for a forecast initialization date.
 
 Dependencies:
     pip install xarray numpy pandas scipy dask matplotlib cartopy
@@ -30,6 +33,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import glob
+import shutil
 from scipy.fft import fft2, ifft2, fftfreq, fftshift
 
 # Attempt to load plotting libraries
@@ -46,6 +50,13 @@ except ImportError:
 
 DEFAULT_START_YEAR = 1999
 DEFAULT_END_YEAR = 2025
+CLIM_START = "1979-01-01"
+CLIM_END = "1998-12-31"
+MIN_WAVENUMBER = 1
+MAX_WAVENUMBER = 5
+SHORT_PERIOD_DAYS = 30
+LONG_PERIOD_DAYS = 90
+CAUSAL_PAD_MONTH_DAY = "09-01"
 
 
 def load_olr_dataset(olr_paths):
@@ -112,7 +123,7 @@ def normalize_olr_grid(da_olr):
     return da_olr
 
 
-def load_or_build_climatology(da_olr, clim_path):
+def load_or_build_climatology(da_olr, clim_path, clim_start=CLIM_START, clim_end=CLIM_END):
     rebuild = True
     climatology = None
 
@@ -140,16 +151,65 @@ def load_or_build_climatology(da_olr, clim_path):
                 elif not np.array_equal(climatology.longitude.values, da_olr.longitude.values):
                     print("  Cached climatology longitude grid mismatch. Rebuilding.")
                     rebuild = True
+                elif climatology.attrs.get('climatology_start') != clim_start:
+                    print("  Cached climatology baseline start mismatch. Rebuilding.")
+                    rebuild = True
+                elif climatology.attrs.get('climatology_end') != clim_end:
+                    print("  Cached climatology baseline end mismatch. Rebuilding.")
+                    rebuild = True
         except Exception as exc:
             print(f"  Failed to load cached climatology ({exc}). Rebuilding.")
             rebuild = True
 
     if rebuild:
-        climatology = compute_climatology(da_olr).compute()
+        base_slice = da_olr.sel(time=slice(clim_start, clim_end))
+        if base_slice.sizes.get('time', 0) == 0:
+            raise ValueError(
+                f"No OLR data available for climatology baseline {clim_start} -> {clim_end}."
+            )
+        print(f"  Building climatology from fixed baseline {clim_start} -> {clim_end}...")
+        climatology = compute_climatology(base_slice).compute()
+        climatology.attrs['climatology_start'] = clim_start
+        climatology.attrs['climatology_end'] = clim_end
         print(f"  Saving climatology cache to {clim_path}...")
         climatology.to_netcdf(clim_path, mode='w')
 
     return climatology
+
+
+def zonal_wavenumber_filter(da_anom, min_k=MIN_WAVENUMBER, max_k=MAX_WAVENUMBER):
+    """
+    Keep only the large-scale zonal structure associated with MJO-like variability.
+    This is instantaneous in longitude and does not introduce time leakage.
+    """
+    print(f"  Applying zonal wavenumber filter (k={min_k}-{max_k})...")
+
+    arr = da_anom.values
+    lon_len = arr.shape[2]
+    k = fftfreq(lon_len, d=1.0 / lon_len)
+    mask = (np.abs(k) >= min_k) & (np.abs(k) <= max_k)
+
+    spectrum = np.fft.fft(arr, axis=2)
+    spectrum *= mask[np.newaxis, np.newaxis, :]
+    filtered = np.real(np.fft.ifft(spectrum, axis=2)).astype(np.float32)
+
+    return xr.DataArray(
+        filtered,
+        coords=da_anom.coords,
+        dims=da_anom.dims,
+        name='mjo_wave',
+    )
+
+
+def causal_bandpass_filter(da_field, short_days=SHORT_PERIOD_DAYS, long_days=LONG_PERIOD_DAYS):
+    """
+    Approximate 30-90 day intraseasonal variability using trailing means only.
+    This keeps the preprocessing causal with respect to each forecast init date.
+    """
+    print(f"  Applying causal {short_days}-{long_days} day bandpass approximation...")
+    short_mean = da_field.rolling(time=short_days, min_periods=short_days).mean()
+    long_mean = da_field.rolling(time=long_days, min_periods=long_days).mean()
+    return (short_mean - long_mean).rename('mjo_wave').astype(np.float32)
 
 
 def spacetime_filter(da_anom, time_dim='time', lon_dim='longitude'):
@@ -236,25 +296,24 @@ def spacetime_filter(da_anom, time_dim='time', lon_dim='longitude'):
     return da_mjo
 
 
-def process_mjo_wave(olr_paths, years, output_dir):
+def process_mjo_wave(olr_paths, years, output_dir, overwrite=False):
     os.makedirs(output_dir, exist_ok=True)
     
     ds = load_olr_dataset(olr_paths)
     
     # NOAA uses 'olr' variable
     da_olr = ds['olr']
-    
-    # 0. Slice the global dataset to the relevant training period to drastically speed up Climatology
-    print("Slicing base dataset to 1998-01-01 onwards for faster computation...")
-    da_olr = da_olr.sel(time=slice('1998-01-01', None))
-    
+
     da_olr = normalize_olr_grid(da_olr)
     olr_start = pd.to_datetime(da_olr.time.values[0])
     olr_end = pd.to_datetime(da_olr.time.values[-1])
     print(f"Available OLR coverage: {olr_start.date()} -> {olr_end.date()}")
     
     # 1. Compute or load climatology on the native OLR grid.
-    clim_path = os.path.join(output_dir, "olr_climatology.nc")
+    clim_path = os.path.join(
+        output_dir,
+        f"olr_climatology_{CLIM_START[:4]}_{CLIM_END[:4]}.nc",
+    )
     climatology = load_or_build_climatology(da_olr, clim_path)
     
     all_years_mjo = []
@@ -266,13 +325,13 @@ def process_mjo_wave(olr_paths, years, output_dir):
     for target_year in years:
         print(f"\n--- Processing Year: {target_year} ---")
         
-        # 2. We need a buffer around the target year for the 30-90 day FFT
-        start_time = pd.Timestamp(f"{target_year-1}-09-01")
-        end_time = pd.Timestamp(f"{target_year+1}-03-31")
+        # 2. Use only past data before or within the target year to avoid leakage.
+        start_time = pd.Timestamp(f"{target_year-1}-{CAUSAL_PAD_MONTH_DAY}")
+        end_time = pd.Timestamp(f"{target_year}-12-31")
         
         clipped_start = max(start_time, olr_start)
         clipped_end = min(end_time, olr_end)
-        print(f"Extracting padded window ({start_time.date()} to {end_time.date()}) for FFT stability...")
+        print(f"Extracting past-only padded window ({start_time.date()} to {end_time.date()})...")
         print(f"  Clipped to available OLR coverage: {clipped_start.date()} -> {clipped_end.date()}")
         if clipped_end < clipped_start:
             print(f"  No OLR data available for {target_year}. Skipping.")
@@ -296,8 +355,9 @@ def process_mjo_wave(olr_paths, years, output_dir):
         clim_for_slice = climatology.sel(dayofyear=day_selector)
         da_anom_padded = (da_padded - clim_for_slice).rename('olr_anomaly')
         
-        # 4. Apply Space-Time Wavenumber-Frequency Filter
-        da_mjo_padded = spacetime_filter(da_anom_padded)
+        # 4. Apply the causal MJO-like filter.
+        da_lowk_padded = zonal_wavenumber_filter(da_anom_padded)
+        da_mjo_padded = causal_bandpass_filter(da_lowk_padded)
         
         # 5. Slice back to target year only
         target_start = f"{target_year}-01-01"
@@ -339,7 +399,7 @@ def process_mjo_wave(olr_paths, years, output_dir):
                 fig.colorbar(p1, ax=ax1, orientation='vertical', pad=0.02, label='W/m²')
                 
                 ax2 = fig.add_subplot(2, 1, 2, projection=ccrs.PlateCarree(central_longitude=180))
-                ax2.set_title(f"Isolated MJO Wave (30-90 Day, Wavenumber 1-5) - {plot_label}", fontsize=14)
+                ax2.set_title(f"Causal MJO-like Wave (30-90 Day, Wavenumber 1-5) - {plot_label}", fontsize=14)
                 ax2.coastlines()
                 max_val = max(10, float(np.abs(mjo_slice).max() * 0.8))
                 p2 = ax2.contourf(target_lon, target_lat, mjo_slice, transform=ccrs.PlateCarree(),
@@ -366,12 +426,21 @@ def process_mjo_wave(olr_paths, years, output_dir):
     ds_out = da_mjo_all.to_dataset(name='mjo_wave')
     ds_out['mjo_wave'].attrs = {
         'units': 'W/m2',
-        'long_name': 'MJO Wave (Wavenumber-Frequency Filtered OLR)',
-        'description': 'Eastward propagating, Wavenumbers 1-5, Periods 30-90 days'
+        'long_name': 'Causal MJO-like Wave Envelope (Filtered OLR)',
+        'description': 'Past-only 30-90 day bandpass approximation with zonal wavenumbers 1-5',
+        'climatology_period': f'{CLIM_START} to {CLIM_END}',
+        'causal_processing': 'true',
     }
     
     min_year, max_year = min(processed_years), max(processed_years)
     out_file = os.path.join(output_dir, f"mjo_wave_spatial_{min_year}_{max_year}.zarr")
+    if overwrite:
+        existing_archives = sorted(glob.glob(os.path.join(output_dir, "mjo_wave_spatial_*.zarr")))
+        for archive in existing_archives:
+            print(f"Removing existing MJO archive: {archive}")
+            shutil.rmtree(archive)
+    elif os.path.exists(out_file):
+        print(f"Overwriting existing file in place: {out_file}")
     print(f"Saving merged MJO Wave map to {out_file}...")
     
     ds_out = ds_out.chunk({'time': -1, 'latitude': 181, 'longitude': 360})
@@ -392,6 +461,8 @@ if __name__ == "__main__":
     parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
     parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Remove existing mjo_wave_spatial_*.zarr archives in output_dir before saving.")
     args = parser.parse_args()
 
     years = args.years if args.years else list(range(args.start_year, args.end_year + 1))
@@ -404,4 +475,4 @@ if __name__ == "__main__":
     else:
         olr_paths = [args.olr_path]
 
-    process_mjo_wave(olr_paths, years, args.output_dir)
+    process_mjo_wave(olr_paths, years, args.output_dir, overwrite=args.overwrite)
