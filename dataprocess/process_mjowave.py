@@ -31,9 +31,11 @@ import argparse
 MJO_FILE = "dataprocess/mjo_wave_spatial_1999_2022.zarr"
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
+DEFAULT_START_YEAR = 2024
+DEFAULT_END_YEAR = 2025
 
 
-def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
+def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR, overwrite=False):
     """
     Process MJO Wave data for one year:
     1. Load GEOS Zarr to get init dates and target grid
@@ -41,10 +43,14 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
     3. Compute 4 weekly means before each init date
     4. Save as Zarr
     """
-    out_path = os.path.join(output_dir, f"mjo_wave_weekly_{year}.zarr")
+    out_path = os.path.join(output_dir, f"mjowave_weekly_{year}.zarr")
     if os.path.exists(out_path):
-        print(f"File {out_path} already exists. Skipping {year}.")
-        return
+        if not overwrite:
+            print(f"File {out_path} already exists. Skipping {year}.")
+            return
+        print(f"Overwriting existing file: {out_path}")
+        import shutil
+        shutil.rmtree(out_path)
 
     # 1. Load GEOS to get init dates and grid
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
@@ -172,7 +178,13 @@ def process_year(year, ds_mjo_full, output_dir=OUTPUT_DIR):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process MJO Wave Spatial Map → GEOS weekly Zarr")
     parser.add_argument("--years", type=int, nargs="+", default=None,
-                        help="Specific years to process. Default: 1999-2016")
+                        help="Specific years to process. Overrides start/end year.")
+    parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR,
+                        help=f"First year to process when --years is not given. Default: {DEFAULT_START_YEAR}")
+    parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR,
+                        help=f"Last year to process when --years is not given. Default: {DEFAULT_END_YEAR}")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing mjowave_weekly_<year>.zarr files.")
     args = parser.parse_args()
     
     mjo_files = sorted(glob.glob("dataprocess/mjo_wave_spatial_*.zarr"))
@@ -184,14 +196,17 @@ if __name__ == "__main__":
     print(f"Loading {len(mjo_files)} continuous MJO wave datasets...")
     ds_list = [xr.open_zarr(f, consolidated=False) for f in mjo_files]
     ds_mjo_full = xr.concat(ds_list, dim='time').sortby('time')
+    _, unique_index = np.unique(ds_mjo_full.time.values, return_index=True)
+    if len(unique_index) != ds_mjo_full.sizes['time']:
+        ds_mjo_full = ds_mjo_full.isel(time=np.sort(unique_index))
     
     print(f"  Time range: {ds_mjo_full.time.values[0]} to {ds_mjo_full.time.values[-1]}")
     
-    years = args.years if args.years else list(range(1999, 2026))
+    years = args.years if args.years else list(range(args.start_year, args.end_year + 1))
     
     print(f"Processing MJO into weekly means for years: {years}")
     for year in years:
-        process_year(year, ds_mjo_full)
+        process_year(year, ds_mjo_full, overwrite=args.overwrite)
     
     ds_mjo_full.close()
     print(f"\nAll done! MJO weekly files saved to {OUTPUT_DIR}/")

@@ -12,7 +12,9 @@ Variables checked (mirrors dataset_flow.py file loading logic):
     - soilw_weekly     : Soil Moisture
     - ivt_weekly       : Integrated Vapor Transport
     - mjowave_weekly   : Spatial MJO Wave Envelope
-    - z500_u250_weekly : Z500 & U250 (ERA5)
+    - z500_u250_weekly : Z500 (ERA5)
+    - z500_u250_weekly : U250 (ERA5)
+    - t2m_weekly       : ERA5 T2M target
 
 Usage:
     python dataprocess/check_variable.py
@@ -38,9 +40,9 @@ VARIABLES = [
     ("Soil Moisture (SoilW)",   "soilw_weekly_{year}.zarr",     False, ["soilw"]),
     ("IVT (ERA5)",              "ivt_weekly_{year}.zarr",       False, ["ivt"]),
     ("MJO Wave Envelope",       "mjowave_weekly_{year}.zarr",   False, ["mjo_wave"]),
-    ("Z500 & U250 (ERA5)",      "z500_u250_weekly_{year}.zarr", False, ["z500", "u250"]),
+    ("Z500 (ERA5)",             "z500_u250_weekly_{year}.zarr", False, ["z500"]),
+    ("U250 (ERA5)",             "z500_u250_weekly_{year}.zarr", False, ["u250"]),
     ("T2M (ERA5 Targets)",      "t2m_weekly_{year}.zarr",       False, ["t2m"]),
-    ("SLP (ERA5 Targets)",      "slp_weekly_{year}.zarr",       False, ["slp"]),
 ]
 
 # Column widths for the table

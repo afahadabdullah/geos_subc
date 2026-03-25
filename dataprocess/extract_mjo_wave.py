@@ -43,6 +43,10 @@ except ImportError:
     PLOT_AVAILABLE = False
 
 
+DEFAULT_START_YEAR = 2023
+DEFAULT_END_YEAR = 2025
+
+
 def compute_climatology(da, window=121):
     """
     Compute smoothed daily climatology from the full dataset.
@@ -287,10 +291,13 @@ def process_mjo_wave(olr_path, years, output_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--olr_path", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/olr/olr.day.mean.nc")
-    parser.add_argument("--years", type=int, nargs='+', default=list(range(1999, 2023)))
+    parser.add_argument("--years", type=int, nargs='+', default=None)
+    parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
+    parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/")
     args = parser.parse_args()
     
     assert os.path.exists(args.olr_path), f"OLR file not found at {args.olr_path}"
-    
-    process_mjo_wave(args.olr_path, args.years, args.output_dir)
+
+    years = args.years if args.years else list(range(args.start_year, args.end_year + 1))
+    process_mjo_wave(args.olr_path, years, args.output_dir)
