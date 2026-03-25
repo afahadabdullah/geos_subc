@@ -10,11 +10,9 @@
 
 set -eo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
 CONDA_DIR="${CONDA_DIR:-/home1/11353/afahad/afahad/geossub/miniconda}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-geossub_env}"
+REPO_ROOT="${REPO_ROOT:-/scratch/11353/afahad/geossub/geos_subc}"
 
 echo "Job started at $(date) on $(hostname)"
 
@@ -34,7 +32,10 @@ set -u
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 
-cd "$REPO_ROOT"
+cd "$REPO_ROOT" || {
+    echo "Repo root not found or not accessible: $REPO_ROOT"
+    exit 1
+}
 mkdir -p dataprocess/logs dataprocess/era5_z500_u250
 
 echo "[$(date)] Starting Z500/U250 extract for 2023-2025"
