@@ -88,6 +88,20 @@ def detect_coords(ds):
     return lat_name, lon_name
 
 
+def strip_nondim_coords(da, keep_coord_names):
+    """
+    Drop scalar/non-dimension coordinates that can otherwise make xr.concat fail
+    when some samples carry metadata like ``depth`` and NaN fallback samples do not.
+    """
+    drop_names = [
+        name for name in da.coords
+        if name not in keep_coord_names and name not in da.dims
+    ]
+    if drop_names:
+        da = da.reset_coords(drop_names, drop=True)
+    return da
+
+
 def process_year(year, output_dir=OUTPUT_DIR):
     """
     Process SSS data for one year:
@@ -146,6 +160,7 @@ def process_year(year, output_dir=OUTPUT_DIR):
     print(f"  SSS variable: '{sss_var}', coords: lat='{sss_lat}', lon='{sss_lon}'")
     
     da_sss = ds_sss[sss_var]
+    da_sss = da_sss.squeeze(drop=True)
     
     # 3. Regrid to GEOS grid
     print(f"  Regridding SSS to GEOS 1° grid...")
@@ -159,6 +174,8 @@ def process_year(year, output_dir=OUTPUT_DIR):
     
     if rename_dict:
         da_sss = da_sss.rename(rename_dict)
+
+    da_sss = strip_nondim_coords(da_sss, keep_coord_names={target_lat.name, target_lon.name, 'time'})
     
     # Interpolate to GEOS grid
     da_sss_interp = da_sss.interp(
@@ -192,6 +209,10 @@ def process_year(year, output_dir=OUTPUT_DIR):
                     valid = False
                     break
                 w_mean = chunk.mean(dim='time').squeeze().compute()
+                w_mean = strip_nondim_coords(
+                    w_mean,
+                    keep_coord_names={target_lat.name, target_lon.name}
+                )
                 weeks.append(w_mean)
             except Exception:
                 valid = False
