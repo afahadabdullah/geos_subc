@@ -6,12 +6,12 @@ Processes daily ERA5 T2M files into weekly-mean Zarr files aligned with GEOS S2S
 Input:  Daily Zarr files (era5_t2m_{year}.zarr) created by extract_t2m.py
 Output: t2m_weekly_{year}.zarr with dims (S, L, Y, X) at GEOS 1° grid
 
-For each GEOS init date (S dimension), we compute 4 weekly means of
-OBSERVED ERA5 leading up to the forecast start:
-    L=0 → Week -4: [S-28, S-22]
-    L=1 → Week -3: [S-21, S-15]
-    L=2 → Week -2: [S-14, S-8]
-    L=3 → Week -1: [S-7,  S-1]
+For each GEOS init date (S dimension), we compute 4 future weekly means of
+OBSERVED ERA5 aligned to the forecast lead weeks:
+    L=0 → Week +1: [S,    S+6]
+    L=1 → Week +2: [S+7,  S+13]
+    L=2 → Week +3: [S+14, S+20]
+    L=3 → Week +4: [S+21, S+27]
 
 Usage:
     python dataprocess/process_t2m_weekly.py --years 2020
@@ -28,12 +28,12 @@ DAILY_T2M_DIR = "/home1/11353/afahad/geos_subc/dataprocess/era5_t2m"
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
 
-def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR):
+def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR, overwrite=False):
     """
     Process ERA5 T2M data for one year:
     1. Load GEOS Zarr to get init dates and target grid
-    2. Load Daily T2M files (current + previous year if needed)
-    3. Compute 4 weekly means before each init date
+    2. Load Daily T2M files (current + next year if needed)
+    3. Compute 4 weekly means after each init date
     4. Save as Zarr
     """
     # 1. Load GEOS to get init dates and grid
@@ -52,18 +52,30 @@ def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR):
     target_lat = ds_geos.coords['Y'] if 'Y' in ds_geos.coords else ds_geos.coords['latitude']
     target_lon = ds_geos.coords['X'] if 'X' in ds_geos.coords else ds_geos.coords['longitude']
     
+    out_path = os.path.join(output_dir, f"t2m_weekly_{year}.zarr")
+    if os.path.exists(out_path):
+        if not overwrite:
+            print(f"File {out_path} already exists. Skipping {year}.")
+            ds_geos.close()
+            return
+        print(f"Overwriting existing file: {out_path}")
+        import shutil
+        shutil.rmtree(out_path)
+
     print(f"\n{'='*60}")
     print(f"Processing ERA5 T2M Weekly for {year}")
     print(f"  GEOS init dates: {len(init_dates)}")
     
     # 2. Load Daily T2M files
-    # We might need the previous year for early January initializations
+    # We might need the next year for late-December initializations
     daily_files = [
         os.path.join(daily_dir, f"era5_t2m_{year}.zarr")
     ]
-    prev_year_file = os.path.join(daily_dir, f"era5_t2m_{year-1}.zarr")
-    if os.path.exists(prev_year_file):
-        daily_files.insert(0, prev_year_file)
+    next_year_file = os.path.join(daily_dir, f"era5_t2m_{year+1}.zarr")
+    if os.path.exists(next_year_file):
+        daily_files.append(next_year_file)
+    else:
+        print(f"  Note: next-year daily file not found ({os.path.basename(next_year_file)}). Late-year lead weeks may be NaN.")
         
     print(f"  Loading daily files: {[os.path.basename(f) for f in daily_files]}")
     try:
@@ -76,7 +88,7 @@ def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR):
     # Variables should already be interpolated to 1-degree grid by extract_t2m.py
     # and named 't2m'
     
-    # 3. Compute 4 weekly means BEFORE each init date
+    # 3. Compute 4 weekly means AFTER each init date
     print(f"  Computing 4-weekly observed means...")
     
     processed_samples = []
@@ -87,9 +99,9 @@ def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR):
         valid = True
         
         for w in range(4):
-            # Week offset from init date (going backwards)
-            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)
-            w_start = w_end - pd.Timedelta(days=6)
+            # Future weekly lead windows from init date
+            w_start = init_date + pd.Timedelta(days=w * 7)
+            w_end = w_start + pd.Timedelta(days=6)
             
             try:
                 # Select time slice
@@ -134,7 +146,6 @@ def process_year(year, daily_dir=DAILY_T2M_DIR, output_dir=OUTPUT_DIR):
         if rename_dict:
             ds_yearly = ds_yearly.rename(rename_dict)
 
-        out_path = os.path.join(output_dir, f"t2m_weekly_{year}.zarr")
         print(f"  Saving to {out_path}...")
         
         import dask
@@ -154,11 +165,13 @@ if __name__ == "__main__":
                         help="Directory containing daily T2M Zarr files.")
     parser.add_argument("--output_dir", type=str, default=OUTPUT_DIR,
                         help="Output directory.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing t2m_weekly_<year>.zarr files.")
     args = parser.parse_args()
     
     years = args.years if args.years else list(range(1999, 2023))
     
     for year in years:
-        process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir)
+        process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir, overwrite=args.overwrite)
     
     print("\nAll processing complete.")

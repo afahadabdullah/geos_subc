@@ -1,3 +1,14 @@
+"""
+Extract daily ERA5 T2M on a GEOS-like 1 degree grid.
+
+This is the first stage of the legacy two-step T2M target pipeline:
+1. ``extract_t2m.py`` writes daily ``era5_t2m_{year}.zarr``
+2. ``process_t2m_weekly.py`` converts those daily files into weekly lead targets
+   aligned with GEOS init dates.
+
+The ARCO ERA5 source used here currently spans 1959-2022.
+"""
+
 import xarray as xr
 import gcsfs
 import os
@@ -6,7 +17,7 @@ import numpy as np
 import dask
 import argparse
 
-def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m"):
+def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m", overwrite=False):
     # Define the GCS path to the Zarr store
     zarr_path = 'gs://gcp-public-data-arco-era5/ar/1959-2022-6h-512x256_equiangular_conservative.zarr'
     
@@ -38,8 +49,12 @@ def process_era5_t2m_yearly(start_year=1999, end_year=2022, output_base_dir="/ho
         output_path = os.path.join(output_base_dir, f"era5_t2m_{year}.zarr")
         
         if os.path.exists(output_path):
-            print(f"Skipping {year}, file already exists at {output_path}")
-            continue
+            if not overwrite:
+                print(f"Skipping {year}, file already exists at {output_path}")
+                continue
+            print(f"Overwriting existing daily file: {output_path}")
+            import shutil
+            shutil.rmtree(output_path)
             
         print(f"\n--- Processing Year: {year} ---")
         
@@ -85,6 +100,13 @@ if __name__ == "__main__":
     parser.add_argument("--start_year", type=int, default=1999)
     parser.add_argument("--end_year", type=int, default=2022)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/era5_t2m")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing era5_t2m_<year>.zarr files.")
     args = parser.parse_args()
     
-    process_era5_t2m_yearly(start_year=args.start_year, end_year=args.end_year, output_base_dir=args.output_dir)
+    process_era5_t2m_yearly(
+        start_year=args.start_year,
+        end_year=args.end_year,
+        output_base_dir=args.output_dir,
+        overwrite=args.overwrite,
+    )
