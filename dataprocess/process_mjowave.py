@@ -31,7 +31,7 @@ import argparse
 MJO_FILE = "dataprocess/mjo_wave_spatial_1999_2022.zarr"
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
-DEFAULT_START_YEAR = 2024
+DEFAULT_START_YEAR = 1999
 DEFAULT_END_YEAR = 2025
 
 

@@ -29,6 +29,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import xarray as xr
+import glob
 from scipy.fft import fft2, ifft2, fftfreq, fftshift
 
 # Attempt to load plotting libraries
@@ -43,8 +44,34 @@ except ImportError:
     PLOT_AVAILABLE = False
 
 
-DEFAULT_START_YEAR = 2023
+DEFAULT_START_YEAR = 1999
 DEFAULT_END_YEAR = 2025
+
+
+def load_olr_dataset(olr_paths):
+    existing_paths = [p for p in olr_paths if os.path.exists(p)]
+    missing_paths = [p for p in olr_paths if not os.path.exists(p)]
+
+    for path in missing_paths:
+        print(f"Warning: OLR file not found and will be skipped: {path}")
+
+    if not existing_paths:
+        raise FileNotFoundError("No valid OLR files were found.")
+
+    print("Loading OLR files:")
+    for path in existing_paths:
+        print(f"  - {path}")
+
+    if len(existing_paths) == 1:
+        ds = xr.open_dataset(existing_paths[0], chunks={'time': 365 * 10})
+    else:
+        ds = xr.open_mfdataset(existing_paths, combine='by_coords', chunks={'time': 365 * 10})
+
+    ds = ds.sortby('time')
+    _, unique_index = np.unique(ds.time.values, return_index=True)
+    if len(unique_index) != ds.sizes['time']:
+        ds = ds.isel(time=np.sort(unique_index))
+    return ds
 
 
 def compute_climatology(da, window=121):
@@ -154,12 +181,10 @@ def spacetime_filter(da_anom, time_dim='time', lon_dim='longitude'):
     return da_mjo
 
 
-def process_mjo_wave(olr_path, years, output_dir):
+def process_mjo_wave(olr_paths, years, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     
-    print(f"Loading NOAA OLR dataset from {olr_path}...")
-    # Chunk by time to prevent memory exhaustion
-    ds = xr.open_dataset(olr_path, chunks={'time': 365 * 10})
+    ds = load_olr_dataset(olr_paths)
     
     # NOAA uses 'olr' variable
     da_olr = ds['olr']
@@ -172,6 +197,9 @@ def process_mjo_wave(olr_path, years, output_dir):
     lat_name = 'lat' if 'lat' in da_olr.coords else 'latitude'
     lon_name = 'lon' if 'lon' in da_olr.coords else 'longitude'
     da_olr = da_olr.rename({lat_name: 'latitude', lon_name: 'longitude'})
+    olr_start = pd.to_datetime(da_olr.time.values[0])
+    olr_end = pd.to_datetime(da_olr.time.values[-1])
+    print(f"Available OLR coverage: {olr_start.date()} -> {olr_end.date()}")
     
     # 1. Compute or Load Climatology using the entire record on native 2.5° grid
     clim_path = os.path.join(output_dir, "olr_climatology.nc")
@@ -184,6 +212,7 @@ def process_mjo_wave(olr_path, years, output_dir):
         climatology.to_netcdf(clim_path)
     
     all_years_mjo = []
+    processed_years = []
     
     target_lat = np.linspace(-90, 90, 181)
     target_lon = np.linspace(0, 359, 360)
@@ -192,11 +221,24 @@ def process_mjo_wave(olr_path, years, output_dir):
         print(f"\n--- Processing Year: {target_year} ---")
         
         # 2. We need a buffer around the target year for the 30-90 day FFT
-        start_time = f"{target_year-1}-09-01"
-        end_time = f"{target_year+1}-03-31"
+        start_time = pd.Timestamp(f"{target_year-1}-09-01")
+        end_time = pd.Timestamp(f"{target_year+1}-03-31")
         
-        print(f"Extracting padded window ({start_time} to {end_time}) for FFT stability...")
-        da_padded = da_olr.sel(time=slice(start_time, end_time)).compute()
+        clipped_start = max(start_time, olr_start)
+        clipped_end = min(end_time, olr_end)
+        print(f"Extracting padded window ({start_time.date()} to {end_time.date()}) for FFT stability...")
+        print(f"  Clipped to available OLR coverage: {clipped_start.date()} -> {clipped_end.date()}")
+        if clipped_end < clipped_start:
+            print(f"  No OLR data available for {target_year}. Skipping.")
+            continue
+
+        da_padded = da_olr.sel(time=slice(clipped_start, clipped_end)).compute()
+        if da_padded.sizes.get('time', 0) == 0:
+            print(f"  Empty padded OLR slice for {target_year}. Skipping.")
+            continue
+        if da_padded.sizes['time'] < 90:
+            print(f"  Only {da_padded.sizes['time']} days available for {target_year}; need a longer OLR record. Skipping.")
+            continue
         
         # 3. Compute Anomalies FOR THE SLICE ONLY
         print("  Calculating OLR Anomalies on native 2.5° grid (padded slice)...")
@@ -225,32 +267,42 @@ def process_mjo_wave(olr_path, years, output_dir):
         target_end = f"{target_year}-12-31"
         da_mjo_year_native = da_mjo_padded.sel(time=slice(target_start, target_end))
         da_raw_year_native = da_olr.sel(time=slice(target_start, target_end)).compute()
+        if da_mjo_year_native.sizes.get('time', 0) == 0:
+            print(f"  No filtered MJO output available inside target year {target_year}. Skipping.")
+            continue
         
         # 6. Interpolate just the 1-target-year maps to GEOS 1-degree grid
         print(f"  Interpolating filtered MJO wave to GEOS 1° grid (181x360)...")
         da_mjo_year = da_mjo_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
         all_years_mjo.append(da_mjo_year)
+        processed_years.append(target_year)
         
         # Diagnostic Plot (only for the first year processed to prevent spam)
         if PLOT_AVAILABLE and target_year == years[0]:
             print("  Generating sample diagnostic plot for the first year...")
-            plot_date = f"{target_year}-11-15"
+            plot_target = pd.Timestamp(f"{target_year}-11-15")
             try:
                 raw_scale = da_raw_year_native.interp({'latitude': target_lat, 'longitude': target_lon}, method='linear')
-                raw_slice = raw_scale.sel(time=plot_date).squeeze()
-                mjo_slice = da_mjo_year.sel(time=plot_date).squeeze()
+                available_times = pd.to_datetime(da_mjo_year.time.values)
+                if len(available_times) == 0:
+                    raise ValueError("No valid daily MJO times available for plotting.")
+                nearest_idx = int(np.argmin(np.abs(available_times - plot_target)))
+                plot_time = pd.Timestamp(available_times[nearest_idx])
+                plot_label = plot_time.strftime("%Y-%m-%d")
+                raw_slice = raw_scale.sel(time=plot_time).squeeze()
+                mjo_slice = da_mjo_year.sel(time=plot_time).squeeze()
                 
                 fig = plt.figure(figsize=(12, 8))
                 
                 ax1 = fig.add_subplot(2, 1, 1, projection=ccrs.PlateCarree(central_longitude=180))
-                ax1.set_title(f"Raw NOAA Interpolated OLR ({plot_date})", fontsize=14)
+                ax1.set_title(f"Raw NOAA Interpolated OLR ({plot_label})", fontsize=14)
                 ax1.coastlines(color='white')
                 p1 = ax1.contourf(target_lon, target_lat, raw_slice, transform=ccrs.PlateCarree(),
                                   levels=np.linspace(150, 300, 20), cmap='Blues_r', extend='both')
                 fig.colorbar(p1, ax=ax1, orientation='vertical', pad=0.02, label='W/m²')
                 
                 ax2 = fig.add_subplot(2, 1, 2, projection=ccrs.PlateCarree(central_longitude=180))
-                ax2.set_title(f"Isolated MJO Wave (30-90 Day, Wavenumber 1-5) - {plot_date}", fontsize=14)
+                ax2.set_title(f"Isolated MJO Wave (30-90 Day, Wavenumber 1-5) - {plot_label}", fontsize=14)
                 ax2.coastlines()
                 max_val = max(10, float(np.abs(mjo_slice).max() * 0.8))
                 p2 = ax2.contourf(target_lon, target_lat, mjo_slice, transform=ccrs.PlateCarree(),
@@ -268,6 +320,10 @@ def process_mjo_wave(olr_path, years, output_dir):
     # 7. Concatenate and Save all years to a single Zarr
     print("\n==================================")
     print("Concatenating all years...")
+    if not all_years_mjo:
+        raise RuntimeError(
+            "No MJO wave years were generated. The OLR file likely does not cover the requested dates."
+        )
     da_mjo_all = xr.concat(all_years_mjo, dim='time')
     
     ds_out = da_mjo_all.to_dataset(name='mjo_wave')
@@ -277,7 +333,7 @@ def process_mjo_wave(olr_path, years, output_dir):
         'description': 'Eastward propagating, Wavenumbers 1-5, Periods 30-90 days'
     }
     
-    min_year, max_year = min(years), max(years)
+    min_year, max_year = min(processed_years), max(processed_years)
     out_file = os.path.join(output_dir, f"mjo_wave_spatial_{min_year}_{max_year}.zarr")
     print(f"Saving merged MJO Wave map to {out_file}...")
     
@@ -291,13 +347,24 @@ def process_mjo_wave(olr_path, years, output_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--olr_path", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/olr/olr.day.mean.nc")
+    parser.add_argument("--olr_paths", type=str, nargs="+", default=None,
+                        help="Optional list of OLR NetCDF files to merge into one continuous record.")
+    parser.add_argument("--olr_glob", type=str, default=None,
+                        help="Optional glob pattern for OLR NetCDF files, e.g. '/path/OLR-Daily*.nc'")
     parser.add_argument("--years", type=int, nargs='+', default=None)
     parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
     parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/")
     args = parser.parse_args()
-    
-    assert os.path.exists(args.olr_path), f"OLR file not found at {args.olr_path}"
 
     years = args.years if args.years else list(range(args.start_year, args.end_year + 1))
-    process_mjo_wave(args.olr_path, years, args.output_dir)
+    if args.olr_paths:
+        olr_paths = args.olr_paths
+    elif args.olr_glob:
+        olr_paths = sorted(glob.glob(args.olr_glob))
+        if not olr_paths:
+            raise FileNotFoundError(f"No OLR files matched glob: {args.olr_glob}")
+    else:
+        olr_paths = [args.olr_path]
+
+    process_mjo_wave(olr_paths, years, args.output_dir)
