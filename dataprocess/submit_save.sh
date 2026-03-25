@@ -6,7 +6,7 @@
 #SBATCH -N 1                        # Total # of nodes 
 #SBATCH -n 1                        # Total # of mpi tasks
 #SBATCH -t 06:00:00                 # Run time (hh:mm:ss)
-#SBATCH -A 11353                    # Project/Allocation name
+#SBATCH -A ATM25008                 # Project/Allocation name
 
 # Load the environment
 # Adjust this path if your miniconda is in a different location

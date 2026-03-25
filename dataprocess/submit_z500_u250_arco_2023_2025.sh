@@ -6,7 +6,7 @@
 #SBATCH -N 2
 #SBATCH -n 8
 #SBATCH -t 06:00:00
-#SBATCH -A 11353
+#SBATCH -A ATM25008
 
 set -euo pipefail
 
