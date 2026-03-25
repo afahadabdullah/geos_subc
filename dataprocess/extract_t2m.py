@@ -18,6 +18,7 @@ import os
 import numpy as np
 import dask
 import argparse
+import traceback
 
 DEFAULT_ZARR_PATH = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 
@@ -32,18 +33,19 @@ def process_era5_t2m_yearly(
     
     print(f"Connecting to {zarr_path}...")
     
-    # Open the dataset lazily with Dask (ignoring chunks warnings if any)
+    # Follow the official ARCO access pattern for the v3 store.
     try:
         ds = xr.open_zarr(
             zarr_path,
-            chunks={'time': 48, 'longitude': 256, 'latitude': 256},
+            chunks=None,
             storage_options={'token': 'anon'},
         )
         if "valid_time_start" in ds.attrs and "valid_time_stop" in ds.attrs and "time" in ds.coords:
             ds = ds.sel(time=slice(ds.attrs["valid_time_start"], ds.attrs["valid_time_stop"]))
         print("Dataset opened successfully.")
     except Exception as e:
-        print(f"Error opening dataset: {e}")
+        print(f"Error opening dataset: {type(e).__name__}: {e!r}")
+        traceback.print_exc()
         return
 
     # Define variable names (ERA5 2-meter temperature)
@@ -86,6 +88,7 @@ def process_era5_t2m_yearly(
             
             # Combine into a temporary dataset (just a single variable here)
             ds_subset = t2m.to_dataset()
+            ds_subset = ds_subset.chunk({'time': 48, 'latitude': 721, 'longitude': 1440})
             
             # 2. Daily Mean Calculation
             print(f"Calculating daily means for {year}...")
