@@ -2,15 +2,14 @@
 EarthDataHub ERA5 T2M -> Weekly GEOS-Aligned Zarr
 =================================================
 Builds ``t2m_weekly_{year}.zarr`` directly from the Earth Data Hub ERA5
-single-levels Zarr archive, matching the existing trailing-week target format
-used by ``process_t2m_weekly.py``.
+single-levels Zarr archive, using the same future lead-week target convention
+as ``process_gpcp.py``.
 
-For each GEOS init date ``S`` we compute four observed weekly means before the
-forecast start:
-    L=0 -> [S-28, S-22]
-    L=1 -> [S-21, S-15]
-    L=2 -> [S-14, S-8]
-    L=3 -> [S-7,  S-1]
+For each GEOS init date ``S`` we compute four future observed weekly means:
+    L=0 -> [S,    S+6]
+    L=1 -> [S+7,  S+13]
+    L=2 -> [S+14, S+20]
+    L=3 -> [S+21, S+27]
 
 Authentication
 --------------
@@ -27,7 +26,7 @@ Environment variables:
 
 Example:
     export EARTHDATAHUB_PAT='...'
-    python dataprocess/process_t2m_earthdatahub.py --years 2022 2023 2024 2025
+    python dataprocess/process_t2m_earthdatahub.py --years 1999 2000 2001
 """
 
 from __future__ import annotations
@@ -54,6 +53,7 @@ TIME_CANDIDATES = ["time", "valid_time", "forecast_time", "date"]
 
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
+DEFAULT_YEARS = list(range(1999, 2026))
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,8 +64,8 @@ def parse_args() -> argparse.Namespace:
         "--years",
         type=int,
         nargs="+",
-        default=[2022, 2023, 2024, 2025],
-        help="Years to process. Defaults to 2022 2023 2024 2025.",
+        default=DEFAULT_YEARS,
+        help="Years to process. Defaults to 1999 through 2025.",
     )
     parser.add_argument(
         "--geos_dir",
@@ -222,8 +222,8 @@ def build_daily_regridded_t2m(
 ) -> xr.DataArray:
     min_init = pd.Timestamp(init_dates.min()).normalize()
     max_init = pd.Timestamp(init_dates.max()).normalize()
-    start_date = (min_init - pd.Timedelta(days=28)).strftime("%Y-%m-%d")
-    end_date = (max_init - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    start_date = min_init.strftime("%Y-%m-%d")
+    end_date = (max_init + pd.Timedelta(days=27)).strftime("%Y-%m-%d")
 
     time_name = choose_dim_name(ds_remote["t2m"], TIME_CANDIDATES, "time dimension")
     print(f"  Selecting remote t2m from {start_date} to {end_date} using '{time_name}'")
@@ -271,8 +271,8 @@ def build_weekly_targets(
         weeks = []
 
         for w in range(4):
-            w_end = init_date - pd.Timedelta(days=(3 - w) * 7 + 1)
-            w_start = w_end - pd.Timedelta(days=6)
+            w_start = init_date + pd.Timedelta(days=w * 7)
+            w_end = w_start + pd.Timedelta(days=6)
             chunk = da_daily.sel(time=slice(w_start, w_end))
 
             if chunk.sizes.get("time", 0) < 7:
@@ -296,7 +296,7 @@ def build_weekly_targets(
     ds_out["t2m"].attrs = {
         "units": "K",
         "long_name": "2 metre temperature (weekly mean)",
-        "description": "Four trailing observed weekly means before GEOS S2S init dates",
+        "description": "Four future observed weekly means aligned to GEOS S2S lead weeks",
         "source": "Earth Data Hub ERA5 single levels",
     }
     return ds_out
