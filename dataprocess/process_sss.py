@@ -32,6 +32,8 @@ import argparse
 SSS_BASE_DIR = "dataprocess/SSS/copernicus_sss_data"
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
+DEFAULT_START_YEAR = 2024
+DEFAULT_END_YEAR = 2025
 
 
 def find_sss_files(year, prev_year=None):
@@ -234,10 +236,14 @@ def process_year(year, output_dir=OUTPUT_DIR):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process Copernicus SSS → weekly Zarr")
     parser.add_argument("--years", type=int, nargs="+", default=None,
-                        help="Specific years to process. Default: 1999-2016")
+                        help="Specific years to process. Overrides start/end year.")
+    parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR,
+                        help=f"First year to process when --years is not given. Default: {DEFAULT_START_YEAR}")
+    parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR,
+                        help=f"Last year to process when --years is not given. Default: {DEFAULT_END_YEAR}")
     args = parser.parse_args()
-    
-    years = args.years if args.years else list(range(1999, 2026))
+
+    years = args.years if args.years else list(range(args.start_year, args.end_year + 1))
     
     print(f"Processing SSS for years: {years}")
     for year in years:
