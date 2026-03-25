@@ -16,12 +16,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONDA_DIR="${CONDA_DIR:-/home1/11353/afahad/afahad/geossub/miniconda}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-geossub_env}"
 
-if [ -f "$CONDA_DIR/bin/activate" ]; then
+echo "Job started at $(date) on $(hostname)"
+
+source ~/.bashrc || true
+
+if command -v conda >/dev/null 2>&1; then
+    conda activate "$CONDA_ENV_NAME"
+elif [ -f "$CONDA_DIR/bin/activate" ]; then
     source "$CONDA_DIR/bin/activate" "$CONDA_ENV_NAME"
 else
-    echo "Conda activate script not found at $CONDA_DIR/bin/activate"
+    echo "Conda environment setup failed. 'conda' was not found and fallback activate script is missing at $CONDA_DIR/bin/activate"
     exit 1
 fi
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export PYTHONUNBUFFERED=1
 
 cd "$REPO_ROOT"
 mkdir -p dataprocess/logs dataprocess/era5_z500_u250
