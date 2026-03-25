@@ -114,13 +114,15 @@ def build_daily_ivt(
     target_lon: xr.DataArray,
 ) -> xr.Dataset:
     level_name = edh.choose_coord_name(ds_remote, ["level", "pressure_level", "isobaricInhPa"], "pressure level coordinate")
+    time_name = edh.choose_dim_name(ds_remote, edh.TIME_CANDIDATES, "time dimension")
     start_date, end_date = edh.build_time_window(init_dates)
-    print(f"  Selecting pressure-level data from {start_date} to {end_date}")
+    print(f"  Selecting pressure-level data from {start_date} to {end_date} using '{time_name}'")
 
     ds_sel = ds_remote[["specific_humidity", "u_component_of_wind", "v_component_of_wind"]].sel(
-        time=slice(start_date, end_date),
+        {time_name: slice(start_date, end_date)},
         **{level_name: IVT_LEVELS_HPA},
     )
+    ds_sel = edh.normalize_time_axis(ds_sel)
     if ds_sel.sizes.get("time", 0) == 0:
         raise RuntimeError(f"No pressure-level data found between {start_date} and {end_date}")
 

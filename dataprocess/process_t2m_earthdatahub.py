@@ -50,6 +50,7 @@ EARTHDATAHUB_PAT_ENV = "EARTHDATAHUB_PAT"
 EARTHDATAHUB_URL_ENV = "EARTHDATAHUB_URL"
 EARTHDATAHUB_MACHINE = "data.earthdatahub.destine.eu"
 DEFAULT_EDH_URL = "https://data.earthdatahub.destine.eu/era5/reanalysis-era5-single-levels-v0.zarr"
+TIME_CANDIDATES = ["time", "valid_time", "forecast_time", "date"]
 
 GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
@@ -127,6 +128,21 @@ def choose_coord_name(ds: xr.Dataset | xr.DataArray, candidates: Iterable[str], 
         if name in items:
             return name
     raise KeyError(f"Could not find {label}. Tried {list(candidates)}. Available: {sorted(items)}")
+
+
+def choose_dim_name(ds: xr.Dataset | xr.DataArray, candidates: Iterable[str], label: str) -> str:
+    dims = set(ds.dims)
+    for name in candidates:
+        if name in dims:
+            return name
+    return choose_coord_name(ds, candidates, label)
+
+
+def normalize_time_axis(obj: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    time_name = choose_dim_name(obj, TIME_CANDIDATES, "time dimension")
+    if time_name != "time":
+        obj = obj.rename({time_name: "time"})
+    return obj.assign_coords(time=pd.to_datetime(obj["time"].values)).sortby("time")
 
 
 def open_remote_era5() -> xr.Dataset:
@@ -209,8 +225,10 @@ def build_daily_regridded_t2m(
     start_date = (min_init - pd.Timedelta(days=28)).strftime("%Y-%m-%d")
     end_date = (max_init - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
-    print(f"  Selecting remote t2m from {start_date} to {end_date}")
-    da_hourly = ds_remote["t2m"].sel(time=slice(start_date, end_date))
+    time_name = choose_dim_name(ds_remote["t2m"], TIME_CANDIDATES, "time dimension")
+    print(f"  Selecting remote t2m from {start_date} to {end_date} using '{time_name}'")
+    da_hourly = ds_remote["t2m"].sel({time_name: slice(start_date, end_date)})
+    da_hourly = normalize_time_axis(da_hourly)
     if da_hourly.sizes.get("time", 0) == 0:
         raise RuntimeError(f"No Earth Data Hub t2m data found between {start_date} and {end_date}")
 
@@ -245,6 +263,7 @@ def build_weekly_targets(
     target_lat: xr.DataArray,
     target_lon: xr.DataArray,
 ) -> xr.Dataset:
+    da_daily = normalize_time_axis(da_daily)
     processed = []
     skipped = 0
 

@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 EARTHDATAHUB_PAT_ENV = "EARTHDATAHUB_PAT"
 EARTHDATAHUB_MACHINE = "data.earthdatahub.destine.eu"
+TIME_CANDIDATES = ["time", "valid_time", "forecast_time", "date"]
 
 
 @contextlib.contextmanager
@@ -57,6 +58,21 @@ def choose_coord_name(ds: xr.Dataset | xr.DataArray, candidates: Iterable[str], 
         if name in items:
             return name
     raise KeyError(f"Could not find {label}. Tried {list(candidates)}. Available: {sorted(items)}")
+
+
+def choose_dim_name(ds: xr.Dataset | xr.DataArray, candidates: Iterable[str], label: str) -> str:
+    dims = set(ds.dims)
+    for name in candidates:
+        if name in dims:
+            return name
+    return choose_coord_name(ds, candidates, label)
+
+
+def normalize_time_axis(obj: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    time_name = choose_dim_name(obj, TIME_CANDIDATES, "time dimension")
+    if time_name != "time":
+        obj = obj.rename({time_name: "time"})
+    return obj.assign_coords(time=pd.to_datetime(obj["time"].values)).sortby("time")
 
 
 def load_geos_layout(geos_path: str) -> Tuple[pd.DatetimeIndex, xr.DataArray, xr.DataArray]:
@@ -129,8 +145,7 @@ def weekly_means_from_daily_dataset(
     target_lon: xr.DataArray,
     desc: str,
 ) -> xr.Dataset:
-    if "time" not in ds_daily.dims:
-        raise KeyError(f"Expected a time dimension in daily dataset. Found dims: {dict(ds_daily.sizes)}")
+    ds_daily = normalize_time_axis(ds_daily)
 
     if ds_daily.sizes.get("time", 0) == 0:
         raise ValueError("Daily dataset is empty after time selection.")
