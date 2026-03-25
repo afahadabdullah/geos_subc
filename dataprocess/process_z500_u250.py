@@ -32,7 +32,7 @@ GEOS_DIR = "dataprocess"
 OUTPUT_DIR = "dataprocess"
 
 
-def process_year(year, daily_dir=DAILY_DIR, output_dir=OUTPUT_DIR):
+def process_year(year, daily_dir=DAILY_DIR, output_dir=OUTPUT_DIR, overwrite=False):
     """
     Process ERA5 Z500 & U250 for one year:
     1. Load GEOS Zarr to get init dates
@@ -42,8 +42,12 @@ def process_year(year, daily_dir=DAILY_DIR, output_dir=OUTPUT_DIR):
     """
     out_path = os.path.join(output_dir, f"z500_u250_weekly_{year}.zarr")
     if os.path.exists(out_path):
-        print(f"File {out_path} already exists. Skipping {year}.")
-        return
+        if not overwrite:
+            print(f"File {out_path} already exists. Skipping {year}.")
+            return
+        print(f"Overwriting existing file: {out_path}")
+        import shutil
+        shutil.rmtree(out_path)
 
     # 1. Load GEOS to get init dates
     geos_path = os.path.join(GEOS_DIR, f"geos_subc_{year}.zarr")
@@ -197,11 +201,13 @@ if __name__ == "__main__":
                         help="Directory containing daily ERA5 Z500/U250 Zarr files.")
     parser.add_argument("--output_dir", type=str, default=OUTPUT_DIR,
                         help="Output directory.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing z500_u250_weekly_<year>.zarr files.")
     args = parser.parse_args()
 
-    years = args.years if args.years else list(range(1999, 2026))
+    years = args.years if args.years else list(range(2023, 2026))
 
     for year in years:
-        process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir)
+        process_year(year, daily_dir=args.daily_dir, output_dir=args.output_dir, overwrite=args.overwrite)
 
     print("\nAll processing complete.")

@@ -1,13 +1,23 @@
+"""
+Extract daily ERA5 IVT on a GEOS-like 1 degree grid.
+
+This is the first stage of the legacy two-step IVT input pipeline:
+1. ``extract_era5_ivt.py`` writes daily ``era5_ivt_{year}.zarr``
+2. ``process_ivt.py`` converts those daily files into the 4 trailing observed
+   weekly means before each GEOS init date.
+
+By default this script uses the newer ARCO ERA5 analysis-ready v3 store:
+``gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3``
+"""
 
 import xarray as xr
-import gcsfs
 import os
-import pandas as pd
 import numpy as np
 import dask
-import dask.array as da
-from tqdm import tqdm
 import argparse
+import traceback
+
+DEFAULT_ZARR_PATH = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
 
 def calculate_ivt(ds, levels, gravity=9.80665):
     """
@@ -85,18 +95,29 @@ def calculate_ivt(ds, levels, gravity=9.80665):
     
     return ivt_mag, ivt_u, ivt_v
 
-def process_era5_ivt(start_year=1999, end_year=2022, output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_ivt"):
-    # Define the GCS path to the Zarr store
-    zarr_path = 'gs://gcp-public-data-arco-era5/ar/1959-2022-6h-512x256_equiangular_conservative.zarr'
+def process_era5_ivt(
+    start_year=2023,
+    end_year=2025,
+    output_base_dir="/home1/11353/afahad/geos_subc/dataprocess/era5_ivt",
+    overwrite=False,
+    zarr_path=DEFAULT_ZARR_PATH,
+):
     
     print(f"Connecting to {zarr_path}...")
     
-    # Open the dataset lazily with Dask (Consolidated=True usually faster)
+    # Follow the official ARCO access pattern for the v3 store.
     try:
-        ds = xr.open_zarr(zarr_path, chunks={'time': 48, 'longitude': 256, 'latitude': 256}, consolidated=True)
+        ds = xr.open_zarr(
+            zarr_path,
+            chunks=None,
+            storage_options={"token": "anon"},
+        )
+        if "valid_time_start" in ds.attrs and "valid_time_stop" in ds.attrs and "time" in ds.coords:
+            ds = ds.sel(time=slice(ds.attrs["valid_time_start"], ds.attrs["valid_time_stop"]))
         print("Dataset opened successfully.")
     except Exception as e:
-        print(f"Error opening dataset: {e}")
+        print(f"Error opening dataset: {type(e).__name__}: {e!r}")
+        traceback.print_exc()
         return
 
     # Define variable names
@@ -121,14 +142,21 @@ def process_era5_ivt(start_year=1999, end_year=2022, output_base_dir="/home1/113
         output_path = os.path.join(output_base_dir, f"era5_ivt_{year}.zarr")
         
         if os.path.exists(output_path):
-            print(f"Skipping {year}, file already exists at {output_path}")
-            continue
+            if not overwrite:
+                print(f"Skipping {year}, file already exists at {output_path}")
+                continue
+            print(f"Overwriting existing daily file: {output_path}")
+            import shutil
+            shutil.rmtree(output_path)
             
         print(f"\n--- Processing Year: {year} ---")
         
         try:
             # 1. Select year and variables/levels
-            ds_year = ds.sel(time=str(year))
+            ds_year = ds.sel(time=slice(f"{year}-01-01", f"{year}-12-31"))
+            if len(ds_year.time) == 0:
+                print(f"Warning: No data found for {year} in ARCO ERA5. Skipping.")
+                continue
             
             # Select specific variables and levels
             # We select ALL variables on ALL target levels first to minimize IO calls if efficient,
@@ -143,6 +171,7 @@ def process_era5_ivt(start_year=1999, end_year=2022, output_base_dir="/home1/113
             
             # Merge into dataset for calculation
             ds_subset = xr.Dataset({'specific_humidity': q, 'u_component_of_wind': u, 'v_component_of_wind': v})
+            ds_subset = ds_subset.chunk({'time': 48, 'level': len(target_levels), 'latitude': 721, 'longitude': 1440})
             
             # 2. Calculate IVT (preserving 6-hourly or whatever native resolution)
             # Calculation should happen on native grid BEFORE time averaging
@@ -183,14 +212,23 @@ def process_era5_ivt(start_year=1999, end_year=2022, output_base_dir="/home1/113
             
         except Exception as e:
             print(f"Error processing {year}: {e}")
-            import traceback
             traceback.print_exc()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process ARCO-ERA5 IVT to daily 1-degree GEOS grid.")
-    parser.add_argument("--start_year", type=int, default=1999)
-    parser.add_argument("--end_year", type=int, default=2022)
+    parser.add_argument("--start_year", type=int, default=2023)
+    parser.add_argument("--end_year", type=int, default=2025)
     parser.add_argument("--output_dir", type=str, default="/home1/11353/afahad/geos_subc/dataprocess/era5_ivt")
+    parser.add_argument("--zarr_path", type=str, default=DEFAULT_ZARR_PATH,
+                        help="ARCO ERA5 Zarr source. Defaults to the public v3 full 37-variable hourly store.")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing era5_ivt_<year>.zarr files.")
     args = parser.parse_args()
     
-    process_era5_ivt(start_year=args.start_year, end_year=args.end_year, output_base_dir=args.output_dir)
+    process_era5_ivt(
+        start_year=args.start_year,
+        end_year=args.end_year,
+        output_base_dir=args.output_dir,
+        overwrite=args.overwrite,
+        zarr_path=args.zarr_path,
+    )
