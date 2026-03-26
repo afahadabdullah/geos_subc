@@ -2223,7 +2223,7 @@ def train(args, accelerator):
     # Pre-Flight NaN Integrity Scan (SKIP IF RESUMING)
     # ---------------------------------------------------------
     if accelerator.is_main_process:
-        if start_epoch > 0:
+        if start_epoch > 1:
             print(f"\n✅ Resuming from Epoch {start_epoch}. Skipping Pre-Flight NaN Scan (already verified).")
         else:
             print("\n--- INITIATING PRE-FLIGHT NaN SCAN (Checking entire dataset) ---")

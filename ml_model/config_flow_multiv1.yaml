@@ -26,7 +26,7 @@ validation_rho_t2m: 0.05
 validation_var_beta_pr: 0.15
 validation_var_beta_t2m: 0.01
 
-crps_loss: True
+crps_loss: False
 crps_loss_num_ensemble: 2
 crps_loss_num_steps: 10
 crps_loss_ode_batch_size: 2
