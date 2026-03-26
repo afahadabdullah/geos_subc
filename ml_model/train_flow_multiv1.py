@@ -1538,6 +1538,7 @@ def train(args, accelerator):
     epochs = config.get("epochs", 500)
     batch_size = config.get("batch_size", 4)
     lr = float(config.get("learning_rate", 1e-4))
+    weight_decay = float(config.get("weight_decay", 0.0))
 
     # Area weights (needed early for diagnostic plot)
     lats = np.linspace(-90, 90, 181)
@@ -1737,6 +1738,7 @@ def train(args, accelerator):
         print(f"   [Test Ens]           : {test_num_ensemble}")
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
+        print(f"   [Optimizer]          : AdamW lr={lr:.2e}, wd={weight_decay:.2e}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -1750,7 +1752,7 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print("   ✅ Enabled UNet gradient checkpointing for CRPS fine-tuning.")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     if not args.test:
         model, optimizer, loader, val_loader = accelerator.prepare(
             model, optimizer, loader, val_loader
@@ -1913,7 +1915,23 @@ def train(args, accelerator):
                         )
                 else:
                     try:
-                        optimizer.load_state_dict(checkpoint['optimizer'])
+                        optimizer_state = checkpoint['optimizer']
+                        param_groups = optimizer_state.get('param_groups', [])
+                        loaded_lr = float(param_groups[0].get('lr', lr)) if param_groups else lr
+                        loaded_weight_decay = float(param_groups[0].get('weight_decay', weight_decay)) if param_groups else weight_decay
+                        same_hparams = (
+                            np.isclose(loaded_lr, lr)
+                            and np.isclose(loaded_weight_decay, weight_decay)
+                        )
+                        if same_hparams:
+                            optimizer.load_state_dict(optimizer_state)
+                        elif accelerator.is_main_process:
+                            print(
+                                "   ℹ️ Optimizer hyperparameters changed since the checkpoint "
+                                f"(ckpt lr={loaded_lr:.2e}, wd={loaded_weight_decay:.2e}; "
+                                f"config lr={lr:.2e}, wd={weight_decay:.2e}). "
+                                "Starting with fresh optimizer state."
+                            )
                     except (ValueError, RuntimeError) as e:
                         if accelerator.is_main_process:
                             print(f"   ⚠️ Optimizer state mismatch. Starting with fresh optimizer.")
@@ -1995,7 +2013,8 @@ def train(args, accelerator):
 
         optimizer = torch.optim.AdamW(
             [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
-            lr=variance_phase_lr
+            lr=variance_phase_lr,
+            weight_decay=weight_decay,
         )
         model, optimizer, loader, val_loader = accelerator.prepare(
             model, optimizer, loader, val_loader
