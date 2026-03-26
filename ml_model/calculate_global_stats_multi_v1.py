@@ -8,10 +8,25 @@ import gc
 # Using dataset_flow directly since that's what train_flow_v6.py uses
 from dataset_flow_multi import S2SHybridDataset
 
-def calculate_global_stats(data_root, out_path="v1_multi_global_stats.pt", batch_size=32):
+DEFAULT_START_YEAR = 1999
+DEFAULT_END_YEAR = 2020
+
+
+def calculate_global_stats(
+    data_root,
+    out_path="v1_multi_global_stats.pt",
+    batch_size=32,
+    start_year=DEFAULT_START_YEAR,
+    end_year=DEFAULT_END_YEAR,
+):
     # Initialize the dataset with normalize=False so we get the pure physical arrays
-    print("Initializing S2SHybridDataset for scanning (1999-2019)...")
-    dataset = S2SHybridDataset(data_root=data_root, start_year=1999, end_year=2019, normalize=False)
+    print(f"Initializing S2SHybridDataset for scanning ({start_year}-{end_year})...")
+    dataset = S2SHybridDataset(
+        data_root=data_root,
+        start_year=start_year,
+        end_year=end_year,
+        normalize=False,
+    )
     # Using num_workers=0 to prevent multiprocessing memory blowouts on the login node
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
@@ -115,7 +130,7 @@ def calculate_global_stats(data_root, out_path="v1_multi_global_stats.pt", batch
             gc.collect()
 
     print("\n==================================")
-    print("Calculated Global Bounds (1999-2019)")
+    print(f"Calculated Global Bounds ({start_year}-{end_year})")
     print("==================================")
     # Enforce Robust Physical Limits for Precip/Residual
     bounds["residual_pr_raw"] = {"min": -100.0, "max": 100.0}
@@ -141,6 +156,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, default="/scratch/11353/afahad/geossub/geos_subc/dataprocess")
     parser.add_argument("--out", type=str, default="ml_model/v1_multi_global_stats.pt")
+    parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
+    parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
     args = parser.parse_args()
     
-    calculate_global_stats(args.data_root, args.out)
+    calculate_global_stats(
+        args.data_root,
+        args.out,
+        start_year=args.start_year,
+        end_year=args.end_year,
+    )
