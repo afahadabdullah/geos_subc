@@ -1,7 +1,7 @@
 # ML Training Config - Flow Matching Multi-Target (PR + T2M)
 # Option A architecture: 37 input channels, 2 output channels per lead head
 batch_size: 4
-learning_rate: 1e-4
+learning_rate: 5e-5
 epochs: 300
 output_dir: ml_output_flowmulti
 mixed_precision: bf16
@@ -15,7 +15,7 @@ preload: True
 save_top_k: 4
 stats_file: v1_multi_global_stats.pt
 
-reset_validation_history: True
+reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
 validation_num_ensemble: 30
