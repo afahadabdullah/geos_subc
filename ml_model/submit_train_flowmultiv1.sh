@@ -38,7 +38,9 @@ mkdir -p ml_output_flowmulti
 CONFIG_PATH="ml_model/config_flow_multiv1.yaml"
 CKPT_FILE="ml_output_flowmulti/latest_flow_ckpt.pt"
 MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))" 2>/dev/null || echo "500")
+MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))" 2>/dev/null || echo "no")
 echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
+echo "🎯 Mixed precision from $CONFIG_PATH: $MIXED_PRECISION"
 
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/v1_multi_global_stats.pt"
@@ -59,8 +61,8 @@ if [ -f "$CKPT_FILE" ]; then
 fi
 
 echo "🔥 Launching Flow Matching Multi-Target Training (PR + T2M)..."
-accelerate launch --num_processes 1 --mixed_precision fp16 ml_model/train_flow_multiv1.py --config "$CONFIG_PATH" \
-    --epochs-per-run 10
+accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv1.py --config "$CONFIG_PATH" \
+    --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
