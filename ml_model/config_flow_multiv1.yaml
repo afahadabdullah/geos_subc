@@ -22,6 +22,7 @@ variance_phase_lr: 1e-5
 validation_num_ensemble: 30
 validation_num_steps: 10
 validation_ode_batch_size: 120
+mse_validation_seed: 1234
 validation_rho_pr: 0.15
 validation_rho_t2m: 0.05
 validation_var_beta_pr: 0.15

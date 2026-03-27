@@ -119,6 +119,20 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
     return rmse
 
 
+def sample_deterministic_validation_state(target_norm: torch.Tensor, batch_index: int, base_seed: int, device):
+    """
+    Build a deterministic validation interpolation state for fast MSE validation.
+    The same validation batch always receives the same sampled t and Gaussian noise,
+    which removes Monte Carlo jitter from epoch-to-epoch comparisons.
+    """
+    batch_size = target_norm.shape[0]
+    cpu_gen = torch.Generator(device="cpu")
+    cpu_gen.manual_seed(int(base_seed) + int(batch_index))
+    t = torch.rand((batch_size,), generator=cpu_gen, dtype=torch.float32).to(device)
+    noise = torch.randn(target_norm.shape, generator=cpu_gen, dtype=target_norm.dtype).to(device)
+    return t, noise
+
+
 @torch.no_grad()
 def euler_solve_chunked(
     flow_matcher,
@@ -1630,7 +1644,17 @@ def train(args, accelerator):
     # Get stats file from config (no fallback - must be specified)
     stats_filename = config.get("stats_file", "v1_multi_global_stats.pt")
     
-    val_dataset = S2SHybridDataset(
+    val_dataset_full = S2SHybridDataset(
+        data_root=config["data_dir"],
+        start_year=config["val_start_year"],
+        end_year=config["val_end_year"],
+        normalize=True,
+        preload=config.get("preload", False),
+        stats_file=stats_filename,
+        subsample_monthly=False
+    )
+
+    val_dataset_monthly = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=config["val_start_year"],
         end_year=config["val_end_year"],
@@ -1644,8 +1668,12 @@ def train(args, accelerator):
     val_batch_size = max(8, batch_size * 2) 
     
     from torch.utils.data import DataLoader
-    val_loader = DataLoader(
-        val_dataset, batch_size=val_batch_size, shuffle=False, drop_last=False,
+    val_loader_full = DataLoader(
+        val_dataset_full, batch_size=val_batch_size, shuffle=False, drop_last=False,
+        num_workers=config.get("num_workers", 4), pin_memory=True
+    )
+    val_loader_monthly = DataLoader(
+        val_dataset_monthly, batch_size=val_batch_size, shuffle=False, drop_last=False,
         num_workers=config.get("num_workers", 4), pin_memory=True
     )
 
@@ -1694,6 +1722,7 @@ def train(args, accelerator):
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
+    mse_validation_seed = int(config.get("mse_validation_seed", 1234))
     test_num_ensemble = int(config.get("test_num_ensemble", 90))
     test_num_steps = int(config.get("test_num_steps", 10))
     test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
@@ -1733,6 +1762,9 @@ def train(args, accelerator):
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
+        print(f"   [MSE Val Seed]       : {mse_validation_seed}")
+        print(f"   [MSE Val Dataset]    : Full {config['val_start_year']}-{config['val_end_year']}")
+        print(f"   [CRPS Val Dataset]   : Monthly subset {config['val_start_year']}-{config['val_end_year']}")
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Test Ens]           : {test_num_ensemble}")
@@ -1754,12 +1786,12 @@ def train(args, accelerator):
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     if not args.test:
-        model, optimizer, loader, val_loader = accelerator.prepare(
-            model, optimizer, loader, val_loader
+        model, optimizer, loader, val_loader_full, val_loader_monthly = accelerator.prepare(
+            model, optimizer, loader, val_loader_full, val_loader_monthly
         )
     else:
-        # Test mode: only prepare model and val_loader
-        model, val_loader = accelerator.prepare(model, val_loader)
+        # Test mode: only prepare model and validation loaders
+        model, val_loader_full, val_loader_monthly = accelerator.prepare(model, val_loader_full, val_loader_monthly)
         optimizer = None
 
     if accelerator.is_main_process:
@@ -1814,7 +1846,7 @@ def train(args, accelerator):
             writer.writerow(["Epoch", "Train_Loss", "Val_Noise", "Val_CRPS"])
 
     # Fixed Val Batch for continuous plotting
-    fixed_val_batch = next(iter(val_loader))
+    fixed_val_batch = next(iter(val_loader_full))
 
     def resolve_eof_path(filename):
         for base_dir in (
@@ -2016,8 +2048,8 @@ def train(args, accelerator):
             lr=variance_phase_lr,
             weight_decay=weight_decay,
         )
-        model, optimizer, loader, val_loader = accelerator.prepare(
-            model, optimizer, loader, val_loader
+        model, optimizer, loader, val_loader_full, val_loader_monthly = accelerator.prepare(
+            model, optimizer, loader, val_loader_full, val_loader_monthly
         )
         is_variance_phase = True
         
@@ -2035,7 +2067,7 @@ def train(args, accelerator):
         run_full_test_suite_multi(
             start_epoch,
             model,
-            val_loader,
+            val_loader_full,
             flow_matcher,
             device,
             accelerator,
@@ -2476,7 +2508,7 @@ def train(args, accelerator):
         if use_crps_phase:
             use_flow_variance = is_variance_phase
             val_result = run_val_inference(
-                epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+                epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=use_flow_variance,
                 use_eof_lhs_noise=is_variance_phase,
@@ -2566,7 +2598,7 @@ def train(args, accelerator):
             val_steps = 0
             
             with torch.no_grad():
-                for batch in val_loader:
+                for b_idx, batch in enumerate(val_loader_full):
                     x_geos = batch['x_geos'].to(device)
                     x_obs  = batch['x_obs'].to(device)
                     B = x_geos.shape[0]
@@ -2580,8 +2612,9 @@ def train(args, accelerator):
                     lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
                     x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
                     target_norm = batch['y_target'].to(device)
-                    t = flow_matcher.sample_time_batch(B)
-                    noise = torch.randn_like(target_norm)
+                    t, noise = sample_deterministic_validation_state(
+                        target_norm, b_idx, mse_validation_seed, device
+                    )
                     x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
                     v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
@@ -2637,7 +2670,7 @@ def train(args, accelerator):
                     if epoch >= 20:
                         print(f"📊 Generating PR+T2M validation plot for Epoch {epoch}...")
                         val_result = run_val_inference(
-                            epoch, model, val_loader, flow_matcher, device, accelerator, output_dir, log_file, 
+                            epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
                             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                             is_test=False, is_fast_recon=True,
                             use_flow_variance=is_variance_phase,
