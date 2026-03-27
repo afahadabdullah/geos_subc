@@ -19,7 +19,7 @@ stats_file: v1_multi_global_stats.pt
 reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
-validation_num_ensemble: 30
+validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
 mse_validation_seed: 1234
