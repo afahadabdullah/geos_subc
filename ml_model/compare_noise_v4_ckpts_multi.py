@@ -31,6 +31,10 @@ from flow_matching_multi import CustomFlowMatcher, FlowMatchingModel
 from train_flow_multiv1 import compute_crps, compute_rmse
 
 
+DEFAULT_PERIODIC_EPOCHS = tuple(range(355, 501, 40))
+DEFAULT_BEST_CHECKPOINT = "best_flow_ckpt.pt"
+
+
 def extract_epoch(path):
     match = re.search(r"epoch_(\d+)", os.path.basename(path))
     return int(match.group(1)) if match else -1
@@ -63,7 +67,39 @@ def evenly_select(items, k):
     return selected
 
 
+def resolve_best_checkpoint(output_dir):
+    best_ckpt = os.path.join(output_dir, DEFAULT_BEST_CHECKPOINT)
+    if os.path.exists(best_ckpt):
+        return best_ckpt
+
+    candidates = sorted(
+        glob.glob(os.path.join(output_dir, "best_model_epoch_*.pt")),
+        key=lambda path: (extract_epoch(path), path),
+    )
+    if candidates:
+        return candidates[-1]
+
+    raise FileNotFoundError(
+        f"Missing {DEFAULT_BEST_CHECKPOINT} and no best_model_epoch_*.pt found inside {output_dir}"
+    )
+
+
+def resolve_default_checkpoints(output_dir):
+    resolved = []
+    for epoch in DEFAULT_PERIODIC_EPOCHS:
+        ckpt_path = os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt")
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Missing checkpoint: {ckpt_path}")
+        resolved.append(ckpt_path)
+
+    resolved.append(resolve_best_checkpoint(output_dir))
+    return resolved
+
+
 def resolve_checkpoints(output_dir, checkpoint_args, checkpoint_glob, max_checkpoints):
+    if checkpoint_args is None:
+        return resolve_default_checkpoints(output_dir)
+
     if checkpoint_args:
         resolved = []
         for ckpt in checkpoint_args:
@@ -85,10 +121,13 @@ def resolve_checkpoints(output_dir, checkpoint_args, checkpoint_glob, max_checkp
 
 
 def checkpoint_label(index, ckpt_path):
+    basename = os.path.basename(ckpt_path)
+    if basename == DEFAULT_BEST_CHECKPOINT or basename.startswith("best_model_epoch_"):
+        return f"{index}. BEST"
     epoch = extract_epoch(ckpt_path)
     if epoch >= 0:
         return f"{index}. E{epoch}"
-    return f"{index}. {os.path.basename(ckpt_path)}"
+    return f"{index}. {basename}"
 
 
 def compute_area_weights(height, device):
@@ -389,7 +428,15 @@ def main():
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
-    parser.add_argument("--checkpoints", nargs="*", default=None, help="Checkpoint filenames or absolute paths.")
+    parser.add_argument(
+        "--checkpoints",
+        nargs="*",
+        default=None,
+        help=(
+            "Checkpoint filenames or absolute paths. Defaults to periodic epochs "
+            "355/395/435/475 plus the best-flow checkpoint."
+        ),
+    )
     parser.add_argument("--checkpoint_glob", type=str, default="periodic_ckpt_epoch_*.pt")
     parser.add_argument("--max_checkpoints", type=int, default=5)
     parser.add_argument("--max_batches", type=int, default=12)
