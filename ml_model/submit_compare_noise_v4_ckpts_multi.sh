@@ -25,13 +25,7 @@ python3 ml_model/compare_noise_v4_ckpts_multi.py \
     --output_dir ml_output_flowmulti \
     --year 2021 \
     --num_ensemble 30 \
-    --num_steps 10 \
-    --checkpoints \
-    periodic_ckpt_epoch_185.pt \
-    periodic_ckpt_epoch_190.pt \
-    periodic_ckpt_epoch_200.pt \
-    periodic_ckpt_epoch_215.pt \
-    periodic_ckpt_epoch_235.pt
+    --num_steps 10
 
 echo "Checkpoint sweep finished!"
 date
