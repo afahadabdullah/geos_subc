@@ -19,13 +19,16 @@ stats_file: v1_multi_global_stats.pt
 reset_validation_history: True
 force_variance_phase: False
 variance_phase_lr: 1e-5
-validation_num_ensemble: 10
+validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
 mse_validation_seed: 1234
+crps_val_start_year: 2021
+crps_val_end_year: 2021
+validation_variance_coarse_kernel: 8
 validation_rho_pr: 0.15
 validation_rho_t2m: 0.05
-validation_var_beta_pr: 0.15
+validation_var_beta_pr: 0.3
 validation_var_beta_t2m: 0.01
 
 crps_loss: False

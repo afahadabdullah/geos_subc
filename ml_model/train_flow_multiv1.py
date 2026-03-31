@@ -143,6 +143,7 @@ def euler_solve_chunked(
     lead_idx,
     apply_flow_variance=False,
     variance_beta=1.0,
+    variance_coarse_kernel=None,
     chunk_size=None,
 ):
     """
@@ -159,6 +160,7 @@ def euler_solve_chunked(
             lead_idx=lead_idx,
             apply_flow_variance=apply_flow_variance,
             variance_beta=variance_beta,
+            variance_coarse_kernel=variance_coarse_kernel,
         )
 
     outputs = []
@@ -173,6 +175,7 @@ def euler_solve_chunked(
                 lead_idx=lead_idx[start:end] if lead_idx is not None else None,
                 apply_flow_variance=apply_flow_variance,
                 variance_beta=variance_beta,
+                variance_coarse_kernel=variance_coarse_kernel,
             )
         )
     return torch.cat(outputs, dim=0)
@@ -812,30 +815,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       validation_rho_pr=1.0,
                       validation_rho_t2m=None,
                       validation_var_beta_pr=1.0,
-                      validation_var_beta_t2m=None):
+                      validation_var_beta_t2m=None,
+                      validation_variance_coarse_kernel=None):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
-    
-    # Sample exactly 6 specific months from 2021 (Jan, Mar, May, Jul, Sep, Nov)
-    target_months = [1, 3, 5, 7, 9, 11]
-    target_batches = []
-    found_months = set()
-    
-    # We iterate once over the loader to map out the batch indices that correspond to our requested 2021 months
-    for b_idx, batch in enumerate(val_loader):
-        year = int(batch['year'][0].item()) if 'year' in batch else 2021
-        month = int(batch['month'][0].item())
-        
-        if year == 2021 and month in target_months and month not in found_months:
-            target_batches.append(b_idx)
-            found_months.add(month)
-            
-        if len(target_batches) == len(target_months):
-            break
-            
-    # Fallback just in case the dataloader is much smaller or doesn't have 2021
-    if len(target_batches) < 6:
-        target_batches = list(range(min(6, len(val_loader))))
     
     total_crps = 0.0
     total_rmse = 0.0
@@ -846,22 +829,18 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     total_geos_crps_t2m = 0.0
     total_geos_rmse_t2m = 0.0
     count = 0
+    processed_batches = 0
     did_print_noise_diag = False
     if validation_rho_t2m is None:
         validation_rho_t2m = validation_rho_pr
     if validation_var_beta_t2m is None:
         validation_var_beta_t2m = validation_var_beta_pr
     
-    # Save tensors for the first validation batch we actually process. The
-    # selected validation months may skip dataloader batch 0 entirely.
+    # Save tensors for the first validation batch we actually process.
     saved_tensors = {}
     
     for b_idx, batch in enumerate(val_loader):
-        if b_idx not in target_batches:
-            if b_idx > max(target_batches) if len(target_batches) > 0 else 0:
-                break # Stop iterating once we have all target batches
-            continue
-            
+        processed_batches += 1
         fb_target_norm = batch['y_target'].to(device) # [vB, 2, H, W]
         vB, _, H, W = fb_target_norm.shape
         num_inits = vB // 4
@@ -919,6 +898,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             )
         if use_flow_variance:
             mode_tag += f"_beta_pr{validation_var_beta_pr:.2f}_beta_t2m{validation_var_beta_t2m:.2f}"
+            if validation_variance_coarse_kernel is not None:
+                mode_tag += f"_coarse{int(validation_variance_coarse_kernel)}"
         cache_key = (mode_tag, b_idx, current_year, current_month, current_day, num_ensemble, vB, H, W)
         cache_hit = False
 
@@ -965,6 +946,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+            variance_coarse_kernel=validation_variance_coarse_kernel,
             chunk_size=validation_ode_batch_size,
         )
 
@@ -974,6 +956,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                     f"PR EOF-LHS rho={validation_rho_pr:.2f} beta={validation_var_beta_pr:.2f} / "
                     f"T2M EOF-LHS rho={validation_rho_t2m:.2f} beta={validation_var_beta_t2m:.2f}"
                 )
+                if validation_variance_coarse_kernel is not None:
+                    mode_label += f" + coarse var{int(validation_variance_coarse_kernel)}"
             else:
                 mode_label = "Pure Random"
             source_label = "cache-hit" if cache_hit else ("cache-build" if validation_noise_cache is not None else "fresh")
@@ -1074,9 +1058,10 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         avg_geos_crps_t2m = cached_geos_crps_t2m if cached_geos_crps_t2m is not None else 0.0
         avg_geos_rmse_t2m = cached_geos_rmse_t2m if cached_geos_rmse_t2m is not None else 0.0
     
-    recon_type = f"Monthly (N={len(target_batches)}x{num_ensemble})"
+    recon_type = f"Monthly2021 (batches={processed_batches}, inits={count}, ens={num_ensemble})"
     combined_crps = (avg_crps + avg_crps_t2m) / 2.0
     if accelerator.is_main_process:
+        print(f"Epoch {epoch} | Val Loader Summary: {processed_batches} batches, {count} init dates")
         print(f"Epoch {epoch} | Val CRPS [PR]: {avg_crps:.4f} (GEOS: {avg_geos_crps:.4f})")
         print(f"Epoch {epoch} | Val CRPS [T2M]: {avg_crps_t2m:.4f} (GEOS: {avg_geos_crps_t2m:.4f})")
         print(f"Epoch {epoch} | Combined CRPS: {combined_crps:.4f}")
@@ -1656,8 +1641,8 @@ def train(args, accelerator):
 
     val_dataset_monthly = S2SHybridDataset(
         data_root=config["data_dir"],
-        start_year=config["val_start_year"],
-        end_year=config["val_end_year"],
+        start_year=config.get("crps_val_start_year", config["val_start_year"]),
+        end_year=config.get("crps_val_end_year", config["val_end_year"]),
         normalize=True,
         preload=config.get("preload", False),
         stats_file=stats_filename,
@@ -1723,6 +1708,11 @@ def train(args, accelerator):
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
     mse_validation_seed = int(config.get("mse_validation_seed", 1234))
+    crps_val_start_year = int(config.get("crps_val_start_year", config["val_start_year"]))
+    crps_val_end_year = int(config.get("crps_val_end_year", config["val_end_year"]))
+    validation_variance_coarse_kernel = config.get("validation_variance_coarse_kernel", None)
+    if validation_variance_coarse_kernel is not None:
+        validation_variance_coarse_kernel = int(validation_variance_coarse_kernel)
     test_num_ensemble = int(config.get("test_num_ensemble", 90))
     test_num_steps = int(config.get("test_num_steps", 10))
     test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
@@ -1764,9 +1754,10 @@ def train(args, accelerator):
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
         print(f"   [MSE Val Seed]       : {mse_validation_seed}")
         print(f"   [MSE Val Dataset]    : Full {config['val_start_year']}-{config['val_end_year']}")
-        print(f"   [CRPS Val Dataset]   : Monthly subset {config['val_start_year']}-{config['val_end_year']}")
+        print(f"   [CRPS Val Dataset]   : Monthly subset {crps_val_start_year}-{crps_val_end_year}")
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
+        print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
         print(f"   [Test Ens]           : {test_num_ensemble}")
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
@@ -2506,12 +2497,12 @@ def train(args, accelerator):
         #  CRPS-based validation
         # ============================================================
         if use_crps_phase:
-            use_flow_variance = is_variance_phase
+            use_flow_variance = True
             val_result = run_val_inference(
                 epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                 is_test=False, is_fast_recon=True, use_flow_variance=use_flow_variance,
-                use_eof_lhs_noise=is_variance_phase,
+                use_eof_lhs_noise=True,
                 validation_noise_cache=validation_noise_cache,
                 print_validation_noise_diag=True,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
@@ -2526,6 +2517,7 @@ def train(args, accelerator):
                 validation_rho_t2m=validation_rho_t2m,
                 validation_var_beta_pr=validation_var_beta_pr,
                 validation_var_beta_t2m=validation_var_beta_t2m,
+                validation_variance_coarse_kernel=validation_variance_coarse_kernel,
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -2673,8 +2665,8 @@ def train(args, accelerator):
                             epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
                             target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
                             is_test=False, is_fast_recon=True,
-                            use_flow_variance=is_variance_phase,
-                            use_eof_lhs_noise=is_variance_phase,
+                            use_flow_variance=True,
+                            use_eof_lhs_noise=True,
                             validation_noise_cache=validation_noise_cache,
                             print_validation_noise_diag=False,
                             eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
@@ -2687,6 +2679,7 @@ def train(args, accelerator):
                             validation_rho_t2m=validation_rho_t2m,
                             validation_var_beta_pr=validation_var_beta_pr,
                             validation_var_beta_t2m=validation_var_beta_t2m,
+                            validation_variance_coarse_kernel=validation_variance_coarse_kernel,
                         )
                         vt = val_result['tensors']
                         save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
