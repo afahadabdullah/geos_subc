@@ -1,0 +1,53 @@
+# ML Training Config - Flow Matching Multi-Target v3 (PR + T2M)
+# v3 keeps the multiv1 data pipeline but upgrades the model with FiLM-style
+# conditioning and stronger per-week heads.
+batch_size: 4
+learning_rate: 5e-5
+mse_learning_rate: 5e-5
+crps_phase_lr: 2e-5
+weight_decay: 1e-4
+epochs: 300
+phase_transition_epoch: 100
+output_dir: ml_output_flowmulti_v3
+mixed_precision: bf16
+num_workers: 1
+data_dir: /home1/11353/afahad/geos_subc/dataprocess
+train_start_year: 1999
+train_end_year: 1999
+val_start_year: 1999
+val_end_year: 1999
+preload: True
+save_top_k: 4
+stats_file: v1_multi_global_stats.pt
+
+reset_validation_history: True
+validation_num_ensemble: 15
+validation_num_steps: 10
+validation_ode_batch_size: 120
+mse_validation_seed: 1234
+crps_val_start_year: 1999
+crps_val_end_year: 1999
+validation_variance_coarse_kernel: 8
+validation_rho_pr: 0.15
+validation_rho_t2m: 0.05
+validation_var_beta_pr: 0.3
+validation_var_beta_t2m: 0.01
+
+crps_loss: False
+crps_loss_num_ensemble: 2
+crps_loss_num_steps: 10
+crps_loss_ode_batch_size: 2
+crps_loss_max_ensemble_per_chunk: 1
+crps_loss_pr_weight: 1.0
+crps_loss_t2m_weight: 1.0
+crps_loss_use_land_ocean_weights: False
+crps_loss_use_gradient_checkpointing: True
+
+inference_use_eof_lhs_noise: True
+inference_use_flow_variance: True
+test_use_eof_lhs_noise: True
+test_use_flow_variance: True
+
+test_num_ensemble: 90
+test_num_steps: 10
+test_max_ensemble_per_chunk: 30
