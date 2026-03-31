@@ -34,6 +34,36 @@ import noise_utils_multi
 
 # ─── Index Parsers (same as v4) ───
 
+
+def extract_epoch(path):
+    name = os.path.basename(path)
+    parts = name.split("_")
+    for idx, part in enumerate(parts):
+        if part == "epoch" and idx + 1 < len(parts):
+            try:
+                return int(parts[idx + 1])
+            except ValueError:
+                return -1
+    return -1
+
+
+def resolve_best_checkpoint(output_dir):
+    for filename in ("best_flow_ckpt.pt", "BEST_model.pt"):
+        ckpt_path = os.path.join(output_dir, filename)
+        if os.path.exists(ckpt_path):
+            return ckpt_path
+
+    candidates = sorted(
+        glob.glob(os.path.join(output_dir, "best_model_epoch_*.pt")),
+        key=lambda path: (extract_epoch(path), path),
+    )
+    if candidates:
+        return candidates[-1]
+
+    raise FileNotFoundError(
+        f"Missing best checkpoint in {output_dir}: tried best_flow_ckpt.pt, BEST_model.pt, and best_model_epoch_*.pt"
+    )
+
 def parse_nao_index(nao_path):
     nao_lookup = {}
     with open(nao_path, 'r') as f:
@@ -276,7 +306,7 @@ def main():
     parser.add_argument("--year", type=int, default=2021)
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
-    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint path. Defaults to the best model in output_dir.")
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv1.yaml")
     args = parser.parse_args()
     
@@ -300,13 +330,7 @@ def main():
     if args.checkpoint:
         ckpt_path = args.checkpoint
     else:
-        # Match compare_noise_v4_multi.py: use the latest flow checkpoint by default,
-        # because the EOF-favorable validation state came from that path.
-        ckpt_path = os.path.join(args.output_dir, "best_flow_ckpt.pt")
-        if not os.path.exists(ckpt_path):
-            ckpt_path = os.path.join(args.output_dir, "BEST_model.pt")
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(f"Missing checkpoint: {ckpt_path}")
+        ckpt_path = resolve_best_checkpoint(args.output_dir)
     
     print("\n" + "="*80)
     print(f"🚀 MODEL CHECKPOINT LOADED:")

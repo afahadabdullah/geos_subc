@@ -24,7 +24,7 @@ export PYTHONUNBUFFERED=1
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
 # ─── Step 1: Run noise comparison ───
-# Automaticaly detects best model in output_dir
+# Automatically detects the best model in output_dir
 python3 ml_model/compare_noise_multi.py \
     --output_dir ml_output_flowmulti \
     --year 2021 \
