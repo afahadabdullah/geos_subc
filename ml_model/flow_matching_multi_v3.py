@@ -191,7 +191,7 @@ class FlowMatchingModel(nn.Module):
             mask = (lead_idx == week_idx)
             if mask.any():
                 week_context = context[mask]
-                output[mask] = self.heads[week_idx](features[mask], week_context)
+                output[mask] = self.heads[week_idx](features[mask], week_context).to(features.dtype)
                 if compute_variance:
                     var_output[mask] = F.softplus(
                         self.var_heads[week_idx](features[mask], week_context)
