@@ -2193,6 +2193,11 @@ def train(args, accelerator):
                         print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
                     best_val_loss = float('inf')
                     top_models = []
+                    registry_path = os.path.join(output_dir, "model_registry.json")
+                    if accelerator.is_main_process and os.path.exists(registry_path):
+                        with open(registry_path, 'w') as f:
+                            json.dump([], f, indent=2)
+                        print(f"   🧹 Cleared {registry_path} so rankings do not mix across runs.")
                 
             if accelerator.is_main_process:
                 print(f"\n🔄 Loaded checkpoint: {ckpt_path}")
@@ -2238,8 +2243,15 @@ def train(args, accelerator):
         )
         if loaded_ema_state is not None:
             ema.load_state_dict(loaded_ema_state)
+            restored_decay = ema.decay
+            ema.decay = ema_decay
+            ema.on_cpu = ema_on_cpu
             if accelerator.is_main_process:
-                print("✅ Restored EMA state from checkpoint.")
+                print(
+                    f"✅ Restored EMA state from checkpoint. "
+                    f"Using config decay {ema_decay:.4f} going forward "
+                    f"(checkpoint decay was {restored_decay:.4f})."
+                )
         elif accelerator.is_main_process:
             print("✅ Initialized fresh EMA shadow from current model weights.")
 
