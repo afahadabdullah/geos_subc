@@ -13,9 +13,9 @@ mixed_precision: bf16
 num_workers: 1
 data_dir: /home1/11353/afahad/geos_subc/dataprocess
 train_start_year: 1999
-train_end_year: 1999
-val_start_year: 1999
-val_end_year: 1999
+train_end_year: 2019
+val_start_year: 2021
+val_end_year: 2021
 preload: True
 save_top_k: 4
 stats_file: v1_multi_global_stats.pt
@@ -39,8 +39,16 @@ mse_rollout_validation_num_steps: 4
 mse_rollout_validation_ode_batch_size: 64
 mse_rollout_validation_start_epoch: 5
 mse_rollout_validation_use_monthly_subset: True
-crps_val_start_year: 1999
-crps_val_end_year: 1999
+crps_val_start_year: 2021
+crps_val_end_year: 2021
+crps_validation_num_ensemble: 12
+crps_validation_num_steps: 10
+crps_validation_ode_batch_size: 64
+crps_validation_target_year: 2021
+crps_validation_target_months: [1, 3, 5, 7, 9, 11]
+crps_validation_max_init_dates_per_month: 1
+crps_validation_use_eof_lhs_noise: False
+crps_validation_use_flow_variance: False
 validation_variance_coarse_kernel: 8
 validation_rho_pr: 0.15
 validation_rho_t2m: 0.05
