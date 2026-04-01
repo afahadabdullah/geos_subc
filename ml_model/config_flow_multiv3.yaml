@@ -2,8 +2,8 @@
 # v3 keeps the multiv1 data pipeline but upgrades the model with FiLM-style
 # conditioning and stronger per-week heads.
 batch_size: 4
-learning_rate: 5e-5
-mse_learning_rate: 5e-5
+learning_rate: 3e-5
+mse_learning_rate: 3e-5
 crps_phase_lr: 2e-5
 weight_decay: 1e-4
 epochs: 300
@@ -19,12 +19,26 @@ val_end_year: 1999
 preload: True
 save_top_k: 4
 stats_file: v1_multi_global_stats.pt
+unet_block_out_channels: [128, 256, 512, 768]
+
+use_ema: True
+ema_decay: 0.995
+ema_on_cpu: True
+
+mse_lr_decay_start_epoch: 15
+mse_lr_decay_end_epoch: 100
+mse_lr_min_factor: 0.2
 
 reset_validation_history: True
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
 mse_validation_seed: 1234
+mse_rollout_validation_num_ensemble: 4
+mse_rollout_validation_num_steps: 4
+mse_rollout_validation_ode_batch_size: 64
+mse_rollout_validation_start_epoch: 5
+mse_rollout_validation_use_monthly_subset: True
 crps_val_start_year: 1999
 crps_val_end_year: 1999
 validation_variance_coarse_kernel: 8

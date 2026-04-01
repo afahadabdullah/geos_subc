@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn as nn
 import numpy as np
@@ -29,6 +30,97 @@ from dataset_flow_multi import S2SHybridDataset
 from flow_matching_multi_v3 import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 import noise_utils_multi
+
+
+class ExponentialMovingAverage:
+    """
+    Lightweight EMA helper that can keep its shadow weights on CPU to avoid
+    consuming extra GPU memory during training.
+    """
+
+    def __init__(self, model, decay=0.995, on_cpu=True):
+        self.decay = float(decay)
+        self.on_cpu = bool(on_cpu)
+        self.shadow = {}
+        self.backup = None
+        self._init_from_model(model)
+
+    def _shadow_clone(self, tensor):
+        clone = tensor.detach().clone()
+        return clone.cpu() if self.on_cpu else clone
+
+    def _init_from_model(self, model):
+        self.shadow = {
+            name: self._shadow_clone(tensor)
+            for name, tensor in model.state_dict().items()
+            if torch.is_tensor(tensor)
+        }
+
+    @torch.no_grad()
+    def update(self, model):
+        for name, tensor in model.state_dict().items():
+            if not torch.is_tensor(tensor):
+                continue
+            if name not in self.shadow:
+                self.shadow[name] = self._shadow_clone(tensor)
+                continue
+            shadow_tensor = self.shadow[name]
+            source = tensor.detach()
+            if shadow_tensor.device != source.device or shadow_tensor.dtype != source.dtype:
+                source = source.to(device=shadow_tensor.device, dtype=shadow_tensor.dtype)
+            if torch.is_floating_point(shadow_tensor):
+                shadow_tensor.mul_(self.decay).add_(source, alpha=1.0 - self.decay)
+            else:
+                shadow_tensor.copy_(source)
+
+    @torch.no_grad()
+    def store(self, model):
+        self.backup = {
+            name: tensor.detach().clone()
+            for name, tensor in model.state_dict().items()
+            if torch.is_tensor(tensor)
+        }
+
+    @torch.no_grad()
+    def copy_to(self, model):
+        for name, tensor in model.state_dict().items():
+            if not torch.is_tensor(tensor):
+                continue
+            shadow_tensor = self.shadow[name]
+            tensor.copy_(shadow_tensor.to(device=tensor.device, dtype=tensor.dtype))
+
+    @torch.no_grad()
+    def restore(self, model):
+        if self.backup is None:
+            return
+        for name, tensor in model.state_dict().items():
+            if not torch.is_tensor(tensor):
+                continue
+            if name in self.backup:
+                tensor.copy_(self.backup[name].to(device=tensor.device, dtype=tensor.dtype))
+        self.backup = None
+
+    def state_dict(self):
+        return {
+            "decay": self.decay,
+            "on_cpu": self.on_cpu,
+            "shadow": {
+                name: tensor.detach().clone()
+                for name, tensor in self.shadow.items()
+            },
+        }
+
+    def load_state_dict(self, state):
+        self.decay = float(state.get("decay", self.decay))
+        self.on_cpu = bool(state.get("on_cpu", self.on_cpu))
+        shadow = state.get("shadow", {})
+        self.shadow = {
+            name: tensor.detach().clone()
+            for name, tensor in shadow.items()
+            if torch.is_tensor(tensor)
+        }
+        self.backup = None
+
 
 def get_area_weights(lats, device):
     lats_rad = np.deg2rad(lats)
@@ -1696,6 +1788,9 @@ def train(args, accelerator):
     phase_transition_epoch = int(config.get("phase_transition_epoch", 100))
     mse_learning_rate = float(config.get("mse_learning_rate", lr))
     crps_phase_lr = float(config.get("crps_phase_lr", config.get("crps_learning_rate", mse_learning_rate)))
+    mse_lr_decay_start_epoch = int(config.get("mse_lr_decay_start_epoch", 15))
+    mse_lr_decay_end_epoch = int(config.get("mse_lr_decay_end_epoch", phase_transition_epoch))
+    mse_lr_min_factor = float(config.get("mse_lr_min_factor", 0.2))
     crps_train_num_ensemble = int(config.get("crps_loss_num_ensemble", 4))
     crps_train_num_steps = int(config.get("crps_loss_num_steps", 10))
     crps_train_ode_batch_size = int(config.get("crps_loss_ode_batch_size", max(1, batch_size * crps_train_num_ensemble)))
@@ -1716,6 +1811,13 @@ def train(args, accelerator):
     test_num_ensemble = int(config.get("test_num_ensemble", 90))
     test_num_steps = int(config.get("test_num_steps", 10))
     test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
+    mse_rollout_validation_num_ensemble = int(config.get("mse_rollout_validation_num_ensemble", 4))
+    mse_rollout_validation_num_steps = int(config.get("mse_rollout_validation_num_steps", 4))
+    mse_rollout_validation_ode_batch_size = int(
+        config.get("mse_rollout_validation_ode_batch_size", max(24, batch_size * mse_rollout_validation_num_ensemble * 4))
+    )
+    mse_rollout_validation_start_epoch = int(config.get("mse_rollout_validation_start_epoch", 5))
+    mse_rollout_validation_use_monthly_subset = bool(config.get("mse_rollout_validation_use_monthly_subset", True))
     validation_rho_pr = float(config.get("validation_rho_pr", 1.0))
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
@@ -1725,10 +1827,29 @@ def train(args, accelerator):
     test_use_eof_lhs_noise = bool(config.get("test_use_eof_lhs_noise", inference_use_eof_lhs_noise))
     test_use_flow_variance = bool(config.get("test_use_flow_variance", inference_use_flow_variance))
     crps_loss = bool(config.get("crps_loss", False))
-    train_learning_rate = crps_phase_lr if crps_loss else mse_learning_rate
+    ema_enabled = bool(config.get("use_ema", True))
+    ema_decay = float(config.get("ema_decay", 0.995))
+    ema_on_cpu = bool(config.get("ema_on_cpu", True))
+    unet_block_out_channels = tuple(int(v) for v in config.get("unet_block_out_channels", [128, 256, 512, 768]))
+    if len(unet_block_out_channels) != 4:
+        raise ValueError(f"unet_block_out_channels must have length 4, got {unet_block_out_channels}")
 
     def phase_name_for_epoch(epoch_num):
         return "crps" if epoch_num > phase_transition_epoch else "mse"
+
+    def get_train_learning_rate(epoch_num):
+        if crps_loss:
+            return crps_phase_lr
+        decay_start = max(1, mse_lr_decay_start_epoch)
+        decay_end = max(decay_start, mse_lr_decay_end_epoch)
+        if epoch_num <= decay_start:
+            return mse_learning_rate
+        if epoch_num >= decay_end:
+            return mse_learning_rate * mse_lr_min_factor
+        progress = (epoch_num - decay_start) / max(1, decay_end - decay_start)
+        cosine_weight = 0.5 * (1.0 + math.cos(math.pi * progress))
+        factor = mse_lr_min_factor + (1.0 - mse_lr_min_factor) * cosine_weight
+        return mse_learning_rate * factor
 
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -1744,7 +1865,13 @@ def train(args, accelerator):
         train_weight_mode = "area x land-ocean" if crps_train_use_land_ocean_weights else "area-only"
         rollout_states = batch_size * crps_train_num_ensemble
         print(f"   [MSE Phase LR]       : {mse_learning_rate:.2e}")
+        if not crps_loss:
+            print(
+                f"   [MSE LR Decay]       : cosine from epoch {mse_lr_decay_start_epoch} "
+                f"to {mse_lr_decay_end_epoch} (min factor {mse_lr_min_factor:.2f})"
+            )
         print(f"   [CRPS Phase LR]      : {crps_phase_lr:.2e}")
+        print(f"   [EMA]                : enabled={ema_enabled}, decay={ema_decay:.4f}, on_cpu={ema_on_cpu}")
         print(f"   [CRPS Train Ens]     : {crps_train_num_ensemble}")
         print(f"   [CRPS Train Steps]   : {crps_train_num_steps}")
         print(f"   [CRPS Train Chunk]   : {crps_train_ode_batch_size}")
@@ -1759,6 +1886,12 @@ def train(args, accelerator):
         print(f"   [MSE Val Seed]       : {mse_validation_seed}")
         print(f"   [MSE Val Dataset]    : Full {config['val_start_year']}-{config['val_end_year']}")
         print(f"   [CRPS Val Dataset]   : Monthly subset {crps_val_start_year}-{crps_val_end_year}")
+        print(
+            f"   [MSE Rollout Preview]: ens={mse_rollout_validation_num_ensemble}, "
+            f"steps={mse_rollout_validation_num_steps}, chunk={mse_rollout_validation_ode_batch_size}, "
+            f"start_epoch={mse_rollout_validation_start_epoch}, "
+            f"dataset={'monthly' if mse_rollout_validation_use_monthly_subset else 'full'}"
+        )
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
@@ -1767,13 +1900,18 @@ def train(args, accelerator):
         print(f"   [Test Ens]           : {test_num_ensemble}")
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
-        print(f"   [Optimizer]          : AdamW lr={train_learning_rate:.2e}, wd={weight_decay:.2e}")
+        print(f"   [UNet Widths]        : {' -> '.join(str(v) for v in unet_block_out_channels)}")
+        print(f"   [Optimizer]          : AdamW base_lr={get_train_learning_rate(1):.2e}, wd={weight_decay:.2e}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
-    model = FlowMatchingModel(in_channels=41, out_channels=2).to(device)
+    model = FlowMatchingModel(
+        in_channels=41,
+        out_channels=2,
+        block_out_channels=unet_block_out_channels,
+    ).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     if crps_loss and crps_train_use_gradient_checkpointing:
         if hasattr(model.unet, "enable_gradient_checkpointing"):
@@ -1781,7 +1919,7 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print("   ✅ Enabled UNet gradient checkpointing for CRPS training.")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=train_learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=get_train_learning_rate(1), weight_decay=weight_decay)
     if not args.test:
         model, optimizer, loader, val_loader_full, val_loader_monthly = accelerator.prepare(
             model, optimizer, loader, val_loader_full, val_loader_monthly
@@ -1826,7 +1964,7 @@ def train(args, accelerator):
         print(f"   --- v3 Conditioning Upgrades ---")
         print(f"     Input FiLM: pooled x_cond summary modulates the 41-channel backbone input")
         print(f"     Lead Embedding: discrete week embedding injected into FiLM context")
-        print(f"     UNet block widths: 128 -> 256 -> 512 -> 640")
+        print(f"     UNet block widths: {' -> '.join(str(v) for v in unet_block_out_channels)}")
         print(f"     Shared UNet features: 64 intermediate channels")
         print(f"   --- Dedicated Output Heads (Per-Week Mini-Decoders) ---")
         print(f"     Head 0: Week 1 (3x3 -> 3x3 -> 1x1)")
@@ -1839,12 +1977,19 @@ def train(args, accelerator):
     # Output directory
     output_dir = config.get("output_dir", "ml_output_diffusion_v5")
     os.makedirs(output_dir, exist_ok=True)
-    log_file = os.path.join(output_dir, "training_log_v5.csv")
+    log_file = os.path.join(output_dir, "training_log_v6.csv")
     
     if accelerator.is_main_process and not os.path.exists(log_file):
         with open(log_file, "w") as f:
             writer = csv.writer(f)
-            writer.writerow(["Epoch", "Train_Loss", "Val_Noise", "Val_CRPS"])
+            writer.writerow([
+                "Epoch",
+                "Train_Loss",
+                "Val_Proxy_MSE",
+                "Val_Rollout_CombinedCRPS",
+                "Val_Rollout_PR_CRPS",
+                "Val_Rollout_T2M_CRPS",
+            ])
 
     # Fixed Val Batch for continuous plotting
     fixed_val_batch = next(iter(val_loader_full))
@@ -1897,6 +2042,7 @@ def train(args, accelerator):
     start_epoch = 1
     loaded_checkpoint_epoch = 0
     loaded_phase_name = "mse"
+    loaded_ema_state = None
     best_val_loss = float('inf')
     crps_phase_reset = False  # Flips once metrics move onto the CRPS scale.
     top_models = []
@@ -1930,6 +2076,7 @@ def train(args, accelerator):
             checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
             loaded_checkpoint_epoch = int(checkpoint.get('epoch', 0))
             loaded_phase_name = checkpoint.get("phase_name", phase_name_for_epoch(loaded_checkpoint_epoch))
+            loaded_ema_state = checkpoint.get("ema")
             # Unwrap for loading
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.load_state_dict(checkpoint['model'])
@@ -2002,6 +2149,40 @@ def train(args, accelerator):
         if accelerator.is_main_process:
             print(f"\n🚀 Starting fresh training from Epoch 0\n")
 
+    ema = None
+    if ema_enabled:
+        ema = ExponentialMovingAverage(
+            accelerator.unwrap_model(model),
+            decay=ema_decay,
+            on_cpu=ema_on_cpu,
+        )
+        if loaded_ema_state is not None:
+            ema.load_state_dict(loaded_ema_state)
+            if accelerator.is_main_process:
+                print("✅ Restored EMA state from checkpoint.")
+        elif accelerator.is_main_process:
+            print("✅ Initialized fresh EMA shadow from current model weights.")
+
+    def make_checkpoint_payload(epoch_num, model_state, extra_metrics=None, raw_model_state=None):
+        payload = {
+            'epoch': epoch_num,
+            'model': model_state,
+            'optimizer': optimizer.state_dict() if optimizer is not None else None,
+            'best_val_loss': best_val_loss,
+            'phase_name': current_phase,
+            'is_variance_phase': False,
+        }
+        if top_models:
+            payload['top_models'] = top_models
+        if ema is not None:
+            payload['ema'] = ema.state_dict()
+            payload['ema_decay'] = ema.decay
+            if raw_model_state is not None:
+                payload['raw_model'] = raw_model_state
+        if extra_metrics:
+            payload.update(extra_metrics)
+        return payload
+
     if not args.test and start_epoch > epochs:
         if accelerator.is_main_process:
             print(
@@ -2012,7 +2193,7 @@ def train(args, accelerator):
 
     if not args.test:
         for param_group in optimizer.param_groups:
-            param_group["lr"] = train_learning_rate
+            param_group["lr"] = get_train_learning_rate(start_epoch)
             param_group["weight_decay"] = weight_decay
         
     # ---------------------------------------------------------
@@ -2279,12 +2460,19 @@ def train(args, accelerator):
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
 
+        current_train_lr = get_train_learning_rate(epoch)
+        if optimizer is not None:
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_train_lr
+
         model.train()
         train_loss = 0.0
         train_crps_pr_total = 0.0
         train_crps_t2m_total = 0.0
         train_crps_steps = 0
         phase_label = "CRPS" if crps_loss else "VelMSE"
+        if accelerator.is_main_process:
+            print(f"🔧 Epoch {epoch} LR: {current_train_lr:.2e}")
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             # Conditionals
@@ -2373,6 +2561,8 @@ def train(args, accelerator):
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
+            if ema is not None:
+                ema.update(accelerator.unwrap_model(model))
             optimizer.zero_grad(set_to_none=True)
 
             train_loss += loss.item()
@@ -2403,16 +2593,10 @@ def train(args, accelerator):
         # ---------------------------------------------------------
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
-            ckpt = {
-                'epoch': epoch,
-                'model': unwrapped_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'best_val_loss': best_val_loss,
-                'top_models': top_models,
-                'phase_name': current_phase,
-                'is_variance_phase': False,
-            }
-            torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
+            torch.save(
+                make_checkpoint_payload(epoch, unwrapped_model.state_dict()),
+                os.path.join(output_dir, "latest_flow_ckpt.pt"),
+            )
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
         # Phase 1 (epoch <= phase_transition_epoch): MSE-based validation & best model tracking
@@ -2459,218 +2643,292 @@ def train(args, accelerator):
             else:
                 print(f"\n⌛ Epoch {epoch} complete. Starting Fast Validation (Noise MSE)...")
         
-        # ============================================================
-        #  CRPS-based validation
-        # ============================================================
-        if use_crps_phase:
-            val_result = run_val_inference(
-                epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
-                target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-                is_test=False, is_fast_recon=True, use_flow_variance=inference_use_flow_variance,
-                use_eof_lhs_noise=inference_use_eof_lhs_noise,
-                validation_noise_cache=validation_noise_cache,
-                print_validation_noise_diag=True,
-                cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
-                cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
-                eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-                validation_num_ensemble=validation_num_ensemble,
-                validation_num_steps=validation_num_steps,
-                validation_ode_batch_size=validation_ode_batch_size,
-                validation_rho_pr=validation_rho_pr,
-                validation_rho_t2m=validation_rho_t2m,
-                validation_var_beta_pr=validation_var_beta_pr,
-                validation_var_beta_t2m=validation_var_beta_t2m,
-                validation_variance_coarse_kernel=validation_variance_coarse_kernel,
-            )
-            current_val_metric = val_result['combined_crps']
-            if global_cached_geos_crps is None:
-                global_cached_geos_crps = val_result['avg_geos_crps_pr']
-                global_cached_geos_rmse = val_result['avg_geos_rmse_pr']
-                global_cached_geos_crps_t2m = val_result['avg_geos_crps_t2m']
-                global_cached_geos_rmse_t2m = val_result['avg_geos_rmse_t2m']
+        preview_val_result = None
+        val_result = None
+        current_val_metric = None
+        eval_model = accelerator.unwrap_model(model)
+        if ema is not None:
+            ema.store(eval_model)
+            ema.copy_to(eval_model)
             if accelerator.is_main_process:
-                print(f"✅ CRPS Done. Combined: {current_val_metric:.4f} | PR: {val_result['avg_crps_pr']:.4f} | T2M: {val_result['avg_crps_t2m']:.4f}")
-                is_new_best = (current_val_metric < best_val_loss)
-                if is_new_best:
-                    print(f"🏆 NEW BEST (CRPS)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
-                    best_val_loss = current_val_metric
-                    new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
-                    new_best_path = os.path.join(output_dir, new_best_name)
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    best_ckpt = {
-                        'epoch': epoch,
-                        'model': unwrapped_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'phase_name': current_phase,
-                        'is_variance_phase': False,
-                    }
-                    torch.save(best_ckpt, new_best_path)
-                    torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
-                    registry_path = os.path.join(output_dir, "model_registry.json")
-                    registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
-                    registry.append({"rank": 0, "path": new_best_path, "val_loss": current_val_metric, "epoch": epoch, "metric": "combined_crps"})
-                    registry.sort(key=lambda x: x['val_loss'])
-                    for i, entry in enumerate(registry): entry['rank'] = i + 1
-                    with open(registry_path, 'w') as f: json.dump(registry, f, indent=2)
-                    print(f"📋 Registry: {len(registry)} models tracked.")
-                    vt = val_result['tensors']
-                    save_val_plot(epoch, vt['full_pred'], vt['true_target'], val_result['avg_crps_pr'], val_result['avg_rmse_pr'],
-                                  vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], output_dir,
-                                  ai_residual=vt['ai_res'], suffix="best_crps", geos_single=vt['geos_single'],
-                                  model_single=vt['model_single'], model_var=vt['model_var'],
-                                  full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
-                                  geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
-                                  model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
-                                  geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
-                    print(f"📸 Validation plot saved for Epoch {epoch}.")
-                if epoch % 5 == 0:
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    torch.save({
-                        'epoch': epoch,
-                        'model': unwrapped_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'phase_name': current_phase,
-                        'is_variance_phase': False,
-                    },
-                               os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt"))
-                    print(f"💾 Periodic checkpoint: periodic_ckpt_epoch_{epoch}.pt")
-                unwrapped_model = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch,
-                    'model': unwrapped_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'phase_name': current_phase,
-                    'is_variance_phase': False,
-                },
-                           os.path.join(output_dir, "latest_flow_ckpt.pt"))
-                with open(log_file, "a") as f: csv.writer(f).writerow([epoch, avg_train_loss, current_val_metric, val_result['avg_crps_pr']])
-        # ============================================================
-        #  Phase 1 (epoch <= phase_transition_epoch): MSE-based validation
-        # ============================================================
-        else:
-            model.eval()
-            val_loss_total = 0.0
-            val_steps = 0
-            
-            with torch.no_grad():
-                for b_idx, batch in enumerate(val_loader_full):
-                    x_geos = batch['x_geos'].to(device)
-                    x_obs  = batch['x_obs'].to(device)
-                    B = x_geos.shape[0]
-                    H, W = x_obs.shape[-2], x_obs.shape[-1]
-                    x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
-                    months = batch['month'].to(device)
-                    sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
-                    cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
-                    lead_idx = batch['lead_idx'].to(device)
-                    lead_val = (lead_idx.float() / 1.5) - 1.0 
-                    lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
-                    x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
-                    target_norm = batch['y_target'].to(device)
-                    t, noise = sample_deterministic_validation_state(
-                        target_norm, b_idx, mse_validation_seed, device
-                    )
-                    x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
-                    v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
-                    w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
-                    temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
-                    
-                    loss_vel = (spatial_weights * temp_weights * (v_pred - v_target)**2).mean()
-                    loss_var = compute_multi_variance_loss(
-                        var_pred=var_pred,
-                        v_pred=v_pred,
-                        v_target=v_target,
-                        spatial_weights=spatial_weights,
-                        temp_weights=temp_weights,
-                    )
-                    _ = loss_var
-                    loss_val = loss_vel
-                    val_loss_total += loss_val.item()
-                    val_steps += 1
-        
-            current_val_metric = val_loss_total / max(1, val_steps)
-            
-            if accelerator.is_main_process:
-                print(f"✅ MSE Validation Complete. Avg Loss: {current_val_metric:.4f}")
+                print("   Using EMA weights for validation and best-model selection.")
 
-                is_new_best = (current_val_metric < best_val_loss)
-                
-                if is_new_best:
-                    print(f"🏆 NEW BEST (MSE)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
-                    best_val_loss = current_val_metric
-
-                    new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
-                    new_best_path = os.path.join(output_dir, new_best_name)
-                    unwrapped_model = accelerator.unwrap_model(model)
-                    best_ckpt = {
-                        'epoch': epoch,
-                        'model': unwrapped_model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'phase_name': current_phase,
-                        'is_variance_phase': False,
-                    }
-                    torch.save(best_ckpt, new_best_path)
-                    torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
-                    registry_path = os.path.join(output_dir, "model_registry.json")
-                    registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
-                    registry.append({"rank": 0, "path": new_best_path, "val_loss": current_val_metric, "epoch": epoch, "metric": "mse"})
-                    registry.sort(key=lambda x: x['val_loss'])
-                    for i, entry in enumerate(registry): entry['rank'] = i + 1
-                    with open(registry_path, 'w') as f: json.dump(registry, f, indent=2)
-                    print(f"📋 Registry: {len(registry)} models tracked.")
-                
-                    if epoch >= 20:
-                        print(f"📊 Generating PR+T2M validation plot for Epoch {epoch}...")
-                        val_result = run_val_inference(
-                            epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
-                            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-                            is_test=False, is_fast_recon=True,
-                            use_flow_variance=inference_use_flow_variance,
-                            use_eof_lhs_noise=inference_use_eof_lhs_noise,
-                            validation_noise_cache=validation_noise_cache,
-                            print_validation_noise_diag=False,
-                            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-                            validation_num_ensemble=validation_num_ensemble,
-                            validation_num_steps=validation_num_steps,
-                            validation_ode_batch_size=validation_ode_batch_size,
-                            validation_rho_pr=validation_rho_pr,
-                            validation_rho_t2m=validation_rho_t2m,
-                            validation_var_beta_pr=validation_var_beta_pr,
-                            validation_var_beta_t2m=validation_var_beta_t2m,
-                            validation_variance_coarse_kernel=validation_variance_coarse_kernel,
+        try:
+            # ============================================================
+            #  CRPS-based validation
+            # ============================================================
+            if use_crps_phase:
+                val_result = run_val_inference(
+                    epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file,
+                    target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
+                    is_test=False, is_fast_recon=True, use_flow_variance=inference_use_flow_variance,
+                    use_eof_lhs_noise=inference_use_eof_lhs_noise,
+                    validation_noise_cache=validation_noise_cache,
+                    print_validation_noise_diag=True,
+                    cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
+                    cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
+                    eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                    enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+                    t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                    validation_num_ensemble=validation_num_ensemble,
+                    validation_num_steps=validation_num_steps,
+                    validation_ode_batch_size=validation_ode_batch_size,
+                    validation_rho_pr=validation_rho_pr,
+                    validation_rho_t2m=validation_rho_t2m,
+                    validation_var_beta_pr=validation_var_beta_pr,
+                    validation_var_beta_t2m=validation_var_beta_t2m,
+                    validation_variance_coarse_kernel=validation_variance_coarse_kernel,
+                )
+                current_val_metric = val_result['combined_crps']
+                if global_cached_geos_crps is None:
+                    global_cached_geos_crps = val_result['avg_geos_crps_pr']
+                    global_cached_geos_rmse = val_result['avg_geos_rmse_pr']
+                    global_cached_geos_crps_t2m = val_result['avg_geos_crps_t2m']
+                    global_cached_geos_rmse_t2m = val_result['avg_geos_rmse_t2m']
+                if accelerator.is_main_process:
+                    print(f"✅ CRPS Done. Combined: {current_val_metric:.4f} | PR: {val_result['avg_crps_pr']:.4f} | T2M: {val_result['avg_crps_t2m']:.4f}")
+                    is_new_best = (current_val_metric < best_val_loss)
+                    if is_new_best:
+                        print(f"🏆 NEW BEST (CRPS)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
+                        best_val_loss = current_val_metric
+                        new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
+                        new_best_path = os.path.join(output_dir, new_best_name)
+                        best_ckpt = make_checkpoint_payload(
+                            epoch,
+                            eval_model.state_dict(),
+                            extra_metrics={
+                                'rollout_combined_crps': val_result['combined_crps'],
+                                'rollout_pr_crps': val_result['avg_crps_pr'],
+                                'rollout_t2m_crps': val_result['avg_crps_t2m'],
+                                'ema_eval': ema is not None,
+                            },
+                            raw_model_state=ema.backup if ema is not None else None,
                         )
+                        torch.save(best_ckpt, new_best_path)
+                        torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
+                        registry_path = os.path.join(output_dir, "model_registry.json")
+                        registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
+                        registry.append({
+                            "rank": 0,
+                            "path": new_best_path,
+                            "val_loss": current_val_metric,
+                            "epoch": epoch,
+                            "metric": "combined_crps",
+                            "ema_eval": ema is not None,
+                            "rollout_combined_crps": val_result['combined_crps'],
+                        })
+                        registry.sort(key=lambda x: x['val_loss'])
+                        for i, entry in enumerate(registry):
+                            entry['rank'] = i + 1
+                        with open(registry_path, 'w') as f:
+                            json.dump(registry, f, indent=2)
+                        print(f"📋 Registry: {len(registry)} models tracked.")
                         vt = val_result['tensors']
-                        save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
-                                      val_result['avg_crps_pr'], val_result['avg_rmse_pr'], 
-                                      vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], 
-                                      output_dir, ai_residual=vt['ai_res'], suffix="best",
-                                      geos_single=vt['geos_single'], model_single=vt['model_single'], model_var=vt['model_var'],
-                                      full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
-                                      geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
-                                      model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
-                                      geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
+                        save_val_plot(
+                            epoch, vt['full_pred'], vt['true_target'], val_result['avg_crps_pr'], val_result['avg_rmse_pr'],
+                            vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], output_dir,
+                            ai_residual=vt['ai_res'], suffix="best_crps", geos_single=vt['geos_single'],
+                            model_single=vt['model_single'], model_var=vt['model_var'],
+                            full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
+                            geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
+                            model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
+                            geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m']
+                        )
                         print(f"📸 Validation plot saved for Epoch {epoch}.")
+                    with open(log_file, "a") as f:
+                        csv.writer(f).writerow([
+                            epoch,
+                            avg_train_loss,
+                            "",
+                            current_val_metric,
+                            val_result['avg_crps_pr'],
+                            val_result['avg_crps_t2m'],
+                        ])
+            # ============================================================
+            #  Phase 1 (epoch <= phase_transition_epoch): MSE-based validation
+            # ============================================================
+            else:
+                model.eval()
+                val_loss_total = 0.0
+                val_steps = 0
 
-                unwrapped_model = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch,
-                    'model': unwrapped_model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'best_val_loss': best_val_loss,
-                    'phase_name': current_phase,
-                    'is_variance_phase': False,
-                },
-                           os.path.join(output_dir, "latest_flow_ckpt.pt"))
-                with open(log_file, "a") as f:
-                    csv.writer(f).writerow([epoch, avg_train_loss, 0.0, current_val_metric])
+                with torch.no_grad():
+                    for b_idx, batch in enumerate(val_loader_full):
+                        x_geos = batch['x_geos'].to(device)
+                        x_obs  = batch['x_obs'].to(device)
+                        B = x_geos.shape[0]
+                        H, W = x_obs.shape[-2], x_obs.shape[-1]
+                        x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
+                        months = batch['month'].to(device)
+                        sin_month = torch.sin(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                        cos_month = torch.cos(2 * np.pi * (months - 1) / 12).view(B, 1, 1, 1).expand(B, 1, H, W)
+                        lead_idx = batch['lead_idx'].to(device)
+                        lead_val = (lead_idx.float() / 1.5) - 1.0
+                        lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
+                        x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
+                        target_norm = batch['y_target'].to(device)
+                        t, noise = sample_deterministic_validation_state(
+                            target_norm, b_idx, mse_validation_seed, device
+                        )
+                        x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+                        v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+                        w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
+                        temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
+
+                        loss_vel = (spatial_weights * temp_weights * (v_pred - v_target)**2).mean()
+                        loss_var = compute_multi_variance_loss(
+                            var_pred=var_pred,
+                            v_pred=v_pred,
+                            v_target=v_target,
+                            spatial_weights=spatial_weights,
+                            temp_weights=temp_weights,
+                        )
+                        _ = loss_var
+                        loss_val = loss_vel
+                        val_loss_total += loss_val.item()
+                        val_steps += 1
+
+                current_val_metric = val_loss_total / max(1, val_steps)
+
+                if epoch >= mse_rollout_validation_start_epoch:
+                    preview_loader = val_loader_monthly if mse_rollout_validation_use_monthly_subset else val_loader_full
+                    preview_val_result = run_val_inference(
+                        epoch, model, preview_loader, flow_matcher, device, accelerator, output_dir, log_file,
+                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
+                        is_test=False, is_fast_recon=True,
+                        use_flow_variance=inference_use_flow_variance,
+                        use_eof_lhs_noise=inference_use_eof_lhs_noise,
+                        validation_noise_cache=validation_noise_cache,
+                        print_validation_noise_diag=False,
+                        cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
+                        cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
+                        eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                        enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+                        t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                        validation_num_ensemble=mse_rollout_validation_num_ensemble,
+                        validation_num_steps=mse_rollout_validation_num_steps,
+                        validation_ode_batch_size=mse_rollout_validation_ode_batch_size,
+                        validation_rho_pr=validation_rho_pr,
+                        validation_rho_t2m=validation_rho_t2m,
+                        validation_var_beta_pr=validation_var_beta_pr,
+                        validation_var_beta_t2m=validation_var_beta_t2m,
+                        validation_variance_coarse_kernel=validation_variance_coarse_kernel,
+                    )
+                    if global_cached_geos_crps is None:
+                        global_cached_geos_crps = preview_val_result['avg_geos_crps_pr']
+                        global_cached_geos_rmse = preview_val_result['avg_geos_rmse_pr']
+                        global_cached_geos_crps_t2m = preview_val_result['avg_geos_crps_t2m']
+                        global_cached_geos_rmse_t2m = preview_val_result['avg_geos_rmse_t2m']
+
+                if accelerator.is_main_process:
+                    print(f"✅ MSE Validation Complete. Avg Loss: {current_val_metric:.4f}")
+                    if preview_val_result is not None:
+                        print(
+                            f"   ↳ Cheap Rollout Preview: Combined CRPS {preview_val_result['combined_crps']:.4f} "
+                            f"| PR {preview_val_result['avg_crps_pr']:.4f} | T2M {preview_val_result['avg_crps_t2m']:.4f}"
+                        )
+
+                    is_new_best = (current_val_metric < best_val_loss)
+
+                    if is_new_best:
+                        print(f"🏆 NEW BEST (MSE)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
+                        best_val_loss = current_val_metric
+
+                        new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
+                        new_best_path = os.path.join(output_dir, new_best_name)
+                        best_extra = {
+                            'mse_proxy_loss': current_val_metric,
+                            'ema_eval': ema is not None,
+                        }
+                        if preview_val_result is not None:
+                            best_extra.update({
+                                'rollout_combined_crps': preview_val_result['combined_crps'],
+                                'rollout_pr_crps': preview_val_result['avg_crps_pr'],
+                                'rollout_t2m_crps': preview_val_result['avg_crps_t2m'],
+                            })
+                        best_ckpt = make_checkpoint_payload(
+                            epoch,
+                            eval_model.state_dict(),
+                            extra_metrics=best_extra,
+                            raw_model_state=ema.backup if ema is not None else None,
+                        )
+                        torch.save(best_ckpt, new_best_path)
+                        torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
+                        registry_path = os.path.join(output_dir, "model_registry.json")
+                        registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
+                        registry_entry = {
+                            "rank": 0,
+                            "path": new_best_path,
+                            "val_loss": current_val_metric,
+                            "epoch": epoch,
+                            "metric": "mse",
+                            "ema_eval": ema is not None,
+                        }
+                        if preview_val_result is not None:
+                            registry_entry["rollout_combined_crps"] = preview_val_result['combined_crps']
+                        registry.append(registry_entry)
+                        registry.sort(key=lambda x: x['val_loss'])
+                        for i, entry in enumerate(registry):
+                            entry['rank'] = i + 1
+                        with open(registry_path, 'w') as f:
+                            json.dump(registry, f, indent=2)
+                        print(f"📋 Registry: {len(registry)} models tracked.")
+
+                        if preview_val_result is not None:
+                            vt = preview_val_result['tensors']
+                            save_val_plot(
+                                epoch, vt['full_pred'], vt['true_target'],
+                                preview_val_result['avg_crps_pr'], preview_val_result['avg_rmse_pr'],
+                                vt['geos_mean'], preview_val_result['avg_geos_crps_pr'], preview_val_result['avg_geos_rmse_pr'],
+                                output_dir, ai_residual=vt['ai_res'], suffix="best",
+                                geos_single=vt['geos_single'], model_single=vt['model_single'], model_var=vt['model_var'],
+                                full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
+                                geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
+                                model_crps_t2m=preview_val_result['avg_crps_t2m'], model_rmse_t2m=preview_val_result['avg_rmse_t2m'],
+                                geos_crps_t2m=preview_val_result['avg_geos_crps_t2m'], geos_rmse_t2m=preview_val_result['avg_geos_rmse_t2m']
+                            )
+                            print(f"📸 Validation plot saved for Epoch {epoch}.")
+
+                    with open(log_file, "a") as f:
+                        csv.writer(f).writerow([
+                            epoch,
+                            avg_train_loss,
+                            current_val_metric,
+                            preview_val_result['combined_crps'] if preview_val_result is not None else "",
+                            preview_val_result['avg_crps_pr'] if preview_val_result is not None else "",
+                            preview_val_result['avg_crps_t2m'] if preview_val_result is not None else "",
+                        ])
+        finally:
+            if ema is not None:
+                ema.restore(eval_model)
+
+        if accelerator.is_main_process:
+            unwrapped_model = accelerator.unwrap_model(model)
+            latest_extra = {}
+            if use_crps_phase and val_result is not None:
+                latest_extra.update({
+                    'rollout_combined_crps': val_result['combined_crps'],
+                    'rollout_pr_crps': val_result['avg_crps_pr'],
+                    'rollout_t2m_crps': val_result['avg_crps_t2m'],
+                })
+            if not use_crps_phase:
+                latest_extra['mse_proxy_loss'] = current_val_metric
+                if preview_val_result is not None:
+                    latest_extra.update({
+                        'rollout_combined_crps': preview_val_result['combined_crps'],
+                        'rollout_pr_crps': preview_val_result['avg_crps_pr'],
+                        'rollout_t2m_crps': preview_val_result['avg_crps_t2m'],
+                    })
+            torch.save(
+                make_checkpoint_payload(epoch, unwrapped_model.state_dict(), extra_metrics=latest_extra),
+                os.path.join(output_dir, "latest_flow_ckpt.pt"),
+            )
+            if use_crps_phase and epoch % 5 == 0:
+                torch.save(
+                    make_checkpoint_payload(epoch, unwrapped_model.state_dict(), extra_metrics=latest_extra),
+                    os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt"),
+                )
+                print(f"💾 Periodic checkpoint: periodic_ckpt_epoch_{epoch}.pt")
 
         # Track progress for this execution session
         epochs_done_this_run += 1

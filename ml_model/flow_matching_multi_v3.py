@@ -10,7 +10,9 @@ HEAD_FEATURES = 64
 HEAD_HIDDEN = 64
 HEAD_BOTTLENECK = 32
 CONTEXT_HIDDEN = 128
-UNET_BLOCK_OUT_CHANNELS = (128, 256, 512, 640)
+# Default v3 width: only widen the deepest stage so we gain bottleneck capacity
+# while keeping the higher-resolution attention blocks unchanged.
+UNET_BLOCK_OUT_CHANNELS = (128, 256, 512, 768)
 
 
 def _num_groups(channels, max_groups=8):
@@ -67,11 +69,18 @@ class FlowMatchingModel(nn.Module):
     slow-varying context influence the shared backbone.
     """
 
-    def __init__(self, in_channels=37, out_channels=2):
+    def __init__(self, in_channels=37, out_channels=2, block_out_channels=None):
         super().__init__()
 
         self.in_channels = in_channels
         self.cond_channels = in_channels - out_channels
+        if block_out_channels is None:
+            block_out_channels = UNET_BLOCK_OUT_CHANNELS
+        self.block_out_channels = tuple(int(c) for c in block_out_channels)
+        if len(self.block_out_channels) != 4:
+            raise ValueError(
+                f"Expected 4 UNet block widths, got {self.block_out_channels}."
+            )
         if self.cond_channels <= 0:
             raise ValueError(
                 f"Expected conditioning channels in addition to {out_channels} flow channels, "
@@ -95,10 +104,10 @@ class FlowMatchingModel(nn.Module):
             in_channels=in_channels,
             out_channels=HEAD_FEATURES,  # Intermediate feature space
             layers_per_block=2,
-            # A modest v3 widening: only the deepest stage grows beyond v1.
-            # This adds capacity where the feature maps are smallest, which is
-            # the safest place to spend extra VRAM.
-            block_out_channels=UNET_BLOCK_OUT_CHANNELS,
+            # A modest v3 widening: only the deepest stage grows beyond v1 by
+            # default. This adds capacity where the feature maps are smallest,
+            # which is the safest place to spend extra VRAM.
+            block_out_channels=self.block_out_channels,
             down_block_types=(
                 "DownBlock2D",       # 181x360
                 "DownBlock2D",       # 90x180
