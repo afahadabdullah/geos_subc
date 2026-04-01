@@ -1875,6 +1875,7 @@ def train(args, accelerator):
     test_num_ensemble = int(config.get("test_num_ensemble", 90))
     test_num_steps = int(config.get("test_num_steps", 10))
     test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
+    mse_rollout_validation_enabled = bool(config.get("mse_rollout_validation_enabled", True))
     mse_rollout_validation_num_ensemble = int(config.get("mse_rollout_validation_num_ensemble", 4))
     mse_rollout_validation_num_steps = int(config.get("mse_rollout_validation_num_steps", 4))
     mse_rollout_validation_ode_batch_size = int(
@@ -1962,12 +1963,15 @@ def train(args, accelerator):
             f"steps={crps_validation_num_steps}, chunk={crps_validation_ode_batch_size}, "
             f"pure_noise={not crps_validation_use_eof_lhs_noise and not crps_validation_use_flow_variance}"
         )
-        print(
-            f"   [MSE Rollout Preview]: ens={mse_rollout_validation_num_ensemble}, "
-            f"steps={mse_rollout_validation_num_steps}, chunk={mse_rollout_validation_ode_batch_size}, "
-            f"start_epoch={mse_rollout_validation_start_epoch}, "
-            f"dataset={'monthly' if mse_rollout_validation_use_monthly_subset else 'full'}"
-        )
+        if mse_rollout_validation_enabled:
+            print(
+                f"   [MSE Rollout Preview]: ens={mse_rollout_validation_num_ensemble}, "
+                f"steps={mse_rollout_validation_num_steps}, chunk={mse_rollout_validation_ode_batch_size}, "
+                f"start_epoch={mse_rollout_validation_start_epoch}, "
+                f"dataset={'monthly' if mse_rollout_validation_use_monthly_subset else 'full'}"
+            )
+        else:
+            print("   [MSE Rollout Preview]: disabled")
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
@@ -2873,7 +2877,7 @@ def train(args, accelerator):
 
                 current_val_metric = val_loss_total / max(1, val_steps)
 
-                if epoch >= mse_rollout_validation_start_epoch:
+                if mse_rollout_validation_enabled and epoch >= mse_rollout_validation_start_epoch:
                     preview_loader = val_loader_monthly if mse_rollout_validation_use_monthly_subset else val_loader_full
                     preview_val_result = run_val_inference(
                         epoch, model, preview_loader, flow_matcher, device, accelerator, output_dir, log_file,
