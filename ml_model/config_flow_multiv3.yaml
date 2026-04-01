@@ -29,7 +29,7 @@ mse_lr_decay_start_epoch: 8
 mse_lr_decay_end_epoch: 40
 mse_lr_min_factor: 0.1
 
-reset_validation_history: True
+reset_validation_history: False
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
