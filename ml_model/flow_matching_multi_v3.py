@@ -176,10 +176,10 @@ class FlowMatchingModel(nn.Module):
 
         # Route through dedicated per-week output heads
         if lead_idx is None:
-            output = self.heads[0](features, context)
+            output = self.heads[0](features, context).to(features.dtype)
             if not compute_variance:
                 return output, None
-            return output, F.softplus(self.var_heads[0](features, context))
+            return output, F.softplus(self.var_heads[0](features, context)).to(features.dtype)
 
         B = features.shape[0]
         output = torch.zeros(B, self.out_channels, orig_H, orig_W, device=features.device, dtype=features.dtype)
