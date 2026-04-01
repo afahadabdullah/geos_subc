@@ -62,7 +62,7 @@ fi
 
 echo "🔥 Launching multi-v3 training..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv3.py --config "$CONFIG_PATH" \
-    --epochs-per-run 20
+    --epochs-per-run 15
 
 # --- AUTOMATIC JOB CHAINING ---
 echo "🔄 Checking if we need to resubmit..."
