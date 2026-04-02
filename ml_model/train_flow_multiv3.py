@@ -977,7 +977,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             filtered_batch = {}
             for key, value in batch.items():
                 if torch.is_tensor(value) and value.ndim > 0 and value.shape[0] == row_count:
-                    filtered_batch[key] = value.index_select(0, row_indices)
+                    filtered_batch[key] = value.index_select(0, row_indices.to(value.device))
                 else:
                     filtered_batch[key] = value
             batch = filtered_batch
