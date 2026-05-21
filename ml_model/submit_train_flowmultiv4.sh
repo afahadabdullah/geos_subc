@@ -15,8 +15,15 @@ set -eo pipefail
 echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
 
 # Environment Setup
+echo "🔧 Loading ~/.bashrc..."
+set +e
 source ~/.bashrc
+BASHRC_STATUS=$?
+set -e
+echo "🔧 ~/.bashrc exit status: $BASHRC_STATUS"
+echo "🔧 Activating conda environment: geossub_env"
 conda activate geossub_env
+echo "✅ Conda environment active: ${CONDA_PREFIX:-unset}"
 
 # Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
