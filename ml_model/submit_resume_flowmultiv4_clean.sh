@@ -18,6 +18,7 @@ ENV_NAME="${ENV_NAME:-geossub_env}"
 CONFIG_PATH="${CONFIG_PATH:-ml_model/config_flow_multiv4.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-ml_output_flowmulti_v4}"
 EPOCHS_PER_RUN="${EPOCHS_PER_RUN:-1}"
+ALLOW_EXTEND_EPOCHS="${ALLOW_EXTEND_EPOCHS:-1}"
 HOME_STATS="${HOME_STATS:-/home1/11353/afahad/geos_subc/ml_model/v1_multi_global_stats.pt}"
 
 echo "Resume job started: $(date) on $(hostname)"
@@ -78,6 +79,7 @@ python -c "import torch; d=torch.load('$STATS_PATH', weights_only=True); print('
 CKPT_FILE="$OUTPUT_DIR/latest_flow_ckpt.pt"
 MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))")
 MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))")
+RUN_CONFIG_PATH="$CONFIG_PATH"
 
 echo "Max epochs: $MAX_EPOCHS"
 echo "Mixed precision: $MIXED_PRECISION"
@@ -86,11 +88,28 @@ if [ -f "$CKPT_FILE" ]; then
     CURRENT_EPOCH=$(python -c "import torch; ckpt=torch.load('$CKPT_FILE', map_location='cpu', weights_only=True); print(int(ckpt.get('epoch', -1)))")
     echo "Resuming from checkpoint: $CKPT_FILE"
     echo "Current checkpoint epoch: $CURRENT_EPOCH / $MAX_EPOCHS"
+    if [ "$ALLOW_EXTEND_EPOCHS" = "1" ] && [ "$CURRENT_EPOCH" -ge "$MAX_EPOCHS" ]; then
+        EXTENDED_MAX_EPOCH=$((CURRENT_EPOCH + EPOCHS_PER_RUN))
+        RUN_CONFIG_PATH="$OUTPUT_DIR/resume_config_${SLURM_JOB_ID:-manual}.yaml"
+        echo "Checkpoint is already at configured max. Creating temporary resume config with epochs=$EXTENDED_MAX_EPOCH"
+        python - <<PY
+import yaml
+config_path = "$CONFIG_PATH"
+run_config_path = "$RUN_CONFIG_PATH"
+with open(config_path) as f:
+    cfg = yaml.safe_load(f)
+cfg["epochs"] = int("$EXTENDED_MAX_EPOCH")
+with open(run_config_path, "w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+print(f"Wrote {run_config_path}")
+PY
+        MAX_EPOCHS="$EXTENDED_MAX_EPOCH"
+    fi
 else
     echo "No latest checkpoint found at $CKPT_FILE; training will start from scratch."
 fi
 
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" \
     ml_model/train_flow_multiv4.py \
-    --config "$CONFIG_PATH" \
+    --config "$RUN_CONFIG_PATH" \
     --epochs-per-run "$EPOCHS_PER_RUN"
