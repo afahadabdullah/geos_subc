@@ -21,6 +21,28 @@ source ~/.bashrc
 BASHRC_STATUS=$?
 set -e
 echo "🔧 ~/.bashrc exit status: $BASHRC_STATUS"
+if ! command -v conda >/dev/null 2>&1; then
+    echo "🔧 conda not found after ~/.bashrc; searching for conda.sh..."
+    for CONDA_SH in \
+        "$HOME/miniconda3/etc/profile.d/conda.sh" \
+        "$HOME/anaconda3/etc/profile.d/conda.sh" \
+        "$HOME/miniforge3/etc/profile.d/conda.sh" \
+        "$HOME/mambaforge/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/miniconda3/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/anaconda3/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/miniforge3/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/mambaforge/etc/profile.d/conda.sh"; do
+        if [ -f "$CONDA_SH" ]; then
+            echo "🔧 Sourcing $CONDA_SH"
+            source "$CONDA_SH"
+            break
+        fi
+    done
+fi
+if ! command -v conda >/dev/null 2>&1; then
+    echo "❌ conda command is still unavailable. Check the conda install path on Vista."
+    exit 1
+fi
 echo "🔧 Activating conda environment: geossub_env"
 conda activate geossub_env
 echo "✅ Conda environment active: ${CONDA_PREFIX:-unset}"
