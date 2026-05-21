@@ -14,66 +14,33 @@ set -eo pipefail
 
 echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
 
-# Environment Setup
-echo "🔧 Loading ~/.bashrc..."
-set +e
-source ~/.bashrc
-BASHRC_STATUS=$?
-set -e
-echo "🔧 ~/.bashrc exit status: $BASHRC_STATUS"
-echo "🔧 Clearing any stale conda shell definitions..."
-unset -f conda __conda_activate __conda_reactivate __conda_hashr 2>/dev/null || true
-unalias conda 2>/dev/null || true
-hash -r 2>/dev/null || true
+# Move to Scratch storage before activating the repo-local environment.
+PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
+cd "$PROJECT_DIR" || exit 1
 
-if [ -n "${CONDA_SH:-}" ] && [ -f "$CONDA_SH" ]; then
-    echo "🔧 Sourcing CONDA_SH override: $CONDA_SH"
-    source "$CONDA_SH"
-fi
+# Environment Setup: use the repo-local conda created by setup_env.sh.
+CONDA_DIR="${CONDA_DIR:-$PROJECT_DIR/miniconda}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-geossub_env}"
+CONDA_ENV_PATH="$CONDA_DIR/envs/$CONDA_ENV_NAME"
 
-if ! command -v conda >/dev/null 2>&1; then
-    echo "🔧 conda not found; searching for conda.sh..."
-    for CONDA_SH in \
-        "$HOME/miniconda3/etc/profile.d/conda.sh" \
-        "$HOME/miniconda/etc/profile.d/conda.sh" \
-        "$HOME/anaconda3/etc/profile.d/conda.sh" \
-        "$HOME/miniforge3/etc/profile.d/conda.sh" \
-        "$HOME/mambaforge/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/miniconda3/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/miniconda/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/anaconda3/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/miniforge3/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/mambaforge/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/geossub/geos_subc/miniconda/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/geossub/geos_subc/miniconda3/etc/profile.d/conda.sh" \
-        "/scratch/11353/afahad/geossub/miniconda/etc/profile.d/conda.sh" \
-        "/scratch/11353/afahad/geossub/miniconda3/etc/profile.d/conda.sh" \
-        "/scratch/11353/afahad/geossub/geos_subc/miniconda/etc/profile.d/conda.sh" \
-        "/scratch/11353/afahad/geossub/geos_subc/miniconda3/etc/profile.d/conda.sh"; do
-        if [ -f "$CONDA_SH" ]; then
-            echo "🔧 Sourcing $CONDA_SH"
-            source "$CONDA_SH"
-            break
-        fi
-    done
-fi
-if ! command -v conda >/dev/null 2>&1; then
-    echo "❌ conda command is still unavailable. Check the conda install path on Vista."
-    echo "   Tip: find /home1/11353/afahad /scratch/11353/afahad -maxdepth 7 -path '*/etc/profile.d/conda.sh' -print 2>/dev/null"
-    echo "   Then submit with: CONDA_SH=/path/to/conda.sh sbatch ml_model/submit_train_flowmultiv4.sh"
+echo "🔧 Using conda dir: $CONDA_DIR"
+if [ ! -f "$CONDA_DIR/bin/activate" ]; then
+    echo "❌ Missing $CONDA_DIR/bin/activate. Run: bash setup_env.sh"
     exit 1
 fi
-echo "🔧 Activating conda environment: geossub_env"
-conda activate geossub_env
+if [ ! -d "$CONDA_ENV_PATH" ]; then
+    echo "❌ Missing conda env at $CONDA_ENV_PATH. Run: bash setup_env.sh"
+    exit 1
+fi
+
+source "$CONDA_DIR/bin/activate" "$CONDA_ENV_PATH"
 echo "✅ Conda environment active: ${CONDA_PREFIX:-unset}"
 
 # Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
+export SYMPY_GROUND_TYPES=python
 export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
-
-# Move to Scratch storage
-cd /scratch/11353/afahad/geossub/geos_subc || exit 1
 
 # Cleanup zombie processes from previous failed runs (VRAM protection)
 echo "🧹 Cleaning up previous zombie processes..."
