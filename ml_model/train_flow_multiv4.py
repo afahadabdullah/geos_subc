@@ -25,7 +25,12 @@ from accelerate import Accelerator
 import pandas as pd
 
 # Local Modules
-from dataset_flow_multi import S2SHybridDataset
+from dataset_flow_multi import (
+    S2SHybridDataset,
+    crop_spatial_to_domain,
+    get_target_domain_coords,
+    resolve_target_domain,
+)
 from flow_matching_multi_v4 import FlowMatchingModel, CustomFlowMatcher
 import noise_utils
 import noise_utils_multi
@@ -112,7 +117,7 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
     mse_map = (pred - target)**2
     mask = ~torch.isnan(mse_map)
     if mask.any():
-        aw_expanded = area_weights.view(1, 1, 181, 1).expand_as(mse_map)
+        aw_expanded = area_weights.expand_as(mse_map)
         rmse = torch.sqrt((mse_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)).item()
     else:
         rmse = 0.0
@@ -588,6 +593,22 @@ def load_plot_coords(data_dir, year_hint):
             continue
 
     return np.linspace(-90, 90, 181), np.arange(360)
+
+
+def crop_eof_bases_to_domain(eof_bases, domain_info):
+    if eof_bases is None or domain_info is None:
+        return eof_bases
+
+    target_shape = (len(domain_info["lats"]), len(domain_info["lons"]))
+    cropped = {}
+    for key, value in eof_bases.items():
+        item = dict(value)
+        if "eofs" in item:
+            eof_shape = tuple(item["eofs"].shape[-2:])
+            if eof_shape != target_shape:
+                item["eofs"] = crop_spatial_to_domain(item["eofs"], domain_info)
+        cropped[key] = item
+    return cropped
 
 
 def compute_multi_variance_loss(
@@ -1539,31 +1560,53 @@ def train(args, accelerator):
     lr = float(config.get("learning_rate", 1e-4))
     weight_decay = float(config.get("weight_decay", 0.0))
 
+    target_domain = config.get("target_domain")
+    target_domain_bounds = config.get("target_domain_bounds")
+    domain_info = resolve_target_domain(target_domain, target_domain_bounds)
+    lats, lons = get_target_domain_coords(target_domain, target_domain_bounds)
+    grid_h, grid_w = len(lats), len(lons)
+
     # Area weights (needed early for diagnostic plot)
-    lats = np.linspace(-90, 90, 181)
     area_weights = get_area_weights(lats, device)
 
     # ─── Land-Ocean Mask (V6: 65% land / 35% ocean) ───
     # Derive from SSS data: NaN pixels = land, valid pixels = ocean
     # Cache to .pt file so we only need SSS once.
-    land_ocean_weights = torch.ones(1, 1, 181, 360, device=device)  # Default: uniform
-    mask_cache_path = os.path.join(os.path.dirname(__file__), "land_ocean_mask_v6.pt")
+    land_ocean_weights = torch.ones(1, 1, grid_h, grid_w, device=device)  # Default: uniform
+    domain_slug = "global" if domain_info is None else "".join(
+        c if c.isalnum() else "_" for c in str(target_domain or domain_info["label"]).lower()
+    ).strip("_")
+    mask_cache_name = "land_ocean_mask_v6.pt" if domain_info is None else f"land_ocean_mask_v6_{domain_slug}.pt"
+    mask_cache_path = os.path.join(os.path.dirname(__file__), mask_cache_name)
+    needs_mask_build = True
     
     if os.path.exists(mask_cache_path):
         # ── Load cached mask ──
         cached = torch.load(mask_cache_path, map_location=device, weights_only=True)
-        land_ocean_weights = cached['weights'].to(device)
-        if accelerator.is_main_process:
-            print(f"  ✅ V6 Land-Ocean Mask loaded from cache: {mask_cache_path}")
-            print(f"     Land pixels: {cached['n_land']}, weight = {cached['land_w']:.4f}")
-            print(f"     Ocean pixels: {cached['n_ocean']}, weight = {cached['ocean_w']:.4f}")
-    else:
+        cached_weights = cached['weights'].to(device)
+        if tuple(cached_weights.shape[-2:]) == (grid_h, grid_w):
+            land_ocean_weights = cached_weights
+            needs_mask_build = False
+            if accelerator.is_main_process:
+                print(f"  ✅ V6 Land-Ocean Mask loaded from cache: {mask_cache_path}")
+                print(f"     Land pixels: {cached['n_land']}, weight = {cached['land_w']:.4f}")
+                print(f"     Ocean pixels: {cached['n_ocean']}, weight = {cached['ocean_w']:.4f}")
+        elif accelerator.is_main_process:
+            print(
+                f"  ⚠️ Cached land-ocean mask shape {tuple(cached_weights.shape[-2:])} "
+                f"does not match target grid {(grid_h, grid_w)}. Rebuilding."
+            )
+
+    if needs_mask_build:
         # ── Create mask from SSS ──
         sss_sample_path = os.path.join(config["data_dir"], "sss_weekly_2020.zarr")
         if os.path.exists(sss_sample_path):
             try:
                 ds_sss = xr.open_zarr(sss_sample_path, consolidated=False)
                 sss_arr = ds_sss['sss'].isel(S=0, L=0).values  # [Y, X]
+                ds_sss.close()
+                if domain_info is not None:
+                    sss_arr = crop_spatial_to_domain(sss_arr, domain_info)
                 is_land = np.isnan(sss_arr)  # True = land
                 n_land = int(is_land.sum())
                 n_ocean = int((~is_land).sum())
@@ -1574,7 +1617,7 @@ def train(args, accelerator):
                     ocean_w = 0.35 * n_total / n_ocean
                     
                     mask_np = np.where(is_land, land_w, ocean_w).astype(np.float32)
-                    land_ocean_weights = torch.from_numpy(mask_np).to(device).view(1, 1, 181, 360)
+                    land_ocean_weights = torch.from_numpy(mask_np).to(device).view(1, 1, grid_h, grid_w)
                     
                     # Save cache for future runs
                     if accelerator.is_main_process:
@@ -1591,20 +1634,21 @@ def train(args, accelerator):
                         
                         # ── Diagnostic Plot ──
                         fig, axes = plt.subplots(1, 3, figsize=(24, 6))
+                        plot_extent = [float(lons.min()), float(lons.max()), float(lats.min()), float(lats.max())]
                         
                         im0 = axes[0].imshow(is_land.astype(float), cmap='RdYlGn', vmin=0, vmax=1,
-                                            extent=[-180, 180, -90, 90], aspect='auto')
+                                            extent=plot_extent, aspect='auto')
                         axes[0].set_title(f"Land-Ocean Mask (Green=Land, Red=Ocean)\nLand: {n_land} px ({n_land/n_total*100:.1f}%)")
                         fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
                         
                         im1 = axes[1].imshow(mask_np, cmap='hot_r',
-                                            extent=[-180, 180, -90, 90], aspect='auto')
+                                            extent=plot_extent, aspect='auto')
                         axes[1].set_title(f"Loss Weight Map\nLand w={land_w:.3f}, Ocean w={ocean_w:.3f}")
                         fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
                         
-                        combined = (area_weights.cpu().numpy().reshape(181, 1) * mask_np)
+                        combined = (area_weights.cpu().numpy().reshape(grid_h, 1) * mask_np)
                         im2 = axes[2].imshow(combined, cmap='magma',
-                                            extent=[-180, 180, -90, 90], aspect='auto')
+                                            extent=plot_extent, aspect='auto')
                         axes[2].set_title("Combined: Area Weight × Land-Ocean Weight")
                         fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
                         
@@ -1636,7 +1680,9 @@ def train(args, accelerator):
         normalize=True,
         preload=config.get("preload", False),
         stats_file=stats_filename,
-        subsample_monthly=False
+        subsample_monthly=False,
+        target_domain=target_domain,
+        target_domain_bounds=target_domain_bounds,
     )
 
     val_dataset_monthly = S2SHybridDataset(
@@ -1646,7 +1692,9 @@ def train(args, accelerator):
         normalize=True,
         preload=config.get("preload", False),
         stats_file=stats_filename,
-        subsample_monthly=True
+        subsample_monthly=True,
+        target_domain=target_domain,
+        target_domain_bounds=target_domain_bounds,
     )
 
     # Process multiple init dates per validation batch for speed (batch_size * 2 since we flattened leads)
@@ -1671,7 +1719,9 @@ def train(args, accelerator):
             end_year=config["train_end_year"],
             normalize=True,
             preload=config.get("preload", False),
-            stats_file=stats_filename
+            stats_file=stats_filename,
+            target_domain=target_domain,
+            target_domain_bounds=target_domain_bounds,
         )
         loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
@@ -1691,7 +1741,10 @@ def train(args, accelerator):
     
     geos_min = global_bounds["geos_pr_raw"]["min"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["min"]
     geos_max = global_bounds["geos_pr_raw"]["max"] if "geos_pr_raw" in global_bounds else global_bounds["geos_raw"]["max"]
-    plot_lats, plot_lons = load_plot_coords(config["data_dir"], config.get("val_end_year"))
+    if domain_info is None:
+        plot_lats, plot_lons = load_plot_coords(config["data_dir"], config.get("val_end_year"))
+    else:
+        plot_lats, plot_lons = lats, lons
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
@@ -1734,6 +1787,12 @@ def train(args, accelerator):
         print(f"✅ Loaded Strict Global Stats: {stats_file}")
         print(f"   [Target SQRT Bounds] : Min = {target_sqrt_min:.4f}, Max = {target_sqrt_max:.4f}")
         print(f"   [GEOS Raw Bounds]    : Min = {geos_min:.4f}, Max = {geos_max:.4f}")
+        if domain_info is not None:
+            print(f"   [Target Domain]      : {domain_info['label']} ({grid_h}x{grid_w})")
+            print(f"   [Target Lat Range]   : {float(lats.min()):.2f} .. {float(lats.max()):.2f}")
+            print(f"   [Target Lon Range]   : {float(lons.min()):.2f} .. {float(lons.max()):.2f}")
+        else:
+            print(f"   [Target Domain]      : Global ({grid_h}x{grid_w})")
         print(f"   [Plot Lon Range]     : {float(plot_lons.min()):.2f} .. {float(plot_lons.max()):.2f}")
         if crps_loss:
             print(f"   [Training Mode]      : CRPS fine-tune (pure Gaussian rollout)")
@@ -1775,6 +1834,7 @@ def train(args, accelerator):
         in_channels=41,
         out_channels=2,
         block_out_channels=unet_block_out_channels,
+        sample_size=(grid_h, grid_w),
     ).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     if crps_loss and crps_loss_use_gradient_checkpointing:
@@ -1809,6 +1869,7 @@ def train(args, accelerator):
 
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
+        print(f"   Spatial Grid: {grid_h} x {grid_w}")
         print(f"   Total Input Channels: 41")
         print(f"   --- Condition Channels (x_cond = 39) ---")
         print(f"     [00-03] x_obs: SST (L=1 to 4)")
@@ -1879,6 +1940,13 @@ def train(args, accelerator):
     t2m_eof_bases = torch.load(t2m_eof_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_eof_bases_path) else None
     t2m_nao_bases = torch.load(t2m_nao_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_nao_bases_path) else None
     t2m_enso_bases = torch.load(t2m_enso_bases_path, map_location='cpu', weights_only=False)['eof_bases'] if os.path.exists(t2m_enso_bases_path) else None
+
+    eof_bases = crop_eof_bases_to_domain(eof_bases, domain_info)
+    nao_bases = crop_eof_bases_to_domain(nao_bases, domain_info)
+    enso_bases = crop_eof_bases_to_domain(enso_bases, domain_info)
+    t2m_eof_bases = crop_eof_bases_to_domain(t2m_eof_bases, domain_info)
+    t2m_nao_bases = crop_eof_bases_to_domain(t2m_nao_bases, domain_info)
+    t2m_enso_bases = crop_eof_bases_to_domain(t2m_enso_bases, domain_info)
     
     try:
         nao_lookup = noise_utils.parse_nao_index(os.path.join(config["data_dir"], "norm.daily.nao.index.b500101.current.ascii"))

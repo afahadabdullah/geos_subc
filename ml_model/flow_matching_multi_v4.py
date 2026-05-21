@@ -69,11 +69,12 @@ class FlowMatchingModel(nn.Module):
     slow-varying context influence the shared backbone.
     """
 
-    def __init__(self, in_channels=37, out_channels=2, block_out_channels=None):
+    def __init__(self, in_channels=37, out_channels=2, block_out_channels=None, sample_size=(181, 360)):
         super().__init__()
 
         self.in_channels = in_channels
         self.cond_channels = in_channels - out_channels
+        self.sample_size = tuple(int(v) for v in sample_size)
         if block_out_channels is None:
             block_out_channels = UNET_BLOCK_OUT_CHANNELS
         self.block_out_channels = tuple(int(c) for c in block_out_channels)
@@ -100,7 +101,7 @@ class FlowMatchingModel(nn.Module):
 
         # Shared UNet backbone (outputs intermediate features, NOT final prediction)
         self.unet = UNet2DModel(
-            sample_size=(181, 360),
+            sample_size=self.sample_size,
             in_channels=in_channels,
             out_channels=HEAD_FEATURES,  # Intermediate feature space
             layers_per_block=2,

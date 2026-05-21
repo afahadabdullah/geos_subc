@@ -1,4 +1,4 @@
-# ML Training Config - Flow Matching Multi-Target v4 (PR + T2M)
+# ML Training Config - Flow Matching Multi-Target v4 (PR + T2M, South Asia target domain)
 # v4 keeps the multiv1 training setup, but upgrades the model with FiLM-style
 # conditioning, learned lead embeddings, a wider deepest UNet block, and
 # stronger per-week decoder heads.
@@ -6,7 +6,7 @@ batch_size: 4
 learning_rate: 5e-5
 weight_decay: 1e-4
 epochs: 300
-output_dir: ml_output_flowmulti_v4
+output_dir: ml_output_flowmulti_v4_south_asia
 mixed_precision: bf16
 num_workers: 1
 data_dir: /home1/11353/afahad/geos_subc/dataprocess
@@ -18,6 +18,7 @@ preload: True
 save_top_k: 4
 stats_file: v1_multi_global_stats.pt
 unet_block_out_channels: [128, 256, 512, 768]
+target_domain: south_asia
 
 reset_validation_history: True
 force_variance_phase: False

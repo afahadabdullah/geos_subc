@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J flow_multi_v4             # Job name
-#SBATCH -o ml_output_flowmulti_v4/flow_%j.log
-#SBATCH -e ml_output_flowmulti_v4/flow_%j.log
+#SBATCH -J SA_flow_v4                # Job name
+#SBATCH -o ml_output_flowmulti_v4_south_asia/flow_%j.log
+#SBATCH -e ml_output_flowmulti_v4_south_asia/flow_%j.log
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
@@ -10,7 +10,7 @@
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
 
-echo "🚀 Multi-v4 training job started at $(date) on $(hostname)"
+echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
 
 # Environment Setup
 source ~/.bashrc
@@ -30,13 +30,13 @@ pkill -9 -u $USER -f accelerate
 sleep 3
 
 echo "🔄 Pulling latest fixes from git..."
-git pull --no-rebase origin flow_multi
+git pull --no-rebase origin SA_flow
 
 # Ensure output directory exists
-mkdir -p ml_output_flowmulti_v4
+mkdir -p ml_output_flowmulti_v4_south_asia
 
 CONFIG_PATH="ml_model/config_flow_multiv4.yaml"
-CKPT_FILE="ml_output_flowmulti_v4/latest_flow_ckpt.pt"
+CKPT_FILE="ml_output_flowmulti_v4_south_asia/latest_flow_ckpt.pt"
 MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))" 2>/dev/null || echo "500")
 MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))" 2>/dev/null || echo "no")
 echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
@@ -60,7 +60,7 @@ if [ -f "$CKPT_FILE" ]; then
     fi
 fi
 
-echo "🔥 Launching Flow Matching Multi-Target v4 Training (PR + T2M)..."
+echo "🔥 Launching Flow Matching Multi-Target v4 Training (South Asia target domain, PR + T2M)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv4.py --config "$CONFIG_PATH" \
     --epochs-per-run 20
 
@@ -91,4 +91,4 @@ else
     echo "⚠️ Checkpoint not found. Chaining stopped to prevent infinite loops."
 fi
 
-echo "🏁 Multi-v4 training job finished at $(date)"
+echo "🏁 South Asia Multi-v4 training job finished at $(date)"

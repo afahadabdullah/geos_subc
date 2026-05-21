@@ -7,6 +7,140 @@ import glob
 import pandas as pd
 from datetime import datetime, timedelta
 
+GLOBAL_LATS = np.linspace(-90.0, 90.0, 181, dtype=np.float32)
+GLOBAL_LONS = np.arange(360, dtype=np.float32)
+
+DEFAULT_TARGET_DOMAINS = {
+    # Longitudes use the project-wide 0..359 convention.
+    "sa": {
+        "label": "South Asia CORDEX-WAS envelope",
+        "lat_min": -16.0,
+        "lat_max": 45.0,
+        "lon_min": 19.0,
+        "lon_max": 116.0,
+    },
+    "sam": {
+        "label": "South America CORDEX-SAM envelope",
+        "lat_min": -58.0,
+        "lat_max": 18.0,
+        "lon_min": 254.0,
+        "lon_max": 343.0,
+    },
+    "south_america": {
+        "label": "South America CORDEX-SAM envelope",
+        "lat_min": -58.0,
+        "lat_max": 18.0,
+        "lon_min": 254.0,
+        "lon_max": 343.0,
+    },
+    "south_america_cordex_sam": {
+        "label": "South America CORDEX-SAM envelope",
+        "lat_min": -58.0,
+        "lat_max": 18.0,
+        "lon_min": 254.0,
+        "lon_max": 343.0,
+    },
+    "south_asia": {
+        "label": "South Asia CORDEX-WAS envelope",
+        "lat_min": -16.0,
+        "lat_max": 45.0,
+        "lon_min": 19.0,
+        "lon_max": 116.0,
+    },
+    "sas": {
+        "label": "South Asia CORDEX-WAS envelope",
+        "lat_min": -16.0,
+        "lat_max": 45.0,
+        "lon_min": 19.0,
+        "lon_max": 116.0,
+    },
+    "was": {
+        "label": "South Asia CORDEX-WAS envelope",
+        "lat_min": -16.0,
+        "lat_max": 45.0,
+        "lon_min": 19.0,
+        "lon_max": 116.0,
+    },
+}
+
+
+def _normalize_lon(lon):
+    return float(lon) % 360.0
+
+
+def resolve_target_domain(target_domain=None, target_domain_bounds=None):
+    if target_domain_bounds:
+        bounds = dict(target_domain_bounds)
+        label = bounds.get("label") or bounds.get("name") or target_domain or "custom"
+    elif target_domain and str(target_domain).lower() not in {"global", "none", "false"}:
+        key = str(target_domain).strip().lower()
+        if key not in DEFAULT_TARGET_DOMAINS:
+            known = ", ".join(sorted(DEFAULT_TARGET_DOMAINS))
+            raise ValueError(f"Unknown target_domain={target_domain!r}. Known domains: {known}")
+        bounds = DEFAULT_TARGET_DOMAINS[key]
+        label = bounds["label"]
+    else:
+        return None
+
+    lat_min = float(bounds["lat_min"])
+    lat_max = float(bounds["lat_max"])
+    if lat_min > lat_max:
+        lat_min, lat_max = lat_max, lat_min
+
+    lon_min = _normalize_lon(bounds["lon_min"])
+    lon_max = _normalize_lon(bounds["lon_max"])
+
+    lat_mask = (GLOBAL_LATS >= lat_min) & (GLOBAL_LATS <= lat_max)
+    if lon_min <= lon_max:
+        lon_mask = (GLOBAL_LONS >= lon_min) & (GLOBAL_LONS <= lon_max)
+    else:
+        lon_mask = (GLOBAL_LONS >= lon_min) | (GLOBAL_LONS <= lon_max)
+
+    lat_indices = np.where(lat_mask)[0].astype(np.int64)
+    lon_indices = np.where(lon_mask)[0].astype(np.int64)
+    if lat_indices.size == 0 or lon_indices.size == 0:
+        raise ValueError(
+            f"Target domain {label!r} selected no grid cells: "
+            f"lat={lat_min}..{lat_max}, lon={lon_min}..{lon_max}"
+        )
+
+    return {
+        "label": label,
+        "lat_min": lat_min,
+        "lat_max": lat_max,
+        "lon_min": lon_min,
+        "lon_max": lon_max,
+        "lat_indices": lat_indices,
+        "lon_indices": lon_indices,
+        "lats": GLOBAL_LATS[lat_indices],
+        "lons": GLOBAL_LONS[lon_indices],
+    }
+
+
+def get_target_domain_coords(target_domain=None, target_domain_bounds=None):
+    domain_info = resolve_target_domain(target_domain, target_domain_bounds)
+    if domain_info is None:
+        return GLOBAL_LATS.copy(), GLOBAL_LONS.copy()
+    return domain_info["lats"].copy(), domain_info["lons"].copy()
+
+
+def crop_spatial_to_domain(value, domain_info):
+    if domain_info is None:
+        return value
+
+    lat_indices = domain_info["lat_indices"]
+    lon_indices = domain_info["lon_indices"]
+
+    if isinstance(value, torch.Tensor):
+        lat_idx = torch.as_tensor(lat_indices, dtype=torch.long, device=value.device)
+        lon_idx = torch.as_tensor(lon_indices, dtype=torch.long, device=value.device)
+        value = value.index_select(value.ndim - 2, lat_idx)
+        return value.index_select(value.ndim - 1, lon_idx)
+
+    value = np.take(value, lat_indices, axis=-2)
+    return np.take(value, lon_indices, axis=-1)
+
+
 class S2SHybridDataset(Dataset):
     """
     Hybrid S2S Dataset for Committee Model.
@@ -21,7 +155,8 @@ class S2SHybridDataset(Dataset):
         
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
-                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt", subsample_monthly=False):
+                 transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt",
+                 subsample_monthly=False, target_domain=None, target_domain_bounds=None):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
@@ -29,6 +164,19 @@ class S2SHybridDataset(Dataset):
         self.normalize = normalize
         self.stats_file = stats_file
         self.subsample_monthly = subsample_monthly
+        self.domain_info = resolve_target_domain(target_domain, target_domain_bounds)
+        if self.domain_info is None:
+            self.lats = GLOBAL_LATS.copy()
+            self.lons = GLOBAL_LONS.copy()
+        else:
+            self.lats = self.domain_info["lats"].copy()
+            self.lons = self.domain_info["lons"].copy()
+            print(
+                f"Target domain: {self.domain_info['label']} "
+                f"lat={self.lats[0]:.1f}..{self.lats[-1]:.1f}, "
+                f"lon={self.lons[0]:.1f}..{self.lons[-1]:.1f}, "
+                f"shape={len(self.lats)}x{len(self.lons)}"
+            )
         
         # Load Stats
         if self.normalize:
@@ -42,6 +190,9 @@ class S2SHybridDataset(Dataset):
         
         if self.preload:
             self._preload_data()
+
+    def _crop_spatial(self, value):
+        return crop_spatial_to_domain(value, self.domain_info)
         
     def load_stats(self):
         # Load Z-Score stats for Precip
@@ -546,6 +697,12 @@ class S2SHybridDataset(Dataset):
             if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
                 obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
 
+            geos_cond_tensor = self._crop_spatial(geos_cond_tensor)
+            obs_tensor = self._crop_spatial(obs_tensor)
+            geos_ens_pr_raw = self._crop_spatial(geos_ens_pr_raw)
+            geos_ens_tas_raw = self._crop_spatial(geos_ens_tas_raw)
+            pure_geos_mean_raw = self._crop_spatial(pure_geos_mean_raw)
+
             # Package common features
             cached_common = {
                 "geos_cond": geos_cond_tensor,
@@ -620,6 +777,13 @@ class S2SHybridDataset(Dataset):
             t_min, t_max = 200.0, 320.0
             t2m_tensor = 2.0 * (torch.clamp(t2m_tensor, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
         
+        gpcp_tensor = self._crop_spatial(gpcp_tensor)
+        t2m_tensor = self._crop_spatial(t2m_tensor)
+        gpcp_raw_lead = self._crop_spatial(gpcp_raw_lead)
+        t2m_raw_lead = self._crop_spatial(t2m_raw_lead)
+        gpcp_raw_full = self._crop_spatial(gpcp_raw_full)
+        t2m_raw_full = self._crop_spatial(t2m_raw_full)
+
         # Stack targets: [C=2, H, W]
         target_tensor = torch.stack([gpcp_tensor, t2m_tensor], dim=0)
         target_raw_lead = torch.stack([gpcp_raw_lead, t2m_raw_lead], dim=0)
