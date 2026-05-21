@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J SA_flow_v5
-#SBATCH -o ml_output_flowmulti_v5_south_asia_global_ocean/flow_%j.log
-#SBATCH -e ml_output_flowmulti_v5_south_asia_global_ocean/flow_%j.log
+#SBATCH -o ml_output_flowmulti_v5_south_asia_global_context/flow_%j.log
+#SBATCH -e ml_output_flowmulti_v5_south_asia_global_context/flow_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -59,11 +59,11 @@ CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('
 STATS_FILENAME=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('stats_file', 'v1_multi_global_stats.pt'))")
 STATS_PATH="ml_model/$STATS_FILENAME"
 
-if [ "$OUTPUT_DIR" != "ml_output_flowmulti_v5_south_asia_global_ocean" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+if [ "$OUTPUT_DIR" != "ml_output_flowmulti_v5_south_asia_global_context" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
     echo "❌ Refusing to train unexpected config: output_dir=$OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
-if [ "$CONFIG_GLOBAL_CONTEXT" != "sst,sss" ]; then
+if [ "$CONFIG_GLOBAL_CONTEXT" != "sst,sss,ivt,z500_zonal_dev,u250" ]; then
     echo "❌ Refusing to train unexpected global context variables: $CONFIG_GLOBAL_CONTEXT"
     exit 1
 fi

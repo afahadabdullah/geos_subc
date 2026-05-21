@@ -1,11 +1,11 @@
 # ML Training Config - Flow Matching Multi-Target v5
-# South Asia 1-degree target with local land/atmosphere predictors and
-# full-global SST/SSS conditioning through the global context encoder.
+# South Asia 1-degree target with local land predictors and full-global
+# ocean/circulation/moisture conditioning through the global context encoder.
 batch_size: 4
 learning_rate: 5e-5
 weight_decay: 1e-4
 epochs: 300
-output_dir: ml_output_flowmulti_v5_south_asia_global_ocean
+output_dir: ml_output_flowmulti_v5_south_asia_global_context
 mixed_precision: bf16
 num_workers: 1
 data_dir: /scratch/11353/afahad/geossub/dataprocess
@@ -22,15 +22,15 @@ target_domain: south_asia
 # Local predictors are cropped to the South Asia 1-degree grid.
 local_obs_variables:
   - sm
-  - ivt
-  - z500_zonal_dev
-  - u250
   - mjo
 
 # Global predictors keep the full 181x360 grid and feed the FiLM context.
 global_context_variables:
   - sst
   - sss
+  - ivt
+  - z500_zonal_dev
+  - u250
 
 reset_validation_history: True
 force_variance_phase: False
