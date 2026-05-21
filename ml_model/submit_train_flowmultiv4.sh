@@ -21,17 +21,35 @@ source ~/.bashrc
 BASHRC_STATUS=$?
 set -e
 echo "🔧 ~/.bashrc exit status: $BASHRC_STATUS"
+echo "🔧 Clearing any stale conda shell definitions..."
+unset -f conda __conda_activate __conda_reactivate __conda_hashr 2>/dev/null || true
+unalias conda 2>/dev/null || true
+hash -r 2>/dev/null || true
+
+if [ -n "${CONDA_SH:-}" ] && [ -f "$CONDA_SH" ]; then
+    echo "🔧 Sourcing CONDA_SH override: $CONDA_SH"
+    source "$CONDA_SH"
+fi
+
 if ! command -v conda >/dev/null 2>&1; then
-    echo "🔧 conda not found after ~/.bashrc; searching for conda.sh..."
+    echo "🔧 conda not found; searching for conda.sh..."
     for CONDA_SH in \
         "$HOME/miniconda3/etc/profile.d/conda.sh" \
+        "$HOME/miniconda/etc/profile.d/conda.sh" \
         "$HOME/anaconda3/etc/profile.d/conda.sh" \
         "$HOME/miniforge3/etc/profile.d/conda.sh" \
         "$HOME/mambaforge/etc/profile.d/conda.sh" \
         "/home1/11353/afahad/miniconda3/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/miniconda/etc/profile.d/conda.sh" \
         "/home1/11353/afahad/anaconda3/etc/profile.d/conda.sh" \
         "/home1/11353/afahad/miniforge3/etc/profile.d/conda.sh" \
-        "/home1/11353/afahad/mambaforge/etc/profile.d/conda.sh"; do
+        "/home1/11353/afahad/mambaforge/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/geossub/geos_subc/miniconda/etc/profile.d/conda.sh" \
+        "/home1/11353/afahad/geossub/geos_subc/miniconda3/etc/profile.d/conda.sh" \
+        "/scratch/11353/afahad/geossub/miniconda/etc/profile.d/conda.sh" \
+        "/scratch/11353/afahad/geossub/miniconda3/etc/profile.d/conda.sh" \
+        "/scratch/11353/afahad/geossub/geos_subc/miniconda/etc/profile.d/conda.sh" \
+        "/scratch/11353/afahad/geossub/geos_subc/miniconda3/etc/profile.d/conda.sh"; do
         if [ -f "$CONDA_SH" ]; then
             echo "🔧 Sourcing $CONDA_SH"
             source "$CONDA_SH"
@@ -41,6 +59,8 @@ if ! command -v conda >/dev/null 2>&1; then
 fi
 if ! command -v conda >/dev/null 2>&1; then
     echo "❌ conda command is still unavailable. Check the conda install path on Vista."
+    echo "   Tip: find /home1/11353/afahad /scratch/11353/afahad -maxdepth 7 -path '*/etc/profile.d/conda.sh' -print 2>/dev/null"
+    echo "   Then submit with: CONDA_SH=/path/to/conda.sh sbatch ml_model/submit_train_flowmultiv4.sh"
     exit 1
 fi
 echo "🔧 Activating conda environment: geossub_env"
