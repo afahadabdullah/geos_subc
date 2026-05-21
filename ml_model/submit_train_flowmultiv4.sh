@@ -10,6 +10,8 @@
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
 
+set -euo pipefail
+
 echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
 
 # Environment Setup
@@ -30,17 +32,28 @@ pkill -9 -u $USER -f accelerate
 sleep 3
 
 echo "🔄 Pulling latest fixes from git..."
-git pull --no-rebase origin SA_flow
+git fetch origin SA_flow
+git switch SA_flow
+git pull --ff-only origin SA_flow
 
 # Ensure output directory exists
 mkdir -p ml_output_flowmulti_v4_south_asia
 
 CONFIG_PATH="ml_model/config_flow_multiv4.yaml"
 CKPT_FILE="ml_output_flowmulti_v4_south_asia/latest_flow_ckpt.pt"
+CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
+CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v4_south_asia" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+    echo "❌ Refusing to train unexpected config: output_dir=$CONFIG_OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
+    exit 1
+fi
+
 MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))" 2>/dev/null || echo "500")
 MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))" 2>/dev/null || echo "no")
 echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
 echo "🎯 Mixed precision from $CONFIG_PATH: $MIXED_PRECISION"
+echo "🎯 Output dir from $CONFIG_PATH: $CONFIG_OUTPUT_DIR"
+echo "🎯 Target domain from $CONFIG_PATH: $CONFIG_TARGET_DOMAIN"
 
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/v1_multi_global_stats.pt"
