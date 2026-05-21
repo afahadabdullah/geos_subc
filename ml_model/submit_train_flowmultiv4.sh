@@ -10,7 +10,7 @@
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
 
-set -euo pipefail
+set -eo pipefail
 
 echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
 
