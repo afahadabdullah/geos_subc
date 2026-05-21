@@ -31,10 +31,7 @@ pkill -9 -u $USER -f python
 pkill -9 -u $USER -f accelerate
 sleep 3
 
-echo "🔄 Pulling latest fixes from git..."
-git fetch origin SA_flow
-git switch SA_flow
-git pull --ff-only origin SA_flow
+echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 
 # Ensure output directory exists
 mkdir -p ml_output_flowmulti_v4_south_asia
