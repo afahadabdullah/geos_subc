@@ -9,7 +9,7 @@ epochs: 300
 output_dir: ml_output_flowmulti_v4_south_asia
 mixed_precision: bf16
 num_workers: 1
-data_dir: /scratch/11353/afahad/geossub/geos_subc/dataprocess
+data_dir: /scratch/11353/afahad/geossub/dataprocess
 train_start_year: 1999
 train_end_year: 2020
 val_start_year: 2021

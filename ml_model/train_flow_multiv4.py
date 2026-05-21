@@ -1554,6 +1554,9 @@ def train(args, accelerator):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
+    data_dir_override = os.environ.get("DATA_DIR_OVERRIDE")
+    if data_dir_override:
+        config["data_dir"] = data_dir_override
 
     epochs = config.get("epochs", 500)
     batch_size = config.get("batch_size", 4)

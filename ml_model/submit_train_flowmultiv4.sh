@@ -21,6 +21,7 @@ conda activate geossub_env
 # Fix for "CXXABI_1.3.15 not found" Matplotlib error on TACC
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
+export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
 
 # Move to Scratch storage
 cd /scratch/11353/afahad/geossub/geos_subc || exit 1
@@ -51,6 +52,7 @@ echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
 echo "🎯 Mixed precision from $CONFIG_PATH: $MIXED_PRECISION"
 echo "🎯 Output dir from $CONFIG_PATH: $CONFIG_OUTPUT_DIR"
 echo "🎯 Target domain from $CONFIG_PATH: $CONFIG_TARGET_DOMAIN"
+echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/v1_multi_global_stats.pt"
