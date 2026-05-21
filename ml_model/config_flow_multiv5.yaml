@@ -1,0 +1,62 @@
+# ML Training Config - Flow Matching Multi-Target v5
+# South Asia 1-degree target with local land/atmosphere predictors and
+# full-global SST/SSS conditioning through the global context encoder.
+batch_size: 4
+learning_rate: 5e-5
+weight_decay: 1e-4
+epochs: 300
+output_dir: ml_output_flowmulti_v5_south_asia_global_ocean
+mixed_precision: bf16
+num_workers: 1
+data_dir: /scratch/11353/afahad/geossub/dataprocess
+train_start_year: 1999
+train_end_year: 2020
+val_start_year: 2021
+val_end_year: 2023
+preload: True
+save_top_k: 4
+stats_file: v1_multi_global_stats.pt
+unet_block_out_channels: [128, 256, 512, 768]
+target_domain: south_asia
+
+# Local predictors are cropped to the South Asia 1-degree grid.
+local_obs_variables:
+  - sm
+  - ivt
+  - z500_zonal_dev
+  - u250
+  - mjo
+
+# Global predictors keep the full 181x360 grid and feed the FiLM context.
+global_context_variables:
+  - sst
+  - sss
+
+reset_validation_history: True
+force_variance_phase: False
+variance_phase_lr: 1e-5
+validation_num_ensemble: 15
+validation_num_steps: 10
+validation_ode_batch_size: 120
+mse_validation_seed: 1234
+crps_val_start_year: 2021
+crps_val_end_year: 2021
+validation_variance_coarse_kernel: 8
+validation_rho_pr: 0.15
+validation_rho_t2m: 0.05
+validation_var_beta_pr: 0.3
+validation_var_beta_t2m: 0.01
+
+crps_loss: False
+crps_loss_num_ensemble: 2
+crps_loss_num_steps: 10
+crps_loss_ode_batch_size: 2
+crps_loss_max_ensemble_per_chunk: 1
+crps_loss_pr_weight: 1.0
+crps_loss_t2m_weight: 1.0
+crps_loss_use_land_ocean_weights: False
+crps_loss_use_gradient_checkpointing: True
+
+test_num_ensemble: 90
+test_num_steps: 10
+test_max_ensemble_per_chunk: 30

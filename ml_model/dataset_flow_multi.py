@@ -63,9 +63,47 @@ DEFAULT_TARGET_DOMAINS = {
     },
 }
 
+OBS_VARIABLE_CHANNELS = {
+    "sst": 4,
+    "sss": 4,
+    "sm": 4,
+    "ivt": 4,
+    "z500_zonal_dev": 4,
+    "u250": 4,
+    "mjo": 4,
+}
+
+OBS_VARIABLE_ALIASES = {
+    "soil_moisture": "sm",
+    "soilw": "sm",
+    "z500": "z500_zonal_dev",
+    "zonal_dev": "z500_zonal_dev",
+    "mjo_wave": "mjo",
+}
+
+DEFAULT_LOCAL_OBS_VARIABLES = tuple(OBS_VARIABLE_CHANNELS)
+DEFAULT_GLOBAL_CONTEXT_VARIABLES = ()
+
 
 def _normalize_lon(lon):
     return float(lon) % 360.0
+
+
+def normalize_obs_variable_list(values, default, field_name):
+    if values is None:
+        return tuple(default)
+    if isinstance(values, str):
+        values = [v.strip() for v in values.split(",") if v.strip()]
+
+    normalized = []
+    for value in values:
+        key = str(value).strip().lower()
+        key = OBS_VARIABLE_ALIASES.get(key, key)
+        if key not in OBS_VARIABLE_CHANNELS:
+            known = ", ".join(sorted(OBS_VARIABLE_CHANNELS))
+            raise ValueError(f"Unknown {field_name} variable {value!r}. Known variables: {known}")
+        normalized.append(key)
+    return tuple(normalized)
 
 
 def resolve_target_domain(target_domain=None, target_domain_bounds=None):
@@ -156,7 +194,8 @@ class S2SHybridDataset(Dataset):
     """
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
                  transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt",
-                 subsample_monthly=False, target_domain=None, target_domain_bounds=None):
+                 subsample_monthly=False, target_domain=None, target_domain_bounds=None,
+                 local_obs_variables=None, global_context_variables=None):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
@@ -165,6 +204,16 @@ class S2SHybridDataset(Dataset):
         self.stats_file = stats_file
         self.subsample_monthly = subsample_monthly
         self.domain_info = resolve_target_domain(target_domain, target_domain_bounds)
+        self.local_obs_variables = normalize_obs_variable_list(
+            local_obs_variables, DEFAULT_LOCAL_OBS_VARIABLES, "local_obs_variables"
+        )
+        self.global_context_variables = normalize_obs_variable_list(
+            global_context_variables, DEFAULT_GLOBAL_CONTEXT_VARIABLES, "global_context_variables"
+        )
+        self.obs_channel_count = sum(OBS_VARIABLE_CHANNELS[v] for v in self.local_obs_variables)
+        self.global_context_channel_count = sum(
+            OBS_VARIABLE_CHANNELS[v] for v in self.global_context_variables
+        )
         if self.domain_info is None:
             self.lats = GLOBAL_LATS.copy()
             self.lons = GLOBAL_LONS.copy()
@@ -176,6 +225,12 @@ class S2SHybridDataset(Dataset):
                 f"lat={self.lats[0]:.1f}..{self.lats[-1]:.1f}, "
                 f"lon={self.lons[0]:.1f}..{self.lons[-1]:.1f}, "
                 f"shape={len(self.lats)}x{len(self.lons)}"
+            )
+        if self.global_context_variables:
+            print(
+                "Predictor domains: "
+                f"local={list(self.local_obs_variables)} "
+                f"global_context={list(self.global_context_variables)}"
             )
         
         # Load Stats
@@ -670,8 +725,16 @@ class S2SHybridDataset(Dataset):
 
             # Stack Obs along Channel dimension
             # Added +4 channels for MJO Wave Spatial Map
-            obs_stack = np.concatenate([sst_val, sss_val, sm_val,
-                                        ivt_val, zonal_dev_val, u250_val, mjo_val], axis=0) 
+            obs_arrays = {
+                "sst": sst_val,
+                "sss": sss_val,
+                "sm": sm_val,
+                "ivt": ivt_val,
+                "z500_zonal_dev": zonal_dev_val,
+                "u250": u250_val,
+                "mjo": mjo_val,
+            }
+            obs_stack = np.concatenate([obs_arrays[v] for v in DEFAULT_LOCAL_OBS_VARIABLES], axis=0)
             
             if self.normalize and self.bounds is not None:
                 def min_max_scale(val, vmin, vmax):
@@ -692,10 +755,37 @@ class S2SHybridDataset(Dataset):
                 else:
                     # Fallback min/max anomaly if stats file isn't updated yet
                     obs_stack[24:28] = min_max_scale(obs_stack[24:28], -100.0, 100.0)
+
+            obs_arrays = {
+                "sst": obs_stack[0:4],
+                "sss": obs_stack[4:8],
+                "sm": obs_stack[8:12],
+                "ivt": obs_stack[12:16],
+                "z500_zonal_dev": obs_stack[16:20],
+                "u250": obs_stack[20:24],
+                "mjo": obs_stack[24:28],
+            }
+            if self.local_obs_variables:
+                local_obs_stack = np.concatenate(
+                    [obs_arrays[v] for v in self.local_obs_variables], axis=0
+                )
+            else:
+                local_obs_stack = np.zeros((0, 181, 360), dtype=np.float32)
+            if self.global_context_variables:
+                global_context_stack = np.concatenate(
+                    [obs_arrays[v] for v in self.global_context_variables], axis=0
+                )
+            else:
+                global_context_stack = np.zeros((0, 181, 360), dtype=np.float32)
             
-            obs_tensor = torch.from_numpy(obs_stack).float()
+            obs_tensor = torch.from_numpy(local_obs_stack).float()
+            global_context_tensor = torch.from_numpy(global_context_stack).float()
             if torch.isnan(obs_tensor).any() or torch.isinf(obs_tensor).any():
                 obs_tensor = torch.nan_to_num(obs_tensor, nan=0.0, posinf=10.0, neginf=-10.0)
+            if torch.isnan(global_context_tensor).any() or torch.isinf(global_context_tensor).any():
+                global_context_tensor = torch.nan_to_num(
+                    global_context_tensor, nan=0.0, posinf=10.0, neginf=-10.0
+                )
 
             geos_cond_tensor = self._crop_spatial(geos_cond_tensor)
             obs_tensor = self._crop_spatial(obs_tensor)
@@ -707,6 +797,7 @@ class S2SHybridDataset(Dataset):
             cached_common = {
                 "geos_cond": geos_cond_tensor,
                 "obs_tensor": obs_tensor,
+                "global_context_tensor": global_context_tensor,
                 "geos_ens_pr_raw": geos_ens_pr_raw,
                 "geos_ens_tas_raw": geos_ens_tas_raw,
                 "pure_geos_mean_raw": pure_geos_mean_raw
@@ -795,6 +886,7 @@ class S2SHybridDataset(Dataset):
         return {
             "x_geos": cached_common["geos_cond"], 
             "x_obs": cached_common["obs_tensor"],
+            "x_global_context": cached_common["global_context_tensor"],
             "y_target": target_tensor,
             "target_raw": target_raw_lead,
             "target_raw_full": target_raw_full,

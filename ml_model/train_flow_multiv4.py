@@ -138,6 +138,13 @@ def sample_deterministic_validation_state(target_norm: torch.Tensor, batch_index
     return t, noise
 
 
+def get_batch_global_context(batch, device):
+    global_context = batch.get("x_global_context")
+    if global_context is None or global_context.shape[1] == 0:
+        return None
+    return global_context.to(device)
+
+
 @torch.no_grad()
 def euler_solve_chunked(
     flow_matcher,
@@ -150,6 +157,7 @@ def euler_solve_chunked(
     variance_beta=1.0,
     variance_coarse_kernel=None,
     chunk_size=None,
+    global_context=None,
 ):
     """
     Memory-safe wrapper for validation/test inference.
@@ -166,6 +174,7 @@ def euler_solve_chunked(
             apply_flow_variance=apply_flow_variance,
             variance_beta=variance_beta,
             variance_coarse_kernel=variance_coarse_kernel,
+            global_context=global_context,
         )
 
     outputs = []
@@ -181,6 +190,7 @@ def euler_solve_chunked(
                 apply_flow_variance=apply_flow_variance,
                 variance_beta=variance_beta,
                 variance_coarse_kernel=variance_coarse_kernel,
+                global_context=global_context[start:end] if global_context is not None else None,
             )
         )
     return torch.cat(outputs, dim=0)
@@ -195,6 +205,7 @@ def euler_solve_train_chunked(
     lead_idx,
     chunk_size=None,
     use_checkpoint=False,
+    global_context=None,
 ):
     """
     Gradient-enabled chunked Euler solve for CRPS fine-tuning.
@@ -209,6 +220,7 @@ def euler_solve_train_chunked(
             num_steps=num_steps,
             lead_idx=lead_idx,
             use_checkpoint=use_checkpoint,
+            global_context=global_context,
         )
 
     outputs = []
@@ -222,6 +234,7 @@ def euler_solve_train_chunked(
                 num_steps=num_steps,
                 lead_idx=lead_idx[start:end] if lead_idx is not None else None,
                 use_checkpoint=use_checkpoint,
+                global_context=global_context[start:end] if global_context is not None else None,
             )
         )
     return torch.cat(outputs, dim=0)
@@ -652,6 +665,7 @@ def compute_multi_crps_training_loss(
     pr_weight=1.0,
     t2m_weight=1.0,
     use_checkpoint=False,
+    global_context=None,
 ):
     """
     Fine-tuning loss that backpropagates through a short Euler rollout and
@@ -673,6 +687,15 @@ def compute_multi_crps_training_loss(
 
     x_cond_expanded = x_cond.unsqueeze(1).expand(B, num_ensemble, -1, H, W).reshape(B * num_ensemble, -1, H, W)
     lead_idx_expanded = lead_idx.unsqueeze(1).expand(B, num_ensemble).reshape(-1).long()
+    if global_context is not None:
+        gc, gh, gw = global_context.shape[1], global_context.shape[2], global_context.shape[3]
+        global_context_expanded = (
+            global_context.unsqueeze(1)
+            .expand(B, num_ensemble, gc, gh, gw)
+            .reshape(B * num_ensemble, gc, gh, gw)
+        )
+    else:
+        global_context_expanded = None
     noise = torch.randn((B * num_ensemble, 2, H, W), device=device, dtype=dtype)
 
     chunk_size = ode_chunk_size
@@ -690,6 +713,7 @@ def compute_multi_crps_training_loss(
         lead_idx=lead_idx_expanded,
         chunk_size=chunk_size,
         use_checkpoint=use_checkpoint,
+        global_context=global_context_expanded,
     )
 
     pred_raw = decode_multi_forecast_raw(pred_norm, target_sqrt_min, target_sqrt_max)
@@ -893,6 +917,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         fx_obs = batch['x_obs'].to(device) 
         fx_geos = batch['x_geos'].to(device) 
+        fx_global_context = get_batch_global_context(batch, device)
         fx_geos_cat = fx_geos.view(vB, -1, H, W)
         
         f_month = batch['month'].to(device).float()
@@ -908,6 +933,15 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Expand for simultaneous ensemble generation: [vB * num_ensemble, 35, H, W]
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+        if fx_global_context is not None:
+            gc, gh, gw = fx_global_context.shape[1:]
+            fx_global_context_expanded = (
+                fx_global_context.unsqueeze(1)
+                .expand(vB, num_ensemble, gc, gh, gw)
+                .reshape(vB * num_ensemble, gc, gh, gw)
+            )
+        else:
+            fx_global_context_expanded = None
         
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
@@ -969,6 +1003,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
             variance_coarse_kernel=validation_variance_coarse_kernel,
             chunk_size=validation_ode_batch_size,
+            global_context=fx_global_context_expanded,
         )
 
         if print_validation_noise_diag and not did_print_noise_diag and accelerator.is_main_process:
@@ -1207,6 +1242,7 @@ def run_full_test_suite_multi(
 
         fx_obs = batch['x_obs'].to(device)
         fx_geos = batch['x_geos'].to(device)
+        fx_global_context = get_batch_global_context(batch, device)
         fx_geos_cat = fx_geos.view(vB, -1, H, W)
 
         f_month = batch['month'].to(device).float()
@@ -1218,6 +1254,15 @@ def run_full_test_suite_multi(
         fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
         num_ensemble = int(validation_num_ensemble)
         fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
+        if fx_global_context is not None:
+            gc, gh, gw = fx_global_context.shape[1:]
+            fx_global_context_expanded = (
+                fx_global_context.unsqueeze(1)
+                .expand(vB, num_ensemble, gc, gh, gw)
+                .reshape(vB * num_ensemble, gc, gh, gw)
+            )
+        else:
+            fx_global_context_expanded = None
 
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
@@ -1275,6 +1320,7 @@ def run_full_test_suite_multi(
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
             chunk_size=chunk_size,
+            global_context=fx_global_context_expanded,
         )
 
         p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
@@ -1686,6 +1732,8 @@ def train(args, accelerator):
         subsample_monthly=False,
         target_domain=target_domain,
         target_domain_bounds=target_domain_bounds,
+        local_obs_variables=config.get("local_obs_variables"),
+        global_context_variables=config.get("global_context_variables"),
     )
 
     val_dataset_monthly = S2SHybridDataset(
@@ -1698,6 +1746,8 @@ def train(args, accelerator):
         subsample_monthly=True,
         target_domain=target_domain,
         target_domain_bounds=target_domain_bounds,
+        local_obs_variables=config.get("local_obs_variables"),
+        global_context_variables=config.get("global_context_variables"),
     )
 
     # Process multiple init dates per validation batch for speed (batch_size * 2 since we flattened leads)
@@ -1725,6 +1775,8 @@ def train(args, accelerator):
             stats_file=stats_filename,
             target_domain=target_domain,
             target_domain_bounds=target_domain_bounds,
+            local_obs_variables=config.get("local_obs_variables"),
+            global_context_variables=config.get("global_context_variables"),
         )
         loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
@@ -1779,6 +1831,12 @@ def train(args, accelerator):
     unet_block_out_channels = tuple(int(v) for v in config.get("unet_block_out_channels", [128, 256, 512, 768]))
     if len(unet_block_out_channels) != 4:
         raise ValueError(f"unet_block_out_channels must have length 4, got {unet_block_out_channels}")
+    obs_channel_count = int(val_dataset_full.obs_channel_count)
+    geos_channel_count = 2 * 4
+    temporal_channel_count = 3
+    cond_channel_count = obs_channel_count + geos_channel_count + temporal_channel_count
+    model_in_channels = cond_channel_count + 2
+    global_context_channel_count = int(val_dataset_full.global_context_channel_count)
 
     if crps_loss and force_variance_phase:
         if accelerator.is_main_process:
@@ -1824,6 +1882,8 @@ def train(args, accelerator):
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
         print(f"   [UNet Widths]        : {' -> '.join(str(v) for v in unet_block_out_channels)}")
+        print(f"   [Local Predictors]   : {list(val_dataset_full.local_obs_variables)} ({obs_channel_count} channels)")
+        print(f"   [Global Context]     : {list(val_dataset_full.global_context_variables)} ({global_context_channel_count} channels)")
         print(f"   [Test Ens]           : {test_num_ensemble}")
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
@@ -1834,10 +1894,11 @@ def train(args, accelerator):
     # 2. Model & Scheduler Setup
     # ---------------------------------------------------------
     model = FlowMatchingModel(
-        in_channels=41,
+        in_channels=model_in_channels,
         out_channels=2,
         block_out_channels=unet_block_out_channels,
         sample_size=(grid_h, grid_w),
+        global_context_channels=global_context_channel_count,
     ).to(device)
     flow_matcher = CustomFlowMatcher(device=device)
     if crps_loss and crps_loss_use_gradient_checkpointing:
@@ -1873,24 +1934,29 @@ def train(args, accelerator):
         print(f"\n--- FLOW ARCHITECTURE DIAGNOSTICS ---")
         print(f"   Model Base: FlowMatchingModel (UNet2D Structure)")
         print(f"   Spatial Grid: {grid_h} x {grid_w}")
-        print(f"   Total Input Channels: 41")
-        print(f"   --- Condition Channels (x_cond = 39) ---")
-        print(f"     [00-03] x_obs: SST (L=1 to 4)")
-        print(f"     [04-07] x_obs: SSS (L=1 to 4)")
-        print(f"     [08-11] x_obs: Soil Moisture (L=1 to 4)")
-        print(f"     [12-15] x_obs: IVT (L=1 to 4)")
-        print(f"     [16-19] x_obs: Z500 Zonal Dev (L=1 to 4)")
-        print(f"     [20-23] x_obs: U250 (L=1 to 4)")
-        print(f"     [24-27] x_obs: MJO Spatial Wave (L=1 to 4)")
-        print(f"     [28-31] x_geos: GEOS Precipitation Forecast (L=1 to 4)")
-        print(f"     [32-35] x_geos: GEOS T2M Forecast (L=1 to 4)")
-        print(f"     [    36] Month: Sine Temporal Embedding")
-        print(f"     [    37] Month: Cosine Temporal Embedding")
-        print(f"     [    38] Target Lead: Relative Index Tracking [-1 to +1]")
+        print(f"   Total Input Channels: {model_in_channels}")
+        print(f"   --- Condition Channels (x_cond = {cond_channel_count}) ---")
+        offset = 0
+        for var_name in val_dataset_full.local_obs_variables:
+            print(f"     [{offset:02d}-{offset + 3:02d}] x_obs: {var_name} (L=1 to 4, local target grid)")
+            offset += 4
+        print(f"     [{offset:02d}-{offset + 3:02d}] x_geos: GEOS Precipitation Forecast (L=1 to 4, local)")
+        offset += 4
+        print(f"     [{offset:02d}-{offset + 3:02d}] x_geos: GEOS T2M Forecast (L=1 to 4, local)")
+        offset += 4
+        print(f"     [{offset:02d}] Month: Sine Temporal Embedding")
+        print(f"     [{offset + 1:02d}] Month: Cosine Temporal Embedding")
+        print(f"     [{offset + 2:02d}] Target Lead: Relative Index Tracking [-1 to +1]")
+        if val_dataset_full.global_context_variables:
+            print(
+                f"   --- Global Context Encoder ({global_context_channel_count} channels, full 181x360 grid) ---"
+            )
+            for var_name in val_dataset_full.global_context_variables:
+                print(f"     global: {var_name} (L=1 to 4)")
         print(f"   --- Dynamic Flow Channel (x_t = 2) ---")
-        print(f"     [ 39,40] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
+        print(f"     [{cond_channel_count:02d},{cond_channel_count + 1:02d}] x_t: Pure Noise Vector (Solver Substrate) PR & T2M")
         print(f"   --- v4 Conditioning Upgrades ---")
-        print(f"     Input FiLM: pooled x_cond summary modulates the 41-channel backbone input")
+        print(f"     Input FiLM: pooled x_cond summary modulates the {model_in_channels}-channel backbone input")
         print(f"     Lead Embedding: discrete week embedding injected into FiLM context")
         print(f"     UNet block widths: {' -> '.join(str(v) for v in unet_block_out_channels)}")
         print(f"   --- Dedicated Output Heads (Per-Week Mini-Decoders) ---")
@@ -2185,6 +2251,7 @@ def train(args, accelerator):
         batch = fixed_val_batch
         x_geos = batch['x_geos'].to(device)
         x_obs = batch['x_obs'].to(device)
+        x_global_context = get_batch_global_context(batch, device)
         target_norm = batch['y_target'].to(device)
         lead_idx_tensor = batch['lead_idx'].to(device)
         
@@ -2196,9 +2263,30 @@ def train(args, accelerator):
         geos_norm_sample = np.nan_to_num(x_geos[sample_idx, 0, 0, lead_idx].cpu().numpy(), nan=-1.0)
         geos_raw_sample = ((geos_norm_sample + 1.0) / 2.0) * (geos_max - geos_min) + geos_min
         
-        # 2. Reverse Normalize SST (Channel 0 of x_obs)
-        sst_norm_sample = np.nan_to_num(x_obs[sample_idx, 0].cpu().numpy(), nan=0.0)
-        sst_raw_sample = ((sst_norm_sample + 1.0) / 2.0) * (global_bounds["sst"]["max"] - global_bounds["sst"]["min"]) + global_bounds["sst"]["min"]
+        local_obs_vars = list(val_dataset_full.local_obs_variables)
+        global_context_vars = list(val_dataset_full.global_context_variables)
+
+        def predictor_norm_sample(var_name):
+            if var_name in local_obs_vars:
+                channel = local_obs_vars.index(var_name) * 4 + lead_idx
+                return np.nan_to_num(x_obs[sample_idx, channel].cpu().numpy(), nan=0.0), "local"
+            if x_global_context is not None and var_name in global_context_vars:
+                channel = global_context_vars.index(var_name) * 4 + lead_idx
+                return np.nan_to_num(x_global_context[sample_idx, channel].cpu().numpy(), nan=0.0), "global"
+            return np.zeros((grid_h, grid_w), dtype=np.float32), "missing"
+
+        def reverse_minmax(norm_sample, bounds_key, fallback=None):
+            if bounds_key in global_bounds:
+                vmin, vmax = global_bounds[bounds_key]["min"], global_bounds[bounds_key]["max"]
+            elif fallback is not None:
+                vmin, vmax = fallback
+            else:
+                vmin, vmax = -1.0, 1.0
+            return ((norm_sample + 1.0) / 2.0) * (vmax - vmin) + vmin
+
+        # 2. Reverse Normalize SST
+        sst_norm_sample, sst_scope = predictor_norm_sample("sst")
+        sst_raw_sample = reverse_minmax(sst_norm_sample, "sst")
         
         # 3. Reverse Normalize Target SQRT (Lead 0)
         sqrt_norm_sample = np.nan_to_num(target_norm[sample_idx, lead_idx].cpu().numpy(), nan=-1.0)
@@ -2206,30 +2294,23 @@ def train(args, accelerator):
         res_raw_sample = np.square(sqrt_raw_sample) - geos_raw_sample
 
         # 4. Reverse Normalize Observational States
-        # SST(0-3), SSS(4-7), SM(8-11), IVT(12-15), ZDEV(16-19), U250(20-23)
-        sss_norm_sample = np.nan_to_num(x_obs[sample_idx, 4].cpu().numpy(), nan=0.0)
-        sss_raw_sample = ((sss_norm_sample + 1.0) / 2.0) * (global_bounds["sss"]["max"] - global_bounds["sss"]["min"]) + global_bounds["sss"]["min"]
-        
-        sm_norm_sample = np.nan_to_num(x_obs[sample_idx, 8].cpu().numpy(), nan=0.0)
-        sm_raw_sample = ((sm_norm_sample + 1.0) / 2.0) * (global_bounds["sm"]["max"] - global_bounds["sm"]["min"]) + global_bounds["sm"]["min"]
-        
-        ivt_norm_sample = np.nan_to_num(x_obs[sample_idx, 12].cpu().numpy(), nan=0.0)
-        ivt_raw_sample = ((ivt_norm_sample + 1.0) / 2.0) * (global_bounds["ivt"]["max"] - global_bounds["ivt"]["min"]) + global_bounds["ivt"]["min"]
-        
-        zdev_norm_sample = np.nan_to_num(x_obs[sample_idx, 16].cpu().numpy(), nan=0.0)
-        zdev_raw_sample = ((zdev_norm_sample + 1.0) / 2.0) * (global_bounds["z500_zonal_dev"]["max"] - global_bounds["z500_zonal_dev"]["min"]) + global_bounds["z500_zonal_dev"]["min"]
-        
-        # Channel 20: U250
-        u250_norm_sample = np.nan_to_num(x_obs[sample_idx, 20].cpu().numpy(), nan=0.0)
-        u250_raw_sample = ((u250_norm_sample + 1.0) / 2.0) * (global_bounds["u250"]["max"] - global_bounds["u250"]["min"]) + global_bounds["u250"]["min"]
+        sss_norm_sample, sss_scope = predictor_norm_sample("sss")
+        sss_raw_sample = reverse_minmax(sss_norm_sample, "sss")
 
-        # Channel 24: MJO Wave Spatial Map
-        mjo_norm_sample = np.nan_to_num(x_obs[sample_idx, 24].cpu().numpy(), nan=0.0)
-        if "mjo" in global_bounds:
-            m_min, m_max = global_bounds["mjo"]["min"], global_bounds["mjo"]["max"]
-        else:
-            m_min, m_max = -100.0, 100.0
-        mjo_raw_sample = ((mjo_norm_sample + 1.0) / 2.0) * (m_max - m_min) + m_min
+        sm_norm_sample, sm_scope = predictor_norm_sample("sm")
+        sm_raw_sample = reverse_minmax(sm_norm_sample, "sm")
+
+        ivt_norm_sample, ivt_scope = predictor_norm_sample("ivt")
+        ivt_raw_sample = reverse_minmax(ivt_norm_sample, "ivt")
+
+        zdev_norm_sample, zdev_scope = predictor_norm_sample("z500_zonal_dev")
+        zdev_raw_sample = reverse_minmax(zdev_norm_sample, "z500_zonal_dev")
+
+        u250_norm_sample, u250_scope = predictor_norm_sample("u250")
+        u250_raw_sample = reverse_minmax(u250_norm_sample, "u250")
+
+        mjo_norm_sample, mjo_scope = predictor_norm_sample("mjo")
+        mjo_raw_sample = reverse_minmax(mjo_norm_sample, "mjo", fallback=(-100.0, 100.0))
 
         gpcp_raw_sample = batch['target_raw'][sample_idx, lead_idx].cpu().numpy()
 
@@ -2268,27 +2349,27 @@ def train(args, accelerator):
         fig.colorbar(im4, ax=axes[1, 1])
         
         axes[2, 0].imshow(sst_raw_sample, cmap='viridis')
-        axes[2, 0].set_title("Raw SST")
+        axes[2, 0].set_title(f"Raw SST ({sst_scope})")
         axes[2, 1].imshow(sst_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[2, 1].set_title("Normalized SST [-1, 1]")
+        axes[2, 1].set_title(f"Normalized SST [{sst_scope}]")
         
         axes[3, 0].imshow(sss_raw_sample, cmap='YlGnBu')
-        axes[3, 0].set_title("Raw SSS")
+        axes[3, 0].set_title(f"Raw SSS ({sss_scope})")
         axes[3, 1].imshow(sss_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[3, 1].set_title("Normalized SSS [-1, 1]")
+        axes[3, 1].set_title(f"Normalized SSS [{sss_scope}]")
         
         axes[4, 0].imshow(sm_raw_sample, cmap='YlOrBr')
-        axes[4, 0].set_title("Raw SM")
+        axes[4, 0].set_title(f"Raw SM ({sm_scope})")
         axes[4, 1].imshow(sm_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[4, 1].set_title("Normalized SM [-1, 1]")
+        axes[4, 1].set_title(f"Normalized SM [{sm_scope}]")
         
         axes[5, 0].imshow(ivt_raw_sample, cmap='cubehelix')
         axes[5, 1].imshow(ivt_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
         
         im13 = axes[6, 0].imshow(zdev_raw_sample, cmap='RdBu_r', vmin=-3000, vmax=3000)
-        axes[6, 0].set_title("Raw Z500 Zonal Dev")
+        axes[6, 0].set_title(f"Raw Z500 Zonal Dev ({zdev_scope})")
         im14 = axes[6, 1].imshow(zdev_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
-        axes[6, 1].set_title("Normalized Z500 Zonal Dev [-1, 1]")
+        axes[6, 1].set_title(f"Normalized Z500 Zonal Dev [{zdev_scope}]")
         
         axes[7, 0].imshow(u250_raw_sample, cmap='coolwarm')
         axes[7, 1].imshow(u250_norm_sample, cmap='RdBu_r', vmin=-1, vmax=1)
@@ -2405,6 +2486,7 @@ def train(args, accelerator):
             # Conditionals
             x_geos = batch['x_geos'].to(device)
             x_obs  = batch['x_obs'].to(device)
+            global_context = get_batch_global_context(batch, device)
             
             B = x_geos.shape[0]
             H, W = x_obs.shape[-2], x_obs.shape[-1]
@@ -2445,6 +2527,7 @@ def train(args, accelerator):
                     pr_weight=crps_loss_pr_weight,
                     t2m_weight=crps_loss_t2m_weight,
                     use_checkpoint=crps_loss_use_gradient_checkpointing,
+                    global_context=global_context,
                 )
                 train_crps_pr_total += float(crps_diag["crps_pr"].item())
                 train_crps_t2m_total += float(crps_diag["crps_t2m"].item())
@@ -2459,7 +2542,13 @@ def train(args, accelerator):
                 x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
 
                 # Predict the velocity AND variance (routed through the correct per-week output head)
-                v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+                v_pred, var_pred = model(
+                    x_t,
+                    x_cond,
+                    t,
+                    lead_idx=lead_idx,
+                    global_context=global_context,
+                )
 
                 # --- Temporal Loss Weighting ---
                 # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
@@ -2676,6 +2765,7 @@ def train(args, accelerator):
                 for b_idx, batch in enumerate(val_loader_full):
                     x_geos = batch['x_geos'].to(device)
                     x_obs  = batch['x_obs'].to(device)
+                    global_context = get_batch_global_context(batch, device)
                     B = x_geos.shape[0]
                     H, W = x_obs.shape[-2], x_obs.shape[-1]
                     x_geos_flat = x_geos.contiguous().view(B, -1, H, W)
@@ -2691,7 +2781,13 @@ def train(args, accelerator):
                         target_norm, b_idx, mse_validation_seed, device
                     )
                     x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
-                    v_pred, var_pred = model(x_t, x_cond, t, lead_idx=lead_idx)
+                    v_pred, var_pred = model(
+                        x_t,
+                        x_cond,
+                        t,
+                        lead_idx=lead_idx,
+                        global_context=global_context,
+                    )
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
                     temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
                     

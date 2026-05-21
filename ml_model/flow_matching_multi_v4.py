@@ -61,6 +61,35 @@ class WeekHead(nn.Module):
         return self.out(x)
 
 
+class GlobalContextEncoder(nn.Module):
+    """
+    Encode full-global predictor maps into the same FiLM context used by the
+    South Asia decoder. This lets global SST/SSS patterns condition a local
+    target grid without forcing every predictor onto the target grid.
+    """
+
+    def __init__(self, in_channels, context_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2),
+            nn.GroupNorm(_num_groups(32), 32),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.GroupNorm(_num_groups(64), 64),
+            nn.SiLU(),
+            nn.Conv2d(64, 96, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(_num_groups(96), 96),
+            nn.SiLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(96, context_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, x):
+        return self.net(torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0))
+
+
 class FlowMatchingModel(nn.Module):
     """
     Rectified-flow UNet with lightweight FiLM conditioning and richer week heads.
@@ -69,12 +98,20 @@ class FlowMatchingModel(nn.Module):
     slow-varying context influence the shared backbone.
     """
 
-    def __init__(self, in_channels=37, out_channels=2, block_out_channels=None, sample_size=(181, 360)):
+    def __init__(
+        self,
+        in_channels=37,
+        out_channels=2,
+        block_out_channels=None,
+        sample_size=(181, 360),
+        global_context_channels=0,
+    ):
         super().__init__()
 
         self.in_channels = in_channels
         self.cond_channels = in_channels - out_channels
         self.sample_size = tuple(int(v) for v in sample_size)
+        self.global_context_channels = int(global_context_channels or 0)
         if block_out_channels is None:
             block_out_channels = UNET_BLOCK_OUT_CHANNELS
         self.block_out_channels = tuple(int(c) for c in block_out_channels)
@@ -94,6 +131,10 @@ class FlowMatchingModel(nn.Module):
             nn.SiLU(),
             nn.Linear(CONTEXT_HIDDEN, CONTEXT_HIDDEN),
             nn.SiLU(),
+        )
+        self.global_context_encoder = (
+            GlobalContextEncoder(self.global_context_channels, CONTEXT_HIDDEN)
+            if self.global_context_channels > 0 else None
         )
         self.lead_embedding = nn.Embedding(4, CONTEXT_HIDDEN)
         self.input_adapter = nn.Conv2d(in_channels, in_channels, kernel_size=1)
@@ -134,11 +175,23 @@ class FlowMatchingModel(nn.Module):
         ])
         self.out_channels = out_channels
 
-    def _build_context(self, x_cond, lead_idx=None):
+    def _build_context(self, x_cond, lead_idx=None, global_context=None):
         cond_mean = x_cond.mean(dim=(2, 3))
         cond_var = x_cond.var(dim=(2, 3), unbiased=False)
         cond_std = torch.sqrt(cond_var + 1e-6)
         context = self.context_mlp(torch.cat([cond_mean, cond_std], dim=1))
+
+        if self.global_context_encoder is not None:
+            if global_context is None:
+                global_add = torch.zeros_like(context)
+            else:
+                if global_context.shape[1] != self.global_context_channels:
+                    raise ValueError(
+                        f"Expected {self.global_context_channels} global context channels, "
+                        f"got {global_context.shape[1]}."
+                    )
+                global_add = self.global_context_encoder(global_context.to(dtype=x_cond.dtype))
+            context = context + global_add
 
         if lead_idx is None:
             lead_emb = self.lead_embedding.weight[0].unsqueeze(0).expand(x_cond.shape[0], -1)
@@ -146,7 +199,7 @@ class FlowMatchingModel(nn.Module):
             lead_emb = self.lead_embedding(lead_idx.long())
         return context + lead_emb
 
-    def forward(self, x_t, x_cond, t, lead_idx=None, compute_variance=True):
+    def forward(self, x_t, x_cond, t, lead_idx=None, compute_variance=True, global_context=None):
         """
         x_t:      [B, out_channels, H, W] - State at time t
         x_cond:   [B, cond_channels, H, W] - Conditioning variables
@@ -156,7 +209,7 @@ class FlowMatchingModel(nn.Module):
         compute_variance: If False, skip the variance heads entirely and return
                           ``(velocity, None)``.
         """
-        context = self._build_context(x_cond, lead_idx=lead_idx)
+        context = self._build_context(x_cond, lead_idx=lead_idx, global_context=global_context)
 
         # Spatial concatenation (x_t is [B, 2, H, W], x_cond is [B, cond_channels, H, W]).
         x = torch.cat([x_t, x_cond], dim=1)
@@ -287,7 +340,7 @@ class CustomFlowMatcher:
     @torch.no_grad()
     def prepare_initial_state(self, model, noise, x_cond, lead_idx=None, apply_flow_variance=False,
                               variance_channels=None, variance_beta=1.0,
-                              variance_coarse_kernel=None):
+                              variance_coarse_kernel=None, global_context=None):
         """
         Build the solver initial state x_0.
         If apply_flow_variance is enabled, query the variance head at t=0 and
@@ -316,7 +369,7 @@ class CustomFlowMatcher:
             return x_t, debug
 
         t_zero = torch.zeros((noise.shape[0],), device=noise.device, dtype=torch.float32)
-        _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx)
+        _, var_pred = model(noise, x_cond, t_zero, lead_idx=lead_idx, global_context=global_context)
 
         # Standard deviation from predicted variance, clamped for stability.
         std_pred = torch.sqrt(var_pred + 1e-6)
@@ -365,7 +418,7 @@ class CustomFlowMatcher:
     @torch.no_grad()
     def euler_solve(self, model, noise, x_cond, num_steps=10, lead_idx=None, apply_flow_variance=False,
                     variance_channels=None, variance_beta=1.0,
-                    variance_coarse_kernel=None, return_debug=False):
+                    variance_coarse_kernel=None, return_debug=False, global_context=None):
         """
         Inference routine using explicit Euler integration.
         Solves the ODE dx/dt = v(x, t) from t=0 to t=1.
@@ -390,6 +443,7 @@ class CustomFlowMatcher:
             variance_channels=variance_channels,
             variance_beta=variance_beta,
             variance_coarse_kernel=variance_coarse_kernel,
+            global_context=global_context,
         )
             
         dt = 1.0 / num_steps
@@ -402,7 +456,14 @@ class CustomFlowMatcher:
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
             
             # Predict velocity through the correct per-week head (we ignore variance during integration)
-            v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
+            v_pred, _ = model(
+                x_t,
+                x_cond,
+                t,
+                lead_idx=lead_idx,
+                compute_variance=False,
+                global_context=global_context,
+            )
             
             # Euler step
             x_t = x_t + v_pred * dt
@@ -412,7 +473,16 @@ class CustomFlowMatcher:
             return x_t, debug
         return x_t  # This is the estimated x_1 (Data)
 
-    def euler_solve_differentiable(self, model, noise, x_cond, num_steps=10, lead_idx=None, use_checkpoint=False):
+    def euler_solve_differentiable(
+        self,
+        model,
+        noise,
+        x_cond,
+        num_steps=10,
+        lead_idx=None,
+        use_checkpoint=False,
+        global_context=None,
+    ):
         """
         Training-time Euler integration with gradients enabled.
         This always starts from pure Gaussian noise and skips variance-head work.
@@ -423,24 +493,52 @@ class CustomFlowMatcher:
             t_val = step * dt
             t = torch.full((x_t.shape[0],), t_val, device=x_t.device, dtype=torch.float32)
             if use_checkpoint:
-                def velocity_only(x_state, cond_state, t_state, lead_state):
-                    v_pred, _ = model(
-                        x_state,
-                        cond_state,
-                        t_state,
-                        lead_idx=lead_state,
-                        compute_variance=False,
+                if global_context is None:
+                    def velocity_only(x_state, cond_state, t_state, lead_state):
+                        v_pred, _ = model(
+                            x_state,
+                            cond_state,
+                            t_state,
+                            lead_idx=lead_state,
+                            compute_variance=False,
+                        )
+                        return v_pred
+                    v_pred = checkpoint(
+                        velocity_only,
+                        x_t,
+                        x_cond,
+                        t,
+                        lead_idx,
+                        use_reentrant=False,
                     )
-                    return v_pred
-                v_pred = checkpoint(
-                    velocity_only,
+                else:
+                    def velocity_only(x_state, cond_state, t_state, lead_state, global_state):
+                        v_pred, _ = model(
+                            x_state,
+                            cond_state,
+                            t_state,
+                            lead_idx=lead_state,
+                            compute_variance=False,
+                            global_context=global_state,
+                        )
+                        return v_pred
+                    v_pred = checkpoint(
+                        velocity_only,
+                        x_t,
+                        x_cond,
+                        t,
+                        lead_idx,
+                        global_context,
+                        use_reentrant=False,
+                    )
+            else:
+                v_pred, _ = model(
                     x_t,
                     x_cond,
                     t,
-                    lead_idx,
-                    use_reentrant=False,
+                    lead_idx=lead_idx,
+                    compute_variance=False,
+                    global_context=global_context,
                 )
-            else:
-                v_pred, _ = model(x_t, x_cond, t, lead_idx=lead_idx, compute_variance=False)
             x_t = x_t + v_pred * dt
         return x_t
