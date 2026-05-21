@@ -77,9 +77,32 @@ echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/v1_multi_global_stats.pt"
+if [ -f "$STATS_PATH" ]; then
+    if ! python - "$STATS_PATH" <<'PY'
+import math
+import sys
+import torch
+
+stats = torch.load(sys.argv[1], map_location="cpu", weights_only=True)
+bad = []
+for key, value in stats.items():
+    if isinstance(value, dict) and "min" in value and "max" in value:
+        vmin, vmax = float(value["min"]), float(value["max"])
+        if not (math.isfinite(vmin) and math.isfinite(vmax) and vmin <= vmax):
+            bad.append(f"{key}: {vmin}..{vmax}")
+if bad:
+    print("Invalid stats bounds: " + "; ".join(bad))
+    sys.exit(1)
+PY
+    then
+        echo "⚠️ Existing stats file is invalid. Removing $STATS_PATH before recomputing."
+        rm -f "$STATS_PATH"
+    fi
+fi
+
 if [ ! -f "$STATS_PATH" ]; then
-    echo "📊 Stats file not found. Computing global statistics..."
-    python ml_model/calculate_global_stats_multi_v1.py
+    echo "📊 Stats file not found. Computing global statistics from $DATA_DIR_OVERRIDE..."
+    python ml_model/calculate_global_stats_multi_v1.py --data_root "$DATA_DIR_OVERRIDE" --out "$STATS_PATH"
 else
     echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
 fi

@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import argparse
 import gc
+import math
 
 # Using dataset_flow directly since that's what train_flow_v6.py uses
 from dataset_flow_multi import S2SHybridDataset
@@ -29,6 +30,11 @@ def calculate_global_stats(
     )
     # Using num_workers=0 to prevent multiprocessing memory blowouts on the login node
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    if len(dataset) == 0:
+        raise RuntimeError(
+            f"No samples found while scanning {data_root} for {start_year}-{end_year}. "
+            "Refusing to write invalid global stats."
+        )
 
     # Dictionary to keep track of Absolute Min and Max for every variable
     bounds = {
@@ -147,6 +153,11 @@ def calculate_global_stats(
     for k, v in bounds.items():
         if isinstance(v, dict):
             print(f"{k.upper():<16} | Min: {v['min']:>12.4f} | Max: {v['max']:>12.4f}")
+            if not (math.isfinite(v["min"]) and math.isfinite(v["max"]) and v["min"] <= v["max"]):
+                raise RuntimeError(
+                    f"Invalid bounds for {k}: min={v['min']}, max={v['max']}. "
+                    "Refusing to write invalid global stats."
+                )
 
     # Save to dictionary
     torch.save(bounds, out_path)
@@ -154,7 +165,11 @@ def calculate_global_stats(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="/scratch/11353/afahad/geossub/geos_subc/dataprocess")
+    parser.add_argument(
+        "--data_root",
+        type=str,
+        default=os.environ.get("DATA_DIR_OVERRIDE", "/scratch/11353/afahad/geossub/dataprocess"),
+    )
     parser.add_argument("--out", type=str, default="ml_model/v1_multi_global_stats.pt")
     parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
     parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
