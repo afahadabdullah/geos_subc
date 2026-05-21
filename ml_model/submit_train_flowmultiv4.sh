@@ -42,11 +42,16 @@ export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
 
-# Cleanup zombie processes from previous failed runs (VRAM protection)
-echo "🧹 Cleaning up previous zombie processes..."
-pkill -9 -u $USER -f python
-pkill -9 -u $USER -f accelerate
-sleep 3
+# Optional cleanup for stale processes from previous failed runs.
+# Disabled by default because broad pkill patterns can stop unrelated jobs.
+if [ "${CLEANUP_OLD_PROCS:-0}" = "1" ]; then
+    echo "🧹 Cleaning up previous SA flow processes..."
+    pkill -9 -u "$USER" -f "train_flow_multiv4.py" || true
+    pkill -9 -u "$USER" -f "accelerate.*train_flow_multiv4.py" || true
+    sleep 3
+else
+    echo "🧹 Skipping process cleanup. Set CLEANUP_OLD_PROCS=1 to enable it."
+fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 
