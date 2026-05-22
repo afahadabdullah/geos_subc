@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_flow_v4                # Job name
-#SBATCH -o ml_output_flowmulti_v4_south_asia/flow_%j.log
-#SBATCH -e ml_output_flowmulti_v4_south_asia/flow_%j.log
+#SBATCH -J SA_flow_v4
+#SBATCH -o ml_output_flowmulti_v4_south_asia_global_context/flow_%j.log
+#SBATCH -e ml_output_flowmulti_v4_south_asia_global_context/flow_%j.log
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🚀 South Asia Multi-v4 training job started at $(date) on $(hostname)"
+echo "🚀 South Asia Multi-v4 local/global training job started at $(date) on $(hostname)"
 
 # Move to Scratch storage before activating the repo-local environment.
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
@@ -55,28 +55,43 @@ fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 
-# Ensure output directory exists
-mkdir -p ml_output_flowmulti_v4_south_asia
-
 CONFIG_PATH="ml_model/config_flow_multiv4.yaml"
-CKPT_FILE="ml_output_flowmulti_v4_south_asia/latest_flow_ckpt.pt"
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
+OUTPUT_DIR="$CONFIG_OUTPUT_DIR"
+CKPT_FILE="$OUTPUT_DIR/latest_flow_ckpt.pt"
+EARLY_STOP_FILE="$OUTPUT_DIR/EARLY_STOPPED"
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
-if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v4_south_asia" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
+CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
+STATS_FILENAME=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('stats_file', 'v1_multi_global_stats.pt'))")
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v4_south_asia_global_context" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
     echo "❌ Refusing to train unexpected config: output_dir=$CONFIG_OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
+if [ "$CONFIG_LOCAL_VARS" != "sm,mjo" ]; then
+    echo "❌ Refusing to train unexpected local predictors: $CONFIG_LOCAL_VARS"
+    exit 1
+fi
+if [ "$CONFIG_GLOBAL_CONTEXT" != "sst,sss,ivt,z500_zonal_dev,u250" ]; then
+    echo "❌ Refusing to train unexpected global context variables: $CONFIG_GLOBAL_CONTEXT"
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
 
 MAX_EPOCHS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH'))['epochs']))" 2>/dev/null || echo "500")
 MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))" 2>/dev/null || echo "no")
 echo "🎯 Max epochs from $CONFIG_PATH: $MAX_EPOCHS"
 echo "🎯 Mixed precision from $CONFIG_PATH: $MIXED_PRECISION"
-echo "🎯 Output dir from $CONFIG_PATH: $CONFIG_OUTPUT_DIR"
+echo "🎯 Output dir from $CONFIG_PATH: $OUTPUT_DIR"
 echo "🎯 Target domain from $CONFIG_PATH: $CONFIG_TARGET_DOMAIN"
+echo "🎯 Local predictors: $CONFIG_LOCAL_VARS"
+echo "🎯 Global context: $CONFIG_GLOBAL_CONTEXT"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
+echo "🎯 Stats file: ml_model/$STATS_FILENAME"
 
 # Run Global Stats calculation (only if stats file doesn't exist)
-STATS_PATH="ml_model/v1_multi_global_stats.pt"
+STATS_PATH="ml_model/$STATS_FILENAME"
 if [ -f "$STATS_PATH" ]; then
     if ! python - "$STATS_PATH" <<'PY'
 import math
@@ -107,6 +122,13 @@ else
     echo "✅ Global stats found at $STATS_PATH. Skipping recalculation."
 fi
 
+if [ -f "$EARLY_STOP_FILE" ]; then
+    echo "✅ Early-stop marker found. Not training or resubmitting."
+    cat "$EARLY_STOP_FILE"
+    echo "🏁 Job finished at $(date)"
+    exit 0
+fi
+
 if [ -f "$CKPT_FILE" ]; then
     CURRENT_EPOCH=$(python -c "import torch; ckpt=torch.load('$CKPT_FILE', map_location='cpu', weights_only=True); print(int(ckpt.get('epoch', -1)))" 2>/dev/null || echo "-1")
     if [ "$CURRENT_EPOCH" -ge "$MAX_EPOCHS" ]; then
@@ -116,11 +138,18 @@ if [ -f "$CKPT_FILE" ]; then
     fi
 fi
 
-echo "🔥 Launching Flow Matching Multi-Target v4 Training (South Asia target domain, PR + T2M)..."
+echo "🔥 Launching Flow Matching Multi-Target v4 Training (SA target, local predictors, global context)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv4.py --config "$CONFIG_PATH" \
     --epochs-per-run 20
 
 # --- AUTOMATIC JOB CHAINING ---
+if [ -f "$EARLY_STOP_FILE" ]; then
+    echo "✅ Early-stop marker found. Not resubmitting."
+    cat "$EARLY_STOP_FILE"
+    echo "🏁 Job finished at $(date)"
+    exit 0
+fi
+
 echo "🔄 Checking if we need to resubmit..."
 echo "📍 Current Host: $(hostname)"
 echo "📍 Submit Host: $SLURM_SUBMIT_HOST"
@@ -147,4 +176,4 @@ else
     echo "⚠️ Checkpoint not found. Chaining stopped to prevent infinite loops."
 fi
 
-echo "🏁 South Asia Multi-v4 training job finished at $(date)"
+echo "🏁 South Asia Multi-v4 local/global training job finished at $(date)"

@@ -1,12 +1,11 @@
-# ML Training Config - Flow Matching Multi-Target v4 (PR + T2M, South Asia target domain)
-# v4 keeps the multiv1 training setup, but upgrades the model with FiLM-style
-# conditioning, learned lead embeddings, a wider deepest UNet block, and
-# stronger per-week decoder heads.
+# ML Training Config - Flow Matching Multi-Target v4
+# South Asia 1-degree PR + T2M target with local SA land/MJO predictors and
+# full-global ocean/circulation/moisture predictors through the context encoder.
 batch_size: 4
-learning_rate: 5e-5
+learning_rate: 2e-5
 weight_decay: 1e-4
 epochs: 300
-output_dir: ml_output_flowmulti_v4_south_asia
+output_dir: ml_output_flowmulti_v4_south_asia_global_context
 mixed_precision: bf16
 num_workers: 1
 data_dir: /scratch/11353/afahad/geossub/dataprocess
@@ -20,7 +19,20 @@ stats_file: v1_multi_global_stats.pt
 unet_block_out_channels: [128, 256, 512, 768]
 target_domain: south_asia
 
-reset_validation_history: True
+# Local predictors are cropped to the South Asia 1-degree target grid.
+local_obs_variables:
+  - sm
+  - mjo
+
+# Global predictors keep the full 181x360 grid and feed the FiLM context.
+global_context_variables:
+  - sst
+  - sss
+  - ivt
+  - z500_zonal_dev
+  - u250
+
+reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
 validation_num_ensemble: 15
@@ -34,6 +46,13 @@ validation_rho_pr: 0.15
 validation_rho_t2m: 0.05
 validation_var_beta_pr: 0.3
 validation_var_beta_t2m: 0.01
+dense_mse_validation_until: 40
+mse_plateau_patience: 3
+mse_plateau_factor: 0.5
+mse_min_lr: 1e-6
+mse_early_stop_patience: 0
+mse_early_stop_start_epoch: 15
+mse_early_stop_min_delta: 0.0003
 
 crps_loss: False
 crps_loss_num_ensemble: 2

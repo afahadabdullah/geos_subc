@@ -1828,6 +1828,13 @@ def train(args, accelerator):
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
     validation_var_beta_t2m = float(config.get("validation_var_beta_t2m", validation_var_beta_pr))
+    dense_mse_validation_until = int(config.get("dense_mse_validation_until", 0))
+    mse_early_stop_patience = int(config.get("mse_early_stop_patience", 0))
+    mse_early_stop_start_epoch = int(config.get("mse_early_stop_start_epoch", 0))
+    mse_early_stop_min_delta = float(config.get("mse_early_stop_min_delta", 0.0))
+    mse_plateau_patience = int(config.get("mse_plateau_patience", 0))
+    mse_plateau_factor = float(config.get("mse_plateau_factor", 0.5))
+    mse_min_lr = float(config.get("mse_min_lr", 0.0))
     unet_block_out_channels = tuple(int(v) for v in config.get("unet_block_out_channels", [128, 256, 512, 768]))
     if len(unet_block_out_channels) != 4:
         raise ValueError(f"unet_block_out_channels must have length 4, got {unet_block_out_channels}")
@@ -1881,6 +1888,15 @@ def train(args, accelerator):
         print(f"   [Validation Rho]     : PR={validation_rho_pr:.2f}, T2M={validation_rho_t2m:.2f}")
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
+        print(f"   [Dense MSE Val To]   : {dense_mse_validation_until if dense_mse_validation_until > 0 else 'disabled'}")
+        print(
+            f"   [MSE Plateau]       : patience={mse_plateau_patience}, "
+            f"factor={mse_plateau_factor:.2f}, min_lr={mse_min_lr:.2e}"
+        )
+        print(
+            f"   [MSE Early Stop]    : patience={mse_early_stop_patience}, "
+            f"start={mse_early_stop_start_epoch}, min_delta={mse_early_stop_min_delta:.2e}"
+        )
         print(f"   [UNet Widths]        : {' -> '.join(str(v) for v in unet_block_out_channels)}")
         print(f"   [Local Predictors]   : {list(val_dataset_full.local_obs_variables)} ({obs_channel_count} channels)")
         print(f"   [Global Context]     : {list(val_dataset_full.global_context_variables)} ({global_context_channel_count} channels)")
@@ -1972,6 +1988,7 @@ def train(args, accelerator):
     output_dir = config.get("output_dir", "ml_output_diffusion_v5")
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(output_dir, "training_log_v4.csv")
+    early_stop_marker = os.path.join(output_dir, "EARLY_STOPPED")
     
     if accelerator.is_main_process and not os.path.exists(log_file):
         with open(log_file, "w") as f:
@@ -2037,6 +2054,8 @@ def train(args, accelerator):
     loaded_checkpoint_epoch = 0
     loaded_is_variance_phase = False
     best_val_loss = float('inf')
+    best_val_epoch = 0
+    mse_bad_val_checks = 0
     crps_phase_reset = False  # Will be set True after MSE→CRPS transition (or if resuming from Phase 2)
     top_models = []
     is_variance_phase = False
@@ -2116,6 +2135,8 @@ def train(args, accelerator):
                         print("   ⚠️ Legacy CRPS checkpoint detected. Migrating tracking to MSE Loss scale.")
                     best_val_loss = float('inf')
                     checkpoint['top_models'] = [] # Clear legacy CRPS top_models so we don't mix scales
+                best_val_epoch = int(checkpoint.get('best_val_epoch', 0))
+                mse_bad_val_checks = int(checkpoint.get('mse_bad_val_checks', 0))
                 
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
@@ -2128,6 +2149,8 @@ def train(args, accelerator):
                     if accelerator.is_main_process:
                         print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
                     best_val_loss = float('inf')
+                    best_val_epoch = 0
+                    mse_bad_val_checks = 0
                     top_models = []
                 
             if accelerator.is_main_process:
@@ -2135,6 +2158,8 @@ def train(args, accelerator):
                 if not args.test:
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val Loss so far: {best_val_loss:.4f}")
+                    print(f"   Best Val Epoch so far: {best_val_epoch}")
+                    print(f"   MSE plateau counter: {mse_bad_val_checks}")
                     if start_epoch > 101:
                         print(f"   ✅ Resuming deep in CRPS Phase (>101). best_val_loss is already CRPS-scale.")
                     elif start_epoch == 101:
@@ -2465,6 +2490,7 @@ def train(args, accelerator):
     global_cached_geos_crps_t2m = None
     global_cached_geos_rmse_t2m = None
     spatial_weights = area_weights * land_ocean_weights
+    stop_training_after_validation = False
     
     for epoch in range(start_epoch, epochs + 1):
         if epochs_done_this_run >= max_epochs_this_run:
@@ -2503,9 +2529,8 @@ def train(args, accelerator):
             lead_val = (lead_idx.float() / 1.5) - 1.0 
             lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
 
-            # Total: 24 (Obs) + 4 (MJO) + 8 (GEOS [2 vars * 4 leads]) + 2 (Month) + 1 (Lead) = 39 channels out of which Obs/MJO combined is 28.
-            # So 28 + 8 + 2 + 1 = 39 ? Wait. x_obs earlier was 28. 28 + 8 + 2 + 1 = 39. Let's trace.
-            # x_obs shape in dataset_flow.py gives: SST(4)+SSS(4)+SM(4)+IVT(4)+Z500(4)+U250(4)+MJO(4) = 28.
+            # x_obs is dynamic: local_obs_variables are cropped to the target grid,
+            # while global_context_variables are sent separately through the context encoder.
             x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1) 
 
             if crps_loss:
@@ -2615,6 +2640,8 @@ def train(args, accelerator):
                 'model': unwrapped_model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
+                'best_val_epoch': best_val_epoch,
+                'mse_bad_val_checks': mse_bad_val_checks,
                 'top_models': top_models,
                 'is_variance_phase': is_variance_phase,
             }
@@ -2640,11 +2667,15 @@ def train(args, accelerator):
                 print(f"\n🔄 PHASE TRANSITION: Epoch {epoch} → Switching to CRPS-based validation.")
                 print(f"   Resetting best_val_loss from {best_val_loss:.4f} (MSE) → inf (CRPS)")
             best_val_loss = float('inf')
+            best_val_epoch = 0
+            mse_bad_val_checks = 0
             crps_phase_reset = True
         
         def should_validate(ep):
             if ep < 5:
                 return False
+            elif (not use_crps_phase) and dense_mse_validation_until > 0 and ep <= dense_mse_validation_until:
+                return True
             elif ep < 20:
                 return (ep % 5 == 0)
             elif ep < 70:
@@ -2703,6 +2734,7 @@ def train(args, accelerator):
                 if is_new_best:
                     print(f"🏆 NEW BEST (CRPS)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
                     best_val_loss = current_val_metric
+                    best_val_epoch = epoch
                     new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
                     new_best_path = os.path.join(output_dir, new_best_name)
                     unwrapped_model = accelerator.unwrap_model(model)
@@ -2711,6 +2743,8 @@ def train(args, accelerator):
                         'model': unwrapped_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
+                        'best_val_epoch': best_val_epoch,
+                        'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                     }
                     torch.save(best_ckpt, new_best_path)
@@ -2739,6 +2773,8 @@ def train(args, accelerator):
                         'model': unwrapped_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
+                        'best_val_epoch': best_val_epoch,
+                        'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                     },
                                os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt"))
@@ -2749,6 +2785,8 @@ def train(args, accelerator):
                     'model': unwrapped_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
+                    'best_val_epoch': best_val_epoch,
+                    'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -2811,12 +2849,15 @@ def train(args, accelerator):
             
             if accelerator.is_main_process:
                 print(f"✅ MSE Validation Complete. Avg Loss: {current_val_metric:.4f}")
+                print(f"📉 MSE Gap (val - train): {current_val_metric - avg_train_loss:+.4f}")
 
-                is_new_best = (current_val_metric < best_val_loss)
+                is_new_best = (current_val_metric < (best_val_loss - mse_early_stop_min_delta))
                 
                 if is_new_best:
                     print(f"🏆 NEW BEST (MSE)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
                     best_val_loss = current_val_metric
+                    best_val_epoch = epoch
+                    mse_bad_val_checks = 0
 
                     new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
                     new_best_path = os.path.join(output_dir, new_best_name)
@@ -2826,6 +2867,8 @@ def train(args, accelerator):
                         'model': unwrapped_model.state_dict(),
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
+                        'best_val_epoch': best_val_epoch,
+                        'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                     }
                     torch.save(best_ckpt, new_best_path)
@@ -2871,6 +2914,37 @@ def train(args, accelerator):
                                       model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
                                       geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
                         print(f"📸 Validation plot saved for Epoch {epoch}.")
+                else:
+                    mse_bad_val_checks += 1
+                    print(
+                        f"📊 No MSE improvement for {mse_bad_val_checks} validation check(s). "
+                        f"Best={best_val_loss:.4f} at epoch {best_val_epoch}."
+                    )
+                    if mse_plateau_patience > 0 and mse_bad_val_checks % mse_plateau_patience == 0:
+                        old_lr = float(optimizer.param_groups[0]["lr"])
+                        new_lr = max(old_lr * mse_plateau_factor, mse_min_lr)
+                        if new_lr < old_lr:
+                            for param_group in optimizer.param_groups:
+                                param_group["lr"] = new_lr
+                            print(
+                                f"🔻 MSE plateau detected: reducing LR from {old_lr:.2e} to {new_lr:.2e}."
+                            )
+                        else:
+                            print(f"ℹ️ MSE plateau detected, but LR is already at min_lr={mse_min_lr:.2e}.")
+                    if (
+                        mse_early_stop_patience > 0
+                        and epoch >= mse_early_stop_start_epoch
+                        and mse_bad_val_checks >= mse_early_stop_patience
+                    ):
+                        stop_training_after_validation = True
+                        reason = (
+                            f"Stopped at epoch {epoch}: no MSE improvement greater than "
+                            f"{mse_early_stop_min_delta:.4g} for {mse_bad_val_checks} validation checks. "
+                            f"Best epoch={best_val_epoch}, best_val_loss={best_val_loss:.6f}."
+                        )
+                        with open(early_stop_marker, "w") as f:
+                            f.write(reason + "\n")
+                        print(f"🛑 {reason}")
 
                 unwrapped_model = accelerator.unwrap_model(model)
                 torch.save({
@@ -2878,6 +2952,8 @@ def train(args, accelerator):
                     'model': unwrapped_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
+                    'best_val_epoch': best_val_epoch,
+                    'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
@@ -2886,6 +2962,10 @@ def train(args, accelerator):
 
         # Track progress for this execution session
         epochs_done_this_run += 1
+        if stop_training_after_validation:
+            if accelerator.is_main_process:
+                print("🏁 Stopping training loop after validation control trigger.")
+            break
 
 def main():
     parser = argparse.ArgumentParser(description="Train or Test Flow Matching Model")
