@@ -1803,6 +1803,7 @@ def train(args, accelerator):
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
+    variance_phase_start_epoch = int(config.get("variance_phase_start_epoch", 0))
     crps_loss = bool(config.get("crps_loss", False))
     crps_loss_num_ensemble = int(config.get("crps_loss_num_ensemble", 4))
     crps_loss_num_steps = int(config.get("crps_loss_num_steps", 10))
@@ -1845,10 +1846,11 @@ def train(args, accelerator):
     model_in_channels = cond_channel_count + 2
     global_context_channel_count = int(val_dataset_full.global_context_channel_count)
 
-    if crps_loss and force_variance_phase:
+    if crps_loss and (force_variance_phase or variance_phase_start_epoch > 0):
         if accelerator.is_main_process:
-            print("   ℹ️ crps_loss=True overrides force_variance_phase=True. Using CRPS fine-tuning mode.")
+            print("   ℹ️ crps_loss=True overrides variance-head-only phase settings. Using CRPS fine-tuning mode.")
         force_variance_phase = False
+        variance_phase_start_epoch = 0
     
     if accelerator.is_main_process:
         print("\n=======================================================")
@@ -1868,6 +1870,8 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
         else:
             print(f"   [Training Mode]      : Velocity-only")
+        if variance_phase_start_epoch > 0:
+            print(f"   [Variance Phase]     : starts at epoch {variance_phase_start_epoch}, lr={variance_phase_lr:.2e}")
         if crps_loss:
             train_weight_mode = "area x land-ocean" if crps_loss_use_land_ocean_weights else "area-only"
             rollout_states = batch_size * crps_loss_num_ensemble
@@ -2056,6 +2060,7 @@ def train(args, accelerator):
     best_val_loss = float('inf')
     best_val_epoch = 0
     mse_bad_val_checks = 0
+    variance_phase_best_reset_done = False
     crps_phase_reset = False  # Will be set True after MSE→CRPS transition (or if resuming from Phase 2)
     top_models = []
     is_variance_phase = False
@@ -2096,7 +2101,11 @@ def train(args, accelerator):
             
             if not args.test:
                 start_epoch = loaded_checkpoint_epoch + 1
-                resume_into_variance_phase = force_variance_phase
+                resume_into_variance_phase = (
+                    force_variance_phase
+                    or loaded_is_variance_phase
+                    or (variance_phase_start_epoch > 0 and start_epoch >= variance_phase_start_epoch)
+                )
                 
                 if resume_into_variance_phase:
                     if accelerator.is_main_process:
@@ -2137,6 +2146,7 @@ def train(args, accelerator):
                     checkpoint['top_models'] = [] # Clear legacy CRPS top_models so we don't mix scales
                 best_val_epoch = int(checkpoint.get('best_val_epoch', 0))
                 mse_bad_val_checks = int(checkpoint.get('mse_bad_val_checks', 0))
+                variance_phase_best_reset_done = bool(checkpoint.get('variance_phase_best_reset_done', False))
                 
                 if 'top_models' in checkpoint:
                     top_models = checkpoint['top_models']
@@ -2151,6 +2161,7 @@ def train(args, accelerator):
                     best_val_loss = float('inf')
                     best_val_epoch = 0
                     mse_bad_val_checks = 0
+                    variance_phase_best_reset_done = False
                     top_models = []
                 
             if accelerator.is_main_process:
@@ -2191,32 +2202,59 @@ def train(args, accelerator):
             )
         return
 
-    start_in_variance_phase = force_variance_phase
-
-    if not args.test and start_in_variance_phase:
+    def enable_variance_phase(reason, reset_best_for_phase=False):
+        nonlocal optimizer, is_variance_phase, best_val_loss, best_val_epoch
+        nonlocal mse_bad_val_checks, top_models, variance_phase_best_reset_done
+        if is_variance_phase:
+            return
         if accelerator.is_main_process:
-            if force_variance_phase:
-                print("🔒 Force-enabling variance phase from config. Freezing UNet + mean heads.")
-                if loaded_checkpoint_epoch == 0:
-                    print("   ⚠️ No checkpoint was loaded. This will train only var_heads from scratch.")
-
+            print(f"🔒 Enabling variance-head-only phase: {reason}")
+            print("   Freezing backbone, conditioning layers, and velocity heads; training only var_heads.")
         unwrapped = accelerator.unwrap_model(model)
-        for param in unwrapped.unet.parameters():
-            param.requires_grad_(False)
-        for param in unwrapped.heads.parameters():
+        for param in unwrapped.parameters():
             param.requires_grad_(False)
         for param in unwrapped.var_heads.parameters():
             param.requires_grad_(True)
 
+        var_params = [p for p in unwrapped.var_heads.parameters() if p.requires_grad]
+        if not var_params:
+            raise RuntimeError("Variance phase requested, but no trainable var_heads parameters were found.")
         optimizer = torch.optim.AdamW(
-            [p for p in unwrapped.var_heads.parameters() if p.requires_grad],
+            var_params,
             lr=variance_phase_lr,
             weight_decay=weight_decay,
         )
-        model, optimizer, loader, val_loader_full, val_loader_monthly = accelerator.prepare(
-            model, optimizer, loader, val_loader_full, val_loader_monthly
-        )
+        optimizer = accelerator.prepare(optimizer)
         is_variance_phase = True
+        if reset_best_for_phase and not variance_phase_best_reset_done:
+            if accelerator.is_main_process:
+                print("   Resetting best validation tracker so best_flow_ckpt.pt captures the variance-head phase.")
+            best_val_loss = float('inf')
+            best_val_epoch = 0
+            mse_bad_val_checks = 0
+            top_models = []
+            variance_phase_best_reset_done = True
+
+    start_in_variance_phase = (
+        not args.test
+        and not crps_loss
+        and (
+            force_variance_phase
+            or loaded_is_variance_phase
+            or (variance_phase_start_epoch > 0 and start_epoch >= variance_phase_start_epoch)
+        )
+    )
+
+    if start_in_variance_phase:
+        if force_variance_phase:
+            reason = "force_variance_phase=True"
+        elif loaded_is_variance_phase:
+            reason = "resuming a variance-phase checkpoint"
+        else:
+            reason = f"start_epoch={start_epoch} >= variance_phase_start_epoch={variance_phase_start_epoch}"
+        if loaded_checkpoint_epoch == 0 and accelerator.is_main_process:
+            print("   ⚠️ No checkpoint was loaded. This will train only var_heads from scratch.")
+        enable_variance_phase(reason, reset_best_for_phase=not loaded_is_variance_phase)
         
     # ---------------------------------------------------------
     # 3. Execution Mode: Train or Test
@@ -2497,6 +2535,16 @@ def train(args, accelerator):
             if accelerator.is_main_process:
                 print(f"\n⚠️ Reached --epochs-per-run limit ({max_epochs_this_run}). Exiting for resubmission.")
             break
+        if (
+            not is_variance_phase
+            and not crps_loss
+            and variance_phase_start_epoch > 0
+            and epoch >= variance_phase_start_epoch
+        ):
+            enable_variance_phase(
+                f"epoch {epoch} reached variance_phase_start_epoch={variance_phase_start_epoch}",
+                reset_best_for_phase=True,
+            )
 
         model.train()
         train_loss = 0.0
@@ -2644,6 +2692,7 @@ def train(args, accelerator):
                 'mse_bad_val_checks': mse_bad_val_checks,
                 'top_models': top_models,
                 'is_variance_phase': is_variance_phase,
+                'variance_phase_best_reset_done': variance_phase_best_reset_done,
             }
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
@@ -2746,6 +2795,7 @@ def train(args, accelerator):
                         'best_val_epoch': best_val_epoch,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
+                        'variance_phase_best_reset_done': variance_phase_best_reset_done,
                     }
                     torch.save(best_ckpt, new_best_path)
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
@@ -2776,6 +2826,7 @@ def train(args, accelerator):
                         'best_val_epoch': best_val_epoch,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
+                        'variance_phase_best_reset_done': variance_phase_best_reset_done,
                     },
                                os.path.join(output_dir, f"periodic_ckpt_epoch_{epoch}.pt"))
                     print(f"💾 Periodic checkpoint: periodic_ckpt_epoch_{epoch}.pt")
@@ -2788,6 +2839,7 @@ def train(args, accelerator):
                     'best_val_epoch': best_val_epoch,
                     'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
+                    'variance_phase_best_reset_done': variance_phase_best_reset_done,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f: csv.writer(f).writerow([epoch, avg_train_loss, current_val_metric, val_result['avg_crps_pr']])
@@ -2870,6 +2922,7 @@ def train(args, accelerator):
                         'best_val_epoch': best_val_epoch,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
+                        'variance_phase_best_reset_done': variance_phase_best_reset_done,
                     }
                     torch.save(best_ckpt, new_best_path)
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
@@ -2955,6 +3008,7 @@ def train(args, accelerator):
                     'best_val_epoch': best_val_epoch,
                     'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
+                    'variance_phase_best_reset_done': variance_phase_best_reset_done,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f:

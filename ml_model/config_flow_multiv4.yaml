@@ -4,7 +4,7 @@
 batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
-epochs: 300
+epochs: 320
 output_dir: ml_output_flowmulti_v4_south_asia_global_context
 mixed_precision: bf16
 num_workers: 1
@@ -35,6 +35,7 @@ global_context_variables:
 reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
+variance_phase_start_epoch: 301
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
