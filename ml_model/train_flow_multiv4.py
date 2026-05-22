@@ -1830,6 +1830,7 @@ def train(args, accelerator):
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
     validation_var_beta_t2m = float(config.get("validation_var_beta_t2m", validation_var_beta_pr))
     dense_mse_validation_until = int(config.get("dense_mse_validation_until", 0))
+    plot_validation_every = int(config.get("plot_validation_every", 0))
     mse_early_stop_patience = int(config.get("mse_early_stop_patience", 0))
     mse_early_stop_start_epoch = int(config.get("mse_early_stop_start_epoch", 0))
     mse_early_stop_min_delta = float(config.get("mse_early_stop_min_delta", 0.0))
@@ -1893,6 +1894,7 @@ def train(args, accelerator):
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
         print(f"   [Dense MSE Val To]   : {dense_mse_validation_until if dense_mse_validation_until > 0 else 'disabled'}")
+        print(f"   [Val Plot Every]     : {plot_validation_every if plot_validation_every > 0 else 'best-only'}")
         print(
             f"   [MSE Plateau]       : patience={mse_plateau_patience}, "
             f"factor={mse_plateau_factor:.2f}, min_lr={mse_min_lr:.2e}"
@@ -2720,9 +2722,14 @@ def train(args, accelerator):
             mse_bad_val_checks = 0
             crps_phase_reset = True
         
+        def should_plot_validation(ep):
+            return plot_validation_every > 0 and ep >= 20 and (ep % plot_validation_every == 0)
+
         def should_validate(ep):
             if ep < 5:
                 return False
+            elif should_plot_validation(ep):
+                return True
             elif (not use_crps_phase) and dense_mse_validation_until > 0 and ep <= dense_mse_validation_until:
                 return True
             elif ep < 20:
@@ -2816,6 +2823,17 @@ def train(args, accelerator):
                                   model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
                                   geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
                     print(f"📸 Validation plot saved for Epoch {epoch}.")
+                elif should_plot_validation(epoch):
+                    vt = val_result['tensors']
+                    save_val_plot(epoch, vt['full_pred'], vt['true_target'], val_result['avg_crps_pr'], val_result['avg_rmse_pr'],
+                                  vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], output_dir,
+                                  ai_residual=vt['ai_res'], suffix="periodic_crps", geos_single=vt['geos_single'],
+                                  model_single=vt['model_single'], model_var=vt['model_var'],
+                                  full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
+                                  geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
+                                  model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
+                                  geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
+                    print(f"📸 Periodic validation plot saved for Epoch {epoch}.")
                 if epoch % 5 == 0:
                     unwrapped_model = accelerator.unwrap_model(model)
                     torch.save({
@@ -2933,40 +2951,6 @@ def train(args, accelerator):
                     for i, entry in enumerate(registry): entry['rank'] = i + 1
                     with open(registry_path, 'w') as f: json.dump(registry, f, indent=2)
                     print(f"📋 Registry: {len(registry)} models tracked.")
-                
-                    if epoch >= 20:
-                        print(f"📊 Generating PR+T2M validation plot for Epoch {epoch}...")
-                        val_result = run_val_inference(
-                            epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file, 
-                            target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, 
-                            is_test=False, is_fast_recon=True,
-                            use_flow_variance=True,
-                            use_eof_lhs_noise=True,
-                            validation_noise_cache=validation_noise_cache,
-                            print_validation_noise_diag=False,
-                            eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
-                            enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
-                            t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
-                            validation_num_ensemble=validation_num_ensemble,
-                            validation_num_steps=validation_num_steps,
-                            validation_ode_batch_size=validation_ode_batch_size,
-                            validation_rho_pr=validation_rho_pr,
-                            validation_rho_t2m=validation_rho_t2m,
-                            validation_var_beta_pr=validation_var_beta_pr,
-                            validation_var_beta_t2m=validation_var_beta_t2m,
-                            validation_variance_coarse_kernel=validation_variance_coarse_kernel,
-                        )
-                        vt = val_result['tensors']
-                        save_val_plot(epoch, vt['full_pred'], vt['true_target'], 
-                                      val_result['avg_crps_pr'], val_result['avg_rmse_pr'], 
-                                      vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'], 
-                                      output_dir, ai_residual=vt['ai_res'], suffix="best",
-                                      geos_single=vt['geos_single'], model_single=vt['model_single'], model_var=vt['model_var'],
-                                      full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
-                                      geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
-                                      model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
-                                      geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m'])
-                        print(f"📸 Validation plot saved for Epoch {epoch}.")
                 else:
                     mse_bad_val_checks += 1
                     print(
@@ -2998,6 +2982,44 @@ def train(args, accelerator):
                         with open(early_stop_marker, "w") as f:
                             f.write(reason + "\n")
                         print(f"🛑 {reason}")
+
+                if epoch >= 20 and (is_new_best or should_plot_validation(epoch)):
+                    plot_suffix = "best" if is_new_best else "periodic"
+                    plot_label = "best" if is_new_best else f"periodic every {plot_validation_every} epochs"
+                    print(f"📊 Generating PR+T2M validation plot for Epoch {epoch} ({plot_label})...")
+                    val_result = run_val_inference(
+                        epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file,
+                        target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,
+                        is_test=False, is_fast_recon=True,
+                        use_flow_variance=True,
+                        use_eof_lhs_noise=True,
+                        validation_noise_cache=validation_noise_cache,
+                        print_validation_noise_diag=False,
+                        eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
+                        enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
+                        t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
+                        validation_num_ensemble=validation_num_ensemble,
+                        validation_num_steps=validation_num_steps,
+                        validation_ode_batch_size=validation_ode_batch_size,
+                        validation_rho_pr=validation_rho_pr,
+                        validation_rho_t2m=validation_rho_t2m,
+                        validation_var_beta_pr=validation_var_beta_pr,
+                        validation_var_beta_t2m=validation_var_beta_t2m,
+                        validation_variance_coarse_kernel=validation_variance_coarse_kernel,
+                    )
+                    vt = val_result['tensors']
+                    save_val_plot(
+                        epoch, vt['full_pred'], vt['true_target'],
+                        val_result['avg_crps_pr'], val_result['avg_rmse_pr'],
+                        vt['geos_mean'], val_result['avg_geos_crps_pr'], val_result['avg_geos_rmse_pr'],
+                        output_dir, ai_residual=vt['ai_res'], suffix=plot_suffix,
+                        geos_single=vt['geos_single'], model_single=vt['model_single'], model_var=vt['model_var'],
+                        full_pred_t2m=vt['full_pred_t2m'], true_target_t2m=vt['true_target_t2m'],
+                        geos_pred_t2m=vt['geos_mean_t2m'], model_var_t2m=vt['model_var_t2m'],
+                        model_crps_t2m=val_result['avg_crps_t2m'], model_rmse_t2m=val_result['avg_rmse_t2m'],
+                        geos_crps_t2m=val_result['avg_geos_crps_t2m'], geos_rmse_t2m=val_result['avg_geos_rmse_t2m']
+                    )
+                    print(f"📸 Validation plot saved for Epoch {epoch}.")
 
                 unwrapped_model = accelerator.unwrap_model(model)
                 torch.save({

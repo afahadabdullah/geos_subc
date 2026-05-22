@@ -48,6 +48,7 @@ validation_rho_t2m: 0.05
 validation_var_beta_pr: 0.3
 validation_var_beta_t2m: 0.01
 dense_mse_validation_until: 40
+plot_validation_every: 5
 mse_plateau_patience: 3
 mse_plateau_factor: 0.5
 mse_min_lr: 1e-6
