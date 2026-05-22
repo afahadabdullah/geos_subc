@@ -4,6 +4,7 @@
 batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
+reset_optimizer_state: False
 epochs: 320
 output_dir: ml_output_flowmulti_v4_south_asia_global_context
 mixed_precision: bf16

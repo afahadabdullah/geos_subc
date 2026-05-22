@@ -1608,6 +1608,7 @@ def train(args, accelerator):
     batch_size = config.get("batch_size", 4)
     lr = float(config.get("learning_rate", 1e-4))
     weight_decay = float(config.get("weight_decay", 0.0))
+    reset_optimizer_state = bool(config.get("reset_optimizer_state", False))
 
     target_domain = config.get("target_domain")
     target_domain_bounds = config.get("target_domain_bounds")
@@ -1910,6 +1911,7 @@ def train(args, accelerator):
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
         print(f"   [Optimizer]          : AdamW lr={lr:.2e}, wd={weight_decay:.2e}")
+        print(f"   [Reset Optimizer]    : {reset_optimizer_state}")
         print("=======================================================\n")
 
     # ---------------------------------------------------------
@@ -2121,18 +2123,24 @@ def train(args, accelerator):
                         param_groups = optimizer_state.get('param_groups', [])
                         loaded_lr = float(param_groups[0].get('lr', lr)) if param_groups else lr
                         loaded_weight_decay = float(param_groups[0].get('weight_decay', weight_decay)) if param_groups else weight_decay
-                        same_hparams = (
-                            np.isclose(loaded_lr, lr)
-                            and np.isclose(loaded_weight_decay, weight_decay)
-                        )
-                        if same_hparams:
+                        if reset_optimizer_state:
+                            if accelerator.is_main_process:
+                                print(
+                                    "   ℹ️ reset_optimizer_state=True. "
+                                    f"Starting fresh optimizer at config lr={lr:.2e}."
+                                )
+                        elif not np.isclose(loaded_weight_decay, weight_decay):
+                            if accelerator.is_main_process:
+                                print(
+                                    "   ℹ️ Optimizer weight_decay changed since the checkpoint "
+                                    f"(ckpt wd={loaded_weight_decay:.2e}; config wd={weight_decay:.2e}). "
+                                    "Starting with fresh optimizer state."
+                                )
+                        else:
                             optimizer.load_state_dict(optimizer_state)
-                        elif accelerator.is_main_process:
                             print(
-                                "   ℹ️ Optimizer hyperparameters changed since the checkpoint "
-                                f"(ckpt lr={loaded_lr:.2e}, wd={loaded_weight_decay:.2e}; "
-                                f"config lr={lr:.2e}, wd={weight_decay:.2e}). "
-                                "Starting with fresh optimizer state."
+                                "   ✅ Loaded optimizer state from checkpoint "
+                                f"(current lr={loaded_lr:.2e}, config initial lr={lr:.2e})."
                             )
                     except (ValueError, RuntimeError) as e:
                         if accelerator.is_main_process:
