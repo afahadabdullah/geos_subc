@@ -1170,6 +1170,7 @@ def run_full_test_suite_multi(
     validation_rho_t2m=None,
     validation_var_beta_pr=1.0,
     validation_var_beta_t2m=None,
+    validation_variance_coarse_kernel=None,
     sample_plot_limit=None,
     plot_subdir="test_plots_multi",
 ):
@@ -1272,6 +1273,8 @@ def run_full_test_suite_multi(
             mode_tag = f"pr_t2m_eof_lhs_rho_pr{validation_rho_pr:.2f}_rho_t2m{validation_rho_t2m:.2f}"
         if use_flow_variance:
             mode_tag += f"_beta_pr{validation_var_beta_pr:.2f}_beta_t2m{validation_var_beta_t2m:.2f}"
+            if validation_variance_coarse_kernel is not None:
+                mode_tag += f"_coarse{int(validation_variance_coarse_kernel)}"
         cache_key = ("testsuite", mode_tag, b_idx, current_year, current_month, current_day, num_ensemble, vB, H, W)
 
         if validation_noise_cache is not None and cache_key in validation_noise_cache:
@@ -1319,6 +1322,7 @@ def run_full_test_suite_multi(
             lead_idx=lead_idx_expanded,
             apply_flow_variance=use_flow_variance,
             variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+            variance_coarse_kernel=validation_variance_coarse_kernel,
             chunk_size=chunk_size,
             global_context=fx_global_context_expanded,
         )
@@ -2310,6 +2314,7 @@ def train(args, accelerator):
             validation_rho_t2m=validation_rho_t2m,
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
+            validation_variance_coarse_kernel=validation_variance_coarse_kernel,
             sample_plot_limit=24,
             plot_subdir=f"test_plots_multi_e{test_num_ensemble}_s{test_num_steps}",
         )
