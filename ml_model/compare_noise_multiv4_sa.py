@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-South Asia noise-strategy comparison for multi-target v4/v5 flow models.
+South Asia noise-strategy comparison for the current multi-target v4 flow model.
 
 This is the SA-aware replacement for the older compare_noise_multi.py scripts:
 it reads the training config, respects target_domain/local/global predictors,
-loads the v4/v5 model class, and writes side-by-side GEOS / random / EOF-LHS
+loads the v4 local/global model class, and writes side-by-side GEOS / random / EOF-LHS
 metrics to CSV.
 """
 
@@ -41,9 +41,13 @@ from train_flow_multiv4 import (
     resolve_target_domain,
 )
 
+EXPECTED_OUTPUT_DIR = "ml_output_flowmulti_v4_south_asia_global_context"
+EXPECTED_LOCAL_OBS = ["sm", "mjo"]
+EXPECTED_GLOBAL_CONTEXT = ["sst", "sss", "ivt", "z500_zonal_dev", "u250"]
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare SA multi-v4/v5 noise strategies.")
+    parser = argparse.ArgumentParser(description="Compare SA multi-v4 local/global noise strategies.")
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv4.yaml")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--year", type=int, default=2021)
@@ -69,6 +73,22 @@ def parse_args():
 def load_config(path):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def validate_current_sa_v4_config(config, output_dir):
+    target_domain = config.get("target_domain")
+    local_obs = list(config.get("local_obs_variables") or [])
+    global_context = list(config.get("global_context_variables") or [])
+    output_name = os.path.basename(os.path.normpath(output_dir))
+
+    if target_domain != "south_asia":
+        raise ValueError(f"Expected target_domain=south_asia, got {target_domain!r}")
+    if output_name != EXPECTED_OUTPUT_DIR:
+        raise ValueError(f"Expected output_dir ending in {EXPECTED_OUTPUT_DIR}, got {output_dir!r}")
+    if local_obs != EXPECTED_LOCAL_OBS:
+        raise ValueError(f"Expected local_obs_variables={EXPECTED_LOCAL_OBS}, got {local_obs}")
+    if global_context != EXPECTED_GLOBAL_CONTEXT:
+        raise ValueError(f"Expected global_context_variables={EXPECTED_GLOBAL_CONTEXT}, got {global_context}")
 
 
 def resolve_checkpoint(output_dir, checkpoint, ckpt_rank):
@@ -307,6 +327,7 @@ def main():
         config["data_dir"] = os.environ["DATA_DIR_OVERRIDE"]
 
     output_dir = args.output_dir or config["output_dir"]
+    validate_current_sa_v4_config(config, output_dir)
     stats_file = config.get("stats_file", "v1_multi_global_stats.pt")
     target_domain = config.get("target_domain")
     target_domain_bounds = config.get("target_domain_bounds")

@@ -42,10 +42,16 @@ export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dat
 mkdir -p ml_output_noise_compare_sa
 
 CONFIG_PATH="${SA_NOISE_CONFIG:-ml_model/config_flow_multiv4.yaml}"
+CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
+CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
+CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
+CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
+CONFIG_TEST_ENSEMBLE=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH')).get('test_num_ensemble', yaml.safe_load(open('$CONFIG_PATH')).get('validation_num_ensemble', 15))))")
+CONFIG_TEST_STEPS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH')).get('test_num_steps', yaml.safe_load(open('$CONFIG_PATH')).get('validation_num_steps', 10))))")
 YEAR="${SA_NOISE_YEAR:-2021}"
 CHECKPOINT="${SA_NOISE_CHECKPOINT:-best_flow_ckpt.pt}"
-NUM_ENSEMBLE="${SA_NOISE_ENSEMBLE:-30}"
-NUM_STEPS="${SA_NOISE_STEPS:-10}"
+NUM_ENSEMBLE="${SA_NOISE_ENSEMBLE:-$CONFIG_TEST_ENSEMBLE}"
+NUM_STEPS="${SA_NOISE_STEPS:-$CONFIG_TEST_STEPS}"
 BATCH_LIMIT="${SA_NOISE_BATCH_LIMIT:-12}"
 ODE_BATCH_SIZE="${SA_NOISE_ODE_BATCH:-120}"
 SETTING_ARGS=()
@@ -58,18 +64,39 @@ if [ -n "${SA_NOISE_SETTINGS:-}" ]; then
     done
 fi
 
-CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
-CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
     echo "❌ Refusing to run non-SA config: target_domain=$CONFIG_TARGET_DOMAIN"
+    exit 1
+fi
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v4_south_asia_global_context" ]; then
+    echo "❌ Refusing to run old output dir: output_dir=$CONFIG_OUTPUT_DIR"
+    exit 1
+fi
+if [ "$CONFIG_LOCAL_VARS" != "sm,mjo" ]; then
+    echo "❌ Refusing to run unexpected local predictors: $CONFIG_LOCAL_VARS"
+    exit 1
+fi
+if [ "$CONFIG_GLOBAL_CONTEXT" != "sst,sss,ivt,z500_zonal_dev,u250" ]; then
+    echo "❌ Refusing to run unexpected global context variables: $CONFIG_GLOBAL_CONTEXT"
+    exit 1
+fi
+
+case "$CHECKPOINT" in
+    /*) CKPT_PATH="$CHECKPOINT" ;;
+    *) CKPT_PATH="$CONFIG_OUTPUT_DIR/$CHECKPOINT" ;;
+esac
+if [ ! -f "$CKPT_PATH" ]; then
+    echo "❌ Checkpoint not found: $CKPT_PATH"
     exit 1
 fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 echo "🎯 Config: $CONFIG_PATH"
 echo "🎯 Output dir: $CONFIG_OUTPUT_DIR"
+echo "🎯 Local predictors: $CONFIG_LOCAL_VARS"
+echo "🎯 Global context: $CONFIG_GLOBAL_CONTEXT"
 echo "🎯 Year: $YEAR"
-echo "🎯 Checkpoint: $CHECKPOINT"
+echo "🎯 Checkpoint: $CKPT_PATH"
 echo "🎯 Ensemble members: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Batch limit: $BATCH_LIMIT"
