@@ -1830,6 +1830,13 @@ def train(args, accelerator):
     test_num_ensemble = int(config.get("test_num_ensemble", 90))
     test_num_steps = int(config.get("test_num_steps", 10))
     test_max_ensemble_per_chunk = int(config.get("test_max_ensemble_per_chunk", 30))
+    test_sample_plot_limit_cfg = config.get("test_sample_plot_limit", 24)
+    if test_sample_plot_limit_cfg is None:
+        test_sample_plot_limit = None
+    else:
+        test_sample_plot_limit = int(test_sample_plot_limit_cfg)
+        if test_sample_plot_limit <= 0:
+            test_sample_plot_limit = None
     validation_rho_pr = float(config.get("validation_rho_pr", 1.0))
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
@@ -1914,6 +1921,7 @@ def train(args, accelerator):
         print(f"   [Test Ens]           : {test_num_ensemble}")
         print(f"   [Test Steps]         : {test_num_steps}")
         print(f"   [Test Ens/Chunk]     : {test_max_ensemble_per_chunk}")
+        print(f"   [Test Plot Limit]    : {test_sample_plot_limit if test_sample_plot_limit is not None else 'all'}")
         print(f"   [Optimizer]          : AdamW lr={lr:.2e}, wd={weight_decay:.2e}")
         print(f"   [Reset Optimizer]    : {reset_optimizer_state}")
         print("=======================================================\n")
@@ -2315,7 +2323,7 @@ def train(args, accelerator):
             validation_var_beta_pr=validation_var_beta_pr,
             validation_var_beta_t2m=validation_var_beta_t2m,
             validation_variance_coarse_kernel=validation_variance_coarse_kernel,
-            sample_plot_limit=24,
+            sample_plot_limit=test_sample_plot_limit,
             plot_subdir=f"test_plots_multi_e{test_num_ensemble}_s{test_num_steps}",
         )
         return

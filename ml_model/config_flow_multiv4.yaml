@@ -70,3 +70,4 @@ crps_loss_use_gradient_checkpointing: True
 test_num_ensemble: 90
 test_num_steps: 10
 test_max_ensemble_per_chunk: 30
+test_sample_plot_limit: 0
