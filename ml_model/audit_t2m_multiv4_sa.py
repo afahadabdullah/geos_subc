@@ -68,6 +68,20 @@ def weighted_mean(field, area_weights):
             (torch.where(mask, weights, torch.zeros_like(weights)).sum() + 1e-8)).item()
 
 
+def finite_min(field):
+    values = field[torch.isfinite(field)]
+    if values.numel() == 0:
+        return float("nan")
+    return float(values.min().item())
+
+
+def finite_max(field):
+    values = field[torch.isfinite(field)]
+    if values.numel() == 0:
+        return float("nan")
+    return float(values.max().item())
+
+
 def summarize(rows, key):
     groups = defaultdict(list)
     for row in rows:
@@ -148,25 +162,27 @@ def main():
             target = target_full[lead:lead + 1]
             geos = geos_mean[lead:lead + 1]
             geos_members = geos_ens[:, lead:lead + 1]
+            target_recon_err = torch.abs(target_recon[lead] - target_full[lead])
+            geos_recon_err = torch.abs(geos_recon[lead] - geos_mean[lead])
             rows.append({
                 "init_date": init_date,
                 "month": int(batch["month"][0]),
                 "lead": lead + 1,
-                "target_min": float(torch.nanmin(target).item()),
-                "target_max": float(torch.nanmax(target).item()),
+                "target_min": finite_min(target),
+                "target_max": finite_max(target),
                 "target_mean": weighted_mean(target, area_weights),
-                "geos_min": float(torch.nanmin(geos).item()),
-                "geos_max": float(torch.nanmax(geos).item()),
+                "geos_min": finite_min(geos),
+                "geos_max": finite_max(geos),
                 "geos_mean": weighted_mean(geos, area_weights),
                 "geos_bias": weighted_mean(geos - target, area_weights),
                 "geos_rmse": compute_rmse(geos, target, area_weights),
                 "geos_crps": compute_crps(geos_members.unsqueeze(1), target.unsqueeze(0), area_weights),
-                "target_norm_min": float(torch.nanmin(target_norm[lead]).item()),
-                "target_norm_max": float(torch.nanmax(target_norm[lead]).item()),
-                "target_recon_max_abs_err": float(torch.nanmax(torch.abs(target_recon[lead] - target_full[lead])).item()),
-                "geos_norm_min": float(torch.nanmin(geos_norm[lead]).item()),
-                "geos_norm_max": float(torch.nanmax(geos_norm[lead]).item()),
-                "geos_recon_max_abs_err": float(torch.nanmax(torch.abs(geos_recon[lead] - geos_mean[lead])).item()),
+                "target_norm_min": finite_min(target_norm[lead]),
+                "target_norm_max": finite_max(target_norm[lead]),
+                "target_recon_max_abs_err": finite_max(target_recon_err),
+                "geos_norm_min": finite_min(geos_norm[lead]),
+                "geos_norm_max": finite_max(geos_norm[lead]),
+                "geos_recon_max_abs_err": finite_max(geos_recon_err),
             })
 
     if not rows:
