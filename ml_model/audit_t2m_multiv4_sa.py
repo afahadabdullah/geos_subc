@@ -59,7 +59,19 @@ def validate_config(config):
         raise ValueError(f"Expected global_context_variables={EXPECTED_GLOBAL_CONTEXT}, got {global_context}")
 
 
+def as_bchw(field):
+    """Return field as [B, C, H, W] for shared metric helpers."""
+    if field.ndim == 2:
+        return field.unsqueeze(0).unsqueeze(0)
+    if field.ndim == 3:
+        return field.unsqueeze(1)
+    if field.ndim == 4:
+        return field
+    raise ValueError(f"Expected field with 2, 3, or 4 dims, got shape {tuple(field.shape)}")
+
+
 def weighted_mean(field, area_weights):
+    field = as_bchw(field)
     weights = area_weights.expand_as(field)
     mask = torch.isfinite(field)
     if not mask.any():
@@ -162,6 +174,8 @@ def main():
             target = target_full[lead:lead + 1]
             geos = geos_mean[lead:lead + 1]
             geos_members = geos_ens[:, lead:lead + 1]
+            target_metric = as_bchw(target)
+            geos_metric = as_bchw(geos)
             target_recon_err = torch.abs(target_recon[lead] - target_full[lead])
             geos_recon_err = torch.abs(geos_recon[lead] - geos_mean[lead])
             rows.append({
@@ -175,8 +189,8 @@ def main():
                 "geos_max": finite_max(geos),
                 "geos_mean": weighted_mean(geos, area_weights),
                 "geos_bias": weighted_mean(geos - target, area_weights),
-                "geos_rmse": compute_rmse(geos, target, area_weights),
-                "geos_crps": compute_crps(geos_members.unsqueeze(1), target.unsqueeze(0), area_weights),
+                "geos_rmse": compute_rmse(geos_metric, target_metric, area_weights),
+                "geos_crps": compute_crps(geos_members.unsqueeze(1), target_metric, area_weights),
                 "target_norm_min": finite_min(target_norm[lead]),
                 "target_norm_max": finite_max(target_norm[lead]),
                 "target_recon_max_abs_err": finite_max(target_recon_err),
