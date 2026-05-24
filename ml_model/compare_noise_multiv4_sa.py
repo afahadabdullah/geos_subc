@@ -224,7 +224,7 @@ def decode_multi(pred_norm):
     sqrt_pr = ((pred_pr + 1.0) / 2.0) * 7.071
     precip = torch.clamp(sqrt_pr ** 2, min=0.0)
 
-    pred_t2m = pred_norm[:, :, 1]
+    pred_t2m = torch.clamp(pred_norm[:, :, 1], min=-1.0, max=1.0)
     t2m = ((pred_t2m + 1.0) / 2.0) * (320.0 - 200.0) + 200.0
     return precip, t2m
 

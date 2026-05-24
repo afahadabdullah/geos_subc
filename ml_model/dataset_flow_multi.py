@@ -545,11 +545,12 @@ class S2SHybridDataset(Dataset):
             
             geos_pr_data = ds_geos[geos_pr_var].isel(S=meta['s_idx']).values 
             
-            # Retrieve 'tas' if it exists, else use placeholder
-            if geos_tas_var in ds_geos:
-                geos_tas_data = ds_geos[geos_tas_var].isel(S=meta['s_idx']).values
-            else:
-                geos_tas_data = np.zeros_like(geos_pr_data)
+            if geos_tas_var not in ds_geos:
+                raise KeyError(
+                    f"GEOS T2M/TAS variable missing in {meta['geos_path']}. "
+                    f"Tried tas/t2m aliases; available variables: {list(ds_geos.data_vars)}"
+                )
+            geos_tas_data = ds_geos[geos_tas_var].isel(S=meta['s_idx']).values
             
             if close_geos: ds_geos.close()
             
@@ -817,27 +818,30 @@ class S2SHybridDataset(Dataset):
             if close_gpcp: ds_gpcp.close()
         
         # load t2m
-        t2m_val_lead = np.zeros_like(gpcp_val_lead)
-        t2m_val_raw_full = np.zeros_like(gpcp_val_raw_full)
-        if meta.get("t2m_target_path"):
-            ds_t2m, close_t2m = get_ds(meta["t2m_target_path"], "t2m_target")
-            if ds_t2m:
-                t2m_var = next((v for v in ['t2m'] if v in ds_t2m), list(ds_t2m.data_vars)[0])
-                v_lead = ds_t2m[t2m_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
-                v_full = ds_t2m[t2m_var].isel(S=meta['s_idx']).values 
-                
-                # Handle ERA5 [lon, lat] (360, 181) orientation
-                if v_lead.shape == (360, 181):
-                    v_lead = v_lead.T
-                if v_full.ndim == 3 and v_full.shape[1] == 360 and v_full.shape[2] == 181:
-                    v_full = np.transpose(v_full, (0, 2, 1))
-                elif v_full.ndim == 2 and v_full.shape == (360, 181):
-                    v_full = v_full.T
-                    
-                t2m_val_lead = v_lead
-                t2m_val_raw_full = v_full
-                
-                if close_t2m: ds_t2m.close()
+        if not meta.get("t2m_target_path"):
+            raise FileNotFoundError(
+                f"T2M target file missing for year {meta['year']}. "
+                "Multi-target training/evaluation requires t2m_weekly_<year>.zarr."
+            )
+        ds_t2m, close_t2m = get_ds(meta["t2m_target_path"], "t2m_target")
+        if ds_t2m is None:
+            raise FileNotFoundError(f"Could not open T2M target file: {meta['t2m_target_path']}")
+        t2m_var = next((v for v in ['t2m'] if v in ds_t2m), list(ds_t2m.data_vars)[0])
+        v_lead = ds_t2m[t2m_var].isel(S=meta['s_idx'], L=meta['lead_idx']).values 
+        v_full = ds_t2m[t2m_var].isel(S=meta['s_idx']).values 
+        
+        # Handle ERA5 [lon, lat] (360, 181) orientation
+        if v_lead.shape == (360, 181):
+            v_lead = v_lead.T
+        if v_full.ndim == 3 and v_full.shape[1] == 360 and v_full.shape[2] == 181:
+            v_full = np.transpose(v_full, (0, 2, 1))
+        elif v_full.ndim == 2 and v_full.shape == (360, 181):
+            v_full = v_full.T
+            
+        t2m_val_lead = v_lead
+        t2m_val_raw_full = v_full
+        
+        if close_t2m: ds_t2m.close()
             
         gpcp_tensor = torch.from_numpy(gpcp_val_lead).float() # (H, W)
         t2m_tensor = torch.from_numpy(t2m_val_lead).float() # (H, W)

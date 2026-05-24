@@ -1035,7 +1035,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         # Reverse T2M (Channel 1)
         # Using placeholder min/max of 200/320 for T2M as setup in the dataloader until stats hit
-        p_x1_t2m = p_x1_batch[:, :, 1]
+        p_x1_t2m = torch.clamp(p_x1_batch[:, :, 1], min=-1.0, max=1.0)
         t2m_min, t2m_max = 200.0, 320.0 
         week_t2m = ((p_x1_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
         
@@ -1332,7 +1332,7 @@ def run_full_test_suite_multi(
         week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
 
-        p_x1_t2m = p_x1_batch[:, :, 1]
+        p_x1_t2m = torch.clamp(p_x1_batch[:, :, 1], min=-1.0, max=1.0)
         t2m_min, t2m_max = 200.0, 320.0
         week_t2m = ((p_x1_t2m + 1.0) / 2.0) * (t2m_max - t2m_min) + t2m_min
 
