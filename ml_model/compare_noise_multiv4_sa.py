@@ -56,7 +56,8 @@ def parse_args():
     parser.add_argument("--num_ensemble", type=int, default=None)
     parser.add_argument("--num_steps", type=int, default=None)
     parser.add_argument("--ode_batch_size", type=int, default=None)
-    parser.add_argument("--batch_limit", type=int, default=12)
+    parser.add_argument("--batch_limit", type=int, default=12, help="Maximum loader batches to evaluate; <=0 means no limit.")
+    parser.add_argument("--full-year", action="store_true", help="Use every weekly init date instead of one init per month.")
     parser.add_argument(
         "--setting",
         action="append",
@@ -334,6 +335,7 @@ def main():
     domain_info = resolve_target_domain(target_domain, target_domain_bounds)
     lats, _ = get_target_domain_coords(target_domain, target_domain_bounds)
 
+    batch_limit = None if args.batch_limit is not None and args.batch_limit <= 0 else args.batch_limit
     dataset = S2SHybridDataset(
         data_root=config["data_dir"],
         start_year=args.year,
@@ -341,7 +343,7 @@ def main():
         normalize=True,
         preload=False,
         stats_file=stats_file,
-        subsample_monthly=True,
+        subsample_monthly=not args.full_year,
         target_domain=target_domain,
         target_domain_bounds=target_domain_bounds,
         local_obs_variables=config.get("local_obs_variables"),
@@ -390,6 +392,8 @@ def main():
     print(f"  Ensembles    : {num_ensemble}")
     print(f"  ODE steps    : {num_steps}")
     print(f"  ODE chunk    : {ode_batch_size}")
+    print(f"  Sampling     : {'full weekly year' if args.full_year else 'monthly subset'}")
+    print(f"  Batch limit  : {batch_limit if batch_limit is not None else 'none'}")
     print(f"  Settings     : {settings}")
     print("=" * 88 + "\n")
 
@@ -404,7 +408,7 @@ def main():
         results[label] = []
 
     for batch_idx, batch in enumerate(tqdm(loader, desc="SA noise compare")):
-        if args.batch_limit is not None and batch_idx >= args.batch_limit:
+        if batch_limit is not None and batch_idx >= batch_limit:
             break
 
         height, width = batch["y_target"].shape[-2:]
@@ -491,7 +495,8 @@ def main():
     df = pd.DataFrame(rows)
     os.makedirs(output_dir, exist_ok=True)
     ckpt_label = os.path.splitext(os.path.basename(ckpt_path))[0]
-    csv_path = os.path.join(output_dir, f"noise_comparison_sa_{args.year}_{ckpt_label}.csv")
+    sample_tag = "full_year" if args.full_year else "monthly"
+    csv_path = os.path.join(output_dir, f"noise_comparison_sa_{args.year}_{sample_tag}_{ckpt_label}.csv")
     df.to_csv(csv_path, index=False, float_format="%.4f")
 
     print("\nFinal mean scores:")

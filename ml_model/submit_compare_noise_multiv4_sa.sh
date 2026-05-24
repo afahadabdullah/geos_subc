@@ -54,6 +54,7 @@ NUM_ENSEMBLE="${SA_NOISE_ENSEMBLE:-$CONFIG_TEST_ENSEMBLE}"
 NUM_STEPS="${SA_NOISE_STEPS:-$CONFIG_TEST_STEPS}"
 BATCH_LIMIT="${SA_NOISE_BATCH_LIMIT:-12}"
 ODE_BATCH_SIZE="${SA_NOISE_ODE_BATCH:-120}"
+FULL_YEAR="${SA_NOISE_FULL_YEAR:-0}"
 SETTING_ARGS=()
 if [ -n "${SA_NOISE_SETTINGS:-}" ]; then
     IFS=';' read -ra SETTINGS <<< "$SA_NOISE_SETTINGS"
@@ -62,6 +63,10 @@ if [ -n "${SA_NOISE_SETTINGS:-}" ]; then
             SETTING_ARGS+=(--setting "$setting")
         fi
     done
+fi
+SAMPLE_ARGS=()
+if [ "$FULL_YEAR" = "1" ] || [ "$FULL_YEAR" = "true" ] || [ "$FULL_YEAR" = "TRUE" ]; then
+    SAMPLE_ARGS+=(--full-year)
 fi
 
 if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
@@ -100,6 +105,7 @@ echo "🎯 Checkpoint: $CKPT_PATH"
 echo "🎯 Ensemble members: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Batch limit: $BATCH_LIMIT"
+echo "🎯 Sampling: $([ ${#SAMPLE_ARGS[@]} -gt 0 ] && echo full weekly year || echo monthly subset)"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 echo "🎯 Extra settings: ${SA_NOISE_SETTINGS:-config default}"
 
@@ -111,6 +117,7 @@ python ml_model/compare_noise_multiv4_sa.py \
     --num_steps "$NUM_STEPS" \
     --ode_batch_size "$ODE_BATCH_SIZE" \
     --batch_limit "$BATCH_LIMIT" \
+    "${SAMPLE_ARGS[@]}" \
     "${SETTING_ARGS[@]}"
 
 echo "🏁 South Asia noise comparison finished at $(date)"
