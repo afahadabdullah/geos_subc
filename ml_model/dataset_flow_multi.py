@@ -195,7 +195,8 @@ class S2SHybridDataset(Dataset):
     def __init__(self, data_root="dataprocess", start_year=1999, end_year=2016, 
                  transform=None, preload=False, normalize=True, stats_file="v5_global_stats.pt",
                  subsample_monthly=False, target_domain=None, target_domain_bounds=None,
-                 local_obs_variables=None, global_context_variables=None):
+                 local_obs_variables=None, global_context_variables=None,
+                 t2m_target_mode="absolute", t2m_residual_min=None, t2m_residual_max=None):
         self.data_root = data_root
         self.years = range(start_year, end_year + 1)
         self.transform = transform
@@ -204,6 +205,23 @@ class S2SHybridDataset(Dataset):
         self.stats_file = stats_file
         self.subsample_monthly = subsample_monthly
         self.domain_info = resolve_target_domain(target_domain, target_domain_bounds)
+        self.t2m_target_mode = str(t2m_target_mode or "absolute").strip().lower()
+        if self.t2m_target_mode not in {"absolute", "geos_residual"}:
+            raise ValueError(
+                "t2m_target_mode must be 'absolute' or 'geos_residual', "
+                f"got {t2m_target_mode!r}"
+            )
+        self.t2m_residual_min = None if t2m_residual_min is None else float(t2m_residual_min)
+        self.t2m_residual_max = None if t2m_residual_max is None else float(t2m_residual_max)
+        if (self.t2m_residual_min is None) != (self.t2m_residual_max is None):
+            raise ValueError("t2m_residual_min and t2m_residual_max must be set together.")
+        if (
+            self.t2m_residual_min is not None
+            and not self.t2m_residual_min < self.t2m_residual_max
+        ):
+            raise ValueError(
+                f"Invalid T2M residual bounds: {self.t2m_residual_min}..{self.t2m_residual_max}"
+            )
         self.local_obs_variables = normalize_obs_variable_list(
             local_obs_variables, DEFAULT_LOCAL_OBS_VARIABLES, "local_obs_variables"
         )
@@ -232,6 +250,8 @@ class S2SHybridDataset(Dataset):
                 f"local={list(self.local_obs_variables)} "
                 f"global_context={list(self.global_context_variables)}"
             )
+        if self.t2m_target_mode != "absolute":
+            print(f"T2M target mode: {self.t2m_target_mode}")
         
         # Load Stats
         if self.normalize:
@@ -248,6 +268,14 @@ class S2SHybridDataset(Dataset):
 
     def _crop_spatial(self, value):
         return crop_spatial_to_domain(value, self.domain_info)
+
+    def _get_t2m_residual_bounds(self):
+        if self.t2m_residual_min is not None and self.t2m_residual_max is not None:
+            return self.t2m_residual_min, self.t2m_residual_max
+        if self.bounds is not None and "target_t2m_residual_raw" in self.bounds:
+            bounds = self.bounds["target_t2m_residual_raw"]
+            return float(bounds["min"]), float(bounds["max"])
+        return -20.0, 20.0
         
     def load_stats(self):
         # Load Z-Score stats for Precip
@@ -867,10 +895,6 @@ class S2SHybridDataset(Dataset):
             s_min, s_max = 0.0, 7.071
             gpcp_sqrt = torch.sqrt(gpcp_tensor)
             gpcp_tensor = 2.0 * (torch.clamp(gpcp_sqrt, s_min, s_max) - s_min) / (s_max - s_min + 1e-6) - 1.0
-            
-            # Temp Transform: min-max [200, 320]
-            t_min, t_max = 200.0, 320.0
-            t2m_tensor = 2.0 * (torch.clamp(t2m_tensor, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
         
         gpcp_tensor = self._crop_spatial(gpcp_tensor)
         t2m_tensor = self._crop_spatial(t2m_tensor)
@@ -878,6 +902,17 @@ class S2SHybridDataset(Dataset):
         t2m_raw_lead = self._crop_spatial(t2m_raw_lead)
         gpcp_raw_full = self._crop_spatial(gpcp_raw_full)
         t2m_raw_full = self._crop_spatial(t2m_raw_full)
+
+        if self.normalize and self.bounds is not None:
+            if self.t2m_target_mode == "geos_residual":
+                geos_t2m_lead = cached_common["pure_geos_mean_raw"][1, meta["lead_idx"]]
+                residual = t2m_raw_lead - geos_t2m_lead
+                t_min, t_max = self._get_t2m_residual_bounds()
+                t2m_tensor = 2.0 * (torch.clamp(residual, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
+            else:
+                # Absolute Temp Transform: min-max [200, 320] K
+                t_min, t_max = 200.0, 320.0
+                t2m_tensor = 2.0 * (torch.clamp(t2m_raw_lead, t_min, t_max) - t_min) / (t_max - t_min + 1e-6) - 1.0
 
         # Stack targets: [C=2, H, W]
         target_tensor = torch.stack([gpcp_tensor, t2m_tensor], dim=0)
