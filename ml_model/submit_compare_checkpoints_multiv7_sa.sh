@@ -5,7 +5,7 @@
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
-#SBATCH -t 03:00:00
+#SBATCH -t 02:00:00
 #SBATCH -A ATM25008
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
