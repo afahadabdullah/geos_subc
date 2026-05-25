@@ -56,7 +56,7 @@ NUM_STEPS="${SA_CKPT_STEPS:-10}"
 ODE_BATCH_SIZE="${SA_CKPT_ODE_BATCH:-120}"
 BATCH_LIMIT="${SA_CKPT_BATCH_LIMIT:-12}"
 FULL_YEAR="${SA_CKPT_FULL_YEAR:-0}"
-STRICT="${SA_CKPT_STRICT:-0}"
+STRICT="${SA_CKPT_STRICT:-1}"
 SEED="${SA_CKPT_SEED:-1234}"
 
 if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
@@ -99,6 +99,7 @@ echo "🎯 Pure-noise ensemble members: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 ODE batch: $ODE_BATCH_SIZE"
 echo "🎯 Batch limit: $BATCH_LIMIT"
+echo "🎯 Strict checkpoint check: $STRICT"
 echo "🎯 Sampling: $([ ${#SAMPLE_ARGS[@]} -gt 0 ] && echo full weekly year || echo monthly subset)"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 
