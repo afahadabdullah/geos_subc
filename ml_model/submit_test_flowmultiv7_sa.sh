@@ -76,8 +76,23 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 case "$CHECKPOINT" in
-    /*) CKPT_PATH="$CHECKPOINT" ;;
-    *) CKPT_PATH="$OUTPUT_DIR/$CHECKPOINT" ;;
+    /*)
+        CKPT_PATH="$CHECKPOINT"
+        CKPT_ARG="$CHECKPOINT"
+        ;;
+    */*)
+        if [ -f "$CHECKPOINT" ]; then
+            CKPT_PATH="$(cd "$(dirname "$CHECKPOINT")" && pwd)/$(basename "$CHECKPOINT")"
+            CKPT_ARG="$CKPT_PATH"
+        else
+            CKPT_PATH="$OUTPUT_DIR/$CHECKPOINT"
+            CKPT_ARG="$CHECKPOINT"
+        fi
+        ;;
+    *)
+        CKPT_PATH="$OUTPUT_DIR/$CHECKPOINT"
+        CKPT_ARG="$CHECKPOINT"
+        ;;
 esac
 if [ ! -f "$CKPT_PATH" ]; then
     echo "❌ Checkpoint not found: $CKPT_PATH"
@@ -123,6 +138,7 @@ echo "🎯 Output dir: $TEST_OUTPUT_DIR"
 echo "🎯 T2M target mode: $CONFIG_T2M_MODE"
 echo "🎯 Year: $TEST_YEAR"
 echo "🎯 Checkpoint: $CKPT_PATH"
+echo "🎯 Checkpoint argument: $CKPT_ARG"
 echo "🎯 Ensemble members: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Max ensemble/chunk: $MAX_ENSEMBLE_PER_CHUNK"
@@ -135,6 +151,6 @@ accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" \
     ml_model/train_flow_multiv7.py \
     --config "$TEST_CONFIG" \
     --test \
-    --ckpt "$CKPT_PATH"
+    --ckpt "$CKPT_ARG"
 
 echo "🏁 South Asia Multi-v7 full test finished at $(date)"
