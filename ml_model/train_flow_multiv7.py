@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import random
 import yaml
@@ -143,6 +144,54 @@ def get_batch_global_context(batch, device):
     if global_context is None or global_context.shape[1] == 0:
         return None
     return global_context.to(device)
+
+
+def expand_for_ensemble(tensor, num_ensemble):
+    if tensor is None:
+        return None
+    batch_size = tensor.shape[0]
+    return (
+        tensor.unsqueeze(1)
+        .expand(batch_size, num_ensemble, *tensor.shape[1:])
+        .reshape(batch_size * num_ensemble, *tensor.shape[1:])
+    )
+
+
+def generate_compare_eof_lhs_noise(
+    batch,
+    num_ensemble,
+    device,
+    eof_bases,
+    nao_bases,
+    enso_bases,
+    t2m_eof_bases,
+    t2m_nao_bases,
+    t2m_enso_bases,
+    nao_lookup,
+    oni_lookup,
+    mjo_df,
+    rho_pr,
+    rho_t2m,
+):
+    current_year = int(batch["year"][0].item()) if "year" in batch else 2021
+    eof_noise = noise_utils_multi.generate_dynamic_multimodal_noise_multi(
+        batch=batch,
+        E=num_ensemble,
+        device=device,
+        pr_mjo_bases=eof_bases,
+        pr_nao_bases=nao_bases,
+        pr_enso_bases=enso_bases,
+        t2m_mjo_bases=t2m_eof_bases,
+        t2m_nao_bases=t2m_nao_bases,
+        t2m_enso_bases=t2m_enso_bases,
+        nao_lookup=nao_lookup,
+        oni_lookup=oni_lookup,
+        mjo_df=mjo_df,
+        year=current_year,
+        use_lhs=True,
+        orthogonalize_lhs=True,
+    )
+    return noise_utils_multi.mix_noise_with_random_multi(eof_noise, rho_pr, rho_t2m)
 
 
 @torch.no_grad()
@@ -682,6 +731,7 @@ def compute_multi_variance_loss(
     v_target: torch.Tensor,
     spatial_weights: torch.Tensor,
     temp_weights: torch.Tensor,
+    variance_coarse_kernel=None,
 ):
     """
     Match the v4 variance-head objective more closely:
@@ -691,7 +741,26 @@ def compute_multi_variance_loss(
     target_scale = abs_err / (abs_err.mean(dim=(2, 3), keepdim=True) + 1e-6)
 
     std_mult = torch.sqrt(var_pred + 1e-6)
-    loss_mse_var = (spatial_weights * temp_weights * (std_mult - target_scale) ** 2).mean()
+    std_for_loss = std_mult
+    if variance_coarse_kernel is not None:
+        kernel = int(variance_coarse_kernel)
+        if kernel > 1:
+            coarse = F.avg_pool2d(
+                std_for_loss.float(),
+                kernel_size=kernel,
+                stride=kernel,
+                ceil_mode=True,
+                count_include_pad=False,
+            )
+            std_for_loss = F.interpolate(
+                coarse,
+                size=std_for_loss.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            ).to(std_for_loss.dtype)
+            std_for_loss = torch.clamp(std_for_loss, min=0.1, max=2.0)
+
+    loss_mse_var = (spatial_weights * temp_weights * (std_for_loss - target_scale) ** 2).mean()
 
     # Keep the multiplier near a physically reasonable range while gently pulling toward 1.0.
     var_penalty = torch.relu(std_mult - 2.5) ** 2 + torch.relu(0.5 - std_mult) ** 2
@@ -1929,6 +1998,9 @@ def train(args, accelerator):
     validation_rho_t2m = float(config.get("validation_rho_t2m", validation_rho_pr))
     validation_var_beta_pr = float(config.get("validation_var_beta_pr", 1.0))
     validation_var_beta_t2m = float(config.get("validation_var_beta_t2m", validation_var_beta_pr))
+    variance_training_num_ensemble = int(config.get("variance_training_num_ensemble", validation_num_ensemble))
+    if variance_training_num_ensemble < 1:
+        raise ValueError(f"variance_training_num_ensemble must be >= 1, got {variance_training_num_ensemble}")
     dense_mse_validation_until = int(config.get("dense_mse_validation_until", 0))
     plot_validation_every = int(config.get("plot_validation_every", 0))
     mse_early_stop_patience = int(config.get("mse_early_stop_patience", 0))
@@ -1976,6 +2048,12 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Velocity-only")
         if variance_phase_start_epoch > 0:
             print(f"   [Variance Phase]     : starts at epoch {variance_phase_start_epoch}, lr={variance_phase_lr:.2e}")
+            print(
+                f"   [Variance Train]     : EOF-LHS compare noise, ens={variance_training_num_ensemble}, "
+                f"rho PR/T2M={validation_rho_pr:.2f}/{validation_rho_t2m:.2f}, "
+                f"beta PR/T2M={validation_var_beta_pr:.2f}/{validation_var_beta_t2m:.2f}, "
+                f"coarse={validation_variance_coarse_kernel}"
+            )
         if crps_loss:
             train_weight_mode = "area x land-ocean" if crps_loss_use_land_ocean_weights else "area-only"
             rollout_states = batch_size * crps_loss_num_ensemble
@@ -2735,25 +2813,62 @@ def train(args, accelerator):
                 # Targets are already residual normalized [-1, 1] by dataset_hybrid
                 target_norm = batch['y_target'].to(device) # [B, 2, H, W] (PR, T2M)
 
-                # Flow Matching Interpolation
-                t = flow_matcher.sample_time_batch(B)
-                noise = torch.randn_like(target_norm)
-                x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+                if is_variance_phase:
+                    # Match compare-noise: EOF-LHS dynamic multimodal noise, rho mix,
+                    # and the same coarse variance objective used during inference.
+                    E_var = variance_training_num_ensemble
+                    noise = generate_compare_eof_lhs_noise(
+                        batch=batch,
+                        num_ensemble=E_var,
+                        device=device,
+                        eof_bases=eof_bases,
+                        nao_bases=nao_bases,
+                        enso_bases=enso_bases,
+                        t2m_eof_bases=t2m_eof_bases,
+                        t2m_nao_bases=t2m_nao_bases,
+                        t2m_enso_bases=t2m_enso_bases,
+                        nao_lookup=nao_lookup,
+                        oni_lookup=oni_lookup,
+                        mjo_df=mjo_df,
+                        rho_pr=validation_rho_pr,
+                        rho_t2m=validation_rho_t2m,
+                    ).to(dtype=target_norm.dtype)
+                    target_for_flow = expand_for_ensemble(target_norm, E_var)
+                    x_cond_for_flow = expand_for_ensemble(x_cond, E_var)
+                    lead_idx_for_flow = lead_idx.unsqueeze(1).expand(B, E_var).reshape(-1).long()
+                    global_context_for_flow = expand_for_ensemble(global_context, E_var)
+                    flow_batch_size = target_for_flow.shape[0]
+                else:
+                    noise = torch.randn_like(target_norm)
+                    target_for_flow = target_norm
+                    x_cond_for_flow = x_cond
+                    lead_idx_for_flow = lead_idx
+                    global_context_for_flow = global_context
+                    flow_batch_size = B
+
+                # Flow Matching Interpolation. The variance head is used at
+                # t=0 during inference, so train VarOnly on the same initial
+                # EOF-noise state.
+                if is_variance_phase:
+                    t = torch.zeros((flow_batch_size,), device=device, dtype=torch.float32)
+                else:
+                    t = flow_matcher.sample_time_batch(flow_batch_size)
+                x_t, v_target = flow_matcher.interpolate(target_for_flow, noise, t)
 
                 # Predict the velocity AND variance (routed through the correct per-week output head)
                 v_pred, var_pred = model(
                     x_t,
-                    x_cond,
+                    x_cond_for_flow,
                     t,
-                    lead_idx=lead_idx,
-                    global_context=global_context,
+                    lead_idx=lead_idx_for_flow,
+                    global_context=global_context_for_flow,
                 )
 
                 # --- Temporal Loss Weighting ---
                 # Prioritize gradient updates for harder long-term leads (Week 4 > Week 1)
                 # 0=Week1, 1=Week2, 2=Week3, 3=Week4
                 w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
-                temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1)
+                temp_weights = w_escalation[lead_idx_for_flow].view(flow_batch_size, 1, 1, 1)
 
                 # --- Combined Loss Computation ---
                 # 1. Velocity MSE Loss
@@ -2767,6 +2882,7 @@ def train(args, accelerator):
                     v_target=v_target,
                     spatial_weights=spatial_weights,
                     temp_weights=temp_weights_expanded,
+                    variance_coarse_kernel=validation_variance_coarse_kernel if is_variance_phase else None,
                 )
 
                 if is_variance_phase:
@@ -3012,19 +3128,48 @@ def train(args, accelerator):
                     lead_channel = lead_val.view(B, 1, 1, 1).expand(B, 1, H, W)
                     x_cond = torch.cat([x_obs, x_geos_flat, sin_month, cos_month, lead_channel], dim=1)
                     target_norm = batch['y_target'].to(device)
-                    t, noise = sample_deterministic_validation_state(
-                        target_norm, b_idx, mse_validation_seed, device
-                    )
-                    x_t, v_target = flow_matcher.interpolate(target_norm, noise, t)
+                    if is_variance_phase:
+                        E_var = variance_training_num_ensemble
+                        noise = generate_compare_eof_lhs_noise(
+                            batch=batch,
+                            num_ensemble=E_var,
+                            device=device,
+                            eof_bases=eof_bases,
+                            nao_bases=nao_bases,
+                            enso_bases=enso_bases,
+                            t2m_eof_bases=t2m_eof_bases,
+                            t2m_nao_bases=t2m_nao_bases,
+                            t2m_enso_bases=t2m_enso_bases,
+                            nao_lookup=nao_lookup,
+                            oni_lookup=oni_lookup,
+                            mjo_df=mjo_df,
+                            rho_pr=validation_rho_pr,
+                            rho_t2m=validation_rho_t2m,
+                        ).to(dtype=target_norm.dtype)
+                        target_for_flow = expand_for_ensemble(target_norm, E_var)
+                        x_cond_for_flow = expand_for_ensemble(x_cond, E_var)
+                        lead_idx_for_flow = lead_idx.unsqueeze(1).expand(B, E_var).reshape(-1).long()
+                        global_context_for_flow = expand_for_ensemble(global_context, E_var)
+                        t = torch.zeros((target_for_flow.shape[0],), device=device, dtype=torch.float32)
+                    else:
+                        t, noise = sample_deterministic_validation_state(
+                            target_norm, b_idx, mse_validation_seed, device
+                        )
+                        target_for_flow = target_norm
+                        x_cond_for_flow = x_cond
+                        lead_idx_for_flow = lead_idx
+                        global_context_for_flow = global_context
+
+                    x_t, v_target = flow_matcher.interpolate(target_for_flow, noise, t)
                     v_pred, var_pred = model(
                         x_t,
-                        x_cond,
+                        x_cond_for_flow,
                         t,
-                        lead_idx=lead_idx,
-                        global_context=global_context,
+                        lead_idx=lead_idx_for_flow,
+                        global_context=global_context_for_flow,
                     )
                     w_escalation = torch.tensor([1.0, 1.1, 1.2, 1.3], device=device)
-                    temp_weights = w_escalation[lead_idx].view(B, 1, 1, 1).expand(-1, 2, -1, -1)
+                    temp_weights = w_escalation[lead_idx_for_flow].view(-1, 1, 1, 1).expand(-1, 2, -1, -1)
                     
                     loss_vel = (spatial_weights * temp_weights * (v_pred - v_target)**2).mean()
                     loss_var = compute_multi_variance_loss(
@@ -3033,6 +3178,7 @@ def train(args, accelerator):
                         v_target=v_target,
                         spatial_weights=spatial_weights,
                         temp_weights=temp_weights,
+                        variance_coarse_kernel=validation_variance_coarse_kernel if is_variance_phase else None,
                     )
 
                     if is_variance_phase:
