@@ -38,7 +38,7 @@ global_context_variables:
 reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
-variance_phase_start_epoch: 161
+variance_phase_start_epoch: 141
 variance_training_num_ensemble: 15
 validation_num_ensemble: 15
 validation_num_steps: 10
