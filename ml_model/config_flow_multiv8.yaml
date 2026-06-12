@@ -1,0 +1,82 @@
+# ML Training Config - Flow Matching Multi-Target v8
+# South Asia 55E-100E, 0N-40N 1-degree PR target plus GEOS-residual T2M target.
+# Local SA land/MJO predictors feed the target grid; full-global
+# ocean/circulation/moisture predictors feed the context encoder.
+batch_size: 4
+learning_rate: 2e-5
+weight_decay: 1e-4
+reset_optimizer_state: False
+epochs: 200
+output_dir: ml_output_flowmulti_v8_sa_55e100e_0n40n_t2mres
+mixed_precision: bf16
+num_workers: 1
+data_dir: /scratch/11353/afahad/geossub/dataprocess
+train_start_year: 1999
+train_end_year: 2020
+val_start_year: 2021
+val_end_year: 2023
+preload: True
+save_top_k: 4
+stats_file: v8_sa_55e100e_0n40n_global_local_stats.pt
+unet_block_out_channels: [128, 256, 512, 768]
+target_domain: south_asia
+target_domain_bounds:
+  label: South Asia 55E-100E 0N-40N
+  lat_min: 0.0
+  lat_max: 40.0
+  lon_min: 55.0
+  lon_max: 100.0
+t2m_target_mode: geos_residual
+
+# Local predictors are cropped to the v8 55E-100E, 0N-40N target grid.
+local_obs_variables:
+  - sm
+  - mjo
+
+# Global predictors keep the full 181x360 grid and feed the FiLM context.
+global_context_variables:
+  - sst
+  - sss
+  - ivt
+  - z500_zonal_dev
+  - u250
+
+reset_validation_history: False
+force_variance_phase: False
+variance_phase_lr: 1e-5
+variance_phase_start_epoch: 141
+variance_training_num_ensemble: 15
+validation_num_ensemble: 15
+validation_num_steps: 10
+validation_ode_batch_size: 120
+mse_validation_seed: 1234
+crps_val_start_year: 2021
+crps_val_end_year: 2021
+validation_variance_coarse_kernel: 8
+validation_rho_pr: 0.15
+validation_rho_t2m: 0.05
+validation_var_beta_pr: 0.3
+validation_var_beta_t2m: 0.01
+dense_mse_validation_until: 40
+plot_validation_every: 5
+mse_plateau_patience: 3
+mse_plateau_factor: 0.5
+mse_min_lr: 1e-6
+mse_early_stop_patience: 0
+mse_early_stop_start_epoch: 15
+mse_early_stop_min_delta: 0.0003
+
+crps_loss: False
+crps_loss_num_ensemble: 2
+crps_loss_num_steps: 10
+crps_loss_ode_batch_size: 2
+crps_loss_max_ensemble_per_chunk: 1
+crps_loss_pr_weight: 1.0
+crps_loss_t2m_weight: 1.0
+crps_loss_use_land_ocean_weights: False
+crps_loss_use_gradient_checkpointing: True
+
+test_num_ensemble: 90
+test_num_steps: 10
+test_max_ensemble_per_chunk: 30
+test_sample_plot_limit: 0
