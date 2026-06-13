@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument("--model_output_dir", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default="best_flow_ckpt.pt")
     parser.add_argument("--start_year", type=int, default=2005)
-    parser.add_argument("--end_year", type=int, default=2023)
+    parser.add_argument("--end_year", type=int, default=2024)
     parser.add_argument("--skip_years", type=str, default="2017", help="Comma-separated years to skip.")
     parser.add_argument("--out_dir", type=str, default=DEFAULT_OUT_DIR)
     parser.add_argument("--months", type=str, default="6,7", help="Comma-separated init months to generate.")

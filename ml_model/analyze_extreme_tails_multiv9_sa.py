@@ -3,7 +3,7 @@
 Analyze June/July extreme-tail behavior from saved multi-v9 SA forecast Zarrs.
 
 Baseline thresholds are computed from observed 2005-2020 June/July init dates.
-Evaluation scores are computed for 2021-2023 model and GEOS ensembles.
+Evaluation scores are computed for 2021-2024 model and GEOS ensembles.
 """
 
 import argparse
@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--baseline_start_year", type=int, default=2005)
     parser.add_argument("--baseline_end_year", type=int, default=2020)
     parser.add_argument("--eval_start_year", type=int, default=2021)
-    parser.add_argument("--eval_end_year", type=int, default=2023)
+    parser.add_argument("--eval_end_year", type=int, default=2024)
     parser.add_argument("--quantiles", type=str, default="0.90,0.95,0.99")
     parser.add_argument("--decision_thresholds", type=str, default="0.1,0.25,0.5")
     parser.add_argument(
