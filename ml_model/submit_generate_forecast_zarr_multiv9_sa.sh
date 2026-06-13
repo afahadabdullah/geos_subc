@@ -1,0 +1,135 @@
+#!/bin/bash
+#SBATCH -J SA_v9_zarr
+#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/generate_zarr_%j.log
+#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/generate_zarr_%j.log
+#SBATCH -p gh-dev
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 02:00:00
+#SBATCH -A ATM25008
+#SBATCH --mail-type=all
+#SBATCH --mail-user=a.fahad@nasa.gov
+
+set -eo pipefail
+
+echo "🚀 South Asia v9 forecast Zarr generation started at $(date) on $(hostname)"
+
+PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
+cd "$PROJECT_DIR" || exit 1
+
+CONDA_DIR="${CONDA_DIR:-$PROJECT_DIR/miniconda}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-geossub_env}"
+CONDA_ENV_PATH="$CONDA_DIR/envs/$CONDA_ENV_NAME"
+
+echo "🔧 Using conda dir: $CONDA_DIR"
+if [ ! -f "$CONDA_DIR/bin/activate" ]; then
+    echo "❌ Missing $CONDA_DIR/bin/activate. Run: bash setup_env.sh"
+    exit 1
+fi
+if [ ! -d "$CONDA_ENV_PATH" ]; then
+    echo "❌ Missing conda env at $CONDA_ENV_PATH. Run: bash setup_env.sh"
+    exit 1
+fi
+
+source "$CONDA_DIR/bin/activate" "$CONDA_ENV_PATH"
+echo "✅ Conda environment active: ${CONDA_PREFIX:-unset}"
+
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+export PYTHONUNBUFFERED=1
+export SYMPY_GROUND_TYPES=python
+export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
+
+CONFIG_PATH="${SA_GEN_CONFIG:-ml_model/config_flow_multiv9.yaml}"
+START_YEAR="${SA_GEN_START_YEAR:-2005}"
+END_YEAR="${SA_GEN_END_YEAR:-2023}"
+MONTHS="${SA_GEN_MONTHS:-6,7}"
+CLIM_ENSEMBLE="${SA_GEN_CLIM_ENSEMBLE:-10}"
+EVAL_ENSEMBLE="${SA_GEN_EVAL_ENSEMBLE:-100}"
+EVAL_START_YEAR="${SA_GEN_EVAL_START_YEAR:-2021}"
+NUM_STEPS="${SA_GEN_STEPS:-50}"
+CHECKPOINT="${SA_GEN_CHECKPOINT:-best_flow_ckpt.pt}"
+OUT_DIR="${SA_GEN_OUT_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
+BATCH_SIZE="${SA_GEN_BATCH_SIZE:-8}"
+NUM_WORKERS="${SA_GEN_NUM_WORKERS:-1}"
+ENSEMBLE_CHUNK="${SA_GEN_ENSEMBLE_CHUNK:-30}"
+ODE_BATCH_SIZE="${SA_GEN_ODE_BATCH:-120}"
+MEMBER_CHUNK="${SA_GEN_MEMBER_CHUNK:-10}"
+SEED="${SA_GEN_SEED:-1234}"
+OVERWRITE="${SA_GEN_OVERWRITE:-0}"
+
+CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
+CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
+CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
+CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
+CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
+
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres" ]; then
+    echo "❌ Refusing unexpected output_dir=$CONFIG_OUTPUT_DIR"
+    exit 1
+fi
+if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+    echo "❌ Refusing non-SA config: target_domain=$CONFIG_TARGET_DOMAIN"
+    exit 1
+fi
+if [ "$CONFIG_LOCAL_VARS" != "sm,mjo" ]; then
+    echo "❌ Refusing unexpected local predictors: $CONFIG_LOCAL_VARS"
+    exit 1
+fi
+if [ "$CONFIG_GLOBAL_CONTEXT" != "sst,sss,ivt,z500_zonal_dev,u250" ]; then
+    echo "❌ Refusing unexpected global context variables: $CONFIG_GLOBAL_CONTEXT"
+    exit 1
+fi
+if [ "$CONFIG_T2M_MODE" != "geos_residual" ]; then
+    echo "❌ Refusing v9 generation without residual T2M mode: t2m_target_mode=$CONFIG_T2M_MODE"
+    exit 1
+fi
+
+case "$CHECKPOINT" in
+    /*) CKPT_PATH="$CHECKPOINT" ;;
+    *) CKPT_PATH="$CONFIG_OUTPUT_DIR/$CHECKPOINT" ;;
+esac
+if [ ! -f "$CKPT_PATH" ]; then
+    echo "❌ Checkpoint not found: $CKPT_PATH"
+    exit 1
+fi
+
+EXTRA_ARGS=()
+if [ "$OVERWRITE" = "1" ] || [ "$OVERWRITE" = "true" ] || [ "$OVERWRITE" = "TRUE" ]; then
+    EXTRA_ARGS+=(--overwrite)
+fi
+
+echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
+echo "🎯 Config: $CONFIG_PATH"
+echo "🎯 Model output dir: $CONFIG_OUTPUT_DIR"
+echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
+echo "🎯 Checkpoint: $CKPT_PATH"
+echo "🎯 Years: $START_YEAR-$END_YEAR"
+echo "🎯 Init months: $MONTHS"
+echo "🎯 Ensembles: $CLIM_ENSEMBLE before $EVAL_START_YEAR; $EVAL_ENSEMBLE from $EVAL_START_YEAR"
+echo "🎯 ODE steps: $NUM_STEPS"
+echo "🎯 Output Zarr dir: $OUT_DIR"
+echo "🎯 Ensemble chunk: $ENSEMBLE_CHUNK"
+echo "🎯 ODE batch: $ODE_BATCH_SIZE"
+
+python ml_model/generate_forecast_zarr_multiv9_sa.py \
+    --config "$CONFIG_PATH" \
+    --data_dir "$DATA_DIR_OVERRIDE" \
+    --model_output_dir "$CONFIG_OUTPUT_DIR" \
+    --checkpoint "$CHECKPOINT" \
+    --start_year "$START_YEAR" \
+    --end_year "$END_YEAR" \
+    --months "$MONTHS" \
+    --clim_num_ensemble "$CLIM_ENSEMBLE" \
+    --eval_num_ensemble "$EVAL_ENSEMBLE" \
+    --eval_start_year "$EVAL_START_YEAR" \
+    --num_steps "$NUM_STEPS" \
+    --out_dir "$OUT_DIR" \
+    --batch_size "$BATCH_SIZE" \
+    --num_workers "$NUM_WORKERS" \
+    --ensemble_chunk_size "$ENSEMBLE_CHUNK" \
+    --ode_batch_size "$ODE_BATCH_SIZE" \
+    --member_chunk "$MEMBER_CHUNK" \
+    --seed "$SEED" \
+    "${EXTRA_ARGS[@]}"
+
+echo "🏁 South Asia v9 forecast Zarr generation finished at $(date)"
