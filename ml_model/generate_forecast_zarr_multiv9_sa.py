@@ -11,6 +11,7 @@ import argparse
 import os
 import shutil
 import sys
+import time
 from contextlib import nullcontext
 
 import numpy as np
@@ -59,6 +60,12 @@ def parse_args():
     parser.add_argument("--ode_batch_size", type=int, default=120)
     parser.add_argument("--member_chunk", type=int, default=10)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--max_runtime_minutes",
+        type=float,
+        default=None,
+        help="Stop cleanly after this many minutes, leaving .zarr.tmp resumable.",
+    )
     parser.add_argument("--pure_noise", action="store_true", help="Disable EOF-LHS and variance-head scaling.")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -91,6 +98,57 @@ def batch_init_dates(batch):
     months = batch["month"][0::4].cpu().numpy().astype(int)
     days = batch["day"][0::4].cpu().numpy().astype(int)
     return pd.to_datetime([f"{y:04d}-{m:02d}-{d:02d}" for y, m, d in zip(years, months, days)])
+
+
+def expected_init_dates(dataset):
+    return pd.to_datetime([sample["date"] for sample in dataset.samples[0::4]]).normalize()
+
+
+def inspect_tmp_store(path):
+    ds = xr.open_zarr(path, consolidated=False, chunks=None)
+    try:
+        init_dates = pd.to_datetime(ds["init"].values).normalize()
+        ensemble_size = int(ds.sizes.get("ensemble", 0))
+        lead_size = int(ds.sizes.get("lead", 0))
+        lat_size = int(ds.sizes.get("lat", 0))
+        lon_size = int(ds.sizes.get("lon", 0))
+    finally:
+        ds.close()
+    return {
+        "init_dates": init_dates,
+        "ensemble_size": ensemble_size,
+        "lead_size": lead_size,
+        "lat_size": lat_size,
+        "lon_size": lon_size,
+    }
+
+
+def slice_batch_from_init(batch, skip_inits):
+    if skip_inits <= 0:
+        return batch
+    skip_samples = int(skip_inits) * 4
+    batch_size = int(batch["y_target"].shape[0])
+    sliced = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value) and value.ndim > 0 and int(value.shape[0]) == batch_size:
+            sliced[key] = value[skip_samples:]
+        else:
+            sliced[key] = value
+    return sliced
+
+
+def verify_batch_dates(expected_dates, batch):
+    actual_dates = batch_init_dates(batch).normalize()
+    if len(expected_dates) != len(actual_dates) or not np.array_equal(expected_dates.values, actual_dates.values):
+        raise ValueError(
+            "Dataset/init-date ordering mismatch while writing Zarr. "
+            f"Expected {list(expected_dates.strftime('%Y-%m-%d'))}, "
+            f"got {list(actual_dates.strftime('%Y-%m-%d'))}."
+        )
+
+
+def deadline_reached(deadline):
+    return deadline is not None and time.monotonic() >= deadline
 
 
 def valid_times(init_dates):
@@ -309,22 +367,11 @@ def make_batch_dataset(batch, model_pr, model_t2m, lats, lons, attrs, member_chu
     return ds, encoding
 
 
-def write_year(year, args, config, model, flow_matcher, device, checkpoint_path, checkpoint_meta, noise_context):
+def write_year(year, args, config, model, flow_matcher, device, checkpoint_path, checkpoint_meta, noise_context, deadline=None):
     months = parse_months(args.months)
     num_ensemble = int(args.eval_num_ensemble if year >= int(args.eval_start_year) else args.clim_num_ensemble)
     out_path = os.path.join(args.out_dir, f"{year}.zarr")
     tmp_path = out_path + ".tmp"
-    if os.path.exists(out_path):
-        if not args.overwrite:
-            print(f"✅ {year}: output exists at {out_path}. Skipping.")
-            return
-        print(f"♻️ {year}: removing existing output {out_path}")
-        remove_path(out_path)
-    if os.path.exists(tmp_path):
-        if not args.overwrite:
-            raise FileExistsError(f"Temp output exists: {tmp_path}. Rerun with --overwrite or remove it.")
-        remove_path(tmp_path)
-
     t2m_target_mode, t2m_residual_min, t2m_residual_max = resolve_t2m_residual_bounds(config)
     dataset = S2SHybridDataset(
         data_root=args.data_dir,
@@ -349,6 +396,53 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
         raise RuntimeError(f"{year}: filtered sample count {len(dataset)} is not divisible by 4")
     if args.batch_size % 4 != 0:
         raise ValueError("--batch_size must be divisible by 4 so init dates stay grouped.")
+    expected_dates = expected_init_dates(dataset)
+    total_expected_inits = len(expected_dates)
+
+    if os.path.exists(out_path):
+        if not args.overwrite:
+            print(f"✅ {year}: output exists at {out_path}. Skipping.")
+            return True
+        print(f"♻️ {year}: removing existing output {out_path}")
+        remove_path(out_path)
+
+    resume_offset = 0
+    wrote_any = False
+    if os.path.exists(tmp_path):
+        if args.overwrite:
+            print(f"♻️ {year}: removing existing temp output {tmp_path}")
+            remove_path(tmp_path)
+        else:
+            tmp_info = inspect_tmp_store(tmp_path)
+            if tmp_info["ensemble_size"] != num_ensemble:
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store has ensemble={tmp_info['ensemble_size']}, "
+                    f"expected {num_ensemble}."
+                )
+            if tmp_info["lead_size"] != 4:
+                raise RuntimeError(f"Cannot resume {year}: temp store has lead={tmp_info['lead_size']}, expected 4.")
+            if tmp_info["lat_size"] != len(dataset.lats) or tmp_info["lon_size"] != len(dataset.lons):
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp grid is {tmp_info['lat_size']}x{tmp_info['lon_size']}, "
+                    f"expected {len(dataset.lats)}x{len(dataset.lons)}."
+                )
+            resume_offset = len(tmp_info["init_dates"])
+            if resume_offset > total_expected_inits:
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp store has {resume_offset} init dates, "
+                    f"expected only {total_expected_inits}."
+                )
+            if not np.array_equal(tmp_info["init_dates"].values, expected_dates[:resume_offset].values):
+                raise RuntimeError(
+                    f"Cannot resume {year}: temp init dates do not match expected June/July prefix."
+                )
+            if resume_offset == total_expected_inits:
+                print(f"✅ {year}: temp store already complete. Finalizing {out_path}.")
+                os.rename(tmp_path, out_path)
+                return True
+            if resume_offset > 0:
+                wrote_any = True
+                print(f"♻️ {year}: resuming {tmp_path} from {resume_offset}/{total_expected_inits} init dates.")
 
     loader = DataLoader(
         dataset,
@@ -385,15 +479,33 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
         "validation_variance_coarse_kernel": str(config.get("validation_variance_coarse_kernel", 8)),
     }
 
-    wrote_any = False
-    total_inits = 0
+    total_inits = resume_offset
+    seen_inits = 0
     pbar = tqdm(loader, desc=f"Generate v9 SA {year}")
     for batch_idx, batch in enumerate(pbar):
+        if deadline_reached(deadline):
+            print(
+                f"⏸️ {year}: soft runtime limit reached before batch {batch_idx}. "
+                f"Leaving {tmp_path} for resume ({total_inits}/{total_expected_inits} init dates written)."
+            )
+            return False
         batch_size = batch["y_target"].shape[0]
         if batch_size % 4 != 0:
             raise ValueError(f"Batch {batch_idx} size {batch_size} is not divisible by 4.")
+        num_batch_inits = batch_size // 4
+        batch_start = seen_inits
+        batch_end = batch_start + num_batch_inits
+        seen_inits = batch_end
+        if batch_end <= resume_offset:
+            pbar.set_postfix(init_dates=total_inits)
+            continue
+        skip_inits = max(0, resume_offset - batch_start)
+        write_batch = slice_batch_from_init(batch, skip_inits)
+        write_start = batch_start + skip_inits
+        write_end = batch_end
+        verify_batch_dates(expected_dates[write_start:write_end], write_batch)
         model_pr, model_t2m = generate_batch_forecast(
-            batch=batch,
+            batch=write_batch,
             model=model,
             flow_matcher=flow_matcher,
             device=device,
@@ -410,7 +522,7 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
             t2m_residual_max=t2m_residual_max,
         )
         ds_batch, encoding = make_batch_dataset(
-            batch=batch,
+            batch=write_batch,
             model_pr=model_pr,
             model_t2m=model_t2m,
             lats=dataset.lats,
@@ -430,12 +542,21 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
 
     if not wrote_any:
         raise RuntimeError(f"{year}: nothing was written")
+    if total_inits != total_expected_inits:
+        raise RuntimeError(
+            f"{year}: wrote {total_inits} init dates, expected {total_expected_inits}. "
+            f"Leaving temp store at {tmp_path} for inspection/resume."
+        )
     os.rename(tmp_path, out_path)
     print(f"✅ {year}: saved {total_inits} init dates to {out_path}")
+    return True
 
 
 def main():
     args = parse_args()
+    deadline = None
+    if args.max_runtime_minutes is not None and args.max_runtime_minutes > 0:
+        deadline = time.monotonic() + float(args.max_runtime_minutes) * 60.0
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -504,13 +625,37 @@ def main():
     print(f"  ODE steps    : {args.num_steps}")
     print(f"  Ens chunk    : {args.ensemble_chunk_size}")
     print(f"  ODE batch    : {args.ode_batch_size}")
+    print(f"  Soft runtime : {args.max_runtime_minutes if args.max_runtime_minutes else 'disabled'} minutes")
     print(f"  Noise mode   : {'pure Gaussian' if args.pure_noise else 'EOF-LHS + variance'}")
     print("=" * 88 + "\n")
 
+    all_complete = True
     for year in range(args.start_year, args.end_year + 1):
+        if deadline_reached(deadline):
+            print(f"⏸️ Soft runtime limit reached before starting {year}.")
+            all_complete = False
+            break
         torch.manual_seed(args.seed + year)
         np.random.seed(args.seed + year)
-        write_year(year, args, config, model, flow_matcher, device, checkpoint_path, checkpoint, noise_context)
+        completed = write_year(
+            year,
+            args,
+            config,
+            model,
+            flow_matcher,
+            device,
+            checkpoint_path,
+            checkpoint,
+            noise_context,
+            deadline=deadline,
+        )
+        if not completed:
+            all_complete = False
+            break
+    if all_complete:
+        print("✅ Requested v9 SA Zarr generation range is complete.")
+    else:
+        print("⏸️ Requested v9 SA Zarr generation range is incomplete and can be resumed.")
 
 
 if __name__ == "__main__":
