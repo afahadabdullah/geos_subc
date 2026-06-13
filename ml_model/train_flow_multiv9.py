@@ -2005,6 +2005,8 @@ def train(args, accelerator):
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
     force_variance_phase = bool(config.get("force_variance_phase", False))
     variance_phase_start_epoch = int(config.get("variance_phase_start_epoch", 0))
+    variance_phase_start_from_best = bool(config.get("variance_phase_start_from_best", True))
+    variance_phase_best_checkpoint = str(config.get("variance_phase_best_checkpoint", "best_flow_ckpt.pt"))
     crps_loss = bool(config.get("crps_loss", False))
     crps_loss_num_ensemble = int(config.get("crps_loss_num_ensemble", 4))
     crps_loss_num_steps = int(config.get("crps_loss_num_steps", 10))
@@ -2120,6 +2122,10 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : Velocity-only")
         if variance_phase_start_epoch > 0:
             print(f"   [Variance Phase]     : starts at epoch {variance_phase_start_epoch}, lr={variance_phase_lr:.2e}")
+            print(
+                f"   [Variance Start]     : load_best={variance_phase_start_from_best}, "
+                f"checkpoint={variance_phase_best_checkpoint}"
+            )
             print(
                 f"   [Variance Train]     : EOF-LHS compare noise, ens={variance_training_num_ensemble}, "
                 f"rho PR/T2M={validation_rho_pr:.2f}/{validation_rho_t2m:.2f}, "
@@ -2314,7 +2320,7 @@ def train(args, accelerator):
         nao_lookup, oni_lookup, mjo_df = None, None, None
         
     if accelerator.is_main_process and eof_bases is not None:
-        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (pure noise in velocity mode, EOF-LHS in variance-only mode).")
+        print("✅ Loaded Multi-Modal EOF bases & Teleconnection Indices (weak EOF-mix in velocity mode, EOF-LHS in variance-only mode).")
         print(f"   PR EOF files : {eof_bases_path}, {nao_bases_path}, {enso_bases_path}")
         print(f"   T2M EOF files: {t2m_eof_bases_path}, {t2m_nao_bases_path}, {t2m_enso_bases_path}")
 
@@ -2474,6 +2480,37 @@ def train(args, accelerator):
             )
         return
 
+    def load_best_velocity_checkpoint_for_variance_phase():
+        if not variance_phase_start_from_best:
+            if accelerator.is_main_process:
+                print("   Variance phase will start from the current/latest model state.")
+            return
+
+        best_path = variance_phase_best_checkpoint
+        if not os.path.isabs(best_path):
+            best_path = os.path.join(output_dir, best_path)
+        if not os.path.exists(best_path):
+            raise FileNotFoundError(
+                f"variance_phase_start_from_best=True, but checkpoint was not found: {best_path}"
+            )
+
+        best_checkpoint = torch.load(best_path, map_location="cpu", weights_only=True)
+        best_epoch = int(best_checkpoint.get("epoch", 0))
+        if bool(best_checkpoint.get("is_variance_phase", False)):
+            raise RuntimeError(
+                f"Refusing to initialize variance phase from already variance-phase checkpoint: {best_path}"
+            )
+
+        unwrapped_model = accelerator.unwrap_model(model)
+        unwrapped_model.load_state_dict(best_checkpoint["model"])
+        if accelerator.is_main_process:
+            best_loss = best_checkpoint.get("best_val_loss", None)
+            best_loss_msg = f", best_val_loss={float(best_loss):.4f}" if best_loss is not None else ""
+            print(
+                "   ✅ Loaded best velocity/CRPS checkpoint for variance phase "
+                f"from {best_path} (epoch={best_epoch}{best_loss_msg})."
+            )
+
     def enable_variance_phase(reason, reset_best_for_phase=False):
         nonlocal optimizer, is_variance_phase, best_val_loss, best_val_epoch
         nonlocal mse_bad_val_checks, top_models, variance_phase_best_reset_done
@@ -2481,6 +2518,9 @@ def train(args, accelerator):
             return
         if accelerator.is_main_process:
             print(f"🔒 Enabling variance-head-only phase: {reason}")
+        if reset_best_for_phase and not loaded_is_variance_phase:
+            load_best_velocity_checkpoint_for_variance_phase()
+        if accelerator.is_main_process:
             print("   Freezing backbone, conditioning layers, and velocity heads; training only var_heads.")
         unwrapped = accelerator.unwrap_model(model)
         for param in unwrapped.parameters():

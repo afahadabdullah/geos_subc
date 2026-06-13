@@ -63,6 +63,8 @@ reset_validation_history: False
 force_variance_phase: False
 variance_phase_lr: 1e-5
 variance_phase_start_epoch: 141
+variance_phase_start_from_best: True
+variance_phase_best_checkpoint: best_flow_ckpt.pt
 variance_training_num_ensemble: 15
 validation_num_ensemble: 15
 validation_num_steps: 10
