@@ -6,7 +6,7 @@ batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
 reset_optimizer_state: False
-epochs: 200
+epochs: 300
 output_dir: ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres
 mixed_precision: bf16
 num_workers: 1
@@ -73,10 +73,10 @@ mse_validation_seed: 1234
 crps_val_start_year: 2021
 crps_val_end_year: 2021
 validation_variance_coarse_kernel: 8
-validation_rho_pr: 0.15
-validation_rho_t2m: 0.05
-validation_var_beta_pr: 0.3
-validation_var_beta_t2m: 0.01
+validation_rho_pr: 0.25
+validation_rho_t2m: 0.08
+validation_var_beta_pr: 0.45
+validation_var_beta_t2m: 0.03
 dense_mse_validation_until: 40
 plot_validation_every: 5
 mse_plateau_patience: 3

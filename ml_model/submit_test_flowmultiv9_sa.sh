@@ -60,6 +60,11 @@ CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH'))
 CONFIG_LAT_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_max'))")
 CONFIG_LON_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_min'))")
 CONFIG_LON_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_max'))")
+CONFIG_RHO_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_pr'))")
+CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_t2m'))")
+CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
+CONFIG_BETA_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_t2m'))")
+CONFIG_COARSE=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_variance_coarse_kernel'))")
 
 if [ "$OUTPUT_DIR" != "$EXPECTED_OUTPUT_DIR" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
     echo "❌ Refusing to test unexpected config: output_dir=$OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
@@ -154,7 +159,9 @@ echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Max ensemble/chunk: $MAX_ENSEMBLE_PER_CHUNK"
 echo "🎯 ODE batch: $VALIDATION_ODE_BATCH"
 echo "🎯 Sample plot limit: $SAMPLE_PLOT_LIMIT (0 means all init dates)"
-echo "🎯 Noise mode: forced EOF-LHS + variance using config rho/beta/coarse settings"
+echo "🎯 Noise mode: forced EOF-LHS + variance"
+echo "🎯 Variance rho: PR=$CONFIG_RHO_PR T2M=$CONFIG_RHO_T2M"
+echo "🎯 Variance beta: PR=$CONFIG_BETA_PR T2M=$CONFIG_BETA_T2M coarse=$CONFIG_COARSE"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" \

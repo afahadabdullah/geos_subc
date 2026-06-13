@@ -70,6 +70,11 @@ CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH'))
 CONFIG_LAT_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_max'))")
 CONFIG_LON_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_min'))")
 CONFIG_LON_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_max'))")
+CONFIG_RHO_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_pr'))")
+CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_t2m'))")
+CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
+CONFIG_BETA_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_t2m'))")
+CONFIG_COARSE=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_variance_coarse_kernel'))")
 if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
     echo "❌ Refusing to train unexpected config: output_dir=$CONFIG_OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
@@ -103,6 +108,8 @@ echo "🎯 Target bounds: $CONFIG_DOMAIN_LABEL lat=$CONFIG_LAT_MIN..$CONFIG_LAT_
 echo "🎯 T2M target mode: $CONFIG_T2M_MODE"
 echo "🎯 Local predictors: $CONFIG_LOCAL_VARS"
 echo "🎯 Global context: $CONFIG_GLOBAL_CONTEXT"
+echo "🎯 Variance inference/fine-tune rho: PR=$CONFIG_RHO_PR T2M=$CONFIG_RHO_T2M"
+echo "🎯 Variance inference/fine-tune beta: PR=$CONFIG_BETA_PR T2M=$CONFIG_BETA_T2M coarse=$CONFIG_COARSE"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 echo "🎯 Stats file: ml_model/$STATS_FILENAME"
 
