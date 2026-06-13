@@ -332,6 +332,271 @@ def obs_for(ds, variable):
     return ds[f"obs_{variable}_anom"].values.astype(np.float32, copy=False)
 
 
+def lead_all(df):
+    return df[df["lead"].astype(str) == "all"].copy()
+
+
+def ml_vs_geos_improvement(overall_df):
+    total = lead_all(overall_df)
+    ml = total[total["system"] == "ml"].set_index(["month", "variable"])
+    geos = total[total["system"] == "geos"].set_index(["month", "variable"])
+    rows = []
+    for idx in ml.index:
+        geos_crps = geos.loc[idx, "crps"]
+        geos_rmse = geos.loc[idx, "rmse"]
+        rows.append({
+            "month": idx[0],
+            "variable": idx[1],
+            "ml_crps": ml.loc[idx, "crps"],
+            "geos_crps": geos_crps,
+            "crps_improve_pct": 100.0 * (geos_crps - ml.loc[idx, "crps"]) / geos_crps if geos_crps else np.nan,
+            "ml_rmse": ml.loc[idx, "rmse"],
+            "geos_rmse": geos_rmse,
+            "rmse_improve_pct": 100.0 * (geos_rmse - ml.loc[idx, "rmse"]) / geos_rmse if geos_rmse else np.nan,
+            "ml_acc": ml.loc[idx, "acc"],
+            "geos_acc": geos.loc[idx, "acc"],
+            "acc_delta": ml.loc[idx, "acc"] - geos.loc[idx, "acc"],
+            "ml_spread_error_ratio": ml.loc[idx, "spread_error_ratio"],
+            "geos_spread_error_ratio": geos.loc[idx, "spread_error_ratio"],
+        })
+    return pd.DataFrame(rows).sort_values(["month", "variable"])
+
+
+def print_table(title, df, columns, sort_by=None, float_format="{:.4f}"):
+    if df.empty:
+        print(f"\n{title}: no rows")
+        return
+    table = df.copy()
+    if sort_by:
+        table = table.sort_values(sort_by)
+    numeric_cols = table.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        if col in {"month", "n_init"}:
+            table[col] = table[col].map(lambda value: str(int(value)) if pd.notna(value) else "nan")
+        elif col in {"quantile", "decision_probability"}:
+            table[col] = table[col].map(lambda value: f"{value:.2f}" if pd.notna(value) else "nan")
+        else:
+            table[col] = table[col].map(lambda value: float_format.format(value) if pd.notna(value) else "nan")
+    print(f"\n{title}")
+    print(table[columns].to_string(index=False))
+
+
+def print_evaluation_summaries(overall_df, extreme_df, decision_df):
+    total = lead_all(overall_df)
+    print_table(
+        "Overall anomaly metrics (lead=all; lower CRPS/RMSE better, higher ACC better)",
+        total,
+        [
+            "month",
+            "variable",
+            "system",
+            "crps",
+            "rmse",
+            "acc",
+            "ensemble_spread_mean",
+            "spread_error_ratio",
+            "forecast_anom_std",
+            "obs_anom_std",
+        ],
+        sort_by=["month", "variable", "system"],
+    )
+
+    improvement = ml_vs_geos_improvement(overall_df)
+    print_table(
+        "ML improvement vs GEOS (lead=all)",
+        improvement,
+        [
+            "month",
+            "variable",
+            "crps_improve_pct",
+            "rmse_improve_pct",
+            "acc_delta",
+            "ml_spread_error_ratio",
+            "geos_spread_error_ratio",
+        ],
+        sort_by=["month", "variable"],
+    )
+
+    extreme_total = lead_all(extreme_df)
+    print_table(
+        "Extreme upper-tail anomaly metrics (lead=all; lower Brier/event RMSE better, frequency bias near 1)",
+        extreme_total,
+        [
+            "month",
+            "variable",
+            "quantile",
+            "system",
+            "obs_event_rate",
+            "forecast_event_probability_mean",
+            "frequency_bias",
+            "brier_score",
+            "event_rmse",
+            "ensemble_spread_on_obs_events",
+        ],
+        sort_by=["month", "variable", "quantile", "system"],
+    )
+
+    decision_total = lead_all(decision_df)
+    if not decision_total.empty:
+        decision_focus = decision_total[decision_total["decision_probability"].isin([0.25, 0.5])]
+        print_table(
+            "Extreme event decision scores (lead=all)",
+            decision_focus,
+            [
+                "month",
+                "variable",
+                "quantile",
+                "system",
+                "decision_probability",
+                "pod",
+                "far",
+                "csi",
+            ],
+            sort_by=["month", "variable", "quantile", "decision_probability", "system"],
+        )
+    return improvement
+
+
+def add_value_labels(ax, bars, fmt="{:.1f}"):
+    for bar in bars:
+        height = bar.get_height()
+        if not np.isfinite(height):
+            continue
+        va = "bottom" if height >= 0 else "top"
+        offset = 3 if height >= 0 else -3
+        ax.annotate(
+            fmt.format(height),
+            xy=(bar.get_x() + bar.get_width() / 2.0, height),
+            xytext=(0, offset),
+            textcoords="offset points",
+            ha="center",
+            va=va,
+            fontsize=8,
+        )
+
+
+def plot_grouped_metric(ax, total, metric, ylabel, title, labels):
+    systems = ["ml", "geos"]
+    x = np.arange(len(labels))
+    width = 0.36
+    for idx, system in enumerate(systems):
+        values = []
+        for month, variable in labels:
+            row = total[(total["month"] == month) & (total["variable"] == variable) & (total["system"] == system)]
+            values.append(row[metric].iloc[0] if not row.empty else np.nan)
+        offset = (idx - 0.5) * width
+        bars = ax.bar(x + offset, values, width=width, label=system.upper())
+        add_value_labels(ax, bars, fmt="{:.2f}")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{month_name(m)} {v.upper()}" for m, v in labels], rotation=25, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, axis="y", alpha=0.25)
+
+
+def month_name(month):
+    return {6: "Jun", 7: "Jul"}.get(int(month), str(month))
+
+
+def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_dir):
+    plot_dir = os.path.join(output_dir, "plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    mpl_config_dir = os.path.join(output_dir, ".matplotlib_cache")
+    os.makedirs(mpl_config_dir, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", mpl_config_dir)
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"⚠️ Matplotlib unavailable; skipping plots ({exc})")
+        return []
+
+    plot_paths = []
+    total = lead_all(overall_df)
+    labels = sorted(total[["month", "variable"]].drop_duplicates().itertuples(index=False, name=None))
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
+    plot_grouped_metric(axes[0, 0], total, "crps", "CRPS", "Anomaly CRPS", labels)
+    plot_grouped_metric(axes[0, 1], total, "rmse", "RMSE", "Anomaly RMSE", labels)
+    plot_grouped_metric(axes[1, 0], total, "acc", "ACC", "Anomaly correlation", labels)
+    plot_grouped_metric(axes[1, 1], total, "spread_error_ratio", "Spread / RMSE", "Ensemble spread calibration", labels)
+    axes[0, 0].legend(loc="best")
+    path = os.path.join(plot_dir, "overall_anomaly_skill.png")
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    plot_paths.append(path)
+
+    fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+    labels_text = [f"{month_name(row.month)} {row.variable.upper()}" for row in improvement_df.itertuples()]
+    x = np.arange(len(labels_text))
+    width = 0.36
+    bars1 = ax.bar(x - width / 2, improvement_df["crps_improve_pct"], width=width, label="CRPS improvement")
+    bars2 = ax.bar(x + width / 2, improvement_df["rmse_improve_pct"], width=width, label="RMSE improvement")
+    add_value_labels(ax, bars1)
+    add_value_labels(ax, bars2)
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels_text, rotation=25, ha="right")
+    ax.set_ylabel("Improvement vs GEOS (%)")
+    ax.set_title("ML anomaly skill improvement vs GEOS")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(loc="best")
+    path = os.path.join(plot_dir, "ml_vs_geos_improvement.png")
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    plot_paths.append(path)
+
+    extreme_total = lead_all(extreme_df)
+    quantiles = sorted(extreme_total["quantile"].dropna().unique())
+    if quantiles:
+        fig, axes = plt.subplots(len(quantiles), 2, figsize=(13, 4 * len(quantiles)), squeeze=False, constrained_layout=True)
+        for q_idx, quantile in enumerate(quantiles):
+            qdf = extreme_total[np.isclose(extreme_total["quantile"], quantile)]
+            plot_grouped_metric(axes[q_idx, 0], qdf, "brier_score", "Brier score", f"Extreme Brier q={quantile:.2f}", labels)
+            plot_grouped_metric(axes[q_idx, 1], qdf, "frequency_bias", "Frequency bias", f"Extreme frequency bias q={quantile:.2f}", labels)
+            axes[q_idx, 1].axhline(1.0, color="black", linestyle="--", linewidth=0.8)
+        axes[0, 0].legend(loc="best")
+        path = os.path.join(plot_dir, "extreme_event_skill.png")
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        plot_paths.append(path)
+
+    rel_total = lead_all(reliability_df)
+    if not rel_total.empty:
+        qmax = rel_total["quantile"].max()
+        rel_q = rel_total[np.isclose(rel_total["quantile"], qmax)]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 9), constrained_layout=True)
+        for ax, (month, variable) in zip(axes.ravel(), labels):
+            subset = rel_q[(rel_q["month"] == month) & (rel_q["variable"] == variable)]
+            for system in ("ml", "geos"):
+                s = subset[subset["system"] == system].sort_values("mean_forecast_probability")
+                if s.empty:
+                    continue
+                ax.plot(
+                    s["mean_forecast_probability"],
+                    s["observed_frequency"],
+                    marker="o",
+                    linewidth=1.8,
+                    label=system.upper(),
+                )
+            ax.plot([0, 1], [0, 1], color="black", linestyle="--", linewidth=0.8)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_title(f"{month_name(month)} {variable.upper()} q={qmax:.2f}")
+            ax.set_xlabel("Forecast probability")
+            ax.set_ylabel("Observed frequency")
+            ax.grid(True, alpha=0.25)
+        axes[0, 0].legend(loc="best")
+        path = os.path.join(plot_dir, "extreme_reliability_qmax.png")
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        plot_paths.append(path)
+
+    return plot_paths
+
+
 def main():
     args = parse_args()
     months = parse_int_list(args.months)
@@ -393,12 +658,21 @@ def main():
     extreme_path = os.path.join(args.output_dir, "anomaly_extreme_matrix.csv")
     decision_path = os.path.join(args.output_dir, "anomaly_extreme_decision_matrix.csv")
     reliability_path = os.path.join(args.output_dir, "anomaly_extreme_reliability_matrix.csv")
+    improvement_path = os.path.join(args.output_dir, "anomaly_ml_vs_geos_improvement.csv")
     metadata_path = os.path.join(args.output_dir, "anomaly_matrix_metadata.json")
 
-    pd.DataFrame(overall_rows).to_csv(overall_path, index=False)
-    pd.DataFrame(extreme_rows).to_csv(extreme_path, index=False)
-    pd.DataFrame(decision_matrix_rows).to_csv(decision_path, index=False)
-    pd.DataFrame(reliability_matrix_rows).to_csv(reliability_path, index=False)
+    overall_df = pd.DataFrame(overall_rows)
+    extreme_df = pd.DataFrame(extreme_rows)
+    decision_df = pd.DataFrame(decision_matrix_rows)
+    reliability_df = pd.DataFrame(reliability_matrix_rows)
+    improvement_df = print_evaluation_summaries(overall_df, extreme_df, decision_df)
+    plot_paths = make_plots(overall_df, extreme_df, reliability_df, improvement_df, args.output_dir)
+
+    overall_df.to_csv(overall_path, index=False)
+    extreme_df.to_csv(extreme_path, index=False)
+    decision_df.to_csv(decision_path, index=False)
+    reliability_df.to_csv(reliability_path, index=False)
+    improvement_df.to_csv(improvement_path, index=False)
     with open(metadata_path, "w") as f:
         json.dump(
             {
@@ -409,6 +683,7 @@ def main():
                 "extreme_quantiles": quantiles,
                 "decision_thresholds": decision_thresholds,
                 "threshold_metadata": threshold_meta,
+                "plots": plot_paths,
                 "notes": "Extreme thresholds are month/lead/grid-specific observed anomaly quantiles from the baseline years.",
             },
             f,
@@ -420,6 +695,11 @@ def main():
     print(f"  Extreme matrix : {extreme_path}")
     print(f"  Decision matrix: {decision_path}")
     print(f"  Reliability   : {reliability_path}")
+    print(f"  Improvement   : {improvement_path}")
+    if plot_paths:
+        print("  Plots         :")
+        for path in plot_paths:
+            print(f"    {path}")
     print(f"  Metadata       : {metadata_path}")
 
 
