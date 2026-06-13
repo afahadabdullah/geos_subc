@@ -1423,16 +1423,6 @@ def run_full_test_suite_multi(
         f_lead_channel = f_lead_val.view(vB, 1, 1, 1).expand(vB, 1, H, W)
         fx_cond = torch.cat([fx_obs, fx_geos_cat, fsin_month, fcos_month, f_lead_channel], dim=1)
         num_ensemble = int(validation_num_ensemble)
-        fx_cond_expanded = fx_cond.unsqueeze(1).expand(vB, num_ensemble, -1, H, W).reshape(vB * num_ensemble, -1, H, W)
-        if fx_global_context is not None:
-            gc, gh, gw = fx_global_context.shape[1:]
-            fx_global_context_expanded = (
-                fx_global_context.unsqueeze(1)
-                .expand(vB, num_ensemble, gc, gh, gw)
-                .reshape(vB * num_ensemble, gc, gh, gw)
-            )
-        else:
-            fx_global_context_expanded = None
 
         current_year = int(batch['year'][0].item()) if 'year' in batch else 2021
         current_month = int(batch['month'][0].item())
@@ -1476,27 +1466,58 @@ def run_full_test_suite_multi(
             if validation_noise_cache is not None:
                 validation_noise_cache[cache_key] = noise_expanded.detach().cpu()
 
-        lead_idx_expanded = batch['lead_idx'].to(device).unsqueeze(1).expand(vB, num_ensemble).reshape(-1).long()
-        chunk_size = validation_ode_batch_size
+        state_chunk_size = validation_ode_batch_size
+        ensemble_chunk = num_ensemble
         if validation_max_ensemble_per_chunk is not None:
-            max_ensemble_chunk = max(1, int(validation_max_ensemble_per_chunk))
-            max_state_chunk = vB * max_ensemble_chunk
-            chunk_size = max_state_chunk if chunk_size is None else min(chunk_size, max_state_chunk)
-        p_x1_expanded = euler_solve_chunked(
-            flow_matcher,
-            unwrapped_model,
-            noise_expanded,
-            fx_cond_expanded,
-            num_steps=int(validation_num_steps),
-            lead_idx=lead_idx_expanded,
-            apply_flow_variance=use_flow_variance,
-            variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
-            variance_coarse_kernel=validation_variance_coarse_kernel,
-            chunk_size=chunk_size,
-            global_context=fx_global_context_expanded,
-        )
+            ensemble_chunk = min(ensemble_chunk, max(1, int(validation_max_ensemble_per_chunk)))
+        if state_chunk_size is not None and state_chunk_size > 0:
+            ensemble_chunk = min(ensemble_chunk, max(1, int(state_chunk_size) // max(1, vB)))
+        ensemble_chunk = max(1, ensemble_chunk)
 
-        p_x1_batch = p_x1_expanded.view(vB, num_ensemble, 2, H, W)
+        noise_by_ensemble = noise_expanded.view(vB, num_ensemble, 2, H, W)
+        p_x1_chunks = []
+        for ens_start in range(0, num_ensemble, ensemble_chunk):
+            ens_end = min(ens_start + ensemble_chunk, num_ensemble)
+            this_E = ens_end - ens_start
+            fx_cond_chunk = (
+                fx_cond.unsqueeze(1)
+                .expand(vB, this_E, -1, H, W)
+                .reshape(vB * this_E, -1, H, W)
+            )
+            if fx_global_context is not None:
+                gc, gh, gw = fx_global_context.shape[1:]
+                fx_global_context_chunk = (
+                    fx_global_context.unsqueeze(1)
+                    .expand(vB, this_E, gc, gh, gw)
+                    .reshape(vB * this_E, gc, gh, gw)
+                )
+            else:
+                fx_global_context_chunk = None
+            noise_chunk = noise_by_ensemble[:, ens_start:ens_end].reshape(vB * this_E, 2, H, W)
+            lead_idx_chunk = (
+                batch['lead_idx']
+                .to(device)
+                .unsqueeze(1)
+                .expand(vB, this_E)
+                .reshape(-1)
+                .long()
+            )
+            p_x1_chunk = euler_solve_chunked(
+                flow_matcher,
+                unwrapped_model,
+                noise_chunk,
+                fx_cond_chunk,
+                num_steps=int(validation_num_steps),
+                lead_idx=lead_idx_chunk,
+                apply_flow_variance=use_flow_variance,
+                variance_beta=(validation_var_beta_pr, validation_var_beta_t2m),
+                variance_coarse_kernel=validation_variance_coarse_kernel,
+                chunk_size=vB * this_E,
+                global_context=fx_global_context_chunk,
+            )
+            p_x1_chunks.append(p_x1_chunk.view(vB, this_E, 2, H, W))
+
+        p_x1_batch = torch.cat(p_x1_chunks, dim=1)
         p_x1_pr = torch.clamp(p_x1_batch[:, :, 0], min=-1.0, max=1.0)
         week_sqrt = ((p_x1_pr + 1.0) / 2.0) * (target_sqrt_max - target_sqrt_min) + target_sqrt_min
         week_precip = torch.clamp(week_sqrt ** 2, min=0.0)
