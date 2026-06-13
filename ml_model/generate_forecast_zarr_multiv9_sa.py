@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default="best_flow_ckpt.pt")
     parser.add_argument("--start_year", type=int, default=2005)
     parser.add_argument("--end_year", type=int, default=2023)
+    parser.add_argument("--skip_years", type=str, default="2017", help="Comma-separated years to skip.")
     parser.add_argument("--out_dir", type=str, default=DEFAULT_OUT_DIR)
     parser.add_argument("--months", type=str, default="6,7", help="Comma-separated init months to generate.")
     parser.add_argument("--clim_num_ensemble", type=int, default=10, help="Members/year before --eval_start_year.")
@@ -84,6 +85,11 @@ def parse_months(text):
     if bad:
         raise ValueError(f"Invalid month(s): {bad}")
     return months
+
+
+def parse_years(text):
+    years = {int(item.strip()) for item in str(text or "").split(",") if item.strip()}
+    return years
 
 
 def remove_path(path):
@@ -617,6 +623,7 @@ def main():
     print(f"  Model output : {model_output_dir}")
     print(f"  Checkpoint   : {checkpoint_path} (epoch={checkpoint.get('epoch', 'unknown')})")
     print(f"  Years        : {args.start_year}-{args.end_year}")
+    print(f"  Skip years   : {args.skip_years or 'none'}")
     print(f"  Init months  : {args.months}")
     print(f"  Out dir      : {args.out_dir}")
     print(f"  Domain       : {len(probe_dataset.lats)}x{len(probe_dataset.lons)}")
@@ -630,7 +637,11 @@ def main():
     print("=" * 88 + "\n")
 
     all_complete = True
+    skip_years = parse_years(args.skip_years)
     for year in range(args.start_year, args.end_year + 1):
+        if year in skip_years:
+            print(f"⏭️ {year}: skipped by --skip_years.")
+            continue
         if deadline_reached(deadline):
             print(f"⏸️ Soft runtime limit reached before starting {year}.")
             all_complete = False

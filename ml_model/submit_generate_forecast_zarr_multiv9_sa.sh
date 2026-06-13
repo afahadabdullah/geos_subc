@@ -42,6 +42,7 @@ export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dat
 CONFIG_PATH="${SA_GEN_CONFIG:-ml_model/config_flow_multiv9.yaml}"
 START_YEAR="${SA_GEN_START_YEAR:-2005}"
 END_YEAR="${SA_GEN_END_YEAR:-2023}"
+SKIP_YEARS="${SA_GEN_SKIP_YEARS:-2017}"
 MONTHS="${SA_GEN_MONTHS:-6,7}"
 CLIM_ENSEMBLE="${SA_GEN_CLIM_ENSEMBLE:-10}"
 EVAL_ENSEMBLE="${SA_GEN_EVAL_ENSEMBLE:-100}"
@@ -106,6 +107,7 @@ echo "🎯 Model output dir: $CONFIG_OUTPUT_DIR"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 echo "🎯 Checkpoint: $CKPT_PATH"
 echo "🎯 Years: $START_YEAR-$END_YEAR"
+echo "🎯 Skip years: $SKIP_YEARS"
 echo "🎯 Init months: $MONTHS"
 echo "🎯 Ensembles: $CLIM_ENSEMBLE before $EVAL_START_YEAR; $EVAL_ENSEMBLE from $EVAL_START_YEAR"
 echo "🎯 ODE steps: $NUM_STEPS"
@@ -122,6 +124,7 @@ python ml_model/generate_forecast_zarr_multiv9_sa.py \
     --checkpoint "$CHECKPOINT" \
     --start_year "$START_YEAR" \
     --end_year "$END_YEAR" \
+    --skip_years "$SKIP_YEARS" \
     --months "$MONTHS" \
     --clim_num_ensemble "$CLIM_ENSEMBLE" \
     --eval_num_ensemble "$EVAL_ENSEMBLE" \
@@ -137,13 +140,16 @@ python ml_model/generate_forecast_zarr_multiv9_sa.py \
     --max_runtime_minutes "$MAX_RUNTIME_MINUTES" \
     "${EXTRA_ARGS[@]}"
 
-MISSING_YEARS=$(python - "$OUT_DIR" "$START_YEAR" "$END_YEAR" <<'PY'
+MISSING_YEARS=$(python - "$OUT_DIR" "$START_YEAR" "$END_YEAR" "$SKIP_YEARS" <<'PY'
 import os
 import sys
 
-out_dir, start_year, end_year = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+out_dir, start_year, end_year, skip_text = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+skip_years = {int(item.strip()) for item in skip_text.split(",") if item.strip()}
 missing = []
 for year in range(start_year, end_year + 1):
+    if year in skip_years:
+        continue
     if not os.path.isdir(os.path.join(out_dir, f"{year}.zarr")):
         missing.append(str(year))
 print(",".join(missing))
@@ -160,7 +166,7 @@ if [ -n "$MISSING_YEARS" ]; then
 
         echo "📡 Resubmitting generation job via $SUBMIT_TARGET..."
         ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" \
-            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' SA_GEN_CONFIG='$CONFIG_PATH' SA_GEN_START_YEAR='$START_YEAR' SA_GEN_END_YEAR='$END_YEAR' SA_GEN_MONTHS='$MONTHS' SA_GEN_CLIM_ENSEMBLE='$CLIM_ENSEMBLE' SA_GEN_EVAL_ENSEMBLE='$EVAL_ENSEMBLE' SA_GEN_EVAL_START_YEAR='$EVAL_START_YEAR' SA_GEN_STEPS='$NUM_STEPS' SA_GEN_CHECKPOINT='$CHECKPOINT' SA_GEN_OUT_DIR='$OUT_DIR' SA_GEN_BATCH_SIZE='$BATCH_SIZE' SA_GEN_NUM_WORKERS='$NUM_WORKERS' SA_GEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' SA_GEN_ODE_BATCH='$ODE_BATCH_SIZE' SA_GEN_MEMBER_CHUNK='$MEMBER_CHUNK' SA_GEN_SEED='$SEED' SA_GEN_OVERWRITE='0' SA_GEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' SA_GEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' sbatch ml_model/submit_generate_forecast_zarr_multiv9_sa.sh"
+            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' SA_GEN_CONFIG='$CONFIG_PATH' SA_GEN_START_YEAR='$START_YEAR' SA_GEN_END_YEAR='$END_YEAR' SA_GEN_SKIP_YEARS='$SKIP_YEARS' SA_GEN_MONTHS='$MONTHS' SA_GEN_CLIM_ENSEMBLE='$CLIM_ENSEMBLE' SA_GEN_EVAL_ENSEMBLE='$EVAL_ENSEMBLE' SA_GEN_EVAL_START_YEAR='$EVAL_START_YEAR' SA_GEN_STEPS='$NUM_STEPS' SA_GEN_CHECKPOINT='$CHECKPOINT' SA_GEN_OUT_DIR='$OUT_DIR' SA_GEN_BATCH_SIZE='$BATCH_SIZE' SA_GEN_NUM_WORKERS='$NUM_WORKERS' SA_GEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' SA_GEN_ODE_BATCH='$ODE_BATCH_SIZE' SA_GEN_MEMBER_CHUNK='$MEMBER_CHUNK' SA_GEN_SEED='$SEED' SA_GEN_OVERWRITE='0' SA_GEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' SA_GEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' sbatch ml_model/submit_generate_forecast_zarr_multiv9_sa.sh"
     else
         echo "ℹ️ Auto-resubmit disabled. Rerun this script to continue."
     fi

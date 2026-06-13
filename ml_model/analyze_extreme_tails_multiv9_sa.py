@@ -49,17 +49,27 @@ def open_year(path):
     return xr.open_zarr(path, consolidated=False, chunks=None)
 
 
-def load_obs_stack(forecast_dir, years, var_name):
+def load_obs_stack(forecast_dir, years, var_name, skip_missing=False):
     arrays = []
     init_values = []
+    loaded_years = []
+    missing_years = []
     for year in years:
-        ds = open_year(os.path.join(forecast_dir, f"{year}.zarr"))
+        path = os.path.join(forecast_dir, f"{year}.zarr")
+        if skip_missing and not os.path.exists(path):
+            print(f"⚠️ Missing baseline year {year}: {path}. Skipping.")
+            missing_years.append(year)
+            continue
+        ds = open_year(path)
         try:
             arrays.append(ds[var_name].values.astype(np.float32, copy=False))
             init_values.extend(pd.to_datetime(ds["init"].values).strftime("%Y-%m-%d").tolist())
+            loaded_years.append(year)
         finally:
             ds.close()
-    return np.concatenate(arrays, axis=0), init_values
+    if not arrays:
+        raise RuntimeError(f"No baseline arrays were loaded for {var_name}.")
+    return np.concatenate(arrays, axis=0), init_values, loaded_years, missing_years
 
 
 def load_eval_stack(forecast_dir, years):
@@ -274,8 +284,10 @@ def main():
     eval_years = list(range(args.eval_start_year, args.eval_end_year + 1))
     os.makedirs(args.output_dir, exist_ok=True)
 
-    base_pr, base_init = load_obs_stack(args.forecast_dir, baseline_years, "obs_pr")
-    base_t2m, _ = load_obs_stack(args.forecast_dir, baseline_years, "obs_t2m")
+    base_pr, base_init, loaded_baseline_years, missing_baseline_years = load_obs_stack(
+        args.forecast_dir, baseline_years, "obs_pr", skip_missing=True
+    )
+    base_t2m, _, _, _ = load_obs_stack(args.forecast_dir, baseline_years, "obs_t2m", skip_missing=True)
     eval_data = load_eval_stack(args.forecast_dir, eval_years)
     weights = area_weights(eval_data["lat"])
 
@@ -324,7 +336,9 @@ def main():
         json.dump(
             {
                 "forecast_dir": args.forecast_dir,
-                "baseline_years": baseline_years,
+                "baseline_years_requested": baseline_years,
+                "baseline_years_loaded": loaded_baseline_years,
+                "baseline_years_missing": sorted(set(missing_baseline_years)),
                 "eval_years": eval_years,
                 "baseline_init_count": len(base_init),
                 "eval_init_count": len(eval_data["init"]),
@@ -338,7 +352,12 @@ def main():
 
     print("\nExtreme-tail analysis complete")
     print(f"  Forecast dir : {args.forecast_dir}")
-    print(f"  Baseline     : {args.baseline_start_year}-{args.baseline_end_year} ({len(base_init)} init dates)")
+    print(
+        f"  Baseline     : {args.baseline_start_year}-{args.baseline_end_year} "
+        f"({len(base_init)} init dates, loaded years={loaded_baseline_years})"
+    )
+    if missing_baseline_years:
+        print(f"  Missing base : {sorted(set(missing_baseline_years))}")
     print(f"  Evaluation   : {args.eval_start_year}-{args.eval_end_year} ({len(eval_data['init'])} init dates)")
     print(f"  Summary      : {summary_path}")
     print(f"  Reliability  : {reliability_path}")
