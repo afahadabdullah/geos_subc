@@ -451,6 +451,86 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
     return improvement
 
 
+def print_final_evaluation_summary(overall_df, extreme_df, improvement_df):
+    print("\n" + "=" * 88)
+    print("FINAL RAW EVALUATION SUMMARY")
+    print("=" * 88)
+
+    total = all_years_lead_all(overall_df)
+    print_table(
+        "Final raw metrics by month and variable (all years, all leads)",
+        total,
+        [
+            "month",
+            "variable",
+            "system",
+            "crps",
+            "rmse",
+            "bias",
+            "acc",
+            "ensemble_spread_mean",
+            "spread_error_ratio",
+        ],
+        sort_by=["month", "variable", "system"],
+    )
+
+    improvement_total = all_years_lead_all(improvement_df)
+    print_table(
+        "Final ML improvement vs GEOS (all years, all leads)",
+        improvement_total,
+        [
+            "month",
+            "variable",
+            "crps_improve_pct",
+            "rmse_improve_pct",
+            "acc_delta",
+            "ml_spread_error_ratio",
+            "geos_spread_error_ratio",
+        ],
+        sort_by=["month", "variable"],
+    )
+
+    weekly = improvement_df[
+        (improvement_df["scope"] == "all_years") & (improvement_df["lead"].astype(str) != "all")
+    ].copy()
+    print_table(
+        "Final weekly lead ML improvement vs GEOS (all years)",
+        weekly,
+        [
+            "month",
+            "variable",
+            "lead",
+            "crps_improve_pct",
+            "rmse_improve_pct",
+            "acc_delta",
+        ],
+        sort_by=["month", "variable", "lead"],
+    )
+
+    extreme_total = all_years_lead_all(extreme_df)
+    if not extreme_total.empty:
+        focus_quantile = float(extreme_total["quantile"].max())
+        extreme_focus = extreme_total[extreme_total["quantile"] == focus_quantile].copy()
+        print_table(
+            f"Final extreme-event metrics (q={focus_quantile:.2f}, all years, all leads)",
+            extreme_focus,
+            [
+                "month",
+                "variable",
+                "tail",
+                "system",
+                "obs_event_rate",
+                "forecast_event_probability_mean",
+                "frequency_bias",
+                "brier_score",
+                "event_rmse",
+            ],
+            sort_by=["month", "variable", "tail", "system"],
+        )
+
+    print("=" * 88)
+
+
 def add_value_labels(ax, bars, fmt="{:.1f}"):
     for bar in bars:
         height = bar.get_height()
@@ -843,6 +923,7 @@ def main():
         for path in plot_paths:
             print(f"    {path}")
     print(f"  Metadata     : {paths['metadata']}")
+    print_final_evaluation_summary(overall_df, extreme_df, improvement_df)
 
 
 if __name__ == "__main__":
