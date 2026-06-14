@@ -16,8 +16,8 @@ import pandas as pd
 import xarray as xr
 
 
-DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50"
-DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_2021_2024"
+DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_testmode_e100_s50"
+DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024"
 
 
 def parse_args():
@@ -180,7 +180,7 @@ def obs_for(ds, variable):
     return ds[f"obs_{variable}"].values.astype(np.float32, copy=False)
 
 
-def overall_metrics(month, variable, system, ensemble, obs, weights, lead_idx=None):
+def overall_metrics(scope, year, init, month, variable, system, ensemble, obs, weights, lead_idx=None):
     ens = select_lead(ensemble, lead_idx)
     target = select_lead(obs, lead_idx)
     ens_mean = np.nanmean(ens, axis=1)
@@ -189,6 +189,9 @@ def overall_metrics(month, variable, system, ensemble, obs, weights, lead_idx=No
     rmse = float(np.sqrt(max(weighted_mean(err ** 2, weights), 0.0)))
     spread_mean = weighted_mean(spread, weights)
     return {
+        "scope": scope,
+        "year": year,
+        "init": init,
         "month": int(month),
         "variable": variable,
         "system": system,
@@ -233,7 +236,7 @@ def tails_for_variable(variable):
     return ("upper",)
 
 
-def extreme_metrics(month, variable, system, ensemble, obs, weights, quantile, tail, threshold, lead_idx=None):
+def extreme_metrics(scope, year, init, month, variable, system, ensemble, obs, weights, quantile, tail, threshold, lead_idx=None):
     ens = select_lead(ensemble, lead_idx)
     target = select_lead(obs, lead_idx)
     if lead_idx is not None:
@@ -247,6 +250,9 @@ def extreme_metrics(month, variable, system, ensemble, obs, weights, quantile, t
     obs_rate = weighted_mean(event.astype(np.float32), weights)
     forecast_rate = weighted_mean(prob, weights)
     return {
+        "scope": scope,
+        "year": year,
+        "init": init,
         "month": int(month),
         "variable": variable,
         "system": system,
@@ -273,7 +279,7 @@ def weighted_decision_rows(base, prob, event, weights, decision_thresholds):
         hits = weighted_sum_bool(yes & event, weights)
         false_alarms = weighted_sum_bool(yes & ~event, weights)
         misses = weighted_sum_bool(~yes & event, weights)
-        row = {key: base[key] for key in ("month", "variable", "system", "lead", "tail", "quantile")}
+        row = {key: base[key] for key in ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile")}
         row.update({
             "decision_probability": float(decision),
             "hits": hits,
@@ -298,7 +304,7 @@ def reliability_rows(base, prob, event, weights):
         weighted_count = weighted_sum_bool(in_bin, weights)
         if weighted_count <= 0:
             continue
-        row = {key: base[key] for key in ("month", "variable", "system", "lead", "tail", "quantile")}
+        row = {key: base[key] for key in ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile")}
         row.update({
             "prob_bin_left": float(left),
             "prob_bin_right": float(right),
@@ -314,17 +320,22 @@ def lead_all(df):
     return df[df["lead"].astype(str) == "all"].copy()
 
 
+def all_years_lead_all(df):
+    return df[(df["scope"] == "all_years") & (df["lead"].astype(str) == "all")].copy()
+
+
 def ml_vs_geos_improvement(overall_df):
-    total = lead_all(overall_df)
-    ml = total[total["system"] == "ml"].set_index(["month", "variable"])
-    geos = total[total["system"] == "geos"].set_index(["month", "variable"])
+    key_cols = ["scope", "year", "init", "month", "variable", "lead"]
+    ml = overall_df[overall_df["system"] == "ml"].set_index(key_cols)
+    geos = overall_df[overall_df["system"] == "geos"].set_index(key_cols)
     rows = []
     for idx in ml.index:
+        if idx not in geos.index:
+            continue
         geos_crps = geos.loc[idx, "crps"]
         geos_rmse = geos.loc[idx, "rmse"]
-        rows.append({
-            "month": idx[0],
-            "variable": idx[1],
+        row = dict(zip(key_cols, idx))
+        row.update({
             "ml_crps": ml.loc[idx, "crps"],
             "geos_crps": geos_crps,
             "crps_improve_pct": 100.0 * (geos_crps - ml.loc[idx, "crps"]) / geos_crps if geos_crps else np.nan,
@@ -337,7 +348,8 @@ def ml_vs_geos_improvement(overall_df):
             "ml_spread_error_ratio": ml.loc[idx, "spread_error_ratio"],
             "geos_spread_error_ratio": geos.loc[idx, "spread_error_ratio"],
         })
-    return pd.DataFrame(rows).sort_values(["month", "variable"])
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(key_cols)
 
 
 def print_table(title, df, columns, sort_by=None, float_format="{:.4f}"):
@@ -360,7 +372,7 @@ def print_table(title, df, columns, sort_by=None, float_format="{:.4f}"):
 
 
 def print_evaluation_summaries(overall_df, extreme_df, decision_df):
-    total = lead_all(overall_df)
+    total = all_years_lead_all(overall_df)
     print_table(
         "Raw forecast metrics (lead=all; lower CRPS/RMSE better, higher ACC better)",
         total,
@@ -381,9 +393,10 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
     )
 
     improvement = ml_vs_geos_improvement(overall_df)
+    improvement_total = all_years_lead_all(improvement)
     print_table(
         "Raw ML improvement vs GEOS (lead=all)",
-        improvement,
+        improvement_total,
         [
             "month",
             "variable",
@@ -396,7 +409,7 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
         sort_by=["month", "variable"],
     )
 
-    extreme_total = lead_all(extreme_df)
+    extreme_total = all_years_lead_all(extreme_df)
     print_table(
         "Raw extreme metrics (lead=all; T2M includes warm and cold tails)",
         extreme_total,
@@ -416,7 +429,7 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
         sort_by=["month", "variable", "tail", "quantile", "system"],
     )
 
-    decision_total = lead_all(decision_df)
+    decision_total = all_years_lead_all(decision_df)
     if not decision_total.empty:
         decision_focus = decision_total[decision_total["decision_probability"].isin([0.25, 0.5])]
         print_table(
@@ -489,7 +502,7 @@ def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_di
         return []
 
     plot_paths = []
-    total = lead_all(overall_df)
+    total = all_years_lead_all(overall_df)
     labels = sorted(total[["month", "variable"]].drop_duplicates().itertuples(index=False, name=None))
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), constrained_layout=True)
@@ -523,7 +536,7 @@ def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_di
     plt.close(fig)
     plot_paths.append(path)
 
-    extreme_total = lead_all(extreme_df)
+    extreme_total = all_years_lead_all(extreme_df)
     focus = extreme_total[
         ((extreme_total["variable"] == "pr") & (extreme_total["tail"] == "upper"))
         | ((extreme_total["variable"] == "t2m") & (extreme_total["tail"].isin(["upper", "lower"])))
@@ -561,7 +574,7 @@ def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_di
         plt.close(fig)
         plot_paths.append(path)
 
-    rel_total = lead_all(reliability_df)
+    rel_total = all_years_lead_all(reliability_df)
     if not rel_total.empty:
         qmax = rel_total["quantile"].max()
         rel_q = rel_total[np.isclose(rel_total["quantile"], qmax)]
@@ -602,6 +615,73 @@ def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_di
     return plot_paths
 
 
+def evaluate_subset(
+    sub,
+    scope,
+    year_label,
+    init_label,
+    month,
+    weights,
+    quantiles,
+    decision_thresholds,
+    thresholds_by_variable,
+    overall_rows,
+    extreme_rows,
+    decision_rows,
+    reliability_matrix_rows,
+):
+    for variable in ("pr", "t2m"):
+        obs = obs_for(sub, variable)
+        thresholds = thresholds_by_variable[variable]
+        for system in ("ml", "geos"):
+            ensemble = data_for(sub, variable, system)
+            overall_rows.append(overall_metrics(scope, year_label, init_label, month, variable, system, ensemble, obs, weights))
+            for lead_idx in range(obs.shape[1]):
+                overall_rows.append(
+                    overall_metrics(scope, year_label, init_label, month, variable, system, ensemble, obs, weights, lead_idx=lead_idx)
+                )
+
+            for tail in tails_for_variable(variable):
+                for quantile in quantiles:
+                    threshold = thresholds[(tail, quantile)]
+                    row, prob, event = extreme_metrics(
+                        scope,
+                        year_label,
+                        init_label,
+                        month,
+                        variable,
+                        system,
+                        ensemble,
+                        obs,
+                        weights,
+                        quantile,
+                        tail,
+                        threshold,
+                    )
+                    extreme_rows.append(row)
+                    decision_rows.extend(weighted_decision_rows(row, prob, event, weights, decision_thresholds))
+                    reliability_matrix_rows.extend(reliability_rows(row, prob, event, weights))
+                    for lead_idx in range(obs.shape[1]):
+                        lead_row, lead_prob, lead_event = extreme_metrics(
+                            scope,
+                            year_label,
+                            init_label,
+                            month,
+                            variable,
+                            system,
+                            ensemble,
+                            obs,
+                            weights,
+                            quantile,
+                            tail,
+                            threshold,
+                            lead_idx=lead_idx,
+                        )
+                        extreme_rows.append(lead_row)
+                        decision_rows.extend(weighted_decision_rows(lead_row, lead_prob, lead_event, weights, decision_thresholds))
+                        reliability_matrix_rows.extend(reliability_rows(lead_row, lead_prob, lead_event, weights))
+
+
 def main():
     args = parse_args()
     months = parse_int_list(args.months)
@@ -616,52 +696,76 @@ def main():
         extreme_rows = []
         decision_rows = []
         reliability_matrix_rows = []
-        init_month = pd.to_datetime(ds["init"].values).month
+        init_dates = pd.to_datetime(ds["init"].values).normalize()
+        init_month = init_dates.month
+        init_year = init_dates.year
 
         for month in months:
             indices = np.where(init_month == int(month))[0]
             if len(indices) == 0:
                 print(f"⚠️ No raw init dates for month={month}.")
                 continue
-            sub = ds.isel(init=indices)
+            month_sub = ds.isel(init=indices)
+            thresholds_by_variable = {}
             for variable in ("pr", "t2m"):
-                obs = obs_for(sub, variable)
-                thresholds = {
-                    (tail, quantile): raw_threshold(obs, quantile, tail)
+                month_obs = obs_for(month_sub, variable)
+                thresholds_by_variable[variable] = {
+                    (tail, quantile): raw_threshold(month_obs, quantile, tail)
                     for tail in tails_for_variable(variable)
                     for quantile in quantiles
                 }
-                for system in ("ml", "geos"):
-                    ensemble = data_for(sub, variable, system)
-                    overall_rows.append(overall_metrics(month, variable, system, ensemble, obs, weights))
-                    for lead_idx in range(obs.shape[1]):
-                        overall_rows.append(overall_metrics(month, variable, system, ensemble, obs, weights, lead_idx=lead_idx))
 
-                    for tail in tails_for_variable(variable):
-                        for quantile in quantiles:
-                            threshold = thresholds[(tail, quantile)]
-                            row, prob, event = extreme_metrics(
-                                month, variable, system, ensemble, obs, weights, quantile, tail, threshold
-                            )
-                            extreme_rows.append(row)
-                            decision_rows.extend(weighted_decision_rows(row, prob, event, weights, decision_thresholds))
-                            reliability_matrix_rows.extend(reliability_rows(row, prob, event, weights))
-                            for lead_idx in range(obs.shape[1]):
-                                lead_row, lead_prob, lead_event = extreme_metrics(
-                                    month,
-                                    variable,
-                                    system,
-                                    ensemble,
-                                    obs,
-                                    weights,
-                                    quantile,
-                                    tail,
-                                    threshold,
-                                    lead_idx=lead_idx,
-                                )
-                                extreme_rows.append(lead_row)
-                                decision_rows.extend(weighted_decision_rows(lead_row, lead_prob, lead_event, weights, decision_thresholds))
-                                reliability_matrix_rows.extend(reliability_rows(lead_row, lead_prob, lead_event, weights))
+            evaluate_subset(
+                month_sub,
+                "all_years",
+                "all",
+                "all",
+                month,
+                weights,
+                quantiles,
+                decision_thresholds,
+                thresholds_by_variable,
+                overall_rows,
+                extreme_rows,
+                decision_rows,
+                reliability_matrix_rows,
+            )
+
+            for year in sorted(np.unique(init_year[indices])):
+                year_indices = indices[init_year[indices] == year]
+                evaluate_subset(
+                    ds.isel(init=year_indices),
+                    "year",
+                    str(int(year)),
+                    "all",
+                    month,
+                    weights,
+                    quantiles,
+                    decision_thresholds,
+                    thresholds_by_variable,
+                    overall_rows,
+                    extreme_rows,
+                    decision_rows,
+                    reliability_matrix_rows,
+                )
+
+            for idx in indices:
+                init_label = init_dates[idx].strftime("%Y-%m-%d")
+                evaluate_subset(
+                    ds.isel(init=[idx]),
+                    "init",
+                    init_dates[idx].strftime("%Y"),
+                    init_label,
+                    month,
+                    weights,
+                    quantiles,
+                    decision_thresholds,
+                    thresholds_by_variable,
+                    overall_rows,
+                    extreme_rows,
+                    decision_rows,
+                    reliability_matrix_rows,
+                )
     finally:
         ds.close()
 
@@ -670,18 +774,34 @@ def main():
     decision_df = pd.DataFrame(decision_rows)
     reliability_df = pd.DataFrame(reliability_matrix_rows)
     improvement_df = print_evaluation_summaries(overall_df, extreme_df, decision_df)
-    plot_paths = make_plots(overall_df, extreme_df, reliability_df, improvement_df, args.output_dir)
+    plot_paths = make_plots(overall_df, extreme_df, reliability_df, all_years_lead_all(improvement_df), args.output_dir)
 
     paths = {
         "overall": os.path.join(args.output_dir, "raw_overall_matrix.csv"),
+        "overall_yearly": os.path.join(args.output_dir, "raw_overall_yearly_matrix.csv"),
+        "overall_init": os.path.join(args.output_dir, "raw_overall_init_matrix.csv"),
+        "overall_all_year_weekly": os.path.join(args.output_dir, "raw_overall_all_year_weekly_matrix.csv"),
         "extreme": os.path.join(args.output_dir, "raw_extreme_matrix.csv"),
+        "extreme_yearly": os.path.join(args.output_dir, "raw_extreme_yearly_matrix.csv"),
+        "extreme_init": os.path.join(args.output_dir, "raw_extreme_init_matrix.csv"),
+        "extreme_all_year_weekly": os.path.join(args.output_dir, "raw_extreme_all_year_weekly_matrix.csv"),
         "decision": os.path.join(args.output_dir, "raw_extreme_decision_matrix.csv"),
         "reliability": os.path.join(args.output_dir, "raw_extreme_reliability_matrix.csv"),
         "improvement": os.path.join(args.output_dir, "raw_ml_vs_geos_improvement.csv"),
         "metadata": os.path.join(args.output_dir, "raw_matrix_metadata.json"),
     }
     overall_df.to_csv(paths["overall"], index=False)
+    overall_df[overall_df["scope"] == "year"].to_csv(paths["overall_yearly"], index=False)
+    overall_df[overall_df["scope"] == "init"].to_csv(paths["overall_init"], index=False)
+    overall_df[(overall_df["scope"] == "all_years") & (overall_df["lead"].astype(str) != "all")].to_csv(
+        paths["overall_all_year_weekly"], index=False
+    )
     extreme_df.to_csv(paths["extreme"], index=False)
+    extreme_df[extreme_df["scope"] == "year"].to_csv(paths["extreme_yearly"], index=False)
+    extreme_df[extreme_df["scope"] == "init"].to_csv(paths["extreme_init"], index=False)
+    extreme_df[(extreme_df["scope"] == "all_years") & (extreme_df["lead"].astype(str) != "all")].to_csv(
+        paths["extreme_all_year_weekly"], index=False
+    )
     decision_df.to_csv(paths["decision"], index=False)
     reliability_df.to_csv(paths["reliability"], index=False)
     improvement_df.to_csv(paths["improvement"], index=False)
@@ -708,7 +828,13 @@ def main():
     print(f"  Forecast dir : {args.forecast_dir}")
     print(f"  Years loaded : {loaded_years}")
     print(f"  Overall      : {paths['overall']}")
+    print(f"  Year overall : {paths['overall_yearly']}")
+    print(f"  Init overall : {paths['overall_init']}")
+    print(f"  Weekly mean  : {paths['overall_all_year_weekly']}")
     print(f"  Extreme      : {paths['extreme']}")
+    print(f"  Year extreme : {paths['extreme_yearly']}")
+    print(f"  Init extreme : {paths['extreme_init']}")
+    print(f"  Weekly event : {paths['extreme_all_year_weekly']}")
     print(f"  Decision     : {paths['decision']}")
     print(f"  Reliability  : {paths['reliability']}")
     print(f"  Improvement  : {paths['improvement']}")

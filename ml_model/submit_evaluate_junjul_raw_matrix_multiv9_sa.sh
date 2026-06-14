@@ -38,8 +38,8 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_2021_2024}"
+FORECAST_DIR="${SA_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_testmode_e100_s50}"
+OUTPUT_DIR="${SA_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024}"
 START_YEAR="${SA_RAW_START_YEAR:-2021}"
 END_YEAR="${SA_RAW_END_YEAR:-2024}"
 MONTHS="${SA_RAW_MONTHS:-6,7}"
