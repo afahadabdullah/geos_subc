@@ -43,6 +43,7 @@ from train_flow_multiv9 import (
 
 EXPECTED_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres"
 EXPECTED_NOGEOS_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres_nogeos"
+EXPECTED_NOGEOS_RAWT2M_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_nogeos_rawt2m"
 EXPECTED_LOCAL_OBS = ["sm", "mjo"]
 EXPECTED_GLOBAL_CONTEXT = ["sst", "sss", "ivt", "z500_zonal_dev", "u250"]
 EXPECTED_TARGET_BOUNDS = {
@@ -90,9 +91,12 @@ def validate_current_sa_v9_config(config, output_dir):
     global_context = list(config.get("global_context_variables") or [])
     output_name = os.path.basename(os.path.normpath(output_dir))
     zero_geos = bool(config.get("zero_geos_condition", False))
+    t2m_target_mode = str(config.get("t2m_target_mode", "absolute")).lower()
     expected_output_names = {EXPECTED_OUTPUT_DIR}
     if zero_geos:
         expected_output_names.add(EXPECTED_NOGEOS_OUTPUT_DIR)
+        if t2m_target_mode == "absolute":
+            expected_output_names.add(EXPECTED_NOGEOS_RAWT2M_OUTPUT_DIR)
 
     if target_domain != "south_asia":
         raise ValueError(f"Expected target_domain=south_asia, got {target_domain!r}")
@@ -106,8 +110,13 @@ def validate_current_sa_v9_config(config, output_dir):
         raise ValueError(f"Expected local_obs_variables={EXPECTED_LOCAL_OBS}, got {local_obs}")
     if global_context != EXPECTED_GLOBAL_CONTEXT:
         raise ValueError(f"Expected global_context_variables={EXPECTED_GLOBAL_CONTEXT}, got {global_context}")
-    if str(config.get("t2m_target_mode", "absolute")).lower() != "geos_residual":
-        raise ValueError(f"Expected t2m_target_mode=geos_residual, got {config.get('t2m_target_mode')!r}")
+    if t2m_target_mode not in {"absolute", "geos_residual"}:
+        raise ValueError(f"Expected t2m_target_mode absolute or geos_residual, got {config.get('t2m_target_mode')!r}")
+    if t2m_target_mode == "absolute" and output_name != EXPECTED_NOGEOS_RAWT2M_OUTPUT_DIR:
+        raise ValueError(
+            "t2m_target_mode=absolute is only allowed for the no-GEOS raw-T2M ablation "
+            f"output_dir={EXPECTED_NOGEOS_RAWT2M_OUTPUT_DIR}, got {output_dir!r}"
+        )
 
 
 def resolve_stats_path(stats_file):
