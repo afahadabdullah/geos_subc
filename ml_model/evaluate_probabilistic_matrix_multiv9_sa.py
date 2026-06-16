@@ -353,6 +353,11 @@ def main():
     interval_levels = parse_float_list(args.interval_levels)
     ds, loaded_years, missing_years, skip_years = load_eval_dataset(args, months)
     weights = area_weights(ds["lat"].values)
+    print("\nSouth Asia v9 probabilistic matrix evaluation")
+    print(f"  Forecast dir : {args.forecast_dir}")
+    print(f"  Years        : {args.start_year}-{args.end_year}")
+    print("  Target mode  : raw observed PR/T2M, no anomaly transform")
+    print(f"  Months       : {months}")
 
     variables = ["pr", "t2m"]
     systems = ["ml", "geos"]

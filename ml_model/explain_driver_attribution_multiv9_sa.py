@@ -38,7 +38,7 @@ from train_flow_multiv9 import euler_solve_chunked, get_area_weights, get_batch_
 
 DEFAULT_OUTPUT_DIR = (
     "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/"
-    "driver_attribution"
+    "driver_attribution_raw_2021_2024"
 )
 
 
@@ -47,12 +47,14 @@ def parse_args():
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv9.yaml")
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--model_output_dir", type=str, default=None)
-    parser.add_argument("--year", type=int, default=2022)
+    parser.add_argument("--start_year", type=int, default=2021)
+    parser.add_argument("--end_year", type=int, default=2024)
+    parser.add_argument("--year", type=int, default=None, help="Optional single-year override for quick probes.")
     parser.add_argument("--checkpoint", type=str, default="best_flow_ckpt.pt")
     parser.add_argument("--num_ensemble", type=int, default=30)
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--ode_batch_size", type=int, default=120)
-    parser.add_argument("--batch_limit", type=int, default=12)
+    parser.add_argument("--batch_limit", type=int, default=0, help="Maximum loader batches; <=0 evaluates all selected raw init dates.")
     parser.add_argument("--full-year", action="store_true")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
@@ -283,6 +285,10 @@ def main():
     config = load_config(args.config)
     if "DATA_DIR_OVERRIDE" in os.environ:
         config["data_dir"] = os.environ["DATA_DIR_OVERRIDE"]
+    start_year = int(args.year) if args.year is not None else int(args.start_year)
+    end_year = int(args.year) if args.year is not None else int(args.end_year)
+    if end_year < start_year:
+        raise ValueError(f"end_year={end_year} is before start_year={start_year}")
     model_output_dir = args.model_output_dir or config["output_dir"]
     validate_current_sa_v9_config(config, model_output_dir)
     t2m_target_mode, t2m_residual_min, t2m_residual_max = resolve_t2m_residual_bounds(config)
@@ -292,8 +298,8 @@ def main():
 
     dataset = S2SHybridDataset(
         data_root=config["data_dir"],
-        start_year=args.year,
-        end_year=args.year,
+        start_year=start_year,
+        end_year=end_year,
         normalize=True,
         preload=False,
         stats_file=config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt"),
@@ -340,8 +346,9 @@ def main():
     print(f"  Config       : {args.config}")
     print(f"  Output dir   : {args.output_dir}")
     print(f"  Checkpoint   : {ckpt_path} (epoch={checkpoint.get('epoch', 'unknown')})")
-    print(f"  Year         : {args.year}")
-    print(f"  Sampling     : {'full weekly year' if args.full_year else 'monthly'}")
+    print(f"  Years        : {start_year}-{end_year}")
+    print("  Target mode  : raw observed PR/T2M, no anomaly transform")
+    print(f"  Sampling     : {'full weekly raw init dates' if args.full_year else 'monthly raw init dates'}")
     print(f"  Batch limit  : {args.batch_limit if args.batch_limit > 0 else 'none'}")
     print(f"  Ensembles    : {args.num_ensemble}")
     print(f"  ODE steps    : {args.num_steps}")
@@ -409,7 +416,8 @@ def main():
                 "model_output_dir": model_output_dir,
                 "checkpoint": ckpt_path,
                 "checkpoint_epoch": checkpoint.get("epoch"),
-                "year": args.year,
+                "start_year": start_year,
+                "end_year": end_year,
                 "full_year": args.full_year,
                 "batch_limit": args.batch_limit,
                 "num_ensemble": args.num_ensemble,

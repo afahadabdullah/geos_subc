@@ -51,6 +51,7 @@ echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(g
 echo "🎯 Forecast dir: $FORECAST_DIR"
 echo "🎯 Output dir: $OUTPUT_DIR"
 echo "🎯 Years: $START_YEAR-$END_YEAR"
+echo "🎯 Target mode: raw observed PR/T2M, no anomaly transform"
 echo "🎯 Months: $MONTHS"
 echo "🎯 Skip years: ${SKIP_YEARS:-none}"
 echo "🎯 Extreme quantiles: $EXTREME_QUANTILES"
