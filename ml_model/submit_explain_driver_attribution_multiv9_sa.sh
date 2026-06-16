@@ -52,7 +52,7 @@ NUM_STEPS="${SA_XAI_STEPS:-10}"
 ODE_BATCH="${SA_XAI_ODE_BATCH:-120}"
 BATCH_LIMIT="${SA_XAI_BATCH_LIMIT:-0}"
 FULL_YEAR="${SA_XAI_FULL_YEAR:-0}"
-GROUPS="${SA_XAI_GROUPS:-geos_all,geos_pr,geos_t2m,local_sm,local_mjo,global_sst,global_sss,global_ivt,global_z500_zonal_dev,global_u250,all_global_context,all_local_obs}"
+XAI_GROUP_LIST="${SA_XAI_GROUPS:-geos_all,geos_pr,geos_t2m,local_sm,local_mjo,global_sst,global_sss,global_ivt,global_z500_zonal_dev,global_u250,all_global_context,all_local_obs}"
 
 mkdir -p "$OUTPUT_DIR" "$MPLCONFIGDIR"
 
@@ -74,7 +74,7 @@ echo "🎯 Checkpoint: $CHECKPOINT"
 echo "🎯 Ensembles: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Batch limit: $BATCH_LIMIT"
-echo "🎯 Groups: $GROUPS"
+echo "🎯 Groups: $XAI_GROUP_LIST"
 
 python ml_model/explain_driver_attribution_multiv9_sa.py \
     --config "$CONFIG_PATH" \
@@ -86,7 +86,7 @@ python ml_model/explain_driver_attribution_multiv9_sa.py \
     --num_steps "$NUM_STEPS" \
     --ode_batch_size "$ODE_BATCH" \
     --batch_limit "$BATCH_LIMIT" \
-    --groups "$GROUPS" \
+    --groups "$XAI_GROUP_LIST" \
     "${EXTRA_ARGS[@]}"
 
 echo "🏁 South Asia v9 driver attribution finished at $(date)"

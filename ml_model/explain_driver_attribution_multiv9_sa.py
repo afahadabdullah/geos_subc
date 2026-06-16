@@ -78,6 +78,27 @@ def parse_groups(text):
     return [item.strip() for item in str(text).split(",") if item.strip()]
 
 
+def validate_groups(groups, config):
+    local_vars = list(config.get("local_obs_variables") or [])
+    global_vars = list(config.get("global_context_variables") or [])
+    allowed = {
+        "baseline",
+        "geos_all",
+        "geos_pr",
+        "geos_t2m",
+        "all_local_obs",
+        "all_global_context",
+    }
+    allowed.update(f"local_{var}" for var in local_vars)
+    allowed.update(f"global_{var}" for var in global_vars)
+    bad = [group for group in groups if group not in allowed]
+    if bad:
+        raise ValueError(
+            f"Unknown attribution group(s): {bad}. "
+            f"Allowed groups are: {sorted(allowed - {'baseline'})}"
+        )
+
+
 def variable_slice(name, variables):
     if name not in variables:
         raise ValueError(f"{name!r} is not in configured variables {variables}")
@@ -337,6 +358,7 @@ def main():
     area_weights = get_area_weights(lats, device)
     noise_context = load_noise_context(config, domain_info)
     groups = parse_groups(args.groups)
+    validate_groups(groups, config)
 
     rho_pr = float(config.get("validation_rho_pr", 0.25))
     rho_t2m = float(config.get("validation_rho_t2m", 0.08))
