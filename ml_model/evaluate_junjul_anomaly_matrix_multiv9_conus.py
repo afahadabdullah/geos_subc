@@ -2,7 +2,7 @@
 """
 Evaluate June/July v9 CONUS anomalies for ML and GEOS against observed anomalies.
 
-Inputs are anomaly Zarrs produced by build_junjul_climatology_anomalies_multiv9_sa.py.
+Inputs are anomaly Zarrs produced by build_junjul_climatology_anomalies_multiv9_conus.py.
 Outputs are CSV matrices separated by init month, variable, system, and lead.
 """
 

@@ -38,15 +38,15 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_CLIM_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_CLIM_OUTPUT_DIR:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul}"
-CLIM_START="${SA_CLIM_START:-2005}"
-CLIM_END="${SA_CLIM_END:-2024}"
-ANOM_START="${SA_ANOM_START:-2021}"
-ANOM_END="${SA_ANOM_END:-2023}"
-MONTHS="${SA_CLIM_MONTHS:-6,7}"
-SKIP_YEARS="${SA_CLIM_SKIP_YEARS:-2017}"
-OVERWRITE="${SA_CLIM_OVERWRITE:-0}"
+FORECAST_DIR="${CONUS_CLIM_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${CONUS_CLIM_OUTPUT_DIR:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul}"
+CLIM_START="${CONUS_CLIM_START:-2005}"
+CLIM_END="${CONUS_CLIM_END:-2024}"
+ANOM_START="${CONUS_ANOM_START:-2021}"
+ANOM_END="${CONUS_ANOM_END:-2023}"
+MONTHS="${CONUS_CLIM_MONTHS:-6,7}"
+SKIP_YEARS="${CONUS_CLIM_SKIP_YEARS:-2017}"
+OVERWRITE="${CONUS_CLIM_OVERWRITE:-0}"
 
 if [ ! -d "$FORECAST_DIR" ]; then
     echo "❌ Forecast directory not found: $FORECAST_DIR"
@@ -67,7 +67,7 @@ echo "🎯 Months: $MONTHS"
 echo "🎯 Skip years: $SKIP_YEARS"
 echo "🎯 Overwrite: $OVERWRITE"
 
-python ml_model/build_junjul_climatology_anomalies_multiv9_sa.py \
+python ml_model/build_junjul_climatology_anomalies_multiv9_conus.py \
     --forecast_dir "$FORECAST_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --clim_start_year "$CLIM_START" \

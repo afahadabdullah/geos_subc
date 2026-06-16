@@ -2,7 +2,7 @@
 """
 Generate CONUS multi-v9 ensemble forecasts exactly like v9 test mode.
 
-Unlike generate_forecast_zarr_multiv9_sa.py, this script creates the full
+Unlike generate_forecast_zarr_multiv9_conus.py, this script creates the full
 EOF-LHS/random mixed ensemble noise for each batch before chunking the ODE solve.
 That matches train_flow_multiv9.run_full_test_suite_multi and avoids changing
 the ensemble distribution when saving reusable Zarr stores.
@@ -26,7 +26,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.dirname(__file__))
 
 import noise_utils_multi
-from compare_noise_multiv9_sa import (
+from compare_noise_multiv9_conus import (
     decode_multi,
     load_noise_context,
     resolve_checkpoint,

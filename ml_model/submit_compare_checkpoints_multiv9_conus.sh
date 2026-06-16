@@ -41,23 +41,23 @@ export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dat
 
 mkdir -p ml_output_checkpoint_compare_conus_v9
 
-CONFIG_PATH="${SA_CKPT_CONFIG:-ml_model/config_flow_multiv9.yaml}"
+CONFIG_PATH="${CONUS_CKPT_CONFIG:-ml_model/config_flow_multiv9.yaml}"
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
 CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
 
-YEAR="${SA_CKPT_YEAR:-2021}"
-EPOCHS="${SA_CKPT_EPOCHS:-70,80,90,100,110,120,130,140}"
-BEST_CHECKPOINT="${SA_CKPT_BEST_CHECKPOINT:-best_flow_ckpt.pt}"
-NUM_ENSEMBLE="${SA_CKPT_ENSEMBLE:-30}"
-NUM_STEPS="${SA_CKPT_STEPS:-10}"
-ODE_BATCH_SIZE="${SA_CKPT_ODE_BATCH:-120}"
-BATCH_LIMIT="${SA_CKPT_BATCH_LIMIT:-12}"
-FULL_YEAR="${SA_CKPT_FULL_YEAR:-0}"
-STRICT="${SA_CKPT_STRICT:-1}"
-SEED="${SA_CKPT_SEED:-1234}"
+YEAR="${CONUS_CKPT_YEAR:-2021}"
+EPOCHS="${CONUS_CKPT_EPOCHS:-70,80,90,100,110,120,130,140}"
+BEST_CHECKPOINT="${CONUS_CKPT_BEST_CHECKPOINT:-best_flow_ckpt.pt}"
+NUM_ENSEMBLE="${CONUS_CKPT_ENSEMBLE:-30}"
+NUM_STEPS="${CONUS_CKPT_STEPS:-10}"
+ODE_BATCH_SIZE="${CONUS_CKPT_ODE_BATCH:-120}"
+BATCH_LIMIT="${CONUS_CKPT_BATCH_LIMIT:-12}"
+FULL_YEAR="${CONUS_CKPT_FULL_YEAR:-0}"
+STRICT="${CONUS_CKPT_STRICT:-1}"
+SEED="${CONUS_CKPT_SEED:-1234}"
 
 if [ "$CONFIG_TARGET_DOMAIN" != "conus" ]; then
     echo "❌ Refusing to run non-CONUS config: target_domain=$CONFIG_TARGET_DOMAIN"
@@ -103,7 +103,7 @@ echo "🎯 Strict checkpoint check: $STRICT"
 echo "🎯 Sampling: $([ ${#SAMPLE_ARGS[@]} -gt 0 ] && echo full weekly year || echo monthly subset)"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 
-python ml_model/compare_checkpoints_multiv9_sa.py \
+python ml_model/compare_checkpoints_multiv9_conus.py \
     --config "$CONFIG_PATH" \
     --year "$YEAR" \
     --epochs "$EPOCHS" \

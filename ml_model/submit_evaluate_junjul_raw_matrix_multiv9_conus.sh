@@ -38,14 +38,14 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_testmode_e100_s50}"
-OUTPUT_DIR="${SA_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024}"
-START_YEAR="${SA_RAW_START_YEAR:-2021}"
-END_YEAR="${SA_RAW_END_YEAR:-2024}"
-MONTHS="${SA_RAW_MONTHS:-6,7}"
-SKIP_YEARS="${SA_RAW_SKIP_YEARS:-}"
-QUANTILES="${SA_RAW_QUANTILES:-0.90,0.95}"
-DECISIONS="${SA_RAW_DECISIONS:-0.1,0.25,0.5}"
+FORECAST_DIR="${CONUS_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_testmode_e100_s50}"
+OUTPUT_DIR="${CONUS_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024}"
+START_YEAR="${CONUS_RAW_START_YEAR:-2021}"
+END_YEAR="${CONUS_RAW_END_YEAR:-2024}"
+MONTHS="${CONUS_RAW_MONTHS:-6,7}"
+SKIP_YEARS="${CONUS_RAW_SKIP_YEARS:-}"
+QUANTILES="${CONUS_RAW_QUANTILES:-0.90,0.95}"
+DECISIONS="${CONUS_RAW_DECISIONS:-0.1,0.25,0.5}"
 
 if [ ! -d "$FORECAST_DIR" ]; then
     echo "❌ Forecast directory not found: $FORECAST_DIR"
@@ -61,7 +61,7 @@ echo "🎯 Skip years: ${SKIP_YEARS:-none}"
 echo "🎯 Extreme quantiles: $QUANTILES"
 echo "🎯 Decision thresholds: $DECISIONS"
 
-python ml_model/evaluate_junjul_raw_matrix_multiv9_sa.py \
+python ml_model/evaluate_junjul_raw_matrix_multiv9_conus.py \
     --forecast_dir "$FORECAST_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --start_year "$START_YEAR" \

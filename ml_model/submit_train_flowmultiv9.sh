@@ -70,6 +70,7 @@ CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH'))
 CONFIG_LAT_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_max'))")
 CONFIG_LON_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_min'))")
 CONFIG_LON_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_max'))")
+CONFIG_DOMAIN_SHAPE=$(python -c "import yaml, numpy as np; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); lats=np.linspace(-90.0,90.0,181); lons=np.arange(360); lat=((lats>=float(b['lat_min']))&(lats<=float(b['lat_max']))).sum(); lo=float(b['lon_min'])%360; hi=float(b['lon_max'])%360; lon=((lons>=lo)&(lons<=hi)).sum() if lo<=hi else ((lons>=lo)|(lons<=hi)).sum(); print(f'{lat}x{lon}')")
 CONFIG_RHO_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_pr'))")
 CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_t2m'))")
 CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
@@ -105,6 +106,7 @@ echo "🎯 Mixed precision from $CONFIG_PATH: $MIXED_PRECISION"
 echo "🎯 Output dir from $CONFIG_PATH: $OUTPUT_DIR"
 echo "🎯 Target domain from $CONFIG_PATH: $CONFIG_TARGET_DOMAIN"
 echo "🎯 Target bounds: $CONFIG_DOMAIN_LABEL lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX"
+echo "🎯 Selected CONUS domain: $CONFIG_DOMAIN_LABEL lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX grid=$CONFIG_DOMAIN_SHAPE"
 echo "🎯 T2M target mode: $CONFIG_T2M_MODE"
 echo "🎯 Local predictors: $CONFIG_LOCAL_VARS"
 echo "🎯 Global context: $CONFIG_GLOBAL_CONTEXT"

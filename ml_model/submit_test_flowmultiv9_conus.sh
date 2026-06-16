@@ -39,14 +39,14 @@ export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
 
-CONFIG_PATH="${SA_TEST_CONFIG:-ml_model/config_flow_multiv9.yaml}"
-TEST_YEAR="${SA_TEST_YEAR:-2022}"
-CHECKPOINT="${SA_TEST_CHECKPOINT:-best_flow_ckpt.pt}"
-NUM_ENSEMBLE="${SA_TEST_ENSEMBLE:-30}"
-NUM_STEPS="${SA_TEST_STEPS:-10}"
-MAX_ENSEMBLE_PER_CHUNK="${SA_TEST_MAX_ENSEMBLE_PER_CHUNK:-30}"
-VALIDATION_ODE_BATCH="${SA_TEST_ODE_BATCH:-120}"
-SAMPLE_PLOT_LIMIT="${SA_TEST_SAMPLE_PLOT_LIMIT:-0}"
+CONFIG_PATH="${CONUS_TEST_CONFIG:-ml_model/config_flow_multiv9.yaml}"
+TEST_YEAR="${CONUS_TEST_YEAR:-2022}"
+CHECKPOINT="${CONUS_TEST_CHECKPOINT:-best_flow_ckpt.pt}"
+NUM_ENSEMBLE="${CONUS_TEST_ENSEMBLE:-30}"
+NUM_STEPS="${CONUS_TEST_STEPS:-10}"
+MAX_ENSEMBLE_PER_CHUNK="${CONUS_TEST_MAX_ENSEMBLE_PER_CHUNK:-30}"
+VALIDATION_ODE_BATCH="${CONUS_TEST_ODE_BATCH:-120}"
+SAMPLE_PLOT_LIMIT="${CONUS_TEST_SAMPLE_PLOT_LIMIT:-0}"
 EXPECTED_OUTPUT_DIR="ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres"
 
 OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
@@ -60,6 +60,7 @@ CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH'))
 CONFIG_LAT_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_max'))")
 CONFIG_LON_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_min'))")
 CONFIG_LON_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_max'))")
+CONFIG_DOMAIN_SHAPE=$(python -c "import yaml, numpy as np; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); lats=np.linspace(-90.0,90.0,181); lons=np.arange(360); lat=((lats>=float(b['lat_min']))&(lats<=float(b['lat_max']))).sum(); lo=float(b['lon_min'])%360; hi=float(b['lon_max'])%360; lon=((lons>=lo)&(lons<=hi)).sum() if lo<=hi else ((lons>=lo)|(lons<=hi)).sum(); print(f'{lat}x{lon}')")
 CONFIG_RHO_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_pr'))")
 CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_t2m'))")
 CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
@@ -88,6 +89,7 @@ if [ "$CONFIG_T2M_MODE" != "geos_residual" ]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
+echo "🎯 Selected CONUS domain: $CONFIG_DOMAIN_LABEL lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX grid=$CONFIG_DOMAIN_SHAPE"
 
 case "$CHECKPOINT" in
     /*)

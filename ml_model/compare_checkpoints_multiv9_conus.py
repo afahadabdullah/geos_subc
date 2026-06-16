@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from compare_noise_multiv9_sa import (
+from compare_noise_multiv9_conus import (
     build_condition,
     decode_multi,
     expand_global_context,

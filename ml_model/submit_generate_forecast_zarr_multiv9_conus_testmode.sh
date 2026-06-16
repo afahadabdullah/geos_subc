@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J CONUS_zarr
-#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_zarr_%j.log
-#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_zarr_%j.log
+#SBATCH -J CONUS_tgen
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_testmode_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_testmode_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🚀 CONUS v9 forecast Zarr generation started at $(date) on $(hostname)"
+echo "🚀 CONUS v9 test-mode-equivalent Zarr generation started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -39,32 +39,37 @@ export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
 
-CONFIG_PATH="${SA_GEN_CONFIG:-ml_model/config_flow_multiv9.yaml}"
-START_YEAR="${SA_GEN_START_YEAR:-2005}"
-END_YEAR="${SA_GEN_END_YEAR:-2024}"
-SKIP_YEARS="${SA_GEN_SKIP_YEARS:-2017}"
-MONTHS="${SA_GEN_MONTHS:-6,7}"
-CLIM_ENSEMBLE="${SA_GEN_CLIM_ENSEMBLE:-10}"
-EVAL_ENSEMBLE="${SA_GEN_EVAL_ENSEMBLE:-100}"
-EVAL_START_YEAR="${SA_GEN_EVAL_START_YEAR:-2021}"
-NUM_STEPS="${SA_GEN_STEPS:-50}"
-CHECKPOINT="${SA_GEN_CHECKPOINT:-best_flow_ckpt.pt}"
-OUT_DIR="${SA_GEN_OUT_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
-BATCH_SIZE="${SA_GEN_BATCH_SIZE:-8}"
-NUM_WORKERS="${SA_GEN_NUM_WORKERS:-1}"
-ENSEMBLE_CHUNK="${SA_GEN_ENSEMBLE_CHUNK:-30}"
-ODE_BATCH_SIZE="${SA_GEN_ODE_BATCH:-120}"
-MEMBER_CHUNK="${SA_GEN_MEMBER_CHUNK:-10}"
-SEED="${SA_GEN_SEED:-1234}"
-OVERWRITE="${SA_GEN_OVERWRITE:-0}"
-MAX_RUNTIME_MINUTES="${SA_GEN_MAX_RUNTIME_MINUTES:-100}"
-AUTO_RESUBMIT="${SA_GEN_AUTO_RESUBMIT:-1}"
+CONFIG_PATH="${CONUS_TESTGEN_CONFIG:-ml_model/config_flow_multiv9.yaml}"
+START_YEAR="${CONUS_TESTGEN_START_YEAR:-2021}"
+END_YEAR="${CONUS_TESTGEN_END_YEAR:-2024}"
+SKIP_YEARS="${CONUS_TESTGEN_SKIP_YEARS:-}"
+MONTHS="${CONUS_TESTGEN_MONTHS:-6,7}"
+NUM_ENSEMBLE="${CONUS_TESTGEN_ENSEMBLE:-100}"
+NUM_STEPS="${CONUS_TESTGEN_STEPS:-50}"
+CHECKPOINT="${CONUS_TESTGEN_CHECKPOINT:-best_flow_ckpt.pt}"
+OUT_DIR="${CONUS_TESTGEN_OUT_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_testmode_e100_s50}"
+BATCH_SIZE="${CONUS_TESTGEN_BATCH_SIZE:-8}"
+NUM_WORKERS="${CONUS_TESTGEN_NUM_WORKERS:-1}"
+ENSEMBLE_CHUNK="${CONUS_TESTGEN_ENSEMBLE_CHUNK:-30}"
+ODE_BATCH_SIZE="${CONUS_TESTGEN_ODE_BATCH:-120}"
+MEMBER_CHUNK="${CONUS_TESTGEN_MEMBER_CHUNK:-10}"
+SEED="${CONUS_TESTGEN_SEED:-1234}"
+OVERWRITE="${CONUS_TESTGEN_OVERWRITE:-0}"
+CLEAN_OUTPUT="${CONUS_TESTGEN_CLEAN_OUTPUT:-0}"
+MAX_RUNTIME_MINUTES="${CONUS_TESTGEN_MAX_RUNTIME_MINUTES:-100}"
+AUTO_RESUBMIT="${CONUS_TESTGEN_AUTO_RESUBMIT:-1}"
 
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
 CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
+CONFIG_DOMAIN_LABEL=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('label'))")
+CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_min'))")
+CONFIG_LAT_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_max'))")
+CONFIG_LON_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_min'))")
+CONFIG_LON_MAX=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lon_max'))")
+CONFIG_DOMAIN_SHAPE=$(python -c "import yaml, numpy as np; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); lats=np.linspace(-90.0,90.0,181); lons=np.arange(360); lat=((lats>=float(b['lat_min']))&(lats<=float(b['lat_max']))).sum(); lo=float(b['lon_min'])%360; hi=float(b['lon_max'])%360; lon=((lons>=lo)&(lons<=hi)).sum() if lo<=hi else ((lons>=lo)|(lons<=hi)).sum(); print(f'{lat}x{lon}')")
 
 if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres" ]; then
     echo "❌ Refusing unexpected output_dir=$CONFIG_OUTPUT_DIR"
@@ -100,24 +105,29 @@ EXTRA_ARGS=()
 if [ "$OVERWRITE" = "1" ] || [ "$OVERWRITE" = "true" ] || [ "$OVERWRITE" = "TRUE" ]; then
     EXTRA_ARGS+=(--overwrite)
 fi
+if [ "$CLEAN_OUTPUT" = "1" ] || [ "$CLEAN_OUTPUT" = "true" ] || [ "$CLEAN_OUTPUT" = "TRUE" ]; then
+    EXTRA_ARGS+=(--clean_out_dir)
+fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 echo "🎯 Config: $CONFIG_PATH"
 echo "🎯 Model output dir: $CONFIG_OUTPUT_DIR"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 echo "🎯 Checkpoint: $CKPT_PATH"
+echo "🎯 Selected CONUS domain: $CONFIG_DOMAIN_LABEL lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX grid=$CONFIG_DOMAIN_SHAPE"
 echo "🎯 Years: $START_YEAR-$END_YEAR"
-echo "🎯 Skip years: $SKIP_YEARS"
+echo "🎯 Skip years: ${SKIP_YEARS:-none}"
 echo "🎯 Init months: $MONTHS"
-echo "🎯 Ensembles: $CLIM_ENSEMBLE before $EVAL_START_YEAR; $EVAL_ENSEMBLE from $EVAL_START_YEAR"
+echo "🎯 Ensembles: $NUM_ENSEMBLE"
 echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Output Zarr dir: $OUT_DIR"
-echo "🎯 Ensemble chunk: $ENSEMBLE_CHUNK"
+echo "🎯 Clean output first: $CLEAN_OUTPUT"
+echo "🎯 Max ens/chunk: $ENSEMBLE_CHUNK"
 echo "🎯 ODE batch: $ODE_BATCH_SIZE"
 echo "🎯 Soft runtime minutes: $MAX_RUNTIME_MINUTES"
 echo "🎯 Auto resubmit: $AUTO_RESUBMIT"
 
-python ml_model/generate_forecast_zarr_multiv9_sa.py \
+python ml_model/generate_forecast_zarr_multiv9_conus_testmode.py \
     --config "$CONFIG_PATH" \
     --data_dir "$DATA_DIR_OVERRIDE" \
     --model_output_dir "$CONFIG_OUTPUT_DIR" \
@@ -126,9 +136,9 @@ python ml_model/generate_forecast_zarr_multiv9_sa.py \
     --end_year "$END_YEAR" \
     --skip_years "$SKIP_YEARS" \
     --months "$MONTHS" \
-    --clim_num_ensemble "$CLIM_ENSEMBLE" \
-    --eval_num_ensemble "$EVAL_ENSEMBLE" \
-    --eval_start_year "$EVAL_START_YEAR" \
+    --clim_num_ensemble "$NUM_ENSEMBLE" \
+    --eval_num_ensemble "$NUM_ENSEMBLE" \
+    --eval_start_year "$START_YEAR" \
     --num_steps "$NUM_STEPS" \
     --out_dir "$OUT_DIR" \
     --batch_size "$BATCH_SIZE" \
@@ -164,9 +174,9 @@ if [ -n "$MISSING_YEARS" ]; then
             SUBMIT_TARGET="$SLURM_SUBMIT_HOST"
         fi
 
-        echo "📡 Resubmitting generation job via $SUBMIT_TARGET..."
+        echo "📡 Resubmitting test-mode generation job via $SUBMIT_TARGET..."
         ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" \
-            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' SA_GEN_CONFIG='$CONFIG_PATH' SA_GEN_START_YEAR='$START_YEAR' SA_GEN_END_YEAR='$END_YEAR' SA_GEN_SKIP_YEARS='$SKIP_YEARS' SA_GEN_MONTHS='$MONTHS' SA_GEN_CLIM_ENSEMBLE='$CLIM_ENSEMBLE' SA_GEN_EVAL_ENSEMBLE='$EVAL_ENSEMBLE' SA_GEN_EVAL_START_YEAR='$EVAL_START_YEAR' SA_GEN_STEPS='$NUM_STEPS' SA_GEN_CHECKPOINT='$CHECKPOINT' SA_GEN_OUT_DIR='$OUT_DIR' SA_GEN_BATCH_SIZE='$BATCH_SIZE' SA_GEN_NUM_WORKERS='$NUM_WORKERS' SA_GEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' SA_GEN_ODE_BATCH='$ODE_BATCH_SIZE' SA_GEN_MEMBER_CHUNK='$MEMBER_CHUNK' SA_GEN_SEED='$SEED' SA_GEN_OVERWRITE='0' SA_GEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' SA_GEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' sbatch ml_model/submit_generate_forecast_zarr_multiv9_sa.sh"
+            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' CONUS_TESTGEN_CONFIG='$CONFIG_PATH' CONUS_TESTGEN_START_YEAR='$START_YEAR' CONUS_TESTGEN_END_YEAR='$END_YEAR' CONUS_TESTGEN_SKIP_YEARS='$SKIP_YEARS' CONUS_TESTGEN_MONTHS='$MONTHS' CONUS_TESTGEN_ENSEMBLE='$NUM_ENSEMBLE' CONUS_TESTGEN_STEPS='$NUM_STEPS' CONUS_TESTGEN_CHECKPOINT='$CHECKPOINT' CONUS_TESTGEN_OUT_DIR='$OUT_DIR' CONUS_TESTGEN_BATCH_SIZE='$BATCH_SIZE' CONUS_TESTGEN_NUM_WORKERS='$NUM_WORKERS' CONUS_TESTGEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' CONUS_TESTGEN_ODE_BATCH='$ODE_BATCH_SIZE' CONUS_TESTGEN_MEMBER_CHUNK='$MEMBER_CHUNK' CONUS_TESTGEN_SEED='$SEED' CONUS_TESTGEN_OVERWRITE='0' CONUS_TESTGEN_CLEAN_OUTPUT='0' CONUS_TESTGEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' CONUS_TESTGEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' sbatch ml_model/submit_generate_forecast_zarr_multiv9_conus_testmode.sh"
     else
         echo "ℹ️ Auto-resubmit disabled. Rerun this script to continue."
     fi
@@ -174,4 +184,4 @@ else
     echo "✅ All requested yearly Zarr stores are complete."
 fi
 
-echo "🏁 CONUS v9 forecast Zarr generation finished at $(date)"
+echo "🏁 CONUS v9 test-mode-equivalent Zarr generation finished at $(date)"

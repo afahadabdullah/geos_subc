@@ -25,7 +25,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, os.path.dirname(__file__))
 
 import noise_utils_multi
-from compare_noise_multiv9_sa import (
+from compare_noise_multiv9_conus import (
     decode_multi,
     load_noise_context,
     resolve_checkpoint,

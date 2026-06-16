@@ -38,14 +38,14 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_TAIL_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_TAIL_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_junjul}"
-BASE_START="${SA_TAIL_BASE_START:-2005}"
-BASE_END="${SA_TAIL_BASE_END:-2020}"
-EVAL_START="${SA_TAIL_EVAL_START:-2021}"
-EVAL_END="${SA_TAIL_EVAL_END:-2024}"
-QUANTILES="${SA_TAIL_QUANTILES:-0.90,0.95,0.99}"
-DECISIONS="${SA_TAIL_DECISIONS:-0.1,0.25,0.5}"
+FORECAST_DIR="${CONUS_TAIL_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${CONUS_TAIL_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_junjul}"
+BASE_START="${CONUS_TAIL_BASE_START:-2005}"
+BASE_END="${CONUS_TAIL_BASE_END:-2020}"
+EVAL_START="${CONUS_TAIL_EVAL_START:-2021}"
+EVAL_END="${CONUS_TAIL_EVAL_END:-2024}"
+QUANTILES="${CONUS_TAIL_QUANTILES:-0.90,0.95,0.99}"
+DECISIONS="${CONUS_TAIL_DECISIONS:-0.1,0.25,0.5}"
 
 if [ ! -d "$FORECAST_DIR" ]; then
     echo "❌ Forecast Zarr directory not found: $FORECAST_DIR"
@@ -60,7 +60,7 @@ echo "🎯 Eval years: $EVAL_START-$EVAL_END"
 echo "🎯 Quantiles: $QUANTILES"
 echo "🎯 Decision thresholds: $DECISIONS"
 
-python ml_model/analyze_extreme_tails_multiv9_sa.py \
+python ml_model/analyze_extreme_tails_multiv9_conus.py \
     --forecast_dir "$FORECAST_DIR" \
     --baseline_start_year "$BASE_START" \
     --baseline_end_year "$BASE_END" \

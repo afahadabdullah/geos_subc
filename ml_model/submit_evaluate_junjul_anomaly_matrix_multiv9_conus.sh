@@ -38,16 +38,16 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-ANOMALY_PATH="${SA_AMTX_ANOMALY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_anomalies_2021_2023.zarr}"
-CLIMATOLOGY_PATH="${SA_AMTX_CLIMATOLOGY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_climatology_2005_2024.zarr}"
-FORECAST_DIR="${SA_AMTX_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_AMTX_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_junjul}"
-MONTHS="${SA_AMTX_MONTHS:-6,7}"
-BASELINE_START="${SA_AMTX_BASELINE_START:-2005}"
-BASELINE_END="${SA_AMTX_BASELINE_END:-2024}"
-SKIP_YEARS="${SA_AMTX_SKIP_YEARS:-2017}"
-QUANTILES="${SA_AMTX_QUANTILES:-0.90,0.95}"
-DECISIONS="${SA_AMTX_DECISIONS:-0.1,0.25,0.5}"
+ANOMALY_PATH="${CONUS_AMTX_ANOMALY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_anomalies_2021_2023.zarr}"
+CLIMATOLOGY_PATH="${CONUS_AMTX_CLIMATOLOGY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_climatology_2005_2024.zarr}"
+FORECAST_DIR="${CONUS_AMTX_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${CONUS_AMTX_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_junjul}"
+MONTHS="${CONUS_AMTX_MONTHS:-6,7}"
+BASELINE_START="${CONUS_AMTX_BASELINE_START:-2005}"
+BASELINE_END="${CONUS_AMTX_BASELINE_END:-2024}"
+SKIP_YEARS="${CONUS_AMTX_SKIP_YEARS:-2017}"
+QUANTILES="${CONUS_AMTX_QUANTILES:-0.90,0.95}"
+DECISIONS="${CONUS_AMTX_DECISIONS:-0.1,0.25,0.5}"
 
 if [ ! -d "$ANOMALY_PATH" ]; then
     echo "❌ Anomaly Zarr not found: $ANOMALY_PATH"
@@ -73,7 +73,7 @@ echo "🎯 Skip years: $SKIP_YEARS"
 echo "🎯 Extreme quantiles: $QUANTILES"
 echo "🎯 Decision thresholds: $DECISIONS"
 
-python ml_model/evaluate_junjul_anomaly_matrix_multiv9_sa.py \
+python ml_model/evaluate_junjul_anomaly_matrix_multiv9_conus.py \
     --anomaly_path "$ANOMALY_PATH" \
     --climatology_path "$CLIMATOLOGY_PATH" \
     --forecast_dir "$FORECAST_DIR" \

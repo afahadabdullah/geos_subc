@@ -41,7 +41,7 @@ export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dat
 
 mkdir -p ml_output_noise_compare_conus_v9
 
-CONFIG_PATH="${SA_NOISE_CONFIG:-ml_model/config_flow_multiv9.yaml}"
+CONFIG_PATH="${CONUS_NOISE_CONFIG:-ml_model/config_flow_multiv9.yaml}"
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
@@ -49,16 +49,16 @@ CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(op
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
 CONFIG_TEST_ENSEMBLE=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH')).get('test_num_ensemble', yaml.safe_load(open('$CONFIG_PATH')).get('validation_num_ensemble', 15))))")
 CONFIG_TEST_STEPS=$(python -c "import yaml; print(int(yaml.safe_load(open('$CONFIG_PATH')).get('test_num_steps', yaml.safe_load(open('$CONFIG_PATH')).get('validation_num_steps', 10))))")
-YEAR="${SA_NOISE_YEAR:-2021}"
-CHECKPOINT="${SA_NOISE_CHECKPOINT:-best_flow_ckpt.pt}"
-NUM_ENSEMBLE="${SA_NOISE_ENSEMBLE:-$CONFIG_TEST_ENSEMBLE}"
-NUM_STEPS="${SA_NOISE_STEPS:-$CONFIG_TEST_STEPS}"
-BATCH_LIMIT="${SA_NOISE_BATCH_LIMIT:-12}"
-ODE_BATCH_SIZE="${SA_NOISE_ODE_BATCH:-120}"
-FULL_YEAR="${SA_NOISE_FULL_YEAR:-0}"
+YEAR="${CONUS_NOISE_YEAR:-2021}"
+CHECKPOINT="${CONUS_NOISE_CHECKPOINT:-best_flow_ckpt.pt}"
+NUM_ENSEMBLE="${CONUS_NOISE_ENSEMBLE:-$CONFIG_TEST_ENSEMBLE}"
+NUM_STEPS="${CONUS_NOISE_STEPS:-$CONFIG_TEST_STEPS}"
+BATCH_LIMIT="${CONUS_NOISE_BATCH_LIMIT:-12}"
+ODE_BATCH_SIZE="${CONUS_NOISE_ODE_BATCH:-120}"
+FULL_YEAR="${CONUS_NOISE_FULL_YEAR:-0}"
 SETTING_ARGS=()
-if [ -n "${SA_NOISE_SETTINGS:-}" ]; then
-    IFS=';' read -ra SETTINGS <<< "$SA_NOISE_SETTINGS"
+if [ -n "${CONUS_NOISE_SETTINGS:-}" ]; then
+    IFS=';' read -ra SETTINGS <<< "$CONUS_NOISE_SETTINGS"
     for setting in "${SETTINGS[@]}"; do
         if [ -n "$setting" ]; then
             SETTING_ARGS+=(--setting "$setting")
@@ -113,9 +113,9 @@ echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Batch limit: $BATCH_LIMIT"
 echo "🎯 Sampling: $([ ${#SAMPLE_ARGS[@]} -gt 0 ] && echo full weekly year || echo monthly subset)"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
-echo "🎯 Extra settings: ${SA_NOISE_SETTINGS:-config default}"
+echo "🎯 Extra settings: ${CONUS_NOISE_SETTINGS:-config default}"
 
-python ml_model/compare_noise_multiv9_sa.py \
+python ml_model/compare_noise_multiv9_conus.py \
     --config "$CONFIG_PATH" \
     --year "$YEAR" \
     --checkpoint "$CHECKPOINT" \
