@@ -174,9 +174,11 @@ def get_autocast_context(device, mixed_precision):
     return nullcontext()
 
 
-def build_condition(batch, device):
+def build_condition(batch, device, zero_geos_condition=False):
     x_obs = batch["x_obs"].to(device)
     x_geos = batch["x_geos"].to(device)
+    if zero_geos_condition:
+        x_geos = torch.zeros_like(x_geos)
     batch_size = x_obs.shape[0]
     height, width = x_obs.shape[-2:]
     x_geos_flat = x_geos.contiguous().view(batch_size, -1, height, width)
@@ -234,7 +236,11 @@ def generate_batch_forecast(
     t2m_residual_min,
     t2m_residual_max,
 ):
-    x_cond, lead_idx = build_condition(batch, device)
+    x_cond, lead_idx = build_condition(
+        batch,
+        device,
+        zero_geos_condition=bool(config.get("zero_geos_condition", False)),
+    )
     global_context = get_batch_global_context(batch, device)
     batch_size, _, height, width = x_cond.shape
     num_inits = batch_size // 4
@@ -643,6 +649,7 @@ def main():
     print(f"  Out dir      : {args.out_dir}")
     print(f"  Domain       : {len(probe_dataset.lats)}x{len(probe_dataset.lons)}")
     print(f"  T2M target   : {t2m_target_mode} ({t2m_residual_min:.3f} .. {t2m_residual_max:.3f})")
+    print(f"  GEOS input   : {'zeroed for ablation' if config.get('zero_geos_condition', False) else 'enabled'}")
     print(f"  Ensembles    : {args.clim_num_ensemble} before {args.eval_start_year}; {args.eval_num_ensemble} from {args.eval_start_year}")
     print(f"  ODE steps    : {args.num_steps}")
     print(f"  Max ens/chunk: {args.ensemble_chunk_size}")

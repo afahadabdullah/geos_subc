@@ -146,6 +146,13 @@ def get_batch_global_context(batch, device):
     return global_context.to(device)
 
 
+def maybe_zero_geos_condition(x_geos, zero_geos_condition=False):
+    """Zero GEOS conditioning for no-GEOS ablation runs."""
+    if zero_geos_condition:
+        return torch.zeros_like(x_geos)
+    return x_geos
+
+
 def apply_training_context_dropout(
     x_obs,
     x_geos,
@@ -1023,7 +1030,8 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       validation_variance_coarse_kernel=None,
                       t2m_target_mode="absolute",
                       t2m_residual_min=-20.0,
-                      t2m_residual_max=20.0):
+                      t2m_residual_max=20.0,
+                      zero_geos_condition=False):
     model.eval()
     unwrapped_model = accelerator.unwrap_model(model)
     
@@ -1079,6 +1087,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         
         fx_obs = batch['x_obs'].to(device) 
         fx_geos = batch['x_geos'].to(device) 
+        fx_geos = maybe_zero_geos_condition(fx_geos, zero_geos_condition)
         fx_global_context = get_batch_global_context(batch, device)
         fx_geos_cat = fx_geos.view(vB, -1, H, W)
         
@@ -1342,6 +1351,7 @@ def run_full_test_suite_multi(
     t2m_target_mode="absolute",
     t2m_residual_min=-20.0,
     t2m_residual_max=20.0,
+    zero_geos_condition=False,
 ):
     if not HAS_CARTOPY:
         if accelerator.is_main_process:
@@ -1412,6 +1422,7 @@ def run_full_test_suite_multi(
 
         fx_obs = batch['x_obs'].to(device)
         fx_geos = batch['x_geos'].to(device)
+        fx_geos = maybe_zero_geos_condition(fx_geos, zero_geos_condition)
         fx_global_context = get_batch_global_context(batch, device)
         fx_geos_cat = fx_geos.view(vB, -1, H, W)
 
@@ -2077,6 +2088,7 @@ def train(args, accelerator):
     drop_local_obs_prob = float(config.get("drop_local_obs_prob", 0.0))
     drop_global_context_prob = float(config.get("drop_global_context_prob", 0.0))
     drop_geos_prob = float(config.get("drop_geos_prob", 0.0))
+    zero_geos_condition = bool(config.get("zero_geos_condition", False))
     if train_noise_mode not in {"gaussian", "eof_lhs_mix"}:
         raise ValueError(f"train_noise_mode must be gaussian or eof_lhs_mix, got {train_noise_mode}")
     if train_time_schedule not in {"uniform", "beta", "logit_normal", "stratified_low_mid"}:
@@ -2182,6 +2194,7 @@ def train(args, accelerator):
             f"   [Context Dropout]    : all_ctx={context_dropout_prob:.2f}, local={drop_local_obs_prob:.2f}, "
             f"global={drop_global_context_prob:.2f}, geos={drop_geos_prob:.2f}"
         )
+        print(f"   [GEOS Condition]     : {'zeroed for ablation' if zero_geos_condition else 'enabled'}")
         print(f"   [Dense MSE Val To]   : {dense_mse_validation_until if dense_mse_validation_until > 0 else 'disabled'}")
         print(f"   [Val Plot Every]     : {plot_validation_every if plot_validation_every > 0 else 'best-only'}")
         print(
@@ -2639,6 +2652,7 @@ def train(args, accelerator):
             t2m_target_mode=t2m_target_mode,
             t2m_residual_min=t2m_residual_min,
             t2m_residual_max=t2m_residual_max,
+            zero_geos_condition=zero_geos_condition,
         )
         return
 
@@ -2905,6 +2919,7 @@ def train(args, accelerator):
         for i, batch in enumerate(pbar):    
             # Conditionals
             x_geos = batch['x_geos'].to(device)
+            x_geos = maybe_zero_geos_condition(x_geos, zero_geos_condition)
             x_obs  = batch['x_obs'].to(device)
             global_context = get_batch_global_context(batch, device)
             if not is_variance_phase and not crps_loss:
@@ -3201,6 +3216,7 @@ def train(args, accelerator):
                 t2m_target_mode=t2m_target_mode,
                 t2m_residual_min=t2m_residual_min,
                 t2m_residual_max=t2m_residual_max,
+                zero_geos_condition=zero_geos_condition,
             )
             current_val_metric = val_result['combined_crps']
             if global_cached_geos_crps is None:
@@ -3296,6 +3312,7 @@ def train(args, accelerator):
             with torch.no_grad():
                 for b_idx, batch in enumerate(val_loader_full):
                     x_geos = batch['x_geos'].to(device)
+                    x_geos = maybe_zero_geos_condition(x_geos, zero_geos_condition)
                     x_obs  = batch['x_obs'].to(device)
                     global_context = get_batch_global_context(batch, device)
                     B = x_geos.shape[0]
@@ -3463,6 +3480,7 @@ def train(args, accelerator):
                         t2m_target_mode=t2m_target_mode,
                         t2m_residual_min=t2m_residual_min,
                         t2m_residual_max=t2m_residual_max,
+                        zero_geos_condition=zero_geos_condition,
                     )
                     vt = val_result['tensors']
                     save_val_plot(

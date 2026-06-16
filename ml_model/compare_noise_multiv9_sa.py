@@ -42,6 +42,7 @@ from train_flow_multiv9 import (
 )
 
 EXPECTED_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres"
+EXPECTED_NOGEOS_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres_nogeos"
 EXPECTED_LOCAL_OBS = ["sm", "mjo"]
 EXPECTED_GLOBAL_CONTEXT = ["sst", "sss", "ivt", "z500_zonal_dev", "u250"]
 EXPECTED_TARGET_BOUNDS = {
@@ -88,6 +89,10 @@ def validate_current_sa_v9_config(config, output_dir):
     local_obs = list(config.get("local_obs_variables") or [])
     global_context = list(config.get("global_context_variables") or [])
     output_name = os.path.basename(os.path.normpath(output_dir))
+    zero_geos = bool(config.get("zero_geos_condition", False))
+    expected_output_names = {EXPECTED_OUTPUT_DIR}
+    if zero_geos:
+        expected_output_names.add(EXPECTED_NOGEOS_OUTPUT_DIR)
 
     if target_domain != "south_asia":
         raise ValueError(f"Expected target_domain=south_asia, got {target_domain!r}")
@@ -95,8 +100,8 @@ def validate_current_sa_v9_config(config, output_dir):
         actual = float(bounds.get(key, float("nan")))
         if not np.isclose(actual, expected):
             raise ValueError(f"Expected target_domain_bounds.{key}={expected}, got {actual}")
-    if output_name != EXPECTED_OUTPUT_DIR:
-        raise ValueError(f"Expected output_dir ending in {EXPECTED_OUTPUT_DIR}, got {output_dir!r}")
+    if output_name not in expected_output_names:
+        raise ValueError(f"Expected output_dir ending in {sorted(expected_output_names)}, got {output_dir!r}")
     if local_obs != EXPECTED_LOCAL_OBS:
         raise ValueError(f"Expected local_obs_variables={EXPECTED_LOCAL_OBS}, got {local_obs}")
     if global_context != EXPECTED_GLOBAL_CONTEXT:
@@ -243,9 +248,11 @@ def expand_global_context(batch, device, num_ensemble):
     )
 
 
-def build_condition(batch, device):
+def build_condition(batch, device, zero_geos_condition=False):
     x_obs = batch["x_obs"].to(device)
     x_geos = batch["x_geos"].to(device)
+    if zero_geos_condition:
+        x_geos = torch.zeros_like(x_geos)
     batch_size = x_obs.shape[0]
     height, width = x_obs.shape[-2:]
     x_geos_flat = x_geos.contiguous().view(batch_size, -1, height, width)
@@ -318,13 +325,14 @@ def run_model_strategy(
     t2m_target_mode="absolute",
     t2m_residual_min=-20.0,
     t2m_residual_max=20.0,
+    zero_geos_condition=False,
 ):
     target_raw = batch["target_raw_full"][0::4].to(device)
     target_pr = target_raw[:, 0]
     target_t2m = target_raw[:, 1]
     num_inits = target_pr.shape[0]
 
-    x_cond, lead_idx = build_condition(batch, device)
+    x_cond, lead_idx = build_condition(batch, device, zero_geos_condition=zero_geos_condition)
     batch_size, _, height, width = x_cond.shape
     x_cond_expanded = (
         x_cond.unsqueeze(1)
@@ -498,6 +506,7 @@ def main():
             t2m_target_mode=t2m_target_mode,
             t2m_residual_min=t2m_residual_min,
             t2m_residual_max=t2m_residual_max,
+            zero_geos_condition=bool(config.get("zero_geos_condition", False)),
         )
         results["1. Pure Random"].append(pure_metrics)
 
@@ -548,6 +557,7 @@ def main():
                 t2m_target_mode=t2m_target_mode,
                 t2m_residual_min=t2m_residual_min,
                 t2m_residual_max=t2m_residual_max,
+                zero_geos_condition=bool(config.get("zero_geos_condition", False)),
             )
             results[label].append(metrics)
 
