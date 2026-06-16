@@ -81,6 +81,13 @@ def finite_pair_flat(prob, event, weights_2d):
     return p[mask], e[mask], weights[mask]
 
 
+def auc_trapezoid(y, x):
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    dx = np.diff(x)
+    return float(np.sum(dx * (y[:-1] + y[1:]) * 0.5))
+
+
 def weighted_roc_auc(prob, event, weights_2d):
     p, e, w = finite_pair_flat(prob, event, weights_2d)
     if p.size == 0 or not np.any(e) or np.all(e):
@@ -94,7 +101,7 @@ def weighted_roc_auc(prob, event, weights_2d):
         return np.nan
     tpr = np.concatenate([[0.0], np.cumsum(np.where(e, w, 0.0)) / pos, [1.0]])
     fpr = np.concatenate([[0.0], np.cumsum(np.where(~e, w, 0.0)) / neg, [1.0]])
-    return float(np.trapz(tpr, fpr))
+    return auc_trapezoid(tpr, fpr)
 
 
 def weighted_average_precision(prob, event, weights_2d):
