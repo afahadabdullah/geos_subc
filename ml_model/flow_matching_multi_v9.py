@@ -64,7 +64,7 @@ class WeekHead(nn.Module):
 class GlobalContextEncoder(nn.Module):
     """
     Encode full-global predictor maps into the same FiLM context used by the
-    South Asia decoder. This lets global SST/SSS patterns condition a local
+    regional decoder. This lets global SST/SSS patterns condition a local
     target grid without forcing every predictor onto the target grid.
     """
 

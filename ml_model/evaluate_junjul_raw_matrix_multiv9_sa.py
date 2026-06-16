@@ -16,8 +16,8 @@ import pandas as pd
 import xarray as xr
 
 
-DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_testmode_e100_s50"
-DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024"
+DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_testmode_e100_s50"
+DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024"
 
 
 def parse_args():

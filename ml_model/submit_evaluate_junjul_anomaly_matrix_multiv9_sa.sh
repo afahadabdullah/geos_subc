@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_v9_amtx
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/anomaly_matrix_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/anomaly_matrix_%j.log
+#SBATCH -J CONUS_amtx
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "📊 South Asia v9 June/July anomaly matrix evaluation started at $(date) on $(hostname)"
+echo "📊 CONUS v9 June/July anomaly matrix evaluation started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -38,10 +38,10 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-ANOMALY_PATH="${SA_AMTX_ANOMALY_PATH:-dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul/v9_junjul_anomalies_2021_2023.zarr}"
-CLIMATOLOGY_PATH="${SA_AMTX_CLIMATOLOGY_PATH:-dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul/v9_junjul_climatology_2005_2024.zarr}"
-FORECAST_DIR="${SA_AMTX_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_AMTX_OUTPUT_DIR:-ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/anomaly_matrix_junjul}"
+ANOMALY_PATH="${SA_AMTX_ANOMALY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_anomalies_2021_2023.zarr}"
+CLIMATOLOGY_PATH="${SA_AMTX_CLIMATOLOGY_PATH:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/v9_junjul_climatology_2005_2024.zarr}"
+FORECAST_DIR="${SA_AMTX_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${SA_AMTX_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_junjul}"
 MONTHS="${SA_AMTX_MONTHS:-6,7}"
 BASELINE_START="${SA_AMTX_BASELINE_START:-2005}"
 BASELINE_END="${SA_AMTX_BASELINE_END:-2024}"
@@ -85,4 +85,4 @@ python ml_model/evaluate_junjul_anomaly_matrix_multiv9_sa.py \
     --extreme_quantiles "$QUANTILES" \
     --decision_thresholds "$DECISIONS"
 
-echo "🏁 South Asia v9 June/July anomaly matrix evaluation finished at $(date)"
+echo "🏁 CONUS v9 June/July anomaly matrix evaluation finished at $(date)"

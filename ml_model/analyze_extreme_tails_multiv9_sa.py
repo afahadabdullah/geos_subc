@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument(
         "--forecast_dir",
         type=str,
-        default="dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50",
+        default="dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50",
     )
     parser.add_argument("--baseline_start_year", type=int, default=2005)
     parser.add_argument("--baseline_end_year", type=int, default=2020)
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/extreme_tail_junjul",
+        default="ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_junjul",
     )
     return parser.parse_args()
 

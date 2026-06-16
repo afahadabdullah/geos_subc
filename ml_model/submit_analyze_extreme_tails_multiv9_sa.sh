@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_v9_tail
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/extreme_tail_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/extreme_tail_%j.log
+#SBATCH -J CONUS_tail
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "📊 South Asia v9 extreme-tail analysis started at $(date) on $(hostname)"
+echo "📊 CONUS v9 extreme-tail analysis started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -38,8 +38,8 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_TAIL_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_TAIL_OUTPUT_DIR:-ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/extreme_tail_junjul}"
+FORECAST_DIR="${SA_TAIL_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${SA_TAIL_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/extreme_tail_junjul}"
 BASE_START="${SA_TAIL_BASE_START:-2005}"
 BASE_END="${SA_TAIL_BASE_END:-2020}"
 EVAL_START="${SA_TAIL_EVAL_START:-2021}"
@@ -70,4 +70,4 @@ python ml_model/analyze_extreme_tails_multiv9_sa.py \
     --decision_thresholds "$DECISIONS" \
     --output_dir "$OUTPUT_DIR"
 
-echo "🏁 South Asia v9 extreme-tail analysis finished at $(date)"
+echo "🏁 CONUS v9 extreme-tail analysis finished at $(date)"

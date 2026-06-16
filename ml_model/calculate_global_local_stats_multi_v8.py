@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Build v8 stats for the South Asia local/global multi-target flow model.
+Build global/local stats for the regional local/global multi-target flow model.
 
 The v8 normalization file intentionally mixes two scopes:
 - global predictor bounds for variables used by the full-global context encoder
-- South Asia 55E-100E, 0N-40N local bounds for the T2M residual target
+- regional local bounds for the T2M residual target
 
 T2M v8 target is:
     ERA5_T2M - GEOS_ensemble_mean_T2M
@@ -25,11 +25,11 @@ from dataset_flow_multi import S2SHybridDataset
 DEFAULT_START_YEAR = 1999
 DEFAULT_END_YEAR = 2020
 DEFAULT_TARGET_DOMAIN_BOUNDS = {
-    "label": "South Asia 55E-100E 0N-40N",
-    "lat_min": 0.0,
-    "lat_max": 40.0,
-    "lon_min": 55.0,
-    "lon_max": 100.0,
+    "label": "CONUS 125W-66W 24N-50N",
+    "lat_min": 24.0,
+    "lat_max": 50.0,
+    "lon_min": 235.0,
+    "lon_max": 294.0,
 }
 
 
@@ -93,7 +93,7 @@ def scan_global_predictors(bounds, data_root, start_year, end_year, batch_size):
             gc.collect()
 
 
-def scan_sa_t2m_residual(bounds, data_root, start_year, end_year, batch_size, target_domain, target_domain_bounds):
+def scan_regional_t2m_residual(bounds, data_root, start_year, end_year, batch_size, target_domain, target_domain_bounds):
     domain_label = target_domain_bounds.get("label", target_domain)
     print(f"Scanning {domain_label} T2M residual target bounds ({start_year}-{end_year})...")
     dataset = S2SHybridDataset(
@@ -109,7 +109,7 @@ def scan_sa_t2m_residual(bounds, data_root, start_year, end_year, batch_size, ta
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(loader, desc="SA T2M residual stats")):
+        for i, batch in enumerate(tqdm(loader, desc="Regional T2M residual stats")):
             target_t2m = batch["target_raw"][:, 1]
             geos_ens = batch["geos_ens_raw"]
             lead_idx = batch["lead_idx"].long()
@@ -121,7 +121,7 @@ def scan_sa_t2m_residual(bounds, data_root, start_year, end_year, batch_size, ta
             update_bounds(bounds, "target_t2m_residual_raw", residual)
 
             if i == 0:
-                print("\n--- SA RESIDUAL BATCH 0 DIAGNOSTICS ---")
+                print("\n--- REGIONAL RESIDUAL BATCH 0 DIAGNOSTICS ---")
                 print(f"T2M residual: {residual.min().item():.4f} .. {residual.max().item():.4f}")
                 print("---------------------------------------\n")
 
@@ -166,7 +166,7 @@ def calculate_stats(data_root, out_path, start_year, end_year, batch_size, targe
     }
 
     scan_global_predictors(bounds, data_root, start_year, end_year, batch_size)
-    scan_sa_t2m_residual(bounds, data_root, start_year, end_year, batch_size, target_domain, target_domain_bounds)
+    scan_regional_t2m_residual(bounds, data_root, start_year, end_year, batch_size, target_domain, target_domain_bounds)
     finalize_bounds(bounds)
 
     print("\n==================================")
@@ -188,11 +188,11 @@ def main():
         type=str,
         default=os.environ.get("DATA_DIR_OVERRIDE", "/scratch/11353/afahad/geossub/dataprocess"),
     )
-    parser.add_argument("--out", type=str, default="ml_model/v8_sa_55e100e_0n40n_global_local_stats.pt")
+    parser.add_argument("--out", type=str, default="ml_model/v9_conus_125w66w_24n50n_global_local_stats.pt")
     parser.add_argument("--start_year", type=int, default=DEFAULT_START_YEAR)
     parser.add_argument("--end_year", type=int, default=DEFAULT_END_YEAR)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--target_domain", type=str, default="south_asia")
+    parser.add_argument("--target_domain", type=str, default="conus")
     parser.add_argument("--lat_min", type=float, default=DEFAULT_TARGET_DOMAIN_BOUNDS["lat_min"])
     parser.add_argument("--lat_max", type=float, default=DEFAULT_TARGET_DOMAIN_BOUNDS["lat_max"])
     parser.add_argument("--lon_min", type=float, default=DEFAULT_TARGET_DOMAIN_BOUNDS["lon_min"])

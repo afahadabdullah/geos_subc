@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_v9_raw
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_%j.log
+#SBATCH -J CONUS_raw
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "📊 South Asia v9 June/July raw matrix evaluation started at $(date) on $(hostname)"
+echo "📊 CONUS v9 June/July raw matrix evaluation started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -38,8 +38,8 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_testmode_e100_s50}"
-OUTPUT_DIR="${SA_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024}"
+FORECAST_DIR="${SA_RAW_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_testmode_e100_s50}"
+OUTPUT_DIR="${SA_RAW_OUTPUT_DIR:-ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024}"
 START_YEAR="${SA_RAW_START_YEAR:-2021}"
 END_YEAR="${SA_RAW_END_YEAR:-2024}"
 MONTHS="${SA_RAW_MONTHS:-6,7}"
@@ -71,4 +71,4 @@ python ml_model/evaluate_junjul_raw_matrix_multiv9_sa.py \
     --extreme_quantiles "$QUANTILES" \
     --decision_thresholds "$DECISIONS"
 
-echo "🏁 South Asia v9 June/July raw matrix evaluation finished at $(date)"
+echo "🏁 CONUS v9 June/July raw matrix evaluation finished at $(date)"

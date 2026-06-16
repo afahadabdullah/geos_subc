@@ -1930,7 +1930,7 @@ def train(args, accelerator):
                 print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
     
     # Get stats file from config (no fallback - must be specified)
-    stats_filename = config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt")
+    stats_filename = config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt")
     
     val_dataset_full = S2SHybridDataset(
         data_root=config["data_dir"],

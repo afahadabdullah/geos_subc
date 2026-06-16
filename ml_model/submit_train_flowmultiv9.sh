@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_flow_v9
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/flow_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/flow_%j.log
+#SBATCH -J CONUS_v9
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/flow_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/flow_%j.log
 #SBATCH -p gh-dev                    # Queue (partition) name
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🚀 South Asia Multi-v9 local/global residual-T2M training job started at $(date) on $(hostname)"
+echo "🚀 CONUS Multi-v9 local/global residual-T2M training job started at $(date) on $(hostname)"
 
 # Move to Scratch storage before activating the repo-local environment.
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
@@ -63,7 +63,7 @@ EARLY_STOP_FILE="$OUTPUT_DIR/EARLY_STOPPED"
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
 CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
-STATS_FILENAME=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('stats_file', 'v8_sa_55e100e_0n40n_global_local_stats.pt'))")
+STATS_FILENAME=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('stats_file', 'v9_conus_125w66w_24n50n_global_local_stats.pt'))")
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
 CONFIG_DOMAIN_LABEL=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('label'))")
 CONFIG_LAT_MIN=$(python -c "import yaml; b=(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain_bounds') or {}); print(b.get('lat_min'))")
@@ -75,11 +75,11 @@ CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH'));
 CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
 CONFIG_BETA_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_t2m'))")
 CONFIG_COARSE=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_variance_coarse_kernel'))")
-if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres" ] || [ "$CONFIG_TARGET_DOMAIN" != "conus" ]; then
     echo "❌ Refusing to train unexpected config: output_dir=$CONFIG_OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
-if [ "$CONFIG_LAT_MIN" != "0.0" ] || [ "$CONFIG_LAT_MAX" != "40.0" ] || [ "$CONFIG_LON_MIN" != "55.0" ] || [ "$CONFIG_LON_MAX" != "100.0" ]; then
+if [ "$CONFIG_LAT_MIN" != "24.0" ] || [ "$CONFIG_LAT_MAX" != "50.0" ] || [ "$CONFIG_LON_MIN" != "235.0" ] || [ "$CONFIG_LON_MAX" != "294.0" ]; then
     echo "❌ Refusing unexpected v9 target bounds: lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX"
     exit 1
 fi
@@ -171,7 +171,7 @@ if [ -f "$CKPT_FILE" ]; then
     fi
 fi
 
-echo "🔥 Launching Flow Matching Multi-Target v9 Training (SA target, local/global predictors, residual T2M)..."
+echo "🔥 Launching Flow Matching Multi-Target v9 Training (CONUS target, local/global predictors, residual T2M)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv9.py --config "$CONFIG_PATH" \
     --epochs-per-run 20
 
@@ -209,4 +209,4 @@ else
     echo "⚠️ Checkpoint not found. Chaining stopped to prevent infinite loops."
 fi
 
-echo "🏁 South Asia Multi-v9 local/global residual-T2M training job finished at $(date)"
+echo "🏁 CONUS Multi-v9 local/global residual-T2M training job finished at $(date)"

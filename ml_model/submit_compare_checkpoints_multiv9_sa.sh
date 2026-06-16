@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_ckpt_v9
-#SBATCH -o ml_output_checkpoint_compare_sa_v9/checkpoint_compare_%j.log
-#SBATCH -e ml_output_checkpoint_compare_sa_v9/checkpoint_compare_%j.log
+#SBATCH -J CONUS_ckpt
+#SBATCH -o ml_output_checkpoint_compare_conus_v9/checkpoint_compare_%j.log
+#SBATCH -e ml_output_checkpoint_compare_conus_v9/checkpoint_compare_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🚀 South Asia v9 checkpoint comparison started at $(date) on $(hostname)"
+echo "🚀 CONUS v9 checkpoint comparison started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -39,7 +39,7 @@ export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 export DATA_DIR_OVERRIDE="${DATA_DIR_OVERRIDE:-/scratch/11353/afahad/geossub/dataprocess}"
 
-mkdir -p ml_output_checkpoint_compare_sa_v9
+mkdir -p ml_output_checkpoint_compare_conus_v9
 
 CONFIG_PATH="${SA_CKPT_CONFIG:-ml_model/config_flow_multiv9.yaml}"
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
@@ -59,11 +59,11 @@ FULL_YEAR="${SA_CKPT_FULL_YEAR:-0}"
 STRICT="${SA_CKPT_STRICT:-1}"
 SEED="${SA_CKPT_SEED:-1234}"
 
-if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
-    echo "❌ Refusing to run non-SA config: target_domain=$CONFIG_TARGET_DOMAIN"
+if [ "$CONFIG_TARGET_DOMAIN" != "conus" ]; then
+    echo "❌ Refusing to run non-CONUS config: target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
-if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres" ]; then
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres" ]; then
     echo "❌ Refusing unexpected output dir: output_dir=$CONFIG_OUTPUT_DIR"
     exit 1
 fi
@@ -116,4 +116,4 @@ python ml_model/compare_checkpoints_multiv9_sa.py \
     "${SAMPLE_ARGS[@]}" \
     "${STRICT_ARGS[@]}"
 
-echo "🏁 South Asia v9 checkpoint comparison finished at $(date)"
+echo "🏁 CONUS v9 checkpoint comparison finished at $(date)"

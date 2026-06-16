@@ -1,13 +1,13 @@
 # ML Training Config - Flow Matching Multi-Target v9
-# South Asia 55E-100E, 0N-40N 1-degree PR target plus GEOS-residual T2M target.
-# Local SA land/MJO predictors feed the target grid; full-global
+# CONUS 125W-66W, 24N-50N 1-degree PR target plus GEOS-residual T2M target.
+# Local CONUS land/MJO predictors feed the target grid; full-global
 # ocean/circulation/moisture predictors feed the context encoder.
 batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
 reset_optimizer_state: False
 epochs: 300
-output_dir: ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres
+output_dir: ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres
 mixed_precision: bf16
 num_workers: 1
 data_dir: /scratch/11353/afahad/geossub/dataprocess
@@ -17,18 +17,18 @@ val_start_year: 2021
 val_end_year: 2023
 preload: True
 save_top_k: 4
-stats_file: v8_sa_55e100e_0n40n_global_local_stats.pt
+stats_file: v9_conus_125w66w_24n50n_global_local_stats.pt
 unet_block_out_channels: [128, 256, 512, 768]
-target_domain: south_asia
+target_domain: conus
 target_domain_bounds:
-  label: South Asia 55E-100E 0N-40N
-  lat_min: 0.0
-  lat_max: 40.0
-  lon_min: 55.0
-  lon_max: 100.0
+  label: CONUS 125W-66W 24N-50N
+  lat_min: 24.0
+  lat_max: 50.0
+  lon_min: 235.0
+  lon_max: 294.0
 t2m_target_mode: geos_residual
 
-# Local predictors are cropped to the v9 55E-100E, 0N-40N target grid.
+# Local predictors are cropped to the v9 CONUS 125W-66W, 24N-50N target grid.
 local_obs_variables:
   - sm
   - mjo

@@ -47,6 +47,13 @@ DEFAULT_TARGET_DOMAINS = {
         "lon_min": 19.0,
         "lon_max": 116.0,
     },
+    "conus": {
+        "label": "CONUS 125W-66W 24N-50N",
+        "lat_min": 24.0,
+        "lat_max": 50.0,
+        "lon_min": 235.0,
+        "lon_max": 294.0,
+    },
     "sas": {
         "label": "South Asia CORDEX-WAS envelope",
         "lat_min": -16.0,

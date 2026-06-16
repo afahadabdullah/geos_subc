@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-South Asia v9 checkpoint sweep under pure random noise.
+CONUS v9 checkpoint sweep under pure random noise.
 
 This compares model checkpoints while keeping the ensemble-generation method
 fixed to pure Gaussian noise. Noise is deterministic per batch so checkpoint
@@ -256,15 +256,15 @@ def save_results(results, metadata, output_dir, year, sample_tag):
     total_summary.insert(0, "rank", np.arange(1, len(total_summary) + 1))
     detail = pd.DataFrame(detail_rows)
 
-    summary_path = os.path.join(output_dir, f"checkpoint_pure_noise_v9_sa_{year}_{sample_tag}_summary.csv")
-    detail_path = os.path.join(output_dir, f"checkpoint_pure_noise_v9_sa_{year}_{sample_tag}_detail.csv")
+    summary_path = os.path.join(output_dir, f"checkpoint_pure_noise_v9_conus_{year}_{sample_tag}_summary.csv")
+    detail_path = os.path.join(output_dir, f"checkpoint_pure_noise_v9_conus_{year}_{sample_tag}_detail.csv")
     summary.to_csv(summary_path, index=False, float_format="%.4f")
     detail.to_csv(detail_path, index=False, float_format="%.4f")
     return summary_path, detail_path, total_summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare SA v9 checkpoints under pure random noise.")
+    parser = argparse.ArgumentParser(description="Compare CONUS v9 checkpoints under pure random noise.")
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv9.yaml")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--year", type=int, default=2021)
@@ -303,7 +303,7 @@ def main():
         end_year=args.year,
         normalize=True,
         preload=False,
-        stats_file=config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt"),
+        stats_file=config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt"),
         subsample_monthly=not args.full_year,
         target_domain=target_domain,
         target_domain_bounds=target_domain_bounds,
@@ -344,7 +344,7 @@ def main():
     area_weights = get_area_weights(lats, device)
 
     print("\n" + "=" * 96)
-    print("South Asia v9 checkpoint sweep: pure random noise only")
+    print("CONUS v9 checkpoint sweep: pure random noise only")
     print(f"  Config       : {args.config}")
     print(f"  Output dir   : {output_dir}")
     print(f"  Data dir     : {config['data_dir']}")

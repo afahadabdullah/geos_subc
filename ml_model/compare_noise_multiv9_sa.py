@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-South Asia noise-strategy comparison for the multi-target v9 flow model.
+CONUS noise-strategy comparison for the multi-target v9 flow model.
 
-This is the SA-aware replacement for the older compare_noise_multi.py scripts:
+This is the domain-aware replacement for the older compare_noise_multi.py scripts:
 it reads the training config, respects target_domain/local/global predictors,
 loads the v9 local/global model class, and writes side-by-side GEOS / random / EOF-LHS
 metrics to CSV.
@@ -41,19 +41,19 @@ from train_flow_multiv9 import (
     resolve_target_domain,
 )
 
-EXPECTED_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres"
+EXPECTED_OUTPUT_DIR = "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres"
 EXPECTED_LOCAL_OBS = ["sm", "mjo"]
 EXPECTED_GLOBAL_CONTEXT = ["sst", "sss", "ivt", "z500_zonal_dev", "u250"]
 EXPECTED_TARGET_BOUNDS = {
-    "lat_min": 0.0,
-    "lat_max": 40.0,
-    "lon_min": 55.0,
-    "lon_max": 100.0,
+    "lat_min": 24.0,
+    "lat_max": 50.0,
+    "lon_min": 235.0,
+    "lon_max": 294.0,
 }
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare SA multi-v9 local/global noise strategies.")
+    parser = argparse.ArgumentParser(description="Compare CONUS multi-v9 local/global noise strategies.")
     parser.add_argument("--config", type=str, default="ml_model/config_flow_multiv9.yaml")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--year", type=int, default=2021)
@@ -89,8 +89,8 @@ def validate_current_sa_v9_config(config, output_dir):
     global_context = list(config.get("global_context_variables") or [])
     output_name = os.path.basename(os.path.normpath(output_dir))
 
-    if target_domain != "south_asia":
-        raise ValueError(f"Expected target_domain=south_asia, got {target_domain!r}")
+    if target_domain != "conus":
+        raise ValueError(f"Expected target_domain=conus, got {target_domain!r}")
     for key, expected in EXPECTED_TARGET_BOUNDS.items():
         actual = float(bounds.get(key, float("nan")))
         if not np.isclose(actual, expected):
@@ -124,7 +124,7 @@ def resolve_t2m_residual_bounds(config):
         return t2m_target_mode, float(explicit_min), float(explicit_max)
 
     if t2m_target_mode == "geos_residual":
-        stats_path = resolve_stats_path(config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt"))
+        stats_path = resolve_stats_path(config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt"))
         stats = torch.load(stats_path, map_location="cpu", weights_only=True)
         residual_bounds = stats.get("target_t2m_residual_raw")
         if residual_bounds is None:
@@ -391,7 +391,7 @@ def main():
 
     output_dir = args.output_dir or config["output_dir"]
     validate_current_sa_v9_config(config, output_dir)
-    stats_file = config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt")
+    stats_file = config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt")
     t2m_target_mode, t2m_residual_min, t2m_residual_max = resolve_t2m_residual_bounds(config)
     target_domain = config.get("target_domain")
     target_domain_bounds = config.get("target_domain_bounds")
@@ -447,7 +447,7 @@ def main():
     settings = [parse_setting(s) for s in args.setting] if args.setting else default_settings(config)
 
     print("\n" + "=" * 88)
-    print("South Asia noise comparison")
+    print("CONUS noise comparison")
     print(f"  Config       : {args.config}")
     print(f"  Output dir   : {output_dir}")
     print(f"  Checkpoint   : {ckpt_path} (epoch={checkpoint.get('epoch', 'unknown')})")
@@ -474,7 +474,7 @@ def main():
         )
         results[label] = []
 
-    for batch_idx, batch in enumerate(tqdm(loader, desc="SA noise compare")):
+    for batch_idx, batch in enumerate(tqdm(loader, desc="CONUS noise compare")):
         if batch_limit is not None and batch_idx >= batch_limit:
             break
 
@@ -569,7 +569,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     ckpt_label = os.path.splitext(os.path.basename(ckpt_path))[0]
     sample_tag = "full_year" if args.full_year else "monthly"
-    csv_path = os.path.join(output_dir, f"noise_comparison_sa_{args.year}_{sample_tag}_{ckpt_label}.csv")
+    csv_path = os.path.join(output_dir, f"noise_comparison_conus_{args.year}_{sample_tag}_{ckpt_label}.csv")
     df.to_csv(csv_path, index=False, float_format="%.4f")
 
     print("\nFinal mean scores:")

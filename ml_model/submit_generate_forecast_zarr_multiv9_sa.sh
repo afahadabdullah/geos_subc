@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_v9_zarr
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/generate_zarr_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/generate_zarr_%j.log
+#SBATCH -J CONUS_zarr
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_zarr_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/generate_zarr_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🚀 South Asia v9 forecast Zarr generation started at $(date) on $(hostname)"
+echo "🚀 CONUS v9 forecast Zarr generation started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -49,7 +49,7 @@ EVAL_ENSEMBLE="${SA_GEN_EVAL_ENSEMBLE:-100}"
 EVAL_START_YEAR="${SA_GEN_EVAL_START_YEAR:-2021}"
 NUM_STEPS="${SA_GEN_STEPS:-50}"
 CHECKPOINT="${SA_GEN_CHECKPOINT:-best_flow_ckpt.pt}"
-OUT_DIR="${SA_GEN_OUT_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
+OUT_DIR="${SA_GEN_OUT_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
 BATCH_SIZE="${SA_GEN_BATCH_SIZE:-8}"
 NUM_WORKERS="${SA_GEN_NUM_WORKERS:-1}"
 ENSEMBLE_CHUNK="${SA_GEN_ENSEMBLE_CHUNK:-30}"
@@ -66,12 +66,12 @@ CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('
 CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
 
-if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres" ]; then
+if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres" ]; then
     echo "❌ Refusing unexpected output_dir=$CONFIG_OUTPUT_DIR"
     exit 1
 fi
-if [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
-    echo "❌ Refusing non-SA config: target_domain=$CONFIG_TARGET_DOMAIN"
+if [ "$CONFIG_TARGET_DOMAIN" != "conus" ]; then
+    echo "❌ Refusing non-CONUS config: target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
 if [ "$CONFIG_LOCAL_VARS" != "sm,mjo" ]; then
@@ -174,4 +174,4 @@ else
     echo "✅ All requested yearly Zarr stores are complete."
 fi
 
-echo "🏁 South Asia v9 forecast Zarr generation finished at $(date)"
+echo "🏁 CONUS v9 forecast Zarr generation finished at $(date)"

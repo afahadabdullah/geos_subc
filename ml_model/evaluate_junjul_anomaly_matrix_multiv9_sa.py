@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluate June/July v9 SA anomalies for ML and GEOS against observed anomalies.
+Evaluate June/July v9 CONUS anomalies for ML and GEOS against observed anomalies.
 
 Inputs are anomaly Zarrs produced by build_junjul_climatology_anomalies_multiv9_sa.py.
 Outputs are CSV matrices separated by init month, variable, system, and lead.
@@ -16,19 +16,19 @@ import xarray as xr
 
 
 DEFAULT_ANOM_PATH = (
-    "dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul/"
+    "dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/"
     "v9_junjul_anomalies_2021_2023.zarr"
 )
 DEFAULT_CLIM_PATH = (
-    "dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul/"
+    "dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul/"
     "v9_junjul_climatology_2005_2024.zarr"
 )
-DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50"
-DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/anomaly_matrix_junjul"
+DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50"
+DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/anomaly_matrix_junjul"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate v9 SA June/July anomaly matrices.")
+    parser = argparse.ArgumentParser(description="Evaluate v9 CONUS June/July anomaly matrices.")
     parser.add_argument("--anomaly_path", type=str, default=DEFAULT_ANOM_PATH)
     parser.add_argument("--climatology_path", type=str, default=DEFAULT_CLIM_PATH)
     parser.add_argument("--forecast_dir", type=str, default=DEFAULT_FORECAST_DIR)

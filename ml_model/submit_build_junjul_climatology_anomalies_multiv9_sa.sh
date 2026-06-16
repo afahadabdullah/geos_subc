@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_v9_clim
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/clim_anom_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/clim_anom_%j.log
+#SBATCH -J CONUS_clim
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/clim_anom_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/clim_anom_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "📊 South Asia v9 June/July climatology/anomaly build started at $(date) on $(hostname)"
+echo "📊 CONUS v9 June/July climatology/anomaly build started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -38,8 +38,8 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 export PYTHONUNBUFFERED=1
 export SYMPY_GROUND_TYPES=python
 
-FORECAST_DIR="${SA_CLIM_FORECAST_DIR:-dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50}"
-OUTPUT_DIR="${SA_CLIM_OUTPUT_DIR:-dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul}"
+FORECAST_DIR="${SA_CLIM_FORECAST_DIR:-dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50}"
+OUTPUT_DIR="${SA_CLIM_OUTPUT_DIR:-dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul}"
 CLIM_START="${SA_CLIM_START:-2005}"
 CLIM_END="${SA_CLIM_END:-2024}"
 ANOM_START="${SA_ANOM_START:-2021}"
@@ -78,4 +78,4 @@ python ml_model/build_junjul_climatology_anomalies_multiv9_sa.py \
     --skip_years "$SKIP_YEARS" \
     "${EXTRA_ARGS[@]}"
 
-echo "🏁 South Asia v9 June/July climatology/anomaly build finished at $(date)"
+echo "🏁 CONUS v9 June/July climatology/anomaly build finished at $(date)"

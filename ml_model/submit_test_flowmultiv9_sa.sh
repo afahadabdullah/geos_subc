@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J SA_test_v9
-#SBATCH -o ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/test_%j.log
-#SBATCH -e ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/test_%j.log
+#SBATCH -J CONUS_test
+#SBATCH -o ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/test_%j.log
+#SBATCH -e ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres/test_%j.log
 #SBATCH -p gh-dev
 #SBATCH -N 1
 #SBATCH -n 1
@@ -12,7 +12,7 @@
 
 set -eo pipefail
 
-echo "🧪 South Asia Multi-v9 full test started at $(date) on $(hostname)"
+echo "🧪 CONUS Multi-v9 full test started at $(date) on $(hostname)"
 
 PROJECT_DIR="/scratch/11353/afahad/geossub/geos_subc"
 cd "$PROJECT_DIR" || exit 1
@@ -47,7 +47,7 @@ NUM_STEPS="${SA_TEST_STEPS:-10}"
 MAX_ENSEMBLE_PER_CHUNK="${SA_TEST_MAX_ENSEMBLE_PER_CHUNK:-30}"
 VALIDATION_ODE_BATCH="${SA_TEST_ODE_BATCH:-120}"
 SAMPLE_PLOT_LIMIT="${SA_TEST_SAMPLE_PLOT_LIMIT:-0}"
-EXPECTED_OUTPUT_DIR="ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres"
+EXPECTED_OUTPUT_DIR="ml_output_flowmulti_v9_conus_125w66w_24n50n_noisectx_t2mres"
 
 OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
 MIXED_PRECISION=$(python -c "import yaml; print(str(yaml.safe_load(open('$CONFIG_PATH')).get('mixed_precision', 'no')))")
@@ -66,11 +66,11 @@ CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH'));
 CONFIG_BETA_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_t2m'))")
 CONFIG_COARSE=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_variance_coarse_kernel'))")
 
-if [ "$OUTPUT_DIR" != "$EXPECTED_OUTPUT_DIR" ] || [ "$CONFIG_TARGET_DOMAIN" != "south_asia" ]; then
+if [ "$OUTPUT_DIR" != "$EXPECTED_OUTPUT_DIR" ] || [ "$CONFIG_TARGET_DOMAIN" != "conus" ]; then
     echo "❌ Refusing to test unexpected config: output_dir=$OUTPUT_DIR target_domain=$CONFIG_TARGET_DOMAIN"
     exit 1
 fi
-if [ "$CONFIG_LAT_MIN" != "0.0" ] || [ "$CONFIG_LAT_MAX" != "40.0" ] || [ "$CONFIG_LON_MIN" != "55.0" ] || [ "$CONFIG_LON_MAX" != "100.0" ]; then
+if [ "$CONFIG_LAT_MIN" != "24.0" ] || [ "$CONFIG_LAT_MAX" != "50.0" ] || [ "$CONFIG_LON_MIN" != "235.0" ] || [ "$CONFIG_LON_MAX" != "294.0" ]; then
     echo "❌ Refusing unexpected v9 target bounds: lat=$CONFIG_LAT_MIN..$CONFIG_LAT_MAX lon=$CONFIG_LON_MIN..$CONFIG_LON_MAX"
     exit 1
 fi
@@ -170,4 +170,4 @@ accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" \
     --test \
     --ckpt "$CKPT_ARG"
 
-echo "🏁 South Asia Multi-v9 full test finished at $(date)"
+echo "🏁 CONUS Multi-v9 full test finished at $(date)"

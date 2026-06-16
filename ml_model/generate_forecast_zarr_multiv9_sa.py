@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate South Asia multi-v9 ensemble forecasts and save yearly Zarr stores.
+Generate CONUS multi-v9 ensemble forecasts and save yearly Zarr stores.
 
 The output is intended for reusable verification work. Each yearly store contains
 model ensemble forecasts, raw GEOS ensemble forecasts, and verifying obs on the
@@ -37,7 +37,7 @@ from flow_matching_multi_v9 import CustomFlowMatcher, FlowMatchingModel
 from train_flow_multiv9 import euler_solve_chunked, get_batch_global_context
 
 
-DEFAULT_OUT_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50"
+DEFAULT_OUT_DIR = "dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50"
 
 
 def parse_args():
@@ -385,7 +385,7 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
         end_year=year,
         normalize=True,
         preload=False,
-        stats_file=config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt"),
+        stats_file=config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt"),
         subsample_monthly=False,
         target_domain=config.get("target_domain"),
         target_domain_bounds=config.get("target_domain_bounds"),
@@ -585,7 +585,7 @@ def main():
         end_year=args.start_year,
         normalize=True,
         preload=False,
-        stats_file=config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt"),
+        stats_file=config.get("stats_file", "v9_conus_125w66w_24n50n_global_local_stats.pt"),
         subsample_monthly=False,
         target_domain=config.get("target_domain"),
         target_domain_bounds=config.get("target_domain_bounds"),
@@ -617,7 +617,7 @@ def main():
     noise_context = load_noise_context(config, domain_info)
 
     print("\n" + "=" * 88)
-    print("South Asia v9 forecast Zarr generation")
+    print("CONUS v9 forecast Zarr generation")
     print(f"  Config       : {args.config}")
     print(f"  Data dir     : {args.data_dir}")
     print(f"  Model output : {model_output_dir}")

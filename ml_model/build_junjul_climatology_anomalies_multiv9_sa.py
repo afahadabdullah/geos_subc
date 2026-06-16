@@ -24,8 +24,8 @@ import pandas as pd
 import xarray as xr
 
 
-DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_e10clim_e100eval_s50"
-DEFAULT_OUTPUT_DIR = "dataprocess/clim_anom_multiv9_sa_55e100e_0n40n_junjul"
+DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_conus_125w66w_24n50n_junjul_e10clim_e100eval_s50"
+DEFAULT_OUTPUT_DIR = "dataprocess/clim_anom_multiv9_conus_125w66w_24n50n_junjul"
 
 
 def parse_args():
