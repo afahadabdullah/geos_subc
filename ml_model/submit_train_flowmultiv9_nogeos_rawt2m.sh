@@ -210,7 +210,8 @@ if [ -f "$CKPT_FILE" ]; then
         fi
 
         echo "📡 Attempting SSH resubmission to $SUBMIT_TARGET..."
-        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch ml_model/submit_train_flowmultiv9.sh"
+        NEXT_JOB_ID=$(ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch --parsable ml_model/submit_train_flowmultiv9_nogeos_rawt2m.sh")
+        echo "🔁 Auto-resubmitted no-GEOS raw-T2M continuation job: ${NEXT_JOB_ID}"
     else
         echo "✅ Final Epoch $CURRENT_EPOCH reached. Chaining complete."
     fi
@@ -218,4 +219,4 @@ else
     echo "⚠️ Checkpoint not found. Chaining stopped to prevent infinite loops."
 fi
 
-echo "🏁 South Asia Multi-v9 local/global residual-T2M training job finished at $(date)"
+echo "🏁 South Asia Multi-v9 no-GEOS raw-T2M training job finished at $(date)"
