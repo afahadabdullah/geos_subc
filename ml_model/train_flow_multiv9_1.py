@@ -125,6 +125,20 @@ def compute_rmse(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.T
     return rmse
 
 
+def compute_bias(pred: torch.Tensor, target: torch.Tensor, area_weights: torch.Tensor):
+    """
+    Computes area-weighted mean bias.
+    Positive values mean the forecast is wetter/warmer than observations.
+    """
+    bias_map = pred - target
+    mask = ~torch.isnan(bias_map)
+    if mask.any():
+        aw_expanded = area_weights.expand_as(bias_map)
+        bias = (bias_map[mask] * aw_expanded[mask]).sum() / (aw_expanded[mask].sum() + 1e-8)
+        return bias.item()
+    return 0.0
+
+
 def sample_deterministic_validation_state(target_norm: torch.Tensor, batch_index: int, base_seed: int, device):
     """
     Build a deterministic validation interpolation state for fast MSE validation.
@@ -1015,6 +1029,7 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
                       target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds, is_test=False, is_fast_recon=True,
                       cached_geos_crps=None, cached_geos_rmse=None, 
                       cached_geos_crps_t2m=None, cached_geos_rmse_t2m=None,
+                      cached_geos_bias=None, cached_geos_bias_t2m=None,
                       use_flow_variance=False, eof_bases=None,
                       nao_bases=None, nao_lookup=None, enso_bases=None, oni_lookup=None, mjo_df=None,
                       t2m_eof_bases=None, t2m_nao_bases=None, t2m_enso_bases=None,
@@ -1037,12 +1052,16 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     
     total_crps = 0.0
     total_rmse = 0.0
+    total_bias = 0.0
     total_crps_t2m = 0.0
     total_rmse_t2m = 0.0
+    total_bias_t2m = 0.0
     total_geos_crps = 0.0
     total_geos_rmse = 0.0
+    total_geos_bias = 0.0
     total_geos_crps_t2m = 0.0
     total_geos_rmse_t2m = 0.0
+    total_geos_bias_t2m = 0.0
     count = 0
     processed_batches = 0
     did_print_noise_diag = False
@@ -1229,26 +1248,34 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
         # Calculate Natively
         b_crps = compute_crps(ensemble_preds_precip, true_target_precip, area_weights)
         b_rmse = compute_rmse(full_pred_precip, true_target_precip, area_weights)
+        b_bias = compute_bias(full_pred_precip, true_target_precip, area_weights)
         
         b_crps_t2m = compute_crps(ensemble_preds_t2m, true_target_t2m, area_weights)
         b_rmse_t2m = compute_rmse(full_pred_t2m, true_target_t2m, area_weights)
+        b_bias_t2m = compute_bias(full_pred_t2m, true_target_t2m, area_weights)
         
         # GEOS Baseline Metrics (NaN-aware)
         if cached_geos_crps is None:
             g_crps = compute_crps(geos_ens_sample[:, :, 0].transpose(0, 1), true_target_precip, area_weights)
             g_rmse = compute_rmse(geos_mean_precip, true_target_precip, area_weights)
+            g_bias = compute_bias(geos_mean_precip, true_target_precip, area_weights)
             g_crps_t2m = compute_crps(geos_ens_sample[:, :, 1].transpose(0, 1), true_target_t2m, area_weights)
             g_rmse_t2m = compute_rmse(geos_mean_t2m, true_target_t2m, area_weights)
+            g_bias_t2m = compute_bias(geos_mean_t2m, true_target_t2m, area_weights)
             
             total_geos_crps += g_crps * num_inits
             total_geos_rmse += g_rmse * num_inits
+            total_geos_bias += g_bias * num_inits
             total_geos_crps_t2m += g_crps_t2m * num_inits
             total_geos_rmse_t2m += g_rmse_t2m * num_inits
+            total_geos_bias_t2m += g_bias_t2m * num_inits
             
         total_crps += b_crps * num_inits
         total_rmse += b_rmse * num_inits
+        total_bias += b_bias * num_inits
         total_crps_t2m += b_crps_t2m * num_inits
         total_rmse_t2m += b_rmse_t2m * num_inits
+        total_bias_t2m += b_bias_t2m * num_inits
         count += num_inits
         
         # Save only the first processed validation batch for visual plotting consistency
@@ -1275,38 +1302,56 @@ def run_val_inference(epoch, model, val_loader, flow_matcher, device, accelerato
     # Compute Averages
     avg_crps = total_crps / count
     avg_rmse = total_rmse / count
+    avg_bias = total_bias / count
     avg_crps_t2m = total_crps_t2m / count
     avg_rmse_t2m = total_rmse_t2m / count
+    avg_bias_t2m = total_bias_t2m / count
     
     if cached_geos_crps is None:
         avg_geos_crps = total_geos_crps / count
         avg_geos_rmse = total_geos_rmse / count
+        avg_geos_bias = total_geos_bias / count
         avg_geos_crps_t2m = total_geos_crps_t2m / count
         avg_geos_rmse_t2m = total_geos_rmse_t2m / count
+        avg_geos_bias_t2m = total_geos_bias_t2m / count
     else:
         avg_geos_crps = cached_geos_crps
         avg_geos_rmse = cached_geos_rmse
+        avg_geos_bias = cached_geos_bias if cached_geos_bias is not None else 0.0
         avg_geos_crps_t2m = cached_geos_crps_t2m if cached_geos_crps_t2m is not None else 0.0
         avg_geos_rmse_t2m = cached_geos_rmse_t2m if cached_geos_rmse_t2m is not None else 0.0
+        avg_geos_bias_t2m = cached_geos_bias_t2m if cached_geos_bias_t2m is not None else 0.0
     
     recon_type = f"Monthly2021 (batches={processed_batches}, inits={count}, ens={num_ensemble})"
     combined_crps = (avg_crps + avg_crps_t2m) / 2.0
     if accelerator.is_main_process:
         print(f"Epoch {epoch} | Val Loader Summary: {processed_batches} batches, {count} init dates")
-        print(f"Epoch {epoch} | Val CRPS [PR]: {avg_crps:.4f} (GEOS: {avg_geos_crps:.4f})")
-        print(f"Epoch {epoch} | Val CRPS [T2M]: {avg_crps_t2m:.4f} (GEOS: {avg_geos_crps_t2m:.4f})")
+        print(
+            f"Epoch {epoch} | Val PR   CRPS={avg_crps:.4f} (GEOS {avg_geos_crps:.4f}) "
+            f"RMSE={avg_rmse:.4f} (GEOS {avg_geos_rmse:.4f}) "
+            f"Bias={avg_bias:+.4f} (GEOS {avg_geos_bias:+.4f})"
+        )
+        print(
+            f"Epoch {epoch} | Val T2M  CRPS={avg_crps_t2m:.4f} (GEOS {avg_geos_crps_t2m:.4f}) "
+            f"RMSE={avg_rmse_t2m:.4f} (GEOS {avg_geos_rmse_t2m:.4f}) "
+            f"Bias={avg_bias_t2m:+.4f} (GEOS {avg_geos_bias_t2m:+.4f})"
+        )
         print(f"Epoch {epoch} | Combined CRPS: {combined_crps:.4f}")
         
     return {
         'combined_crps': combined_crps,
         'avg_crps_pr': avg_crps,
         'avg_rmse_pr': avg_rmse,
+        'avg_bias_pr': avg_bias,
         'avg_crps_t2m': avg_crps_t2m,
         'avg_rmse_t2m': avg_rmse_t2m,
+        'avg_bias_t2m': avg_bias_t2m,
         'avg_geos_crps_pr': avg_geos_crps,
         'avg_geos_rmse_pr': avg_geos_rmse,
+        'avg_geos_bias_pr': avg_geos_bias,
         'avg_geos_crps_t2m': avg_geos_crps_t2m,
         'avg_geos_rmse_t2m': avg_geos_rmse_t2m,
+        'avg_geos_bias_t2m': avg_geos_bias_t2m,
         'tensors': saved_tensors,
     }
 
@@ -2057,6 +2102,12 @@ def train(args, accelerator):
     validation_num_ensemble = int(config.get("validation_num_ensemble", 15))
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
+    crps_validation_start_epoch = int(config.get("crps_validation_start_epoch", 30))
+    crps_validation_every = int(config.get("crps_validation_every", 1))
+    if crps_validation_start_epoch < 1:
+        raise ValueError(f"crps_validation_start_epoch must be >= 1, got {crps_validation_start_epoch}")
+    if crps_validation_every < 1:
+        raise ValueError(f"crps_validation_every must be >= 1, got {crps_validation_every}")
     mse_validation_seed = int(config.get("mse_validation_seed", 1234))
     crps_val_start_year = int(config.get("crps_val_start_year", config["val_start_year"]))
     crps_val_end_year = int(config.get("crps_val_end_year", config["val_end_year"]))
@@ -2180,6 +2231,7 @@ def train(args, accelerator):
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
+        print(f"   [CRPS Val Start]     : epoch {crps_validation_start_epoch}, every {crps_validation_every}")
         print(f"   [MSE Val Seed]       : {mse_validation_seed}")
         print(f"   [MSE Val Dataset]    : Full {config['val_start_year']}-{config['val_end_year']}")
         print(f"   [CRPS Val Dataset]   : Monthly subset {crps_val_start_year}-{crps_val_end_year}")
@@ -2300,7 +2352,49 @@ def train(args, accelerator):
     output_dir = config.get("output_dir", "ml_output_diffusion_v5")
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(output_dir, "training_log_v9.csv")
+    metrics_log_file = os.path.join(output_dir, "validation_metrics_v9_1.csv")
     early_stop_marker = os.path.join(output_dir, "EARLY_STOPPED")
+    validation_metrics_header = [
+        "epoch",
+        "phase",
+        "train_loss",
+        "validation_metric",
+        "is_new_best",
+        "is_variance_phase",
+        "num_ensemble",
+        "num_steps",
+        "rho_pr",
+        "rho_t2m",
+        "beta_pr",
+        "beta_t2m",
+        "variance_coarse_kernel",
+        "val_noise_mse",
+        "combined_crps",
+        "ml_pr_crps",
+        "ml_pr_rmse",
+        "ml_pr_bias",
+        "geos_pr_crps",
+        "geos_pr_rmse",
+        "geos_pr_bias",
+        "ml_t2m_crps",
+        "ml_t2m_rmse",
+        "ml_t2m_bias",
+        "geos_t2m_crps",
+        "geos_t2m_rmse",
+        "geos_t2m_bias",
+        "best_val_loss",
+        "best_val_epoch",
+    ]
+
+    def append_validation_metrics(row):
+        if not accelerator.is_main_process:
+            return
+        file_exists = os.path.exists(metrics_log_file)
+        with open(metrics_log_file, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=validation_metrics_header)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({key: row.get(key, "") for key in validation_metrics_header})
     
     if accelerator.is_main_process and not os.path.exists(log_file):
         with open(log_file, "w") as f:
@@ -2367,6 +2461,7 @@ def train(args, accelerator):
     loaded_is_variance_phase = False
     best_val_loss = float('inf')
     best_val_epoch = 0
+    best_val_metric = "mse_noise"
     mse_bad_val_checks = 0
     variance_phase_best_reset_done = False
     crps_phase_reset = False  # Will be set True after MSE→CRPS transition (or if resuming from Phase 2)
@@ -2455,10 +2550,18 @@ def train(args, accelerator):
                     best_val_loss = checkpoint['best_val_loss']
                 elif 'best_val_crps' in checkpoint:
                     if accelerator.is_main_process:
-                        print("   ⚠️ Legacy CRPS checkpoint detected. Migrating tracking to MSE Loss scale.")
+                        print("   ⚠️ Legacy CRPS checkpoint detected. Migrating tracking to CRPS Loss scale.")
                     best_val_loss = float('inf')
                     checkpoint['top_models'] = [] # Clear legacy CRPS top_models so we don't mix scales
+                best_val_metric = str(
+                    checkpoint.get("best_val_metric", checkpoint.get("best_val_metric_name", ""))
+                )
                 best_val_epoch = int(checkpoint.get('best_val_epoch', 0))
+                if best_val_metric not in {"mse_noise", "combined_crps"}:
+                    if best_val_epoch >= crps_validation_start_epoch and start_epoch > crps_validation_start_epoch:
+                        best_val_metric = "combined_crps"
+                    else:
+                        best_val_metric = "mse_noise"
                 mse_bad_val_checks = int(checkpoint.get('mse_bad_val_checks', 0))
                 variance_phase_best_reset_done = bool(checkpoint.get('variance_phase_best_reset_done', False))
                 
@@ -2474,6 +2577,7 @@ def train(args, accelerator):
                         print(f"⚠️ Resetting validation metrics as requested by config (reset_validation_history: True).")
                     best_val_loss = float('inf')
                     best_val_epoch = 0
+                    best_val_metric = "mse_noise"
                     mse_bad_val_checks = 0
                     variance_phase_best_reset_done = False
                     top_models = []
@@ -2484,18 +2588,27 @@ def train(args, accelerator):
                     print(f"   Starting at Epoch: {start_epoch}")
                     print(f"   Best Val Loss so far: {best_val_loss:.4f}")
                     print(f"   Best Val Epoch so far: {best_val_epoch}")
+                    print(f"   Best Val Metric so far: {best_val_metric}")
                     print(f"   MSE plateau counter: {mse_bad_val_checks}")
-                    if start_epoch > 101:
-                        print(f"   ✅ Resuming deep in CRPS Phase (>101). best_val_loss is already CRPS-scale.")
-                    elif start_epoch == 101:
-                        print(f"   🔀 Resuming exactly at Phase Boundary (Epoch 101). Will reset best_val_loss.")
+                    if start_epoch > crps_validation_start_epoch and best_val_metric == "combined_crps":
+                        print(
+                            f"   ✅ Resuming in CRPS Phase (>{crps_validation_start_epoch}); "
+                            "best_val_loss is already CRPS-scale."
+                        )
+                    elif start_epoch >= crps_validation_start_epoch:
+                        print(
+                            f"   🔀 Resuming at/after CRPS boundary (Epoch {crps_validation_start_epoch}). "
+                            "Will reset best_val_loss to CRPS scale."
+                        )
                     else:
-                        print(f"   📋 Resuming in MSE Phase (≤100). Will reset best_val_loss later.")
+                        print(
+                            f"   📋 Resuming before CRPS Phase (<{crps_validation_start_epoch}). "
+                            "Will reset best_val_loss later."
+                        )
                     print()
             
-            # If resuming AFTER the boundary (Phase 2), skip the MSE→CRPS reset
-            # But if we start exactly at 101, we MUST trigger the reset inside the loop!
-            if start_epoch > 101:
+            # Skip the MSE→CRPS reset only when the checkpoint already tracked CRPS.
+            if start_epoch > crps_validation_start_epoch and best_val_metric == "combined_crps":
                 crps_phase_reset = True
                     
 
@@ -2548,7 +2661,7 @@ def train(args, accelerator):
             )
 
     def enable_variance_phase(reason, reset_best_for_phase=False):
-        nonlocal optimizer, is_variance_phase, best_val_loss, best_val_epoch
+        nonlocal optimizer, is_variance_phase, best_val_loss, best_val_epoch, best_val_metric
         nonlocal mse_bad_val_checks, top_models, variance_phase_best_reset_done
         if is_variance_phase:
             return
@@ -2579,6 +2692,7 @@ def train(args, accelerator):
                 print("   Resetting best validation tracker so best_flow_ckpt.pt captures the variance-head phase.")
             best_val_loss = float('inf')
             best_val_epoch = 0
+            best_val_metric = "combined_crps"
             mse_bad_val_checks = 0
             top_models = []
             variance_phase_best_reset_done = True
@@ -2887,8 +3001,10 @@ def train(args, accelerator):
 
     global_cached_geos_crps = None
     global_cached_geos_rmse = None
+    global_cached_geos_bias = None
     global_cached_geos_crps_t2m = None
     global_cached_geos_rmse_t2m = None
+    global_cached_geos_bias_t2m = None
     spatial_weights = area_weights * land_ocean_weights
     stop_training_after_validation = False
     
@@ -3129,6 +3245,7 @@ def train(args, accelerator):
                 'optimizer': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_val_epoch': best_val_epoch,
+                'best_val_metric': best_val_metric,
                 'mse_bad_val_checks': mse_bad_val_checks,
                 'top_models': top_models,
                 'is_variance_phase': is_variance_phase,
@@ -3137,15 +3254,11 @@ def train(args, accelerator):
             torch.save(ckpt, os.path.join(output_dir, "latest_flow_ckpt.pt"))
 
         # --- ADAPTIVE VALIDATION SCHEDULE ---
-        # Phase 1 (epoch 1-100):  MSE-based validation & best model tracking
-        #   Epoch 1-4:   No validation
-        #   Epoch 5-19:  Every 5 epochs
-        #   Epoch 20-69: Every 3 epochs
-        #   Epoch 70+:   Every epoch
-        # CRPS-based validation (15 ens, 10 steps)
-        #   Every epoch: run_val_inference, periodic ckpt every 5 epochs
+        # Before crps_validation_start_epoch: deterministic noise-MSE validation.
+        # From crps_validation_start_epoch onward: ensemble CRPS validation using
+        # the same EOF-LHS + variance settings used for evaluation.
         
-        use_crps_phase = (epoch > 100)
+        use_crps_phase = (epoch >= crps_validation_start_epoch)
         
         # One-time reset: when transitioning from MSE (Phase 1) to CRPS (Phase 2),
         # best_val_loss must be reset because MSE values (~0.06) are on a completely
@@ -3158,6 +3271,7 @@ def train(args, accelerator):
             best_val_loss = float('inf')
             best_val_epoch = 0
             mse_bad_val_checks = 0
+            best_val_metric = "combined_crps"
             crps_phase_reset = True
         
         def should_plot_validation(ep):
@@ -3166,6 +3280,8 @@ def train(args, accelerator):
         def should_validate(ep):
             if ep < 5:
                 return False
+            elif use_crps_phase:
+                return (ep - crps_validation_start_epoch) % crps_validation_every == 0
             elif should_plot_validation(ep):
                 return True
             elif (not use_crps_phase) and dense_mse_validation_until > 0 and ep <= dense_mse_validation_until:
@@ -3204,6 +3320,7 @@ def train(args, accelerator):
                 print_validation_noise_diag=True,
                 cached_geos_crps=global_cached_geos_crps, cached_geos_rmse=global_cached_geos_rmse,
                 cached_geos_crps_t2m=global_cached_geos_crps_t2m, cached_geos_rmse_t2m=global_cached_geos_rmse_t2m,
+                cached_geos_bias=global_cached_geos_bias, cached_geos_bias_t2m=global_cached_geos_bias_t2m,
                 eof_bases=eof_bases, nao_bases=nao_bases, nao_lookup=nao_lookup,
                 enso_bases=enso_bases, oni_lookup=oni_lookup, mjo_df=mjo_df,
                 t2m_eof_bases=t2m_eof_bases, t2m_nao_bases=t2m_nao_bases, t2m_enso_bases=t2m_enso_bases,
@@ -3224,15 +3341,22 @@ def train(args, accelerator):
             if global_cached_geos_crps is None:
                 global_cached_geos_crps = val_result['avg_geos_crps_pr']
                 global_cached_geos_rmse = val_result['avg_geos_rmse_pr']
+                global_cached_geos_bias = val_result['avg_geos_bias_pr']
                 global_cached_geos_crps_t2m = val_result['avg_geos_crps_t2m']
                 global_cached_geos_rmse_t2m = val_result['avg_geos_rmse_t2m']
+                global_cached_geos_bias_t2m = val_result['avg_geos_bias_t2m']
             if accelerator.is_main_process:
-                print(f"✅ CRPS Done. Combined: {current_val_metric:.4f} | PR: {val_result['avg_crps_pr']:.4f} | T2M: {val_result['avg_crps_t2m']:.4f}")
+                print(
+                    f"✅ CRPS Done. Combined: {current_val_metric:.4f} | "
+                    f"PR: CRPS={val_result['avg_crps_pr']:.4f}, RMSE={val_result['avg_rmse_pr']:.4f}, Bias={val_result['avg_bias_pr']:+.4f} | "
+                    f"T2M: CRPS={val_result['avg_crps_t2m']:.4f}, RMSE={val_result['avg_rmse_t2m']:.4f}, Bias={val_result['avg_bias_t2m']:+.4f}"
+                )
                 is_new_best = (current_val_metric < best_val_loss)
                 if is_new_best:
                     print(f"🏆 NEW BEST (CRPS)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
                     best_val_loss = current_val_metric
                     best_val_epoch = epoch
+                    best_val_metric = "combined_crps"
                     new_best_name = f"best_model_epoch_{epoch}_crps_{current_val_metric:.4f}.pt"
                     new_best_path = os.path.join(output_dir, new_best_name)
                     unwrapped_model = accelerator.unwrap_model(model)
@@ -3242,6 +3366,7 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'best_val_epoch': best_val_epoch,
+                        'best_val_metric': best_val_metric,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                         'variance_phase_best_reset_done': variance_phase_best_reset_done,
@@ -3250,7 +3375,19 @@ def train(args, accelerator):
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
                     registry_path = os.path.join(output_dir, "model_registry.json")
                     registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
-                    registry.append({"rank": 0, "path": new_best_path, "val_loss": current_val_metric, "epoch": epoch, "metric": "combined_crps"})
+                    registry.append({
+                        "rank": 0,
+                        "path": new_best_path,
+                        "val_loss": current_val_metric,
+                        "epoch": epoch,
+                        "metric": "combined_crps",
+                        "pr_crps": val_result['avg_crps_pr'],
+                        "pr_rmse": val_result['avg_rmse_pr'],
+                        "pr_bias": val_result['avg_bias_pr'],
+                        "t2m_crps": val_result['avg_crps_t2m'],
+                        "t2m_rmse": val_result['avg_rmse_t2m'],
+                        "t2m_bias": val_result['avg_bias_t2m'],
+                    })
                     registry.sort(key=lambda x: x['val_loss'])
                     for i, entry in enumerate(registry): entry['rank'] = i + 1
                     with open(registry_path, 'w') as f: json.dump(registry, f, indent=2)
@@ -3284,6 +3421,7 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'best_val_epoch': best_val_epoch,
+                        'best_val_metric': best_val_metric,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                         'variance_phase_best_reset_done': variance_phase_best_reset_done,
@@ -3297,14 +3435,45 @@ def train(args, accelerator):
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
                     'best_val_epoch': best_val_epoch,
+                    'best_val_metric': best_val_metric,
                     'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
                     'variance_phase_best_reset_done': variance_phase_best_reset_done,
                 },
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f: csv.writer(f).writerow([epoch, avg_train_loss, current_val_metric, val_result['avg_crps_pr']])
+                append_validation_metrics({
+                    "epoch": epoch,
+                    "phase": "crps_var" if is_variance_phase else "crps_vel",
+                    "train_loss": avg_train_loss,
+                    "validation_metric": current_val_metric,
+                    "is_new_best": int(is_new_best),
+                    "is_variance_phase": int(is_variance_phase),
+                    "num_ensemble": validation_num_ensemble,
+                    "num_steps": validation_num_steps,
+                    "rho_pr": validation_rho_pr,
+                    "rho_t2m": validation_rho_t2m,
+                    "beta_pr": validation_var_beta_pr,
+                    "beta_t2m": validation_var_beta_t2m,
+                    "variance_coarse_kernel": validation_variance_coarse_kernel,
+                    "combined_crps": current_val_metric,
+                    "ml_pr_crps": val_result['avg_crps_pr'],
+                    "ml_pr_rmse": val_result['avg_rmse_pr'],
+                    "ml_pr_bias": val_result['avg_bias_pr'],
+                    "geos_pr_crps": val_result['avg_geos_crps_pr'],
+                    "geos_pr_rmse": val_result['avg_geos_rmse_pr'],
+                    "geos_pr_bias": val_result['avg_geos_bias_pr'],
+                    "ml_t2m_crps": val_result['avg_crps_t2m'],
+                    "ml_t2m_rmse": val_result['avg_rmse_t2m'],
+                    "ml_t2m_bias": val_result['avg_bias_t2m'],
+                    "geos_t2m_crps": val_result['avg_geos_crps_t2m'],
+                    "geos_t2m_rmse": val_result['avg_geos_rmse_t2m'],
+                    "geos_t2m_bias": val_result['avg_geos_bias_t2m'],
+                    "best_val_loss": best_val_loss,
+                    "best_val_epoch": best_val_epoch,
+                })
         # ============================================================
-        #  PHASE 1 (epoch <= 100): MSE-based validation
+        #  PRE-CRPS PHASE: MSE-based validation
         # ============================================================
         else:
             model.eval()
@@ -3400,6 +3569,7 @@ def train(args, accelerator):
                     print(f"🏆 NEW BEST (MSE)! {current_val_metric:.4f} (Prev: {best_val_loss:.4f})")
                     best_val_loss = current_val_metric
                     best_val_epoch = epoch
+                    best_val_metric = "mse_noise"
                     mse_bad_val_checks = 0
 
                     new_best_name = f"best_model_epoch_{epoch}_loss_{current_val_metric:.4f}.pt"
@@ -3411,6 +3581,7 @@ def train(args, accelerator):
                         'optimizer': optimizer.state_dict(),
                         'best_val_loss': best_val_loss,
                         'best_val_epoch': best_val_epoch,
+                        'best_val_metric': best_val_metric,
                         'mse_bad_val_checks': mse_bad_val_checks,
                         'is_variance_phase': is_variance_phase,
                         'variance_phase_best_reset_done': variance_phase_best_reset_done,
@@ -3419,7 +3590,7 @@ def train(args, accelerator):
                     torch.save(best_ckpt, os.path.join(output_dir, "best_flow_ckpt.pt"))
                     registry_path = os.path.join(output_dir, "model_registry.json")
                     registry = json.load(open(registry_path)) if os.path.exists(registry_path) else []
-                    registry.append({"rank": 0, "path": new_best_path, "val_loss": current_val_metric, "epoch": epoch, "metric": "mse"})
+                    registry.append({"rank": 0, "path": new_best_path, "val_loss": current_val_metric, "epoch": epoch, "metric": "mse_noise"})
                     registry.sort(key=lambda x: x['val_loss'])
                     for i, entry in enumerate(registry): entry['rank'] = i + 1
                     with open(registry_path, 'w') as f: json.dump(registry, f, indent=2)
@@ -3505,6 +3676,7 @@ def train(args, accelerator):
                     'optimizer': optimizer.state_dict(),
                     'best_val_loss': best_val_loss,
                     'best_val_epoch': best_val_epoch,
+                    'best_val_metric': best_val_metric,
                     'mse_bad_val_checks': mse_bad_val_checks,
                     'is_variance_phase': is_variance_phase,
                     'variance_phase_best_reset_done': variance_phase_best_reset_done,
@@ -3512,6 +3684,17 @@ def train(args, accelerator):
                            os.path.join(output_dir, "latest_flow_ckpt.pt"))
                 with open(log_file, "a") as f:
                     csv.writer(f).writerow([epoch, avg_train_loss, 0.0, current_val_metric])
+                append_validation_metrics({
+                    "epoch": epoch,
+                    "phase": "mse_noise",
+                    "train_loss": avg_train_loss,
+                    "validation_metric": current_val_metric,
+                    "is_new_best": int(is_new_best),
+                    "is_variance_phase": int(is_variance_phase),
+                    "val_noise_mse": current_val_metric,
+                    "best_val_loss": best_val_loss,
+                    "best_val_epoch": best_val_epoch,
+                })
 
         # Track progress for this execution session
         epochs_done_this_run += 1

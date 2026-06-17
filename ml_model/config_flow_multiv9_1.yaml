@@ -68,6 +68,8 @@ variance_training_num_ensemble: 15
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
+crps_validation_start_epoch: 30
+crps_validation_every: 1
 mse_validation_seed: 1234
 crps_val_start_year: 2021
 crps_val_end_year: 2021
@@ -76,7 +78,7 @@ validation_rho_pr: 0.25
 validation_rho_t2m: 0.08
 validation_var_beta_pr: 0.45
 validation_var_beta_t2m: 0.03
-dense_mse_validation_until: 40
+dense_mse_validation_until: 29
 plot_validation_every: 5
 mse_plateau_patience: 3
 mse_plateau_factor: 0.5
