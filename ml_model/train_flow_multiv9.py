@@ -1979,15 +1979,16 @@ def train(args, accelerator):
 
     # Process multiple init dates per validation batch for speed (batch_size * 2 since we flattened leads)
     val_batch_size = max(8, batch_size * 2) 
+    pin_memory = bool(config.get("pin_memory", True))
     
     from torch.utils.data import DataLoader
     val_loader_full = DataLoader(
         val_dataset_full, batch_size=val_batch_size, shuffle=False, drop_last=False,
-        num_workers=config.get("num_workers", 4), pin_memory=True
+        num_workers=config.get("num_workers", 4), pin_memory=pin_memory
     )
     val_loader_monthly = DataLoader(
         val_dataset_monthly, batch_size=val_batch_size, shuffle=False, drop_last=False,
-        num_workers=config.get("num_workers", 4), pin_memory=True
+        num_workers=config.get("num_workers", 4), pin_memory=pin_memory
     )
 
     train_dataset = None
@@ -2010,7 +2011,7 @@ def train(args, accelerator):
         )
         loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, 
-            num_workers=config.get("num_workers", 4), pin_memory=True
+            num_workers=config.get("num_workers", 4), pin_memory=pin_memory
         )
 
     # Calculate Global Min-Max for Target GPCP Precipitation
@@ -2195,6 +2196,7 @@ def train(args, accelerator):
             f"global={drop_global_context_prob:.2f}, geos={drop_geos_prob:.2f}"
         )
         print(f"   [GEOS Condition]     : {'zeroed for ablation' if zero_geos_condition else 'enabled'}")
+        print(f"   [DataLoader]         : num_workers={config.get('num_workers', 4)}, pin_memory={pin_memory}")
         print(f"   [Dense MSE Val To]   : {dense_mse_validation_until if dense_mse_validation_until > 0 else 'disabled'}")
         print(f"   [Val Plot Every]     : {plot_validation_every if plot_validation_every > 0 else 'best-only'}")
         print(

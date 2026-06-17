@@ -9,7 +9,8 @@ reset_optimizer_state: False
 epochs: 300
 output_dir: ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres_nogeos
 mixed_precision: bf16
-num_workers: 1
+num_workers: 0
+pin_memory: False
 data_dir: /scratch/11353/afahad/geossub/dataprocess
 train_start_year: 1999
 train_end_year: 2020
