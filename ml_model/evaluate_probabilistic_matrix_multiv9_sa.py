@@ -314,6 +314,7 @@ def event_rows(
     weights,
     thresholds,
     climatology_event_rates,
+    climatology_event_probability_maps,
     threshold_area_means,
     quantiles,
     lead_idx=None,
@@ -334,7 +335,10 @@ def event_rows(
             brier = weighted_mean((prob - event.astype(np.float32)) ** 2, weights)
             forecast_prob_mean = weighted_mean(prob, weights)
             clim_event_rate = climatology_event_rates[base_key + (lead_key,)]
-            clim_brier = weighted_mean((clim_event_rate - event.astype(np.float32)) ** 2, weights)
+            clim_prob_map = climatology_event_probability_maps[base_key + (lead_key,)]
+            clim_brier = weighted_mean((clim_prob_map - event.astype(np.float32)) ** 2, weights)
+            scalar_clim_brier = weighted_mean((clim_event_rate - event.astype(np.float32)) ** 2, weights)
+            eval_rate_brier = weighted_mean((event_rate - event.astype(np.float32)) ** 2, weights)
             rows.append({
                 "scope": scope,
                 "year": year,
@@ -349,12 +353,23 @@ def event_rows(
                 "obs_event_rate": event_rate,
                 "climatology_event_rate": clim_event_rate,
                 "forecast_event_probability_mean": forecast_prob_mean,
+                "forecast_probability_bias_vs_obs": forecast_prob_mean - event_rate,
+                "obs_minus_climatology_event_rate": event_rate - clim_event_rate,
                 "frequency_bias": forecast_prob_mean / event_rate if event_rate > 0 else np.nan,
                 "frequency_bias_vs_climatology": (
                     forecast_prob_mean / clim_event_rate if clim_event_rate > 0 else np.nan
                 ),
                 "brier_score": brier,
+                "climatology_brier_score": clim_brier,
+                "scalar_climatology_brier_score": scalar_clim_brier,
+                "eval_event_rate_brier_score": eval_rate_brier,
                 "brier_skill_vs_climatology": 1.0 - (brier / clim_brier) if clim_brier > 0 else np.nan,
+                "brier_skill_vs_scalar_climatology": (
+                    1.0 - (brier / scalar_clim_brier) if scalar_clim_brier > 0 else np.nan
+                ),
+                "brier_skill_vs_eval_event_rate": (
+                    1.0 - (brier / eval_rate_brier) if eval_rate_brier > 0 else np.nan
+                ),
                 "roc_auc": weighted_roc_auc(prob, event, weights),
                 "pr_auc": weighted_average_precision(prob, event, weights),
             })
@@ -374,6 +389,7 @@ def make_thresholds(obs_clim, months, variables, quantiles):
 
 def make_climatology_event_rates(obs_clim, thresholds, months, variables, quantiles, weights):
     rates = {}
+    probability_maps = {}
     threshold_area_means = {}
     for month in months:
         for variable in variables:
@@ -383,7 +399,9 @@ def make_climatology_event_rates(obs_clim, thresholds, months, variables, quanti
                     base_key = (month, variable, float(quantile), tail)
                     threshold = thresholds[base_key]
                     event = event_mask(obs, threshold, tail)
+                    event_probability_map = np.nanmean(event.astype(np.float32), axis=0)
                     rates[base_key + ("all",)] = weighted_mean(event.astype(np.float32), weights)
+                    probability_maps[base_key + ("all",)] = event_probability_map
                     threshold_area_means[base_key + ("all",)] = weighted_mean(threshold, weights)
                     for lead_idx in range(4):
                         lead_key = int(lead_idx + 1)
@@ -391,11 +409,12 @@ def make_climatology_event_rates(obs_clim, thresholds, months, variables, quanti
                             event[:, lead_idx:lead_idx + 1].astype(np.float32),
                             weights,
                         )
+                        probability_maps[base_key + (lead_key,)] = event_probability_map[lead_idx:lead_idx + 1]
                         threshold_area_means[base_key + (lead_key,)] = weighted_mean(
                             threshold[lead_idx:lead_idx + 1],
                             weights,
                         )
-    return rates, threshold_area_means
+    return rates, probability_maps, threshold_area_means
 
 
 def subset_by(ds, init_indices):
@@ -412,6 +431,7 @@ def add_scope_rows(
     weights,
     thresholds,
     climatology_event_rates,
+    climatology_event_probability_maps,
     threshold_area_means,
     quantiles,
     interval_levels,
@@ -447,7 +467,8 @@ def add_scope_rows(
                         event_rows(
                             scope, year_label, month, variable, system, ensemble, obs,
                             weights, thresholds, climatology_event_rates,
-                            threshold_area_means, quantiles, lead_idx=lead_idx,
+                            climatology_event_probability_maps, threshold_area_means,
+                            quantiles, lead_idx=lead_idx,
                         )
                     )
     return interval, ranks, events
@@ -519,6 +540,36 @@ def make_plots(interval_df, event_df, rank_df, output_dir):
         fig.savefig(path, dpi=150)
         plt.close(fig)
 
+        fig, axes = plt.subplots(1, 2, figsize=(15, 4))
+        width = 0.24
+        for offset, col, label, color in [
+            (-width, "obs_event_rate", "Observed event rate", "tab:green"),
+            (0.0, "climatology_event_rate", "2001-2020 obs climatology", "tab:gray"),
+            (width, "forecast_event_probability_mean", "Forecast probability", "tab:blue"),
+        ]:
+            s = total_event[total_event["system"] == "ml"].set_index("label").reindex(labels)
+            axes[0].bar(x + offset, s[col].values, width=width, label=label, color=color)
+        axes[0].set_title("ML event-rate diagnostics")
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(labels, rotation=25, ha="right")
+        axes[0].set_ylabel("Probability")
+        axes[0].grid(axis="y", alpha=0.3)
+        axes[0].legend()
+
+        for offset, system in [(-width / 2, "ml"), (width / 2, "geos")]:
+            s = total_event[total_event["system"] == system].set_index("label").reindex(labels)
+            axes[1].bar(x + offset, s["forecast_probability_bias_vs_obs"].values, width=width, label=system.upper())
+        axes[1].axhline(0.0, color="k", linewidth=1)
+        axes[1].set_title("Forecast probability bias vs observed event rate")
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(labels, rotation=25, ha="right")
+        axes[1].grid(axis="y", alpha=0.3)
+        axes[1].legend()
+        path = os.path.join(plot_dir, "prob_event_rate_diagnostics_q95.png")
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+
     total_rank = rank_df[(rank_df["scope"] == "all_years") & (rank_df["lead"].astype(str) == "all")]
     for variable in ["pr", "t2m"]:
         fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharey=True)
@@ -561,7 +612,7 @@ def main():
         args, config, months, variables, expected_shape
     )
     thresholds = make_thresholds(obs_clim, months, variables, quantiles)
-    climatology_event_rates, threshold_area_means = make_climatology_event_rates(
+    climatology_event_rates, climatology_event_probability_maps, threshold_area_means = make_climatology_event_rates(
         obs_clim, thresholds, months, variables, quantiles, weights
     )
 
@@ -571,7 +622,7 @@ def main():
 
     interval, ranks, events = add_scope_rows(
         ds, "all_years", "all", months, variables, systems, weights,
-        thresholds, climatology_event_rates, threshold_area_means,
+        thresholds, climatology_event_rates, climatology_event_probability_maps, threshold_area_means,
         quantiles, interval_levels, args.rank_bins,
     )
     interval_rows_all.extend(interval)
@@ -583,7 +634,7 @@ def main():
         idx = np.where(init_years == year)[0]
         interval, ranks, events = add_scope_rows(
             subset_by(ds, idx), "year", int(year), months, variables, systems, weights,
-            thresholds, climatology_event_rates, threshold_area_means,
+            thresholds, climatology_event_rates, climatology_event_probability_maps, threshold_area_means,
             quantiles, interval_levels, args.rank_bins,
         )
         interval_rows_all.extend(interval)
@@ -650,7 +701,10 @@ def main():
             "obs_event_rate", "climatology_event_rate",
             "forecast_event_probability_mean", "frequency_bias",
             "frequency_bias_vs_climatology",
-            "brier_score", "brier_skill_vs_climatology", "roc_auc", "pr_auc",
+            "forecast_probability_bias_vs_obs", "obs_minus_climatology_event_rate",
+            "brier_score", "climatology_brier_score", "scalar_climatology_brier_score",
+            "brier_skill_vs_climatology", "brier_skill_vs_scalar_climatology",
+            "brier_skill_vs_eval_event_rate", "roc_auc", "pr_auc",
         ],
         ["month", "variable", "tail", "system"],
     )
