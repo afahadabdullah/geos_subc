@@ -2131,6 +2131,11 @@ def train(args, accelerator):
     train_noise_mode = str(config.get("train_noise_mode", "gaussian")).lower()
     train_rho_pr = float(config.get("train_rho_pr", 0.0))
     train_rho_t2m = float(config.get("train_rho_t2m", train_rho_pr))
+    train_rho_after_epoch = int(config.get("train_rho_after_epoch", 0))
+    train_rho_pr_after = float(config.get("train_rho_pr_after", train_rho_pr))
+    train_rho_t2m_after = float(config.get("train_rho_t2m_after", train_rho_t2m))
+    joint_variance_start_epoch = int(config.get("joint_variance_start_epoch", 0))
+    joint_variance_loss_weight = float(config.get("joint_variance_loss_weight", 0.0))
     train_time_schedule = str(config.get("train_time_schedule", "uniform")).lower()
     train_time_beta_alpha = float(config.get("train_time_beta_alpha", 1.5))
     train_time_beta_beta = float(config.get("train_time_beta_beta", 2.0))
@@ -2148,6 +2153,8 @@ def train(args, accelerator):
     for name, value in {
         "train_rho_pr": train_rho_pr,
         "train_rho_t2m": train_rho_t2m,
+        "train_rho_pr_after": train_rho_pr_after,
+        "train_rho_t2m_after": train_rho_t2m_after,
         "train_time_low_fraction": train_time_low_fraction,
         "train_time_mid_fraction": train_time_mid_fraction,
         "context_dropout_prob": context_dropout_prob,
@@ -2157,6 +2164,12 @@ def train(args, accelerator):
     }.items():
         if not (0.0 <= value <= 1.0):
             raise ValueError(f"{name} must be in [0, 1], got {value}")
+    if train_rho_after_epoch < 0:
+        raise ValueError(f"train_rho_after_epoch must be >= 0, got {train_rho_after_epoch}")
+    if joint_variance_start_epoch < 0:
+        raise ValueError(f"joint_variance_start_epoch must be >= 0, got {joint_variance_start_epoch}")
+    if joint_variance_loss_weight < 0.0:
+        raise ValueError(f"joint_variance_loss_weight must be >= 0, got {joint_variance_loss_weight}")
     variance_training_num_ensemble = int(config.get("variance_training_num_ensemble", validation_num_ensemble))
     if variance_training_num_ensemble < 1:
         raise ValueError(f"variance_training_num_ensemble must be >= 1, got {variance_training_num_ensemble}")
@@ -2239,6 +2252,16 @@ def train(args, accelerator):
         print(f"   [Validation Beta]    : PR={validation_var_beta_pr:.2f}, T2M={validation_var_beta_t2m:.2f}")
         print(f"   [Validation Coarse]  : {validation_variance_coarse_kernel}")
         print(f"   [Train Noise]        : {train_noise_mode}, rho PR/T2M={train_rho_pr:.2f}/{train_rho_t2m:.2f}")
+        if train_rho_after_epoch > 0:
+            print(
+                f"   [Train Noise Switch] : epoch {train_rho_after_epoch}, "
+                f"rho PR/T2M={train_rho_pr_after:.2f}/{train_rho_t2m_after:.2f}"
+            )
+        if joint_variance_start_epoch > 0 and joint_variance_loss_weight > 0:
+            print(
+                f"   [Joint Var Training] : starts epoch {joint_variance_start_epoch}, "
+                f"weight={joint_variance_loss_weight:.4f}"
+            )
         print(
             f"   [Train Time]         : {train_time_schedule}, beta={train_time_beta_alpha:.2f}/{train_time_beta_beta:.2f}, "
             f"low/mid={train_time_low_fraction:.2f}/{train_time_mid_fraction:.2f}"
@@ -3024,15 +3047,36 @@ def train(args, accelerator):
                 reset_best_for_phase=True,
             )
 
+        use_joint_variance_training = (
+            not is_variance_phase
+            and not crps_loss
+            and joint_variance_start_epoch > 0
+            and epoch >= joint_variance_start_epoch
+            and joint_variance_loss_weight > 0.0
+        )
+        effective_train_rho_pr = train_rho_pr
+        effective_train_rho_t2m = train_rho_t2m
+        if train_rho_after_epoch > 0 and epoch >= train_rho_after_epoch:
+            effective_train_rho_pr = train_rho_pr_after
+            effective_train_rho_t2m = train_rho_t2m_after
+
         model.train()
         train_loss = 0.0
+        train_vel_loss_total = 0.0
+        train_var_loss_total = 0.0
+        train_vel_var_steps = 0
         train_crps_pr_total = 0.0
         train_crps_t2m_total = 0.0
         train_crps_steps = 0
         if crps_loss:
             phase_label = "CRPS"
         else:
-            phase_label = "VarOnly" if is_variance_phase else "VelOnly"
+            if is_variance_phase:
+                phase_label = "VarOnly"
+            elif use_joint_variance_training:
+                phase_label = "Vel+Var"
+            else:
+                phase_label = "VelOnly"
         pbar = tqdm(loader, desc=f"Epoch {epoch} [{phase_label}]", disable=not accelerator.is_main_process)
         for i, batch in enumerate(pbar):    
             # Conditionals
@@ -3138,8 +3182,8 @@ def train(args, accelerator):
                             nao_lookup=nao_lookup,
                             oni_lookup=oni_lookup,
                             mjo_df=mjo_df,
-                            rho_pr=train_rho_pr,
-                            rho_t2m=train_rho_t2m,
+                            rho_pr=effective_train_rho_pr,
+                            rho_t2m=effective_train_rho_t2m,
                         ).to(dtype=target_norm.dtype)
                         if noise.shape != target_norm.shape:
                             raise RuntimeError(
@@ -3196,13 +3240,22 @@ def train(args, accelerator):
                     v_target=v_target,
                     spatial_weights=spatial_weights,
                     temp_weights=temp_weights_expanded,
-                    variance_coarse_kernel=validation_variance_coarse_kernel if is_variance_phase else None,
+                    variance_coarse_kernel=(
+                        validation_variance_coarse_kernel
+                        if (is_variance_phase or use_joint_variance_training)
+                        else None
+                    ),
                 )
 
                 if is_variance_phase:
                     loss = loss_var
+                elif use_joint_variance_training:
+                    loss = loss_vel + joint_variance_loss_weight * loss_var
                 else:
                     loss = loss_vel
+                train_vel_loss_total += float(loss_vel.detach().item())
+                train_var_loss_total += float(loss_var.detach().item())
+                train_vel_var_steps += 1
 
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -3217,7 +3270,14 @@ def train(args, accelerator):
                     "t2m": f"{crps_diag['crps_t2m'].item():.3f}",
                 })
             else:
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                if use_joint_variance_training:
+                    pbar.set_postfix({
+                        "loss": f"{loss.item():.4f}",
+                        "vel": f"{loss_vel.detach().item():.3f}",
+                        "var": f"{loss_var.detach().item():.3f}",
+                    })
+                else:
+                    pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         avg_train_loss = train_loss / len(loader)
         
@@ -3231,6 +3291,15 @@ def train(args, accelerator):
                 )
             elif is_variance_phase:
                 print(f"📈 Epoch {epoch} Training Loss (Variance): {avg_train_loss:.4f}")
+            elif use_joint_variance_training and train_vel_var_steps > 0:
+                avg_train_vel = train_vel_loss_total / train_vel_var_steps
+                avg_train_var = train_var_loss_total / train_vel_var_steps
+                print(
+                    f"📈 Epoch {epoch} Training Loss (Velocity+Variance): {avg_train_loss:.4f} "
+                    f"| Vel: {avg_train_vel:.4f} | Var: {avg_train_var:.4f} "
+                    f"| rho PR/T2M={effective_train_rho_pr:.2f}/{effective_train_rho_t2m:.2f} "
+                    f"| var_w={joint_variance_loss_weight:.4f}"
+                )
             else:
                 print(f"📈 Epoch {epoch} Training Loss (Noise MSE): {avg_train_loss:.4f}")
 
@@ -3444,7 +3513,11 @@ def train(args, accelerator):
                 with open(log_file, "a") as f: csv.writer(f).writerow([epoch, avg_train_loss, current_val_metric, val_result['avg_crps_pr']])
                 append_validation_metrics({
                     "epoch": epoch,
-                    "phase": "crps_var" if is_variance_phase else "crps_vel",
+                    "phase": (
+                        "crps_var"
+                        if is_variance_phase
+                        else ("crps_joint" if use_joint_variance_training else "crps_vel")
+                    ),
                     "train_loss": avg_train_loss,
                     "validation_metric": current_val_metric,
                     "is_new_best": int(is_new_best),
