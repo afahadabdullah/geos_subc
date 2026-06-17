@@ -6,7 +6,6 @@
 #SBATCH -N 1                         # Total # of nodes
 #SBATCH -n 1                         # Total # of tasks
 #SBATCH -t 02:00:00                  # Run time (hh:mm:ss)
-#SBATCH --mem=64G                    # Avoid tiny default memory request/cgroup kills
 #SBATCH -A ATM25008                  # Project account
 #SBATCH --mail-type=all
 #SBATCH --mail-user=a.fahad@nasa.gov
