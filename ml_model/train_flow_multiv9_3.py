@@ -2223,11 +2223,31 @@ def train(args, accelerator):
     validation_num_steps = int(config.get("validation_num_steps", 10))
     validation_ode_batch_size = int(config.get("validation_ode_batch_size", 120))
     crps_validation_start_epoch = int(config.get("crps_validation_start_epoch", 30))
-    crps_validation_every = int(config.get("crps_validation_every", 1))
+    crps_validation_milestones = sorted(
+        {int(epoch) for epoch in config.get(
+            "crps_validation_milestones",
+            [crps_validation_start_epoch],
+        )}
+    )
+    crps_validation_every_after_epoch = int(
+        config.get("crps_validation_every_after_epoch", crps_validation_start_epoch)
+    )
+    crps_plot_on_validation = bool(config.get("crps_plot_on_validation", True))
     if crps_validation_start_epoch < 1:
         raise ValueError(f"crps_validation_start_epoch must be >= 1, got {crps_validation_start_epoch}")
-    if crps_validation_every < 1:
-        raise ValueError(f"crps_validation_every must be >= 1, got {crps_validation_every}")
+    if not crps_validation_milestones:
+        raise ValueError("crps_validation_milestones must contain at least one epoch")
+    if crps_validation_milestones[0] != crps_validation_start_epoch:
+        raise ValueError(
+            "crps_validation_start_epoch must equal the first CRPS milestone: "
+            f"start={crps_validation_start_epoch}, milestones={crps_validation_milestones}"
+        )
+    if crps_validation_every_after_epoch < crps_validation_milestones[-1]:
+        raise ValueError(
+            "crps_validation_every_after_epoch must be >= the final milestone: "
+            f"after={crps_validation_every_after_epoch}, "
+            f"milestones={crps_validation_milestones}"
+        )
     mse_validation_seed = int(config.get("mse_validation_seed", 1234))
     crps_val_start_year = int(config.get("crps_val_start_year", config["val_start_year"]))
     crps_val_end_year = int(config.get("crps_val_end_year", config["val_end_year"]))
@@ -2384,7 +2404,11 @@ def train(args, accelerator):
         print(f"   [Validation Ens]     : {validation_num_ensemble}")
         print(f"   [Validation Steps]   : {validation_num_steps}")
         print(f"   [Validation Chunk]   : {validation_ode_batch_size}")
-        print(f"   [CRPS Val Start]     : epoch {crps_validation_start_epoch}, every {crps_validation_every}")
+        print(
+            f"   [CRPS Val Schedule]  : milestones={crps_validation_milestones}, "
+            f"then every epoch after {crps_validation_every_after_epoch}"
+        )
+        print(f"   [CRPS Plot Schedule] : {'same as validation' if crps_plot_on_validation else 'best-only'}")
         print(f"   [MSE Val Seed]       : {mse_validation_seed}")
         print(f"   [MSE Val Dataset]    : Full {config['val_start_year']}-{config['val_end_year']}")
         print(f"   [CRPS Val Dataset]   : Monthly subset {crps_val_start_year}-{crps_val_end_year}")
@@ -3702,14 +3726,22 @@ def train(args, accelerator):
             best_val_metric = "combined_crps"
             crps_phase_reset = True
 
+        def is_scheduled_crps_validation(ep):
+            return (
+                ep in crps_validation_milestones
+                or ep > crps_validation_every_after_epoch
+            )
+
         def should_plot_validation(ep):
-            return plot_validation_every > 0 and ep >= 20 and (ep % plot_validation_every == 0)
+            if ep >= crps_validation_start_epoch:
+                return crps_plot_on_validation and is_scheduled_crps_validation(ep)
+            return plot_validation_every > 0 and (ep % plot_validation_every == 0)
 
         def should_validate(ep):
             if ep < 5:
                 return False
             elif use_crps_phase:
-                return (ep - crps_validation_start_epoch) % crps_validation_every == 0
+                return is_scheduled_crps_validation(ep)
             elif should_plot_validation(ep):
                 return True
             elif (not use_crps_phase) and dense_mse_validation_until > 0 and ep <= dense_mse_validation_until:
@@ -3738,7 +3770,14 @@ def train(args, accelerator):
         #  CRPS-based validation
         # ============================================================
         if use_crps_phase:
-            use_flow_variance = True
+            # Variance heads begin training in the joint phase. Before that,
+            # validate the velocity ensemble without random, untrained
+            # variance scaling.
+            use_flow_variance = bool(is_variance_phase or use_joint_variance_training)
+            if accelerator.is_main_process:
+                print(
+                    f"   CRPS flow variance: {'enabled' if use_flow_variance else 'disabled until joint variance training'}"
+                )
             val_result = run_val_inference(
                 epoch, model, val_loader_monthly, flow_matcher, device, accelerator, output_dir, log_file,
                 target_sqrt_min, target_sqrt_max, geos_min, geos_max, area_weights, global_bounds,

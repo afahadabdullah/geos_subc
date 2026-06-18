@@ -104,8 +104,11 @@ joint_variance_loss_weight: 0.03
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
-crps_validation_start_epoch: 26
-crps_validation_every: 1
+# CRPS validation and plotting: epochs 10, 15, 20, then every epoch from 21.
+crps_validation_start_epoch: 10
+crps_validation_milestones: [10, 15, 20]
+crps_validation_every_after_epoch: 20
+crps_plot_on_validation: True
 mse_validation_seed: 1234
 crps_val_start_year: 2021
 crps_val_end_year: 2021
@@ -115,7 +118,7 @@ validation_rho_t2m: 0.08
 validation_var_beta_pr: 0.45
 validation_var_beta_t2m: 0.03
 dense_mse_validation_until: 25
-plot_validation_every: 5
+plot_validation_every: 0
 mse_plateau_patience: 3
 mse_plateau_factor: 0.5
 mse_min_lr: 1e-6
