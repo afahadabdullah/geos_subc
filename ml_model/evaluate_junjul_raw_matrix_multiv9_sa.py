@@ -2,9 +2,10 @@
 """
 Evaluate raw June/July v9 SA forecasts for ML and GEOS against observations.
 
-This intentionally avoids the 2005-2024 ML climatology/anomaly path. It uses
-only generated forecast Zarrs from the evaluation years, so ML, GEOS, and obs
-are compared on the same raw 2021-2024 init dates.
+This intentionally avoids the 2005-2024 ML climatology/anomaly path. Raw
+forecast skill uses the generated evaluation-year Zarrs. Physical extreme
+thresholds use independent raw observations from 2001-2020 by default, while
+a separate diagnostic uses evaluation-period OBS/ML/GEOS self-thresholds.
 """
 
 import argparse
@@ -14,10 +15,19 @@ import os
 import numpy as np
 import pandas as pd
 import xarray as xr
+import yaml
+
+from dataset_flow_multi import S2SHybridDataset
 
 
 DEFAULT_FORECAST_DIR = "dataprocess/gen_multiv9_sa_55e100e_0n40n_junjul_testmode_e100_s50"
-DEFAULT_OUTPUT_DIR = "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/raw_matrix_junjul_testmode_2021_2024"
+DEFAULT_OUTPUT_DIR = (
+    "ml_output_flowmulti_v9_sa_55e100e_0n40n_noisectx_t2mres/"
+    "raw_matrix_junjul_testmode_2021_2024_obsclim2001_2020"
+)
+DEFAULT_CONFIG = "ml_model/config_flow_multiv9.yaml"
+DEFAULT_OBS_CLIM_START_YEAR = 2001
+DEFAULT_OBS_CLIM_END_YEAR = 2020
 
 
 def parse_args():
@@ -28,9 +38,35 @@ def parse_args():
     parser.add_argument("--end_year", type=int, default=2024)
     parser.add_argument("--months", type=str, default="6,7")
     parser.add_argument("--skip_years", type=str, default="")
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG)
+    parser.add_argument("--obs_clim_data_dir", type=str, default=None)
+    parser.add_argument("--obs_clim_start_year", type=int, default=DEFAULT_OBS_CLIM_START_YEAR)
+    parser.add_argument("--obs_clim_end_year", type=int, default=DEFAULT_OBS_CLIM_END_YEAR)
+    parser.add_argument("--obs_clim_skip_years", type=str, default="")
+    parser.add_argument(
+        "--threshold_source",
+        type=str,
+        default="obs_climatology",
+        choices=("obs_climatology", "obs_eval"),
+        help="Main physical-event thresholds: independent obs climatology or eval-period obs.",
+    )
     parser.add_argument("--extreme_quantiles", type=str, default="0.90,0.95")
     parser.add_argument("--decision_thresholds", type=str, default="0.1,0.25,0.5")
     return parser.parse_args()
+
+
+def load_config(path):
+    with open(path, "r") as f:
+        return yaml.safe_load(f) or {}
+
+
+def resolve_obs_clim_data_dir(args, config):
+    return (
+        args.obs_clim_data_dir
+        or os.environ.get("DATA_DIR_OVERRIDE")
+        or config.get("data_dir")
+        or "dataprocess"
+    )
 
 
 def parse_float_list(text):
@@ -171,6 +207,103 @@ def load_eval_dataset(args, months):
     return combined, loaded_years, missing_years, sorted(skip_years)
 
 
+def load_obs_climatology(args, config, months, variables, expected_shape):
+    """Load independent raw observed PR/T2M climatology from dataset files."""
+    data_dir = resolve_obs_clim_data_dir(args, config)
+    skip_years = parse_int_set(args.obs_clim_skip_years)
+    obs_by_month = {month: {variable: [] for variable in variables} for month in months}
+    loaded_years = []
+    empty_years = []
+    failed_years = {}
+    init_counts = {}
+
+    print(
+        "  Obs climatology: raw observations "
+        f"{args.obs_clim_start_year}-{args.obs_clim_end_year} "
+        f"from {data_dir}"
+    )
+
+    for year in range(args.obs_clim_start_year, args.obs_clim_end_year + 1):
+        if year in skip_years:
+            continue
+        try:
+            clim_ds = S2SHybridDataset(
+                data_root=data_dir,
+                start_year=year,
+                end_year=year,
+                preload=False,
+                normalize=False,
+                stats_file=config.get("stats_file", ""),
+                subsample_monthly=False,
+                target_domain=config.get("target_domain"),
+                target_domain_bounds=config.get("target_domain_bounds"),
+                local_obs_variables=config.get("local_obs_variables"),
+                global_context_variables=config.get("global_context_variables"),
+                t2m_target_mode=config.get("t2m_target_mode", "absolute"),
+            )
+        except Exception as exc:
+            print(f"  ⚠️ Obs climatology year {year}: failed to index ({exc}). Skipping.")
+            failed_years[str(year)] = str(exc)
+            continue
+
+        count = 0
+        for sample_idx, sample in enumerate(clim_ds.samples):
+            if int(sample.get("lead_idx", -1)) != 0:
+                continue
+            init_date = pd.Timestamp(sample["date"])
+            month = int(init_date.month)
+            if month not in months:
+                continue
+            try:
+                item = clim_ds[sample_idx]
+                target_raw = item["target_raw_full"].detach().cpu().numpy().astype(np.float32, copy=False)
+            except Exception as exc:
+                print(f"  ⚠️ Obs climatology {year} {init_date.date()}: failed to load ({exc}). Skipping init.")
+                continue
+            if target_raw.shape[1:] != expected_shape:
+                raise RuntimeError(
+                    f"Obs climatology shape mismatch for {year} {init_date.date()}: "
+                    f"got {target_raw.shape[1:]}, expected {expected_shape}"
+                )
+            obs_by_month[month]["pr"].append(target_raw[0])
+            obs_by_month[month]["t2m"].append(target_raw[1])
+            count += 1
+
+        if count > 0:
+            loaded_years.append(year)
+            init_counts[str(year)] = count
+        else:
+            empty_years.append(year)
+
+    obs_clim = {}
+    for month in months:
+        for variable in variables:
+            values = obs_by_month[month][variable]
+            if not values:
+                raise RuntimeError(
+                    f"No observed climatology samples for month={month}, variable={variable}. "
+                    "Check obs climatology years/data_dir."
+                )
+            obs_clim[(month, variable)] = np.stack(values, axis=0)
+
+    metadata = {
+        "data_dir": data_dir,
+        "start_year": args.obs_clim_start_year,
+        "end_year": args.obs_clim_end_year,
+        "loaded_years": loaded_years,
+        "empty_years": empty_years,
+        "failed_years": failed_years,
+        "skip_years": sorted(skip_years),
+        "init_counts": init_counts,
+    }
+    print(f"  Obs climatology loaded years: {loaded_years}")
+    if empty_years:
+        print(f"  Obs climatology empty years: {empty_years}")
+    if failed_years:
+        print(f"  Obs climatology failed years: {sorted(failed_years)}")
+    return obs_clim, metadata
+
+
 def data_for(ds, variable, system):
     prefix = "model" if system == "ml" else "geos"
     return ds[f"{prefix}_{variable}"].values.astype(np.float32, copy=False)
@@ -236,7 +369,82 @@ def tails_for_variable(variable):
     return ("upper",)
 
 
-def extreme_metrics(scope, year, init, month, variable, system, ensemble, obs, weights, quantile, tail, threshold, lead_idx=None):
+def ensemble_threshold(ensemble, quantile, tail):
+    arr = np.asarray(ensemble, dtype=np.float32)
+    if arr.ndim != 5:
+        raise ValueError(f"Expected ensemble shape [init, member, lead, lat, lon], got {arr.shape}")
+    n_init, n_member, n_lead, n_lat, n_lon = arr.shape
+    return raw_threshold(arr.reshape(n_init * n_member, n_lead, n_lat, n_lon), quantile, tail)
+
+
+def build_obs_thresholds(obs_by_month, months, quantiles):
+    thresholds = {}
+    for month in months:
+        thresholds[month] = {}
+        for variable in ("pr", "t2m"):
+            obs = obs_by_month[(month, variable)]
+            thresholds[month][variable] = {
+                (tail, quantile): raw_threshold(obs, quantile, tail)
+                for tail in tails_for_variable(variable)
+                for quantile in quantiles
+            }
+    return thresholds
+
+
+def build_eval_obs_thresholds(ds, months, quantiles):
+    init_dates = pd.to_datetime(ds["init"].values).normalize()
+    thresholds = {}
+    for month in months:
+        indices = np.where(init_dates.month == int(month))[0]
+        if len(indices) == 0:
+            continue
+        month_sub = ds.isel(init=indices)
+        thresholds[month] = {}
+        for variable in ("pr", "t2m"):
+            month_obs = obs_for(month_sub, variable)
+            thresholds[month][variable] = {
+                (tail, quantile): raw_threshold(month_obs, quantile, tail)
+                for tail in tails_for_variable(variable)
+                for quantile in quantiles
+            }
+    return thresholds
+
+
+def build_self_thresholds(month_sub, quantiles):
+    """Build 2021-2024 relative-tail thresholds for OBS, ML, and GEOS separately."""
+    thresholds = {}
+    for system in ("obs", "ml", "geos"):
+        thresholds[system] = {}
+        for variable in ("pr", "t2m"):
+            values = obs_for(month_sub, variable) if system == "obs" else data_for(month_sub, variable, system)
+            thresholds[system][variable] = {
+                (tail, quantile): (
+                    raw_threshold(values, quantile, tail)
+                    if system == "obs"
+                    else ensemble_threshold(values, quantile, tail)
+                )
+                for tail in tails_for_variable(variable)
+                for quantile in quantiles
+            }
+    return thresholds
+
+
+def extreme_metrics(
+    scope,
+    year,
+    init,
+    month,
+    variable,
+    system,
+    ensemble,
+    obs,
+    weights,
+    quantile,
+    tail,
+    threshold,
+    lead_idx=None,
+    threshold_source="obs_climatology",
+):
     ens = select_lead(ensemble, lead_idx)
     target = select_lead(obs, lead_idx)
     if lead_idx is not None:
@@ -259,6 +467,7 @@ def extreme_metrics(scope, year, init, month, variable, system, ensemble, obs, w
         "lead": "all" if lead_idx is None else int(lead_idx + 1),
         "tail": tail,
         "quantile": float(quantile),
+        "threshold_source": threshold_source,
         "threshold_area_mean": weighted_mean(threshold, weights),
         "obs_event_rate": obs_rate,
         "forecast_event_probability_mean": forecast_rate,
@@ -272,6 +481,63 @@ def extreme_metrics(scope, year, init, month, variable, system, ensemble, obs, w
     }, prob, event
 
 
+def self_threshold_extreme_metrics(
+    scope,
+    year,
+    init,
+    month,
+    variable,
+    system,
+    ensemble,
+    obs,
+    weights,
+    quantile,
+    tail,
+    obs_threshold,
+    forecast_threshold,
+    lead_idx=None,
+):
+    ens = select_lead(ensemble, lead_idx)
+    target = select_lead(obs, lead_idx)
+    if lead_idx is not None:
+        obs_threshold = obs_threshold[lead_idx:lead_idx + 1]
+        forecast_threshold = forecast_threshold[lead_idx:lead_idx + 1]
+    prob = event_probability(ens, forecast_threshold, tail)
+    event = event_mask(target, obs_threshold, tail)
+    ens_mean = np.nanmean(ens, axis=1)
+    spread = np.nanstd(ens, axis=1, ddof=1) if ens.shape[1] > 1 else np.zeros_like(ens_mean)
+    event_err = np.where(event, ens_mean - target, np.nan)
+    event_rmse = float(np.sqrt(max(weighted_mean(event_err ** 2, weights), 0.0)))
+    obs_rate = weighted_mean(event.astype(np.float32), weights)
+    forecast_rate = weighted_mean(prob, weights)
+    brier = weighted_mean((prob - event.astype(np.float32)) ** 2, weights)
+    return {
+        "scope": scope,
+        "year": year,
+        "init": init,
+        "month": int(month),
+        "variable": variable,
+        "system": system,
+        "lead": "all" if lead_idx is None else int(lead_idx + 1),
+        "tail": tail,
+        "quantile": float(quantile),
+        "threshold_source": "self_eval_period",
+        "obs_threshold_area_mean": weighted_mean(obs_threshold, weights),
+        "forecast_threshold_area_mean": weighted_mean(forecast_threshold, weights),
+        "obs_event_rate": obs_rate,
+        "forecast_event_probability_mean": forecast_rate,
+        "forecast_probability_bias_vs_obs": forecast_rate - obs_rate,
+        "frequency_bias": forecast_rate / obs_rate if obs_rate > 0 else np.nan,
+        "brier_score": brier,
+        "event_rmse": event_rmse,
+        "event_bias": weighted_mean(event_err, weights),
+        "ensemble_spread_on_obs_events": weighted_mean(np.where(event, spread, np.nan), weights),
+        "forecast_raw_on_obs_events": weighted_mean(np.where(event, ens_mean, np.nan), weights),
+        "obs_raw_on_events": weighted_mean(np.where(event, target, np.nan), weights),
+        "notes": "Diagnostic only: forecast probability uses each system's own eval-period threshold; event truth uses obs eval-period threshold.",
+    }
+
+
 def weighted_decision_rows(base, prob, event, weights, decision_thresholds):
     rows = []
     for decision in decision_thresholds:
@@ -279,7 +545,8 @@ def weighted_decision_rows(base, prob, event, weights, decision_thresholds):
         hits = weighted_sum_bool(yes & event, weights)
         false_alarms = weighted_sum_bool(yes & ~event, weights)
         misses = weighted_sum_bool(~yes & event, weights)
-        row = {key: base[key] for key in ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile")}
+        base_keys = ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile", "threshold_source")
+        row = {key: base[key] for key in base_keys if key in base}
         row.update({
             "decision_probability": float(decision),
             "hits": hits,
@@ -304,7 +571,8 @@ def reliability_rows(base, prob, event, weights):
         weighted_count = weighted_sum_bool(in_bin, weights)
         if weighted_count <= 0:
             continue
-        row = {key: base[key] for key in ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile")}
+        base_keys = ("scope", "year", "init", "month", "variable", "system", "lead", "tail", "quantile", "threshold_source")
+        row = {key: base[key] for key in base_keys if key in base}
         row.update({
             "prob_bin_left": float(left),
             "prob_bin_right": float(right),
@@ -371,7 +639,7 @@ def print_table(title, df, columns, sort_by=None, float_format="{:.4f}"):
     print(table[columns].to_string(index=False))
 
 
-def print_evaluation_summaries(overall_df, extreme_df, decision_df):
+def print_evaluation_summaries(overall_df, extreme_df, self_extreme_df, decision_df):
     total = all_years_lead_all(overall_df)
     print_table(
         "Raw forecast metrics (lead=all; lower CRPS/RMSE better, higher ACC better)",
@@ -411,13 +679,14 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
 
     extreme_total = all_years_lead_all(extreme_df)
     print_table(
-        "Raw extreme metrics (lead=all; T2M includes warm and cold tails)",
+        "Raw physical-threshold extreme metrics (lead=all; thresholds from obs climatology unless overridden)",
         extreme_total,
         [
             "month",
             "variable",
             "tail",
             "quantile",
+            "threshold_source",
             "system",
             "obs_event_rate",
             "forecast_event_probability_mean",
@@ -425,6 +694,27 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
             "brier_score",
             "event_rmse",
             "ensemble_spread_on_obs_events",
+        ],
+        sort_by=["month", "variable", "tail", "quantile", "system"],
+    )
+
+    self_extreme_total = all_years_lead_all(self_extreme_df)
+    print_table(
+        "Raw relative-tail self-threshold metrics (diagnostic only; q from OBS/ML/GEOS evaluation period separately)",
+        self_extreme_total,
+        [
+            "month",
+            "variable",
+            "tail",
+            "quantile",
+            "system",
+            "obs_threshold_area_mean",
+            "forecast_threshold_area_mean",
+            "obs_event_rate",
+            "forecast_event_probability_mean",
+            "forecast_probability_bias_vs_obs",
+            "frequency_bias",
+            "brier_score",
         ],
         sort_by=["month", "variable", "tail", "quantile", "system"],
     )
@@ -451,7 +741,7 @@ def print_evaluation_summaries(overall_df, extreme_df, decision_df):
     return improvement
 
 
-def print_final_evaluation_summary(overall_df, extreme_df, improvement_df):
+def print_final_evaluation_summary(overall_df, extreme_df, self_extreme_df, improvement_df):
     print("\n" + "=" * 88)
     print("FINAL RAW EVALUATION SUMMARY")
     print("=" * 88)
@@ -519,11 +809,32 @@ def print_final_evaluation_summary(overall_df, extreme_df, improvement_df):
                 "variable",
                 "tail",
                 "system",
+                "threshold_source",
                 "obs_event_rate",
                 "forecast_event_probability_mean",
                 "frequency_bias",
                 "brier_score",
                 "event_rmse",
+            ],
+            sort_by=["month", "variable", "tail", "system"],
+        )
+
+    self_extreme_total = all_years_lead_all(self_extreme_df)
+    if not self_extreme_total.empty:
+        focus_quantile = float(self_extreme_total["quantile"].max())
+        self_focus = self_extreme_total[self_extreme_total["quantile"] == focus_quantile].copy()
+        print_table(
+            f"Final relative-tail self-threshold metrics (q={focus_quantile:.2f}, diagnostic only)",
+            self_focus,
+            [
+                "month",
+                "variable",
+                "tail",
+                "system",
+                "obs_event_rate",
+                "forecast_event_probability_mean",
+                "frequency_bias",
+                "brier_score",
             ],
             sort_by=["month", "variable", "tail", "system"],
         )
@@ -566,7 +877,7 @@ def plot_grouped_metric(ax, total, metric, ylabel, title, labels):
     ax.grid(True, axis="y", alpha=0.25)
 
 
-def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_dir):
+def make_plots(overall_df, extreme_df, self_extreme_df, reliability_df, improvement_df, output_dir):
     plot_dir = os.path.join(output_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
     mpl_config_dir = os.path.join(output_dir, ".matplotlib_cache")
@@ -654,6 +965,50 @@ def make_plots(overall_df, extreme_df, reliability_df, improvement_df, output_di
         plt.close(fig)
         plot_paths.append(path)
 
+    self_total = all_years_lead_all(self_extreme_df)
+    if not self_total.empty:
+        qmax = float(self_total["quantile"].max())
+        self_focus = self_total[np.isclose(self_total["quantile"], qmax)].copy()
+        self_focus["label"] = (
+            self_focus["month"].map(month_name)
+            + " "
+            + self_focus["variable"].str.upper()
+            + " "
+            + self_focus["tail"]
+        )
+        labels_self = list(self_focus[self_focus["system"] == "ml"]["label"])
+        x = np.arange(len(labels_self))
+        width = 0.36
+        fig, axes = plt.subplots(1, 2, figsize=(15, 4.5), constrained_layout=True)
+        for ax, metric, title in (
+            (axes[0], "brier_score", f"Relative-tail Brier score q={qmax:.2f}"),
+            (axes[1], "frequency_bias", f"Relative-tail frequency bias q={qmax:.2f}"),
+        ):
+            for offset, system in ((-width / 2, "ml"), (width / 2, "geos")):
+                values = (
+                    self_focus[self_focus["system"] == system]
+                    .set_index("label")
+                    .reindex(labels_self)[metric]
+                    .values
+                )
+                bars = ax.bar(x + offset, values, width=width, label=system.upper())
+                add_value_labels(ax, bars, fmt="{:.2f}")
+            if metric == "frequency_bias":
+                ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8)
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels_self, rotation=25, ha="right")
+            ax.set_title(title)
+            ax.grid(True, axis="y", alpha=0.25)
+        axes[0].legend(loc="best")
+        fig.suptitle(
+            "Diagnostic only: each system uses its own 2021-2024 threshold",
+            fontsize=11,
+        )
+        path = os.path.join(plot_dir, "raw_self_threshold_extreme_skill_qmax.png")
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        plot_paths.append(path)
+
     rel_total = all_years_lead_all(reliability_df)
     if not rel_total.empty:
         qmax = rel_total["quantile"].max()
@@ -705,6 +1060,7 @@ def evaluate_subset(
     quantiles,
     decision_thresholds,
     thresholds_by_variable,
+    threshold_source,
     overall_rows,
     extreme_rows,
     decision_rows,
@@ -737,6 +1093,7 @@ def evaluate_subset(
                         quantile,
                         tail,
                         threshold,
+                        threshold_source=threshold_source,
                     )
                     extreme_rows.append(row)
                     decision_rows.extend(weighted_decision_rows(row, prob, event, weights, decision_thresholds))
@@ -756,10 +1113,70 @@ def evaluate_subset(
                             tail,
                             threshold,
                             lead_idx=lead_idx,
+                            threshold_source=threshold_source,
                         )
                         extreme_rows.append(lead_row)
                         decision_rows.extend(weighted_decision_rows(lead_row, lead_prob, lead_event, weights, decision_thresholds))
                         reliability_matrix_rows.extend(reliability_rows(lead_row, lead_prob, lead_event, weights))
+
+
+def evaluate_self_threshold_subset(
+    sub,
+    scope,
+    year_label,
+    init_label,
+    month,
+    weights,
+    quantiles,
+    self_thresholds,
+    self_extreme_rows,
+):
+    for variable in ("pr", "t2m"):
+        obs = obs_for(sub, variable)
+        obs_thresholds = self_thresholds["obs"][variable]
+        for system in ("ml", "geos"):
+            ensemble = data_for(sub, variable, system)
+            forecast_thresholds = self_thresholds[system][variable]
+            for tail in tails_for_variable(variable):
+                for quantile in quantiles:
+                    obs_threshold = obs_thresholds[(tail, quantile)]
+                    forecast_threshold = forecast_thresholds[(tail, quantile)]
+                    self_extreme_rows.append(
+                        self_threshold_extreme_metrics(
+                            scope,
+                            year_label,
+                            init_label,
+                            month,
+                            variable,
+                            system,
+                            ensemble,
+                            obs,
+                            weights,
+                            quantile,
+                            tail,
+                            obs_threshold,
+                            forecast_threshold,
+                        )
+                    )
+                    for lead_idx in range(obs.shape[1]):
+                        self_extreme_rows.append(
+                            self_threshold_extreme_metrics(
+                                scope,
+                                year_label,
+                                init_label,
+                                month,
+                                variable,
+                                system,
+                                ensemble,
+                                obs,
+                                weights,
+                                quantile,
+                                tail,
+                                obs_threshold,
+                                forecast_threshold,
+                                lead_idx=lead_idx,
+                            )
+                        )
 
 
 def main():
@@ -768,17 +1185,28 @@ def main():
     quantiles = parse_float_list(args.extreme_quantiles)
     decision_thresholds = parse_float_list(args.decision_thresholds)
     os.makedirs(args.output_dir, exist_ok=True)
+    config = load_config(args.config)
 
     ds, loaded_years, missing_years, skip_years = load_eval_dataset(args, months)
     try:
         weights = area_weights(ds["lat"].values)
         overall_rows = []
         extreme_rows = []
+        self_extreme_rows = []
         decision_rows = []
         reliability_matrix_rows = []
         init_dates = pd.to_datetime(ds["init"].values).normalize()
         init_month = init_dates.month
         init_year = init_dates.year
+        expected_shape = obs_for(ds, "pr").shape[1:]
+        obs_clim_metadata = None
+        if args.threshold_source == "obs_climatology":
+            obs_clim, obs_clim_metadata = load_obs_climatology(
+                args, config, months, ("pr", "t2m"), expected_shape
+            )
+            physical_thresholds = build_obs_thresholds(obs_clim, months, quantiles)
+        else:
+            physical_thresholds = build_eval_obs_thresholds(ds, months, quantiles)
 
         for month in months:
             indices = np.where(init_month == int(month))[0]
@@ -786,14 +1214,8 @@ def main():
                 print(f"⚠️ No raw init dates for month={month}.")
                 continue
             month_sub = ds.isel(init=indices)
-            thresholds_by_variable = {}
-            for variable in ("pr", "t2m"):
-                month_obs = obs_for(month_sub, variable)
-                thresholds_by_variable[variable] = {
-                    (tail, quantile): raw_threshold(month_obs, quantile, tail)
-                    for tail in tails_for_variable(variable)
-                    for quantile in quantiles
-                }
+            thresholds_by_variable = physical_thresholds[int(month)]
+            self_thresholds = build_self_thresholds(month_sub, quantiles)
 
             evaluate_subset(
                 month_sub,
@@ -805,10 +1227,22 @@ def main():
                 quantiles,
                 decision_thresholds,
                 thresholds_by_variable,
+                args.threshold_source,
                 overall_rows,
                 extreme_rows,
                 decision_rows,
                 reliability_matrix_rows,
+            )
+            evaluate_self_threshold_subset(
+                month_sub,
+                "all_years",
+                "all",
+                "all",
+                month,
+                weights,
+                quantiles,
+                self_thresholds,
+                self_extreme_rows,
             )
 
             for year in sorted(np.unique(init_year[indices])):
@@ -823,10 +1257,22 @@ def main():
                     quantiles,
                     decision_thresholds,
                     thresholds_by_variable,
+                    args.threshold_source,
                     overall_rows,
                     extreme_rows,
                     decision_rows,
                     reliability_matrix_rows,
+                )
+                evaluate_self_threshold_subset(
+                    ds.isel(init=year_indices),
+                    "year",
+                    str(int(year)),
+                    "all",
+                    month,
+                    weights,
+                    quantiles,
+                    self_thresholds,
+                    self_extreme_rows,
                 )
 
             for idx in indices:
@@ -841,20 +1287,40 @@ def main():
                     quantiles,
                     decision_thresholds,
                     thresholds_by_variable,
+                    args.threshold_source,
                     overall_rows,
                     extreme_rows,
                     decision_rows,
                     reliability_matrix_rows,
+                )
+                evaluate_self_threshold_subset(
+                    ds.isel(init=[idx]),
+                    "init",
+                    init_dates[idx].strftime("%Y"),
+                    init_label,
+                    month,
+                    weights,
+                    quantiles,
+                    self_thresholds,
+                    self_extreme_rows,
                 )
     finally:
         ds.close()
 
     overall_df = pd.DataFrame(overall_rows)
     extreme_df = pd.DataFrame(extreme_rows)
+    self_extreme_df = pd.DataFrame(self_extreme_rows)
     decision_df = pd.DataFrame(decision_rows)
     reliability_df = pd.DataFrame(reliability_matrix_rows)
-    improvement_df = print_evaluation_summaries(overall_df, extreme_df, decision_df)
-    plot_paths = make_plots(overall_df, extreme_df, reliability_df, all_years_lead_all(improvement_df), args.output_dir)
+    improvement_df = print_evaluation_summaries(overall_df, extreme_df, self_extreme_df, decision_df)
+    plot_paths = make_plots(
+        overall_df,
+        extreme_df,
+        self_extreme_df,
+        reliability_df,
+        all_years_lead_all(improvement_df),
+        args.output_dir,
+    )
 
     paths = {
         "overall": os.path.join(args.output_dir, "raw_overall_matrix.csv"),
@@ -865,6 +1331,10 @@ def main():
         "extreme_yearly": os.path.join(args.output_dir, "raw_extreme_yearly_matrix.csv"),
         "extreme_init": os.path.join(args.output_dir, "raw_extreme_init_matrix.csv"),
         "extreme_all_year_weekly": os.path.join(args.output_dir, "raw_extreme_all_year_weekly_matrix.csv"),
+        "self_extreme": os.path.join(args.output_dir, "raw_self_threshold_extreme_matrix.csv"),
+        "self_extreme_yearly": os.path.join(args.output_dir, "raw_self_threshold_extreme_yearly_matrix.csv"),
+        "self_extreme_init": os.path.join(args.output_dir, "raw_self_threshold_extreme_init_matrix.csv"),
+        "self_extreme_all_year_weekly": os.path.join(args.output_dir, "raw_self_threshold_extreme_all_year_weekly_matrix.csv"),
         "decision": os.path.join(args.output_dir, "raw_extreme_decision_matrix.csv"),
         "reliability": os.path.join(args.output_dir, "raw_extreme_reliability_matrix.csv"),
         "improvement": os.path.join(args.output_dir, "raw_ml_vs_geos_improvement.csv"),
@@ -882,6 +1352,12 @@ def main():
     extreme_df[(extreme_df["scope"] == "all_years") & (extreme_df["lead"].astype(str) != "all")].to_csv(
         paths["extreme_all_year_weekly"], index=False
     )
+    self_extreme_df.to_csv(paths["self_extreme"], index=False)
+    self_extreme_df[self_extreme_df["scope"] == "year"].to_csv(paths["self_extreme_yearly"], index=False)
+    self_extreme_df[self_extreme_df["scope"] == "init"].to_csv(paths["self_extreme_init"], index=False)
+    self_extreme_df[
+        (self_extreme_df["scope"] == "all_years") & (self_extreme_df["lead"].astype(str) != "all")
+    ].to_csv(paths["self_extreme_all_year_weekly"], index=False)
     decision_df.to_csv(paths["decision"], index=False)
     reliability_df.to_csv(paths["reliability"], index=False)
     improvement_df.to_csv(paths["improvement"], index=False)
@@ -895,10 +1371,27 @@ def main():
                 "years_missing": missing_years,
                 "skip_years": skip_years,
                 "months": months,
+                "config": args.config,
+                "threshold_source": args.threshold_source,
+                "obs_climatology": obs_clim_metadata,
+                "physical_threshold_definition": (
+                    "Separate init-month, lead, and gridpoint quantiles from raw observed "
+                    "2001-2020 targets by default. The same observed threshold is applied "
+                    "to OBS truth, ML members, and GEOS members."
+                ),
+                "self_threshold_definition": (
+                    "Separate init-month, lead, and gridpoint quantiles from the evaluation "
+                    "period. OBS uses observed values; ML and GEOS each use their own pooled "
+                    "init-by-member distribution. These scores are diagnostic and not an "
+                    "independent physical-event verification."
+                ),
                 "extreme_quantiles": quantiles,
                 "decision_thresholds": decision_thresholds,
                 "plots": plot_paths,
-                "notes": "Raw ML/GEOS forecasts are verified directly against raw obs for evaluation years only.",
+                "notes": (
+                    "Main extreme matrices use physical thresholds from observed climatology by default. "
+                    "Self-threshold matrices are diagnostic relative-tail scores using separate evaluation-period OBS/ML/GEOS thresholds."
+                ),
             },
             f,
             indent=2,
@@ -915,6 +1408,10 @@ def main():
     print(f"  Year extreme : {paths['extreme_yearly']}")
     print(f"  Init extreme : {paths['extreme_init']}")
     print(f"  Weekly event : {paths['extreme_all_year_weekly']}")
+    print(f"  Self extreme : {paths['self_extreme']}")
+    print(f"  Self yearly  : {paths['self_extreme_yearly']}")
+    print(f"  Self init    : {paths['self_extreme_init']}")
+    print(f"  Self weekly  : {paths['self_extreme_all_year_weekly']}")
     print(f"  Decision     : {paths['decision']}")
     print(f"  Reliability  : {paths['reliability']}")
     print(f"  Improvement  : {paths['improvement']}")
@@ -923,7 +1420,7 @@ def main():
         for path in plot_paths:
             print(f"    {path}")
     print(f"  Metadata     : {paths['metadata']}")
-    print_final_evaluation_summary(overall_df, extreme_df, improvement_df)
+    print_final_evaluation_summary(overall_df, extreme_df, self_extreme_df, improvement_df)
 
 
 if __name__ == "__main__":
