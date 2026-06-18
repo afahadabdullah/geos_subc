@@ -173,7 +173,7 @@ fi
 
 echo "🔥 Launching Flow Matching Multi-Target v9.2 Training (SA target, local/global predictors, residual T2M)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv9_2.py --config "$CONFIG_PATH" \
-    --epochs-per-run 20
+    --epochs-per-run 30
 
 # --- AUTOMATIC JOB CHAINING ---
 if [ -f "$EARLY_STOP_FILE" ]; then
