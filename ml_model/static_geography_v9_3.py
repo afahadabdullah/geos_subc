@@ -8,7 +8,6 @@ from glob import glob
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import xarray as xr
 
 
@@ -94,8 +93,146 @@ def _load_land_mask(data_dir, lats, lons):
     return np.isnan(local_sss).astype(np.float32), sss_path
 
 
-def _coordinate_name(da, options):
-    return next((name for name in options if name in da.coords), None)
+def _is_axis_variable(variable, axis):
+    standard_name = str(variable.attrs.get("standard_name", "")).strip().lower()
+    units = str(variable.attrs.get("units", "")).strip().lower()
+    if axis == "latitude":
+        return standard_name == "latitude" or units in {
+            "degrees_north",
+            "degree_north",
+            "degrees_n",
+            "degree_n",
+        }
+    return standard_name == "longitude" or units in {
+        "degrees_east",
+        "degree_east",
+        "degrees_e",
+        "degree_e",
+    }
+
+
+def _find_spatial_axis(ds, da, axis):
+    aliases = {
+        "latitude": ("latitude", "lat", "Y", "y"),
+        "longitude": ("longitude", "lon", "X", "x"),
+    }[axis]
+
+    # Prefer a coordinate already attached to the elevation field.
+    for name in da.coords:
+        variable = da.coords[name]
+        if name in aliases or _is_axis_variable(variable, axis):
+            if variable.ndim == 1:
+                return variable.dims[0], np.asarray(variable.values, dtype=np.float64), name
+
+    # GLDAS NetCDF files can store latitude/longitude as ordinary variables
+    # rather than marking them as coordinates on GLDAS_elevation.
+    for name in aliases:
+        if name in ds.variables and ds[name].ndim == 1:
+            variable = ds[name]
+            return variable.dims[0], np.asarray(variable.values, dtype=np.float64), name
+    for name, variable in ds.variables.items():
+        if variable.ndim == 1 and _is_axis_variable(variable, axis):
+            return variable.dims[0], np.asarray(variable.values, dtype=np.float64), name
+
+    raise ValueError(
+        f"Could not identify the {axis} axis for elevation variable {da.name!r}. "
+        f"dims={da.dims}, coordinates={list(da.coords)}, variables={list(ds.variables)}"
+    )
+
+
+def _find_elevation_variable(ds, requested_var=None):
+    if requested_var:
+        if requested_var not in ds:
+            raise ValueError(
+                f"elevation_variable={requested_var!r} is not in the file; "
+                f"variables={list(ds.data_vars)}"
+            )
+        return requested_var
+
+    aliases = (
+        "GLDAS_elevation",
+        "gldas_elevation",
+        "elevation",
+        "Elevation",
+        "elev",
+        "ELEV",
+        "orography",
+        "topography",
+        "z",
+        "geopotential",
+        "surface_geopotential",
+    )
+    for name in aliases:
+        if name in ds.data_vars:
+            return name
+    for name, variable in ds.data_vars.items():
+        if str(variable.attrs.get("standard_name", "")).strip().lower() == "elevation":
+            return name
+    raise ValueError(
+        "Could not identify an elevation variable. "
+        f"Data variables and standard_name values: "
+        f"{[(name, variable.attrs.get('standard_name')) for name, variable in ds.data_vars.items()]}"
+    )
+
+
+def _bilinear_interpolate_regular(
+    source,
+    source_lats,
+    source_lons,
+    target_lats,
+    target_lons,
+):
+    """Bilinear interpolation on monotonic 1-D lat/lon axes without SciPy."""
+    source = np.asarray(source, dtype=np.float64)
+    source_lats = np.asarray(source_lats, dtype=np.float64)
+    source_lons = np.asarray(source_lons, dtype=np.float64)
+    target_lats = np.asarray(target_lats, dtype=np.float64)
+    target_lons = np.asarray(target_lons, dtype=np.float64)
+    if source.shape != (source_lats.size, source_lons.size):
+        raise ValueError(
+            f"Elevation data shape {source.shape} does not match coordinate sizes "
+            f"{source_lats.size}x{source_lons.size}."
+        )
+    if np.any(np.diff(source_lats) <= 0) or np.any(np.diff(source_lons) <= 0):
+        raise ValueError("Source latitude and longitude must be strictly increasing.")
+    if (
+        target_lats.min() < source_lats.min()
+        or target_lats.max() > source_lats.max()
+        or target_lons.min() < source_lons.min()
+        or target_lons.max() > source_lons.max()
+    ):
+        raise ValueError(
+            "Target geography grid lies outside the source elevation grid: "
+            f"target lat={target_lats.min()}..{target_lats.max()}, "
+            f"lon={target_lons.min()}..{target_lons.max()}; "
+            f"source lat={source_lats.min()}..{source_lats.max()}, "
+            f"lon={source_lons.min()}..{source_lons.max()}."
+        )
+
+    lat_hi = np.searchsorted(source_lats, target_lats, side="right")
+    lon_hi = np.searchsorted(source_lons, target_lons, side="right")
+    lat_hi = np.clip(lat_hi, 1, source_lats.size - 1)
+    lon_hi = np.clip(lon_hi, 1, source_lons.size - 1)
+    lat_lo = lat_hi - 1
+    lon_lo = lon_hi - 1
+    lat_fraction = (
+        (target_lats - source_lats[lat_lo])
+        / (source_lats[lat_hi] - source_lats[lat_lo])
+    )
+    lon_fraction = (
+        (target_lons - source_lons[lon_lo])
+        / (source_lons[lon_hi] - source_lons[lon_lo])
+    )
+
+    lower_left = source[lat_lo[:, None], lon_lo[None, :]]
+    lower_right = source[lat_lo[:, None], lon_hi[None, :]]
+    upper_left = source[lat_hi[:, None], lon_lo[None, :]]
+    upper_right = source[lat_hi[:, None], lon_hi[None, :]]
+    lon_fraction = lon_fraction[None, :]
+    lower = lower_left * (1.0 - lon_fraction) + lower_right * lon_fraction
+    upper = upper_left * (1.0 - lon_fraction) + upper_right * lon_fraction
+    lat_fraction = lat_fraction[:, None]
+    return lower * (1.0 - lat_fraction) + upper * lat_fraction
 
 
 def _find_elevation_path(config):
@@ -137,62 +274,48 @@ def _load_elevation(config, lats, lons):
     ds = xr.open_dataset(elevation_path)
     try:
         requested_var = config.get("elevation_variable")
-        if requested_var:
-            if requested_var not in ds:
-                raise ValueError(
-                    f"elevation_variable={requested_var!r} is not in {elevation_path}; "
-                    f"variables={list(ds.data_vars)}"
-                )
-            da = ds[requested_var]
-        else:
-            var_name = next(
-                (
-                    name
-                    for name in (
-                        "elevation",
-                        "Elevation",
-                        "elev",
-                        "ELEV",
-                        "orography",
-                        "topography",
-                        "z",
-                        "geopotential",
-                        "surface_geopotential",
-                    )
-                    if name in ds
-                ),
-                next(iter(ds.data_vars)),
-            )
-            da = ds[var_name]
+        var_name = _find_elevation_variable(ds, requested_var=requested_var)
+        da = ds[var_name]
 
         da = da.squeeze(drop=True)
-        lat_name = _coordinate_name(da, ("latitude", "lat", "Y", "y"))
-        lon_name = _coordinate_name(da, ("longitude", "lon", "X", "x"))
-        if lat_name is None or lon_name is None:
-            raise ValueError(
-                f"Could not identify latitude/longitude coordinates in {elevation_path}."
-            )
+        lat_dim, source_lats, lat_name = _find_spatial_axis(ds, da, "latitude")
+        lon_dim, source_lons, lon_name = _find_spatial_axis(ds, da, "longitude")
         for dim in tuple(da.dims):
-            if dim not in {lat_name, lon_name}:
+            if dim not in {lat_dim, lon_dim}:
                 da = da.isel({dim: 0})
 
-        source_lons = np.mod(np.asarray(da[lon_name].values, dtype=np.float64), 360.0)
+        da = da.assign_coords({lat_dim: source_lats, lon_dim: source_lons})
+        source_lons = np.mod(source_lons, 360.0)
         lon_order = np.argsort(source_lons)
         sorted_lons = source_lons[lon_order]
         unique_lons, unique_positions = np.unique(sorted_lons, return_index=True)
         lon_order = lon_order[unique_positions]
-        da = da.isel({lon_name: lon_order})
-        da = da.assign_coords({lon_name: unique_lons})
-        if float(da[lat_name][0]) > float(da[lat_name][-1]):
-            da = da.isel({lat_name: slice(None, None, -1)})
-        local = da.interp(
-            {
-                lat_name: xr.DataArray(np.asarray(lats), dims="target_lat"),
-                lon_name: xr.DataArray(np.asarray(lons) % 360.0, dims="target_lon"),
-            },
-            method="linear",
+        da = da.isel({lon_dim: lon_order})
+        da = da.assign_coords({lon_dim: unique_lons})
+        if float(da[lat_dim][0]) > float(da[lat_dim][-1]):
+            da = da.isel({lat_dim: slice(None, None, -1)})
+        source_lats = np.asarray(da[lat_dim].values, dtype=np.float64)
+        source_lons = np.asarray(da[lon_dim].values, dtype=np.float64)
+        source_elevation = np.asarray(
+            da.transpose(lat_dim, lon_dim).values,
+            dtype=np.float64,
         )
-        elevation = np.asarray(local.values, dtype=np.float64)
+        # GLDAS has missing values over water. Fill these with physical sea
+        # level before interpolation so coastal 1-degree cells are averaged
+        # consistently rather than becoming NaN.
+        source_elevation = np.nan_to_num(
+            source_elevation,
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        elevation = _bilinear_interpolate_regular(
+            source_elevation,
+            source_lats,
+            source_lons,
+            np.asarray(lats, dtype=np.float64),
+            np.mod(np.asarray(lons, dtype=np.float64), 360.0),
+        )
     finally:
         ds.close()
 
@@ -210,7 +333,6 @@ def _load_elevation(config, lats, lons):
     # ERA5 geopotential is commonly stored in m2 s-2; convert it to metres.
     if np.nanpercentile(np.abs(elevation), 95) > 12000.0:
         elevation = elevation / 9.80665
-    elevation = np.maximum(elevation, 0.0)
     mean_m = float(elevation.mean())
     std_m = float(elevation.std())
     if std_m < 1e-6:
@@ -221,6 +343,9 @@ def _load_elevation(config, lats, lons):
         "available": True,
         "mean_m": mean_m,
         "std_m": std_m,
+        "variable": var_name,
+        "latitude_variable": lat_name,
+        "longitude_variable": lon_name,
     }, elevation.astype(np.float32)
 
 
@@ -272,7 +397,7 @@ def _save_topography_diagnostic(channels, elevation_m, lats, lons, path, metadat
     elevation_mean = float(elevation_meta.get("mean_m", 0.0))
     elevation_std = float(elevation_meta.get("std_m", 1.0))
     elevation_norm = np.asarray(channels[0], dtype=np.float32)
-    elevation_m = np.maximum(np.asarray(elevation_m, dtype=np.float32), 0.0)
+    elevation_m = np.asarray(elevation_m, dtype=np.float32)
     land_mask = np.asarray(channels[1], dtype=np.float32)
     extent = [float(lons[0]), float(lons[-1]), float(lats[0]), float(lats[-1])]
 
@@ -308,6 +433,8 @@ def _save_topography_diagnostic(channels, elevation_m, lats, lons, path, metadat
 
 def load_or_build_static_geography(config, lats, lons, output_dir=None):
     """Return a [5,H,W] float tensor and provenance metadata."""
+    import torch
+
     lats = np.asarray(lats, dtype=np.float32)
     lons = np.asarray(lons, dtype=np.float32)
     artifact_path = _resolve_path(

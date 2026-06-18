@@ -119,6 +119,13 @@ echo "🎯 Variance inference/fine-tune beta: PR=$CONFIG_BETA_PR T2M=$CONFIG_BET
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"
 echo "🎯 Stats file: ml_model/$STATS_FILENAME"
 
+# Fail-fast topography preflight before dataset preload or model construction.
+echo "🗺️ Running GLDAS topography preflight..."
+python ml_model/inspect_topography_v9_3.py \
+    --file "$CONFIG_ELEVATION_FILE" \
+    --variable "GLDAS_elevation" \
+    --output "$OUTPUT_DIR/topography_v9_3_preflight.png"
+
 # Run Global Stats calculation (only if stats file doesn't exist)
 STATS_PATH="ml_model/$STATS_FILENAME"
 if [ -f "$STATS_PATH" ]; then
