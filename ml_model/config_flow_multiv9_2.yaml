@@ -6,7 +6,7 @@ batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
 reset_optimizer_state: False
-epochs: 300
+epochs: 80
 output_dir: ml_output_flowmulti_v9_2_sa_55e100e_0n40n_noisectx_t2mres
 mixed_precision: bf16
 num_workers: 1
@@ -47,7 +47,7 @@ global_context_variables:
 train_noise_mode: eof_lhs_mix
 train_rho_pr: 0.15
 train_rho_t2m: 0.05
-train_rho_after_epoch: 30
+train_rho_after_epoch: 26
 train_rho_pr_after: 0.25
 train_rho_t2m_after: 0.08
 train_time_schedule: stratified_low_mid
@@ -65,17 +65,18 @@ drop_geos_prob: 0.00
 
 reset_validation_history: False
 force_variance_phase: False
+# Phase schedule: 1-25 VelOnly, 26-54 Vel+Var, 55-80 VarOnly.
 variance_phase_lr: 1e-5
-variance_phase_start_epoch: 141
+variance_phase_start_epoch: 55
 variance_phase_start_from_best: True
 variance_phase_best_checkpoint: best_flow_ckpt.pt
 variance_training_num_ensemble: 15
-joint_variance_start_epoch: 30
+joint_variance_start_epoch: 26
 joint_variance_loss_weight: 0.03
 validation_num_ensemble: 15
 validation_num_steps: 10
 validation_ode_batch_size: 120
-crps_validation_start_epoch: 30
+crps_validation_start_epoch: 26
 crps_validation_every: 1
 mse_validation_seed: 1234
 crps_val_start_year: 2021
@@ -85,7 +86,7 @@ validation_rho_pr: 0.25
 validation_rho_t2m: 0.08
 validation_var_beta_pr: 0.45
 validation_var_beta_t2m: 0.03
-dense_mse_validation_until: 29
+dense_mse_validation_until: 25
 plot_validation_every: 5
 mse_plateau_patience: 3
 mse_plateau_factor: 0.5
