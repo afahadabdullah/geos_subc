@@ -114,8 +114,9 @@ def main():
     print(f"  normalized shape   : {elevation_norm.shape}")
     print(f"  physical elevation : {finite_summary(elevation_m)}")
     print(f"  normalized         : {finite_summary(elevation_norm)}")
-    print(f"  normalization mean : {metadata['mean_m']:.3f} m")
-    print(f"  normalization std  : {metadata['std_m']:.3f} m")
+    print(f"  normalization      : {metadata['normalization']} -> [-1, 1]")
+    print(f"  normalization min  : {metadata['min_m']:.3f} m")
+    print(f"  normalization max  : {metadata['max_m']:.3f} m")
     if elevation_m.shape != (41, 46):
         raise RuntimeError(f"Wrong South Asia shape: {elevation_m.shape}; expected (41, 46)")
     if not np.isfinite(elevation_m).all() or not np.isfinite(elevation_norm).all():
@@ -144,7 +145,7 @@ def main():
         aspect="auto",
         cmap="coolwarm",
     )
-    axes[1].set_title("Normalized elevation used by model")
+    axes[1].set_title("Min-max elevation used by model [-1, 1]")
     for ax in axes:
         ax.set_xlabel("Longitude (°E)")
         ax.set_ylabel("Latitude (°N)")

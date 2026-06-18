@@ -1988,18 +1988,6 @@ def train(args, accelerator):
     # Area weights (needed early for diagnostic plot)
     area_weights = get_area_weights(lats, device)
 
-    # Validate and build static geography before constructing/preloading any
-    # datasets. A malformed topography file must fail in seconds, not after
-    # thousands of samples have been loaded.
-    output_dir = config.get("output_dir", "ml_output_flowmulti_v9_3")
-    os.makedirs(output_dir, exist_ok=True)
-    static_geography, static_geography_metadata = load_or_build_static_geography(
-        config,
-        lats,
-        lons,
-        output_dir=output_dir if accelerator.is_main_process else None,
-    )
-
     # ─── Land-Ocean Mask (V6: 65% land / 35% ocean) ───
     # Derive from SSS data: NaN pixels = land, valid pixels = ocean
     # Cache to .pt file so we only need SSS once.
@@ -2104,6 +2092,18 @@ def train(args, accelerator):
         else:
             if accelerator.is_main_process:
                 print(f"  ⚠️ SSS file not found at {sss_sample_path}. Using uniform land-ocean weights.")
+
+    # Build static geography only after the original loss-weighting land mask
+    # has been loaded/created, ensuring the model input reuses the same
+    # ``is_land`` field. This still happens before dataset preload.
+    output_dir = config.get("output_dir", "ml_output_flowmulti_v9_3")
+    os.makedirs(output_dir, exist_ok=True)
+    static_geography, static_geography_metadata = load_or_build_static_geography(
+        config,
+        lats,
+        lons,
+        output_dir=output_dir if accelerator.is_main_process else None,
+    )
 
     # Get stats file from config (no fallback - must be specified)
     stats_filename = config.get("stats_file", "v8_sa_55e100e_0n40n_global_local_stats.pt")
@@ -2429,6 +2429,11 @@ def train(args, accelerator):
         print(
             f"   [Elevation Source]  : "
             f"{static_geography_metadata.get('elevation', {}).get('source', 'unknown')}"
+        )
+        print(
+            f"   [Static Land Mask]  : {static_geography_metadata.get('land_source', 'unknown')} "
+            f"(land={static_geography_metadata.get('land_pixels', 'unknown')}, "
+            f"ocean={static_geography_metadata.get('ocean_pixels', 'unknown')})"
         )
         if bool(config.get("plot_topography", True)):
             print(

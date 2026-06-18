@@ -36,6 +36,9 @@ static_geography_file: ml_model/static_geography_multiv9_3_sa.pt
 elevation_file: /home1/11353/afahad/geos_subc/ml_model/GLDASp5_elevation_025d.nc4
 elevation_variable: GLDAS_elevation
 require_elevation_file: True
+elevation_normalization: minmax
+# Reuse the exact v9.2/v9.3 loss-weighting land mask as a model input.
+static_land_mask_file: ml_model/land_ocean_mask_v6_south_asia_55e_100e_0n_40n.pt
 cache_static_geography: True
 rebuild_static_geography: False
 plot_static_geography: True

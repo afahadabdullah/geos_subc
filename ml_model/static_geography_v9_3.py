@@ -12,7 +12,7 @@ import xarray as xr
 
 
 STATIC_CHANNEL_NAMES = (
-    "elevation_zscore",
+    "elevation_minmax",
     "land_mask",
     "latitude_normalized",
     "longitude_sin",
@@ -45,7 +45,8 @@ def _target_indices(lats, lons):
 
 
 def _find_sss_path(data_dir):
-    candidates = sorted(
+    preferred = os.path.join(data_dir, "sss_weekly_2020.zarr")
+    candidates = [preferred] + sorted(
         glob(os.path.join(data_dir, "sss_weekly_*.zarr"))
         + glob(os.path.join(data_dir, "sss", "*.zarr")),
         reverse=True,
@@ -53,9 +54,50 @@ def _find_sss_path(data_dir):
     return next((path for path in candidates if os.path.exists(path)), None)
 
 
-def _load_land_mask(data_dir, lats, lons):
-    sss_path = _find_sss_path(data_dir)
-    if sss_path is None:
+def _load_cached_land_mask(mask_path, lats, lons):
+    if not mask_path or not os.path.exists(mask_path):
+        return None
+    import torch
+
+    cached = torch.load(mask_path, map_location="cpu", weights_only=True)
+    if "is_land" not in cached:
+        raise ValueError(
+            f"Configured land-mask cache has no 'is_land' field: {mask_path}"
+        )
+    land_mask = np.asarray(cached["is_land"], dtype=np.float32).squeeze()
+    expected_shape = (len(lats), len(lons))
+    if land_mask.shape != expected_shape:
+        raise ValueError(
+            f"Configured land mask has shape {land_mask.shape}, expected {expected_shape}: "
+            f"{mask_path}"
+        )
+    if not np.isin(land_mask, [0.0, 1.0]).all():
+        raise ValueError(f"Configured land mask is not binary: {mask_path}")
+    if land_mask.min() == land_mask.max():
+        raise ValueError(f"Configured land mask is spatially uniform: {mask_path}")
+    return land_mask
+
+
+def _load_land_mask(data_dir, lats, lons, mask_cache_path=None):
+    mask_cache_path = _resolve_path(mask_cache_path)
+    cached_land_mask = _load_cached_land_mask(mask_cache_path, lats, lons)
+    if cached_land_mask is not None:
+        return cached_land_mask, mask_cache_path
+
+    candidates = []
+    preferred = _find_sss_path(data_dir)
+    if preferred:
+        candidates.append(preferred)
+    candidates.extend(
+        path
+        for path in sorted(
+            glob(os.path.join(data_dir, "sss_weekly_*.zarr"))
+            + glob(os.path.join(data_dir, "sss", "*.zarr")),
+            reverse=True,
+        )
+        if path not in candidates
+    )
+    if not candidates:
         warnings.warn(
             "No SSS Zarr was found for the v9.3 land mask. The static land channel "
             "will be zero until the artifact is rebuilt where SSS data are available.",
@@ -63,34 +105,46 @@ def _load_land_mask(data_dir, lats, lons):
         )
         return np.zeros((len(lats), len(lons)), dtype=np.float32), "zero_fallback"
 
-    ds = xr.open_zarr(sss_path, consolidated=False)
-    try:
-        var_name = next(
-            (
-                name
-                for name in ("sss", "SSS", "sos", "SOS", "sea_surface_salinity", "s_surface")
-                if name in ds
-            ),
-            None,
-        )
-        if var_name is None:
-            raise ValueError(f"No SSS variable found in {sss_path}; variables={list(ds.data_vars)}")
-        da = ds[var_name]
-        for dim in tuple(da.dims[:-2]):
-            da = da.isel({dim: 0})
-        global_sss = np.asarray(da.values).squeeze()
-    finally:
-        ds.close()
-
-    if global_sss.shape[-2:] == (360, 181):
-        global_sss = global_sss.T
-    if global_sss.shape[-2:] != (181, 360):
-        raise ValueError(
-            f"Expected SSS on a 181x360 grid, got {global_sss.shape} from {sss_path}."
-        )
     lat_idx, lon_idx = _target_indices(lats, lons)
-    local_sss = np.take(np.take(global_sss, lat_idx, axis=-2), lon_idx, axis=-1)
-    return np.isnan(local_sss).astype(np.float32), sss_path
+    rejected = []
+    for sss_path in candidates:
+        ds = xr.open_zarr(sss_path, consolidated=False)
+        try:
+            var_name = next(
+                (
+                    name
+                    for name in ("sss", "SSS", "sos", "SOS", "sea_surface_salinity", "s_surface")
+                    if name in ds
+                ),
+                None,
+            )
+            if var_name is None:
+                rejected.append(f"{sss_path}: no SSS variable")
+                continue
+            da = ds[var_name]
+            for dim in tuple(da.dims[:-2]):
+                da = da.isel({dim: 0})
+            global_sss = np.asarray(da.values).squeeze()
+        finally:
+            ds.close()
+
+        if global_sss.shape[-2:] == (360, 181):
+            global_sss = global_sss.T
+        if global_sss.shape[-2:] != (181, 360):
+            rejected.append(f"{sss_path}: shape={global_sss.shape}")
+            continue
+        local_sss = np.take(np.take(global_sss, lat_idx, axis=-2), lon_idx, axis=-1)
+        land_mask = np.isnan(local_sss).astype(np.float32)
+        if land_mask.min() != land_mask.max():
+            return land_mask, sss_path
+        rejected.append(
+            f"{sss_path}: uniform mask value={float(land_mask.flat[0]):.0f}"
+        )
+
+    raise ValueError(
+        "Could not derive a non-uniform South Asia land mask from SSS. "
+        f"Rejected sources: {'; '.join(rejected)}"
+    )
 
 
 def _is_axis_variable(variable, axis):
@@ -267,8 +321,9 @@ def _load_elevation(config, lats, lons):
         return zeros, {
             "source": "zero_fallback",
             "available": False,
-            "mean_m": 0.0,
-            "std_m": 1.0,
+            "normalization": "minmax",
+            "min_m": 0.0,
+            "max_m": 1.0,
         }, zeros.copy()
 
     ds = xr.open_dataset(elevation_path)
@@ -333,16 +388,26 @@ def _load_elevation(config, lats, lons):
     # ERA5 geopotential is commonly stored in m2 s-2; convert it to metres.
     if np.nanpercentile(np.abs(elevation), 95) > 12000.0:
         elevation = elevation / 9.80665
-    mean_m = float(elevation.mean())
-    std_m = float(elevation.std())
-    if std_m < 1e-6:
-        std_m = 1.0
-    elevation_norm = np.clip((elevation - mean_m) / std_m, -5.0, 5.0).astype(np.float32)
+    normalization = str(config.get("elevation_normalization", "minmax")).lower()
+    if normalization != "minmax":
+        raise ValueError(
+            f"v9.3 elevation_normalization must be 'minmax', got {normalization!r}."
+        )
+    min_m = float(elevation.min())
+    max_m = float(elevation.max())
+    if max_m - min_m < 1e-6:
+        raise ValueError(
+            f"Elevation range is degenerate: min={min_m}, max={max_m}."
+        )
+    elevation_norm = (
+        2.0 * (np.clip(elevation, min_m, max_m) - min_m) / (max_m - min_m) - 1.0
+    ).astype(np.float32)
     return elevation_norm, {
         "source": elevation_path,
         "available": True,
-        "mean_m": mean_m,
-        "std_m": std_m,
+        "normalization": normalization,
+        "min_m": min_m,
+        "max_m": max_m,
         "variable": var_name,
         "latitude_variable": lat_name,
         "longitude_variable": lon_name,
@@ -394,8 +459,8 @@ def _save_topography_diagnostic(channels, elevation_m, lats, lons, path, metadat
     """Save a focused elevation/land alignment plot in physical and normalized units."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     elevation_meta = metadata.get("elevation", {})
-    elevation_mean = float(elevation_meta.get("mean_m", 0.0))
-    elevation_std = float(elevation_meta.get("std_m", 1.0))
+    elevation_min = float(elevation_meta.get("min_m", 0.0))
+    elevation_max = float(elevation_meta.get("max_m", 1.0))
     elevation_norm = np.asarray(channels[0], dtype=np.float32)
     elevation_m = np.asarray(elevation_m, dtype=np.float32)
     land_mask = np.asarray(channels[1], dtype=np.float32)
@@ -404,7 +469,7 @@ def _save_topography_diagnostic(channels, elevation_m, lats, lons, path, metadat
     fig, axes = plt.subplots(1, 3, figsize=(22, 6), constrained_layout=True)
     panels = (
         (elevation_m, "terrain", "GLDAS elevation (m)"),
-        (elevation_norm, "coolwarm", "Elevation normalized for model"),
+        (elevation_norm, "coolwarm", "Elevation min-max normalized [-1, 1]"),
         (land_mask, "Greens", "Land mask (1=land, 0=ocean)"),
     )
     for ax, (field, cmap, title) in zip(axes, panels):
@@ -423,7 +488,7 @@ def _save_topography_diagnostic(channels, elevation_m, lats, lons, path, metadat
     fig.suptitle(
         "v9.3 South Asia static topography alignment\n"
         f"source={elevation_meta.get('source', 'unknown')} | "
-        f"domain mean={elevation_mean:.1f} m, std={elevation_std:.1f} m",
+        f"domain min={elevation_min:.1f} m, max={elevation_max:.1f} m",
         fontsize=13,
         fontweight="bold",
     )
@@ -440,6 +505,7 @@ def load_or_build_static_geography(config, lats, lons, output_dir=None):
     artifact_path = _resolve_path(
         config.get("static_geography_file", "ml_model/static_geography_multiv9_3_sa.pt")
     )
+    configured_land_mask_path = _resolve_path(config.get("static_land_mask_file"))
     rebuild = bool(config.get("rebuild_static_geography", False))
 
     artifact = None
@@ -458,11 +524,20 @@ def load_or_build_static_geography(config, lats, lons, output_dir=None):
         if elevation_m is None:
             elevation_meta = metadata.get("elevation", {})
             elevation_m = (
-                channels[0] * float(elevation_meta.get("std_m", 1.0))
-                + float(elevation_meta.get("mean_m", 0.0))
+                0.5 * (channels[0] + 1.0)
+                * (
+                    float(elevation_meta.get("max_m", 1.0))
+                    - float(elevation_meta.get("min_m", 0.0))
+                )
+                + float(elevation_meta.get("min_m", 0.0))
             )
         elevation_m = torch.as_tensor(elevation_m, dtype=torch.float32)
         expected_elevation_path = _find_elevation_path(config)
+        expected_land_source = (
+            configured_land_mask_path
+            if configured_land_mask_path and os.path.exists(configured_land_mask_path)
+            else None
+        )
         elevation_now_available = expected_elevation_path is not None
         land_now_available = _find_sss_path(_resolve_path(config["data_dir"])) is not None
         stale_elevation = (
@@ -471,15 +546,29 @@ def load_or_build_static_geography(config, lats, lons, output_dir=None):
                 not bool(metadata.get("elevation", {}).get("available", False))
                 or _resolve_path(metadata.get("elevation", {}).get("source"))
                 != expected_elevation_path
+                or metadata.get("elevation", {}).get("normalization") != "minmax"
             )
         )
         stale_land = (
-            land_now_available and metadata.get("land_source") == "zero_fallback"
+            (
+                expected_land_source is not None
+                and _resolve_path(metadata.get("land_source")) != expected_land_source
+            )
+            or (
+                land_now_available
+                and metadata.get("land_source") == "zero_fallback"
+            )
+            or float(channels[1].min()) == float(channels[1].max())
         )
         rebuild = stale_elevation or stale_land
 
     if artifact is None or rebuild:
-        land_mask, land_source = _load_land_mask(_resolve_path(config["data_dir"]), lats, lons)
+        land_mask, land_source = _load_land_mask(
+            _resolve_path(config["data_dir"]),
+            lats,
+            lons,
+            mask_cache_path=configured_land_mask_path,
+        )
         elevation, elevation_meta, elevation_m_array = _load_elevation(config, lats, lons)
         elevation_m = torch.from_numpy(elevation_m_array)
         lat_norm, lon_sin, lon_cos = _make_coordinate_channels(lats, lons)
@@ -492,6 +581,8 @@ def load_or_build_static_geography(config, lats, lons, output_dir=None):
             "version": "v9.3",
             "channel_names": STATIC_CHANNEL_NAMES,
             "land_source": land_source,
+            "land_pixels": int(land_mask.sum()),
+            "ocean_pixels": int(land_mask.size - land_mask.sum()),
             "elevation": elevation_meta,
             "grid_shape": (len(lats), len(lons)),
         }
