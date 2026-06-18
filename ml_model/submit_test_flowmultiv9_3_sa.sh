@@ -47,6 +47,7 @@ NUM_STEPS="${SA_TEST_STEPS:-10}"
 MAX_ENSEMBLE_PER_CHUNK="${SA_TEST_MAX_ENSEMBLE_PER_CHUNK:-30}"
 VALIDATION_ODE_BATCH="${SA_TEST_ODE_BATCH:-120}"
 SAMPLE_PLOT_LIMIT="${SA_TEST_SAMPLE_PLOT_LIMIT:-0}"
+FORCE_VARIANCE="${SA_TEST_FORCE_VARIANCE:-0}"
 EXPECTED_OUTPUT_DIR="ml_output_flowmulti_v9_3_sa_55e100e_0n40n_noisectx_t2mres"
 
 OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
@@ -114,11 +115,11 @@ if [ ! -f "$CKPT_PATH" ]; then
 fi
 
 TEST_CONFIG="$OUTPUT_DIR/config_test_${TEST_YEAR}_${SLURM_JOB_ID:-manual}.yaml"
-python - "$CONFIG_PATH" "$TEST_CONFIG" "$EXPECTED_OUTPUT_DIR" "$TEST_YEAR" "$NUM_ENSEMBLE" "$NUM_STEPS" "$MAX_ENSEMBLE_PER_CHUNK" "$VALIDATION_ODE_BATCH" "$SAMPLE_PLOT_LIMIT" <<'PY'
+python - "$CONFIG_PATH" "$TEST_CONFIG" "$EXPECTED_OUTPUT_DIR" "$TEST_YEAR" "$NUM_ENSEMBLE" "$NUM_STEPS" "$MAX_ENSEMBLE_PER_CHUNK" "$VALIDATION_ODE_BATCH" "$SAMPLE_PLOT_LIMIT" "$FORCE_VARIANCE" <<'PY'
 import sys
 import yaml
 
-src, dst, output_dir, year, ens, steps, ens_chunk, ode_batch, plot_limit = sys.argv[1:]
+src, dst, output_dir, year, ens, steps, ens_chunk, ode_batch, plot_limit, force_variance = sys.argv[1:]
 year = int(year)
 with open(src, "r") as f:
     cfg = yaml.safe_load(f)
@@ -133,7 +134,8 @@ cfg["test_num_steps"] = int(steps)
 cfg["test_max_ensemble_per_chunk"] = int(ens_chunk)
 cfg["validation_ode_batch_size"] = int(ode_batch)
 cfg["test_sample_plot_limit"] = int(plot_limit)
-cfg["force_variance_phase"] = True
+cfg["var_forced"] = str(force_variance).strip().lower() in {"1", "true", "yes", "on"}
+cfg.pop("force_variance_phase", None)
 
 with open(dst, "w") as f:
     yaml.safe_dump(cfg, f, sort_keys=False)
@@ -159,7 +161,7 @@ echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Max ensemble/chunk: $MAX_ENSEMBLE_PER_CHUNK"
 echo "🎯 ODE batch: $VALIDATION_ODE_BATCH"
 echo "🎯 Sample plot limit: $SAMPLE_PLOT_LIMIT (0 means all init dates)"
-echo "🎯 Noise mode: forced EOF-LHS + variance"
+echo "🎯 Force variance: $FORCE_VARIANCE (default 0/off)"
 echo "🎯 Variance rho: PR=$CONFIG_RHO_PR T2M=$CONFIG_RHO_T2M"
 echo "🎯 Variance beta: PR=$CONFIG_BETA_PR T2M=$CONFIG_BETA_T2M coarse=$CONFIG_COARSE"
 echo "🎯 Data dir override: $DATA_DIR_OVERRIDE"

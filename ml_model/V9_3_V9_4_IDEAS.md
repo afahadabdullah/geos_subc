@@ -34,10 +34,10 @@ from the best validated design of the previous version.
 Required metrics:
 
 - CRPS, ensemble-mean RMSE, bias, ACC, and spread/error ratio.
-- Brier score and Brier Skill Score.
-- Reliability diagrams and Brier decomposition.
-- ROC AUC and precision-recall AUC.
-- Frequency bias, POD, FAR, and CSI.
+- PR q90/q95/q99 intensity bias and neighborhood skill.
+- T2M warm- and cold-tail MAE.
+- Rank histograms and ensemble-quantile reliability.
+- Frequency bias, POD, FAR, and CSI as event diagnostics.
 - Separate month and lead-week results.
 
 ## v9.3: Recommended Architecture Update
@@ -162,7 +162,7 @@ Rationale:
 - Smaller T2M weights avoid over-sharpening a naturally smoother field.
 
 These losses should operate on the velocity target during initial v9.3
-development. Do not add tail-aware Brier loss in the same version.
+development. Extreme-aware sampling and physical tail losses belong in v9.4.
 
 ### What Remains Unchanged in v9.3
 
@@ -194,150 +194,176 @@ Promote v9.3 if:
 - 2024 CRPS improves or remains within 2% of v9.2.
 - 2024 ensemble-mean RMSE remains within 2% of v9.2.
 - PR spatial structure and Week 3-4 skill improve.
-- Heavy-rainfall and warm/cold T2M BSS improve without calibration leakage.
+- Heavy-rainfall and warm/cold T2M errors improve.
 - Reliability and spread/error ratio do not deteriorate.
 - Gains are not restricted to one month or one lead.
 
-## v9.4: Direct Extreme-Probability Training
+## v9.4: Extreme-Aware Sampling and Field Losses
 
-v9.4 should start from the best v9.3 architecture. It adds objectives that
-directly target extreme-event probability and Brier skill.
+v9.4 should start from the best independently validated v9.3 checkpoint and
+retain the v9.3 architecture. This version changes the training distribution
+and objectives so rare high-impact fields contribute enough gradient without
+turning the model into a threshold-specific probability classifier.
 
-### 1. Tail-Aware Differentiable Brier Loss
+### 1. Extreme-Balanced Sampling
 
-Add a small proper Brier loss using training-period observed thresholds:
+Construct the training sampler from labels calculated only from the 1999-2020
+training period. Stratify samples by variable and forecast lead using physical
+targets:
 
-- PR upper q90/q95.
-- T2M upper q90/q95.
-- T2M lower q10/q05.
+- Heavy-precipitation samples.
+- Warm-extreme T2M samples.
+- Cold-extreme T2M samples.
+- Ordinary background samples.
 
-Use month-, lead-, and grid-specific thresholds saved as a versioned artifact.
-
-For upper-tail events:
-
-```text
-member probability = sigmoid((forecast - threshold) / temperature)
-```
-
-For lower-tail events:
+Initial batch composition to test:
 
 ```text
-member probability = sigmoid((threshold - forecast) / temperature)
+ordinary background: 65 percent
+heavy precipitation: 15 percent
+warm T2M extreme:    10 percent
+cold T2M extreme:    10 percent
 ```
 
-Average member probabilities and compare with the observed event using squared
-probability error.
+Use month-, lead-, and grid-aware training quantiles when defining extremes.
+A sample may belong to more than one extreme category, but it must not be
+duplicated within a batch.
 
-Suggested schedule:
+Implementation requirements:
 
-- Epochs 1-25: velocity training.
-- Epochs 26-54: velocity plus variance.
-- Epoch 55 onward: variance-only training initialized from the best
-  pre-variance CRPS checkpoint.
-- Enable tail-aware Brier loss during the joint phase only after the velocity
-  forecast is stable; test epoch 35 or 40 as the initial start.
+- Save the sampling labels and thresholds as a versioned training artifact.
+- Record the natural and sampled frequency of every category.
+- Apply inverse-sampling-probability weights, or an equivalent correction, so
+  oversampling does not teach an artificially high extreme-event climatology.
+- Keep a configurable fraction of uniformly sampled batches.
+- Never use 2021-2024 observations to construct training labels or thresholds.
 
-Suggested initial weight:
+### 2. Physical Tail-Intensity Loss
 
-```yaml
-extreme_brier_loss_weight: 0.01
-```
+Add small auxiliary losses after decoding model output to physical units.
+These losses should improve extreme magnitude while retaining the main
+flow-matching velocity objective.
 
-Test weights up to `0.03` only after checking CRPS and RMSE.
+For precipitation:
 
-### 2. Tail-Weighted Variance Training
+- Smooth-L1 loss with smoothly increasing weight above training q90 and q95.
+- Error in the upper spatial quantiles of each forecast field.
+- Separate diagnostic losses for q90, q95, and q99 intensity.
 
-Give additional variance-loss weight to observed extremes:
+For T2M:
 
-```text
-normal case: 1.0
-q90/q10 event: 1.5
-q95/q05 event: 2.0
-```
+- Smooth-L1 loss with smoothly increasing weights below q10/q05 and above
+  q90/q95.
+- Treat warm and cold tails independently.
+- Apply the loss to decoded absolute T2M even when the trained target is a
+  GEOS residual.
 
-Keep weights configurable separately for:
+Use continuous, capped tail weights rather than discontinuous class weights.
+Start with a combined physical tail-intensity weight between `0.02` and `0.05`
+after the ordinary velocity field has begun to stabilize.
 
-- PR upper tail.
-- T2M warm tail.
-- T2M cold tail.
+### 3. Neighborhood Extreme Loss
 
-The objective is better ensemble spread on extremes, not a larger deterministic
-forecast amplitude.
+Add a soft neighborhood loss for spatial placement and event extent:
 
-### 3. Probability Calibration
+- Apply differentiable soft exceedance thresholds to decoded precipitation.
+- Compare observed and forecast neighborhood fractions at 3x3 and 5x5 scales.
+- Begin with q90 and q95 precipitation thresholds.
+- Use month-, lead-, and grid-specific thresholds from training observations.
+- Keep this loss precipitation-only initially; T2M fields are spatially
+  smoother and already receive gradient and multi-scale losses.
 
-Fit probability calibration using 2021-2023 only:
+The neighborhood objective should tolerate a small displacement while still
+penalizing missing, excessively broad, or incorrectly located heavy-rainfall
+areas. Log each neighborhood scale separately.
 
-- Logistic calibration first.
-- Isotonic calibration when sample size is sufficient.
-- Separate by variable, tail, month, and lead.
+### v9.4 Ablation Order
 
-Apply the frozen calibrator to 2024 and report raw and calibrated BSS.
-
-Calibration is required for evaluation but remains post-processing; it must not
-use 2024 outcomes during fitting.
+1. Best v9.3 baseline.
+2. Extreme-balanced sampling only.
+3. Physical tail-intensity loss only.
+4. Neighborhood loss only.
+5. Balanced sampling plus physical tail-intensity loss.
+6. Add the neighborhood loss to the best preceding configuration.
 
 ### v9.4 Acceptance Criteria
 
-- Positive or materially improved 2024 BSS for PR q95 and T2M q95/q05.
-- Reliability curves move toward the diagonal.
-- ROC AUC does not decline materially.
-- CRPS and RMSE remain within 2% of the best v9.3 model.
-- Improvement survives year-block or initialization-block bootstrap testing.
+- Overall PR and T2M CRPS do not deteriorate materially.
+- PR q95/q99 intensity bias and neighborhood skill improve.
+- Warm- and cold-tail T2M MAE improve.
+- Ensemble-mean RMSE and bias remain stable.
+- Gains occur across multiple months and leads, not only one event or season.
+- Improvements survive year-block or initialization-block bootstrap testing.
 
-## v9.5: Temporal and Variance Refinements
+## v9.5: GEOS Ensemble and Temporal Evolution Conditioning
 
-v9.5 should contain the remaining higher-risk architecture experiments.
+v9.5 should start from the best v9.4 configuration and improve the information
+supplied by GEOS. The current target-lead ensemble mean discards both forecast
+evolution and member disagreement, which are valuable signals for extreme
+amplitude and uncertainty.
 
-### 1. GEOS Temporal Evolution Encoder
+### 1. GEOS Ensemble Spread and Quantiles
 
-Replace target-lead-only GEOS conditioning with a compact temporal
-representation containing:
+Do not reduce GEOS to only its ensemble mean before model conditioning. For
+each PR and T2M lead, provide:
 
-- Target lead.
-- Target minus previous lead tendency.
+- Ensemble mean.
+- Ensemble standard deviation.
+- Ensemble q10.
+- Ensemble q90.
+- Member-count or member-availability mask.
+
+Calculate these statistics before spatial cropping and normalize each statistic
+with training-period artifacts. Handle deterministic years explicitly:
+
+- Set ensemble spread to zero.
+- Set q10 and q90 equal to the deterministic member.
+- Mark the available member count so the model can distinguish a deterministic
+  forecast from a genuinely low-spread ensemble.
+
+Keep the raw GEOS members available for verification, but use summary
+statistics first. A permutation-invariant member encoder can be evaluated later
+only if the summary representation proves insufficient.
+
+### 2. GEOS Temporal Evolution Encoder
+
+Encode the four GEOS leads as an ordered sequence instead of flattening them as
+unrelated channels or selecting only the target lead. For the requested target
+week, construct:
+
+- Target-lead ensemble statistics.
+- Target minus previous-lead tendency.
 - Next lead minus target tendency.
-- Explicit availability masks for Week 1 and Week 4 boundaries.
+- Explicit previous/next availability masks at Week 1 and Week 4 boundaries.
+- Lead-position embeddings.
 
-Use a small temporal convolution or attention encoder. Do not return to simply
-flattening all four leads as unrelated channels.
+Use a compact shared temporal convolution or temporal-attention encoder for PR
+and T2M, followed by variable-specific projections into the local backbone.
+Preserve the separate PR/T2M output heads from v9.3.
 
-### 2. Lead-Scaled Decoder Capacity
+Implementation requirements:
 
-Test larger decoder heads for later leads:
+- Do not use future observations; all temporal inputs must come from the GEOS
+  forecast initialized at the same date.
+- Preserve physical lead order.
+- Log the norm and missing-boundary frequency of every tendency feature.
+- Include an ablation that uses ensemble statistics for the target lead only.
+- Include an ablation that uses temporal evolution with the ensemble mean only.
 
-```text
-Week 1: 48 hidden channels
-Week 2: 48 hidden channels
-Week 3: 64 hidden channels
-Week 4: 96 hidden channels
-```
+### v9.5 Ablation Order
 
-Apply this separately to PR and T2M heads. Accept the change only if Week 3-4
-independent CRPS/BSS improves.
-
-### 3. Bounded Log-Scale Variance Heads
-
-Replace unrestricted positive `softplus` scale with bounded log-scale:
-
-```text
-log_scale = clamp(raw_log_scale, minimum, maximum)
-scale = exp(log_scale)
-```
-
-Use different bounds for PR and T2M. Monitor:
-
-- Fraction saturated at minimum scale.
-- Fraction saturated at maximum scale.
-- Spread/error ratio.
-- Rank histograms.
-- Extreme-event reliability.
+1. Best v9.4 baseline with target-lead GEOS ensemble mean.
+2. Target-lead GEOS mean, spread, q10, and q90.
+3. GEOS temporal evolution using ensemble mean only.
+4. Full ensemble-statistic temporal evolution encoder.
 
 ### v9.5 Acceptance Criteria
 
-- Week 3-4 CRPS, RMSE, and BSS improve.
-- Variance bounds do not saturate excessively.
-- Rank histograms and spread/error ratio improve.
+- Independent PR and T2M CRPS improve or remain stable.
+- PR q95/q99 and T2M warm/cold tail errors improve.
+- Week 3-4 skill improves without degrading Week 1-2 materially.
+- Spread/error ratio and rank histograms improve or remain stable.
+- The model uses GEOS spread without simply inflating generated variance.
 - Runtime and memory increases are justified by independent forecast skill.
 
 ## Reproducibility Requirements
@@ -346,11 +372,11 @@ Every version should save:
 
 - Full config in the output directory.
 - Git commit and branch.
-- Training, validation, calibration, and test year ranges.
+- Training, validation, and test year ranges.
 - Statistics and threshold artifact paths with checksums.
 - Noise rho, beta, coarse-kernel, ensemble, and ODE settings.
 - Parameter count and peak GPU memory.
-- Raw and calibrated probabilistic metrics.
+- Probabilistic and physical-tail metrics.
 - Per-variable, per-tail, per-month, and per-lead metrics.
 
 Do not compare weighted training noise MSE directly across versions when loss

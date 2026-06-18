@@ -2201,7 +2201,12 @@ def train(args, accelerator):
         plot_lats, plot_lons = lats, lons
 
     variance_phase_lr = float(config.get("variance_phase_lr", 1e-4))
-    force_variance_phase = bool(config.get("force_variance_phase", False))
+    # ``var_forced`` is the canonical v9.3 switch for entering variance-only
+    # training immediately, regardless of the resumed epoch. Keep the older
+    # name as a fallback so existing copied configs still work.
+    force_variance_phase = bool(
+        config.get("var_forced", config.get("force_variance_phase", False))
+    )
     variance_phase_start_epoch = int(config.get("variance_phase_start_epoch", 0))
     variance_phase_start_from_best = bool(config.get("variance_phase_start_from_best", True))
     variance_phase_best_checkpoint = str(config.get("variance_phase_best_checkpoint", "best_flow_ckpt.pt"))
@@ -2376,6 +2381,10 @@ def train(args, accelerator):
             print(f"   [Training Mode]      : CRPS fine-tune (pure Gaussian rollout)")
         elif force_variance_phase:
             print(f"   [Training Mode]      : Variance-only (lr={variance_phase_lr:.2e})")
+            print(
+                "   [Variance Force]     : var_forced=True; enter immediately "
+                "from the configured best checkpoint"
+            )
         else:
             print(f"   [Training Mode]      : Velocity-only")
         if variance_phase_start_epoch > 0:
@@ -3023,7 +3032,7 @@ def train(args, accelerator):
 
     if start_in_variance_phase:
         if force_variance_phase:
-            reason = "force_variance_phase=True"
+            reason = "var_forced=True"
         elif loaded_is_variance_phase:
             reason = "resuming a variance-phase checkpoint"
         else:

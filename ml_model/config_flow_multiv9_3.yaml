@@ -92,7 +92,11 @@ drop_global_context_prob: 0.10
 drop_geos_prob: 0.00
 
 reset_validation_history: False
-force_variance_phase: False
+# Set True to enter variance-head-only training immediately at the next launch,
+# regardless of the current epoch. On the first forced launch, load
+# variance_phase_best_checkpoint; chained launches then resume the variance
+# state from latest_flow_ckpt.pt instead of restarting it.
+var_forced: False
 # Phase schedule: 1-25 VelOnly, 26-54 Vel+Var, 55-80 VarOnly.
 variance_phase_lr: 1e-5
 variance_phase_start_epoch: 55
