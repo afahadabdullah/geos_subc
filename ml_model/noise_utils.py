@@ -123,7 +123,10 @@ def sample_batch_lhs(eof_bases, phase, lead, device, H, W, E):
     K = eofs.shape[0]
     
     from scipy.stats import qmc, norm
-    sampler = qmc.LatinHypercube(d=K)
+    # Draw the SciPy seed from NumPy's managed RNG. This makes LHS generation
+    # reproducible when callers seed or temporarily isolate NumPy randomness.
+    lhs_seed = int(np.random.randint(0, 2 ** 31 - 1))
+    sampler = qmc.LatinHypercube(d=K, seed=lhs_seed)
     sample = sampler.random(n=E)
     alpha = torch.tensor(norm.ppf(sample), dtype=torch.float32, device=device) # [E, K]
     

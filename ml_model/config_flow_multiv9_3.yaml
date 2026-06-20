@@ -6,6 +6,11 @@ batch_size: 4
 learning_rate: 2e-5
 weight_decay: 1e-4
 reset_optimizer_state: False
+training_seed: 1234
+validation_seed: 4321
+# Fixed RNG streams are enabled; leave strict deterministic CUDA kernels off
+# to preserve the original v9.3 numerical/performance path.
+deterministic_training: False
 epochs: 80
 output_dir: ml_output_flowmulti_v9_3_sa_55e100e_0n40n_noisectx_t2mres
 mixed_precision: bf16
@@ -113,6 +118,9 @@ crps_validation_start_epoch: 10
 crps_validation_milestones: [10, 15, 20]
 crps_validation_every_after_epoch: 20
 crps_plot_on_validation: True
+# CRPS before this epoch is diagnostic-only. MSE remains responsible for
+# checkpoint selection and LR control through epoch 25.
+crps_selection_start_epoch: 26
 mse_validation_seed: 1234
 crps_val_start_year: 2021
 crps_val_end_year: 2021
