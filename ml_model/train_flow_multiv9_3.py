@@ -61,7 +61,9 @@ def capture_rng_state(train_loader_generator=None):
         "python": random.getstate(),
         "numpy": {
             "bit_generator": numpy_state[0],
-            "state": torch.from_numpy(numpy_state[1].copy()),
+            # Older PyTorch builds cannot serialize torch.uint32 storage.
+            # MT19937 values fit safely in int64; cast back on restore.
+            "state": torch.from_numpy(numpy_state[1].astype(np.int64, copy=True)),
             "position": int(numpy_state[2]),
             "has_gauss": int(numpy_state[3]),
             "cached_gaussian": float(numpy_state[4]),
@@ -84,7 +86,7 @@ def restore_rng_state(state, train_loader_generator=None):
     np.random.set_state(
         (
             numpy_state["bit_generator"],
-            numpy_state["state"].cpu().numpy(),
+            numpy_state["state"].cpu().numpy().astype(np.uint32, copy=False),
             int(numpy_state["position"]),
             int(numpy_state["has_gauss"]),
             float(numpy_state["cached_gaussian"]),
