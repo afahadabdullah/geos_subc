@@ -10,7 +10,7 @@ Full-global counterpart of the validated `flow_finalv1.0` South Asia release.
   schedules are unchanged from `flow_finalv1.0`.
 - Static geography is rebuilt on the global grid. GLDAS-uncovered polar rows are
   assigned physical sea-level elevation rather than extrapolated terrain.
-- Training starts from scratch, runs 10 epochs per scheduler session, and resumes
+- Training starts from scratch, runs 15 epochs per scheduler session, and resumes
   from `latest_flow_ckpt.pt`.
 
 Submit training:
