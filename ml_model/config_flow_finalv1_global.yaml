@@ -1,0 +1,154 @@
+# Production Training Config - flow_finalv1_global
+# Full-global 1-degree PR target plus GEOS-residual T2M target.
+# Land/MJO predictors feed the target grid; the same full-global
+# ocean/circulation/moisture predictors feed spatial global cross-attention.
+batch_size: 4
+learning_rate: 2e-5
+weight_decay: 1e-4
+reset_optimizer_state: False
+training_seed: 1234
+validation_seed: 4321
+# Fixed RNG streams are enabled; leave strict deterministic CUDA kernels off
+# to preserve the original flow_finalv1_global numerical/performance path.
+deterministic_training: False
+epochs: 80
+output_dir: ml_output_flow_finalv1_global_noisectx_t2mres
+mixed_precision: bf16
+num_workers: 1
+data_dir: /scratch/11353/afahad/geossub/dataprocess
+train_start_year: 1999
+train_end_year: 2020
+val_start_year: 2021
+val_end_year: 2023
+preload: True
+save_top_k: 4
+stats_file: flow_finalv1_global_stats.pt
+unet_block_out_channels: [128, 256, 512, 768]
+target_domain: global
+target_domain_bounds: null
+t2m_target_mode: geos_residual
+lead_selective_geos: True
+lead_loss_weights: [1.0, 1.2, 1.5, 2.0]
+
+# PR is observed GPCP. T2M is observed T2M minus the target-lead
+# GEOS ensemble-mean T2M.
+geos_condition_statistics: [mean, std, q10, q90, member_count]
+geos_member_count_reference: 4.0
+
+# flow_finalv1_global static geography. Elevation comes from the NASA GLDAS 0.25-degree
+# GTOPO30-derived field; land and coordinate channels are generated locally.
+static_geography_file: ml_model/static_geography_flow_finalv1_global.pt
+elevation_file: /home1/11353/afahad/geos_subc/ml_model/GLDASp5_elevation_025d.nc4
+elevation_variable: GLDAS_elevation
+require_elevation_file: True
+elevation_normalization: minmax
+# Reuse the established loss-weighting land mask as a model input.
+static_land_mask_file: ml_model/land_ocean_mask_v6.pt
+cache_static_geography: True
+rebuild_static_geography: False
+plot_static_geography: True
+plot_topography: True
+
+# flow_finalv1_global spatial global tokens and bottleneck cross-attention. Set False for the
+# pooled-vector-only ablation while retaining the same global encoder.
+use_global_cross_attention: True
+global_attention_heads: 4
+global_attention_layers: 1
+
+# flow_finalv1_global auxiliary velocity objectives.
+gradient_loss_weight_pr: 0.03
+gradient_loss_weight_t2m: 0.01
+multiscale_loss_weight_2x_pr: 0.03
+multiscale_loss_weight_2x_t2m: 0.01
+multiscale_loss_weight_4x_pr: 0.02
+multiscale_loss_weight_4x_t2m: 0.01
+
+# Target-grid predictors now cover the full 181x360 global grid.
+local_obs_variables:
+  - sm
+  - mjo
+
+# Global predictors keep the full 181x360 grid and feed the FiLM context.
+global_context_variables:
+  - sst
+  - sss
+  - ivt
+  - z500_zonal_dev
+  - u250
+
+# flow_finalv1_global: make velocity training match inference prior.
+train_noise_mode: eof_lhs_mix
+train_rho_pr: 0.15
+train_rho_t2m: 0.05
+train_rho_after_epoch: 26
+train_rho_pr_after: 0.25
+train_rho_t2m_after: 0.08
+train_time_schedule: stratified_low_mid
+train_time_beta_alpha: 1.5
+train_time_beta_beta: 2.0
+train_time_low_fraction: 0.35
+train_time_mid_fraction: 0.50
+
+# flow_finalv1_global: mild group dropout to reduce over-reliance on slow boundary context.
+# GEOS is kept on by default because it is the operational forecast baseline.
+context_dropout_prob: 0.10
+drop_local_obs_prob: 0.05
+drop_global_context_prob: 0.10
+drop_geos_prob: 0.00
+
+reset_validation_history: False
+# Set True to enter variance-head-only training immediately at the next launch,
+# regardless of the current epoch. On the first forced launch, load
+# variance_phase_best_checkpoint; chained launches then resume the variance
+# state from latest_flow_ckpt.pt instead of restarting it.
+var_forced: False
+# Phase schedule: 1-25 VelOnly, 26-54 Vel+Var, 55-80 VarOnly.
+variance_phase_lr: 1e-5
+variance_phase_start_epoch: 55
+variance_phase_start_from_best: True
+variance_phase_best_checkpoint: best_flow_ckpt.pt
+variance_training_num_ensemble: 15
+joint_variance_start_epoch: 26
+joint_variance_loss_weight: 0.03
+validation_num_ensemble: 15
+validation_num_steps: 10
+validation_ode_batch_size: 120
+# CRPS validation and plotting: epochs 10, 15, 20, then every epoch from 21.
+crps_validation_start_epoch: 10
+crps_validation_milestones: [10, 15, 20]
+crps_validation_every_after_epoch: 20
+crps_plot_on_validation: True
+# CRPS before this epoch is diagnostic-only. MSE remains responsible for
+# checkpoint selection and LR control through epoch 25.
+crps_selection_start_epoch: 26
+mse_validation_seed: 1234
+crps_val_start_year: 2021
+crps_val_end_year: 2021
+validation_variance_coarse_kernel: 8
+validation_rho_pr: 0.25
+validation_rho_t2m: 0.08
+validation_var_beta_pr: 0.45
+validation_var_beta_t2m: 0.03
+dense_mse_validation_until: 25
+plot_validation_every: 0
+mse_plateau_patience: 3
+mse_plateau_factor: 0.5
+mse_min_lr: 1e-6
+mse_early_stop_patience: 0
+mse_early_stop_start_epoch: 15
+mse_early_stop_min_delta: 0.0003
+
+crps_loss: False
+crps_loss_num_ensemble: 2
+crps_loss_num_steps: 10
+crps_loss_ode_batch_size: 2
+crps_loss_max_ensemble_per_chunk: 1
+crps_loss_pr_weight: 1.0
+crps_loss_t2m_weight: 1.0
+crps_loss_use_land_ocean_weights: False
+crps_loss_use_gradient_checkpointing: True
+
+test_num_ensemble: 90
+test_num_steps: 10
+test_max_ensemble_per_chunk: 30
+test_sample_plot_limit: 0
