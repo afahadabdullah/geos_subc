@@ -196,9 +196,9 @@ else
     CURRENT_EPOCH=-1
 fi
 
-# Run 30 epochs per allocation.
+# Run 10 epochs per allocation because full-global epochs take substantially longer.
 # EPOCHS_PER_RUN remains available as an explicit one-off override.
-EPOCHS_PER_RUN="${EPOCHS_PER_RUN:-30}"
+EPOCHS_PER_RUN="${EPOCHS_PER_RUN:-10}"
 echo "🎯 Epochs in this allocation: $EPOCHS_PER_RUN (resume checkpoint epoch: $CURRENT_EPOCH)"
 
 echo "🔥 Launching flow_finalv1_global training (global target, target-grid/global predictors, residual T2M)..."
