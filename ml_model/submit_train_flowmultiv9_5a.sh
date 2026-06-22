@@ -211,9 +211,9 @@ fi
 # EPOCHS_PER_RUN environment variable still overrides these safe defaults.
 if [ -z "${EPOCHS_PER_RUN:-}" ]; then
     if [ "$CURRENT_EPOCH" -ge 54 ]; then
-        EPOCHS_PER_RUN=2
+        EPOCHS_PER_RUN=1
     elif [ "$CURRENT_EPOCH" -ge 20 ]; then
-        EPOCHS_PER_RUN=5
+        EPOCHS_PER_RUN=3
     else
         EPOCHS_PER_RUN=10
     fi
