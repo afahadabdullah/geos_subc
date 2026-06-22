@@ -205,20 +205,10 @@ else
     CURRENT_EPOCH=-1
 fi
 
-# Keep each chained launch comfortably inside gh-dev's two-hour wall time.
-# Training becomes progressively more expensive once CRPS validation runs
-# every epoch and again when the 15-member VarOnly phase starts. An explicit
-# EPOCHS_PER_RUN environment variable still overrides these safe defaults.
-if [ -z "${EPOCHS_PER_RUN:-}" ]; then
-    if [ "$CURRENT_EPOCH" -ge 54 ]; then
-        EPOCHS_PER_RUN=1
-    elif [ "$CURRENT_EPOCH" -ge 20 ]; then
-        EPOCHS_PER_RUN=3
-    else
-        EPOCHS_PER_RUN=10
-    fi
-fi
-echo "🎯 Epochs in this two-hour allocation: $EPOCHS_PER_RUN (resume checkpoint epoch: $CURRENT_EPOCH)"
+# Preserve the original v9.3/v9.5a chaining behavior: 30 epochs per allocation.
+# EPOCHS_PER_RUN remains available as an explicit one-off override.
+EPOCHS_PER_RUN="${EPOCHS_PER_RUN:-30}"
+echo "🎯 Epochs in this allocation: $EPOCHS_PER_RUN (resume checkpoint epoch: $CURRENT_EPOCH)"
 
 echo "🔥 Launching Flow Matching Multi-Target v9.5a Training (SA target, local/global predictors, residual T2M)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv9_5a.py --config "$CONFIG_PATH" \

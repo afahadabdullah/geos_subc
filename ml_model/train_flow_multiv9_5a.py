@@ -7,6 +7,7 @@ import random
 import yaml
 import csv
 import json
+import gc
 import xarray as xr
 from contextlib import contextmanager
 from tqdm.auto import tqdm
@@ -39,6 +40,26 @@ from flow_matching_multi_v9_5a import FlowMatchingModel, CustomFlowMatcher
 from static_geography_v9_5a import STATIC_CHANNEL_NAMES, load_or_build_static_geography
 import noise_utils
 import noise_utils_multi
+
+
+def get_process_rss_gib():
+    """Return current resident host memory on Linux, or None if unavailable."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / (1024.0 ** 2)
+    except OSError:
+        pass
+    return None
+
+
+def log_process_rss(label, accelerator):
+    if not accelerator.is_main_process:
+        return
+    rss_gib = get_process_rss_gib()
+    if rss_gib is not None:
+        print(f"🧠 Host RSS {label}: {rss_gib:.2f} GiB")
 
 
 def set_global_seed(seed, deterministic=False):
@@ -2280,6 +2301,8 @@ def train(args, accelerator):
             generator=train_loader_generator,
         )
 
+    log_process_rss("after dataset preload", accelerator)
+
     # Calculate Global Min-Max for Target GPCP Precipitation
     stats_file = os.path.join("ml_model", stats_filename)
     if not os.path.exists(stats_file):
@@ -2966,8 +2989,11 @@ def train(args, accelerator):
         ckpt_path = os.path.join(output_dir, "latest_flow_ckpt.pt")
 
     if os.path.exists(ckpt_path):
+        checkpoint = None
+        optimizer_state = None
         try:
             checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            log_process_rss("after checkpoint read", accelerator)
             loaded_checkpoint_epoch = int(checkpoint.get('epoch', 0))
             loaded_is_variance_phase = bool(checkpoint.get('is_variance_phase', False))
             # Unwrap for loading
@@ -3100,6 +3126,15 @@ def train(args, accelerator):
         except Exception as e:
             if accelerator.is_main_process:
                 print(f"⚠️ Failed to load checkpoint {ckpt_path}: {e}")
+        finally:
+            # On resumed training the serialized checkpoint contains another
+            # complete model plus Adam moments. Once copied into the live
+            # model/optimizer, retaining this CPU object can add several GiB
+            # on top of the preloaded dataset and trigger a cgroup SIGKILL.
+            optimizer_state = None
+            checkpoint = None
+            gc.collect()
+            log_process_rss("after releasing checkpoint copy", accelerator)
     else:
         if args.test:
             raise FileNotFoundError(f"CRITICAL: Checkpoint {ckpt_path} not found for testing!")
@@ -3144,6 +3179,9 @@ def train(args, accelerator):
                 "   ✅ Loaded best velocity/CRPS checkpoint for variance phase "
                 f"from {best_path} (epoch={best_epoch}{best_loss_msg})."
             )
+        best_checkpoint = None
+        gc.collect()
+        log_process_rss("after releasing variance-init checkpoint", accelerator)
 
     def enable_variance_phase(reason, reset_best_for_phase=False):
         nonlocal optimizer, is_variance_phase, best_val_loss, best_val_epoch, best_val_metric

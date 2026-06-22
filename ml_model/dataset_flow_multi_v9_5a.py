@@ -501,9 +501,28 @@ class S2SHybridDataset(Dataset):
                 # Load common features ONCE for all 4 leads
                 # We use the first lead sample to trigger the 'common' load
                 common_data = self._load_sample(s_indices[0], handles=handles, return_common_only=True)
+                shared_lead_invariant = None
 
                 for idx in s_indices:
-                    self.data_cache[idx] = self._load_sample(idx, handles=handles, cached_common=common_data)
+                    sample = self._load_sample(idx, handles=handles, cached_common=common_data)
+                    if shared_lead_invariant is None:
+                        shared_lead_invariant = {
+                            key: sample[key]
+                            for key in (
+                                "x_geos",
+                                "x_obs",
+                                "x_global_context",
+                                "target_raw_full",
+                                "geos_ens_raw",
+                                "geos_member_count_raw",
+                            )
+                        }
+                    else:
+                        # These fields are identical for all four leads of one
+                        # initialization. Reusing their tensor storage avoids
+                        # keeping four copies of the raw ensemble/full targets.
+                        sample.update(shared_lead_invariant)
+                    self.data_cache[idx] = sample
                     loaded_count += 1
                     if loaded_count % 100 == 0:
                         print(f"Loaded {loaded_count}/{len(self.samples)}")
