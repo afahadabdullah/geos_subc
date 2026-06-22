@@ -201,11 +201,28 @@ if [ -f "$CKPT_FILE" ]; then
         echo "🏁 Job finished at $(date)"
         exit 0
     fi
+else
+    CURRENT_EPOCH=-1
 fi
+
+# Keep each chained launch comfortably inside gh-dev's two-hour wall time.
+# Training becomes progressively more expensive once CRPS validation runs
+# every epoch and again when the 15-member VarOnly phase starts. An explicit
+# EPOCHS_PER_RUN environment variable still overrides these safe defaults.
+if [ -z "${EPOCHS_PER_RUN:-}" ]; then
+    if [ "$CURRENT_EPOCH" -ge 54 ]; then
+        EPOCHS_PER_RUN=2
+    elif [ "$CURRENT_EPOCH" -ge 20 ]; then
+        EPOCHS_PER_RUN=5
+    else
+        EPOCHS_PER_RUN=10
+    fi
+fi
+echo "🎯 Epochs in this two-hour allocation: $EPOCHS_PER_RUN (resume checkpoint epoch: $CURRENT_EPOCH)"
 
 echo "🔥 Launching Flow Matching Multi-Target v9.5a Training (SA target, local/global predictors, residual T2M)..."
 accelerate launch --num_processes 1 --mixed_precision "$MIXED_PRECISION" ml_model/train_flow_multiv9_5a.py --config "$CONFIG_PATH" \
-    --epochs-per-run 30
+    --epochs-per-run "$EPOCHS_PER_RUN"
 
 # --- AUTOMATIC JOB CHAINING ---
 if [ -f "$EARLY_STOP_FILE" ]; then
@@ -233,7 +250,8 @@ if [ -f "$CKPT_FILE" ]; then
         fi
 
         echo "📡 Attempting SSH resubmission to $SUBMIT_TARGET..."
-        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" "cd $PWD && sbatch ml_model/submit_train_flowmultiv9_5a.sh"
+        ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" \
+            "cd $PWD && sbatch ml_model/submit_train_flowmultiv9_5a.sh"
     else
         echo "✅ Final Epoch $CURRENT_EPOCH reached. Chaining complete."
     fi
