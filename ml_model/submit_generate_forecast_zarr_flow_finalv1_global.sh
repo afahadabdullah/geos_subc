@@ -59,12 +59,20 @@ SEED="${GLOBAL_GEN_SEED:-1234}"
 OVERWRITE="${GLOBAL_GEN_OVERWRITE:-0}"
 MAX_RUNTIME_MINUTES="${GLOBAL_GEN_MAX_RUNTIME_MINUTES:-100}"
 AUTO_RESUBMIT="${GLOBAL_GEN_AUTO_RESUBMIT:-1}"
+PURE_NOISE="${GLOBAL_GEN_PURE_NOISE:-0}"
+FORCE_VARIANCE="${GLOBAL_GEN_FORCE_VARIANCE:-0}"
+NO_VARIANCE="${GLOBAL_GEN_NO_VARIANCE:-0}"
 
 CONFIG_OUTPUT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH'))['output_dir'])")
 CONFIG_TARGET_DOMAIN=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('target_domain'))")
 CONFIG_LOCAL_VARS=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('local_obs_variables', [])))")
 CONFIG_GLOBAL_CONTEXT=$(python -c "import yaml; print(','.join(yaml.safe_load(open('$CONFIG_PATH')).get('global_context_variables', [])))")
 CONFIG_T2M_MODE=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG_PATH')).get('t2m_target_mode'))")
+CONFIG_RHO_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_pr'))")
+CONFIG_RHO_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_rho_t2m'))")
+CONFIG_BETA_PR=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_pr'))")
+CONFIG_BETA_T2M=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_var_beta_t2m'))")
+CONFIG_COARSE=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG_PATH')); print(c.get('validation_variance_coarse_kernel'))")
 
 if [ "$CONFIG_OUTPUT_DIR" != "ml_output_flow_finalv1_global_noisectx_t2mres" ]; then
     echo "❌ Refusing unexpected output_dir=$CONFIG_OUTPUT_DIR"
@@ -100,6 +108,15 @@ EXTRA_ARGS=()
 if [ "$OVERWRITE" = "1" ] || [ "$OVERWRITE" = "true" ] || [ "$OVERWRITE" = "TRUE" ]; then
     EXTRA_ARGS+=(--overwrite)
 fi
+if [ "$PURE_NOISE" = "1" ] || [ "$PURE_NOISE" = "true" ] || [ "$PURE_NOISE" = "TRUE" ]; then
+    EXTRA_ARGS+=(--pure_noise)
+fi
+if [ "$FORCE_VARIANCE" = "1" ] || [ "$FORCE_VARIANCE" = "true" ] || [ "$FORCE_VARIANCE" = "TRUE" ]; then
+    EXTRA_ARGS+=(--force_variance)
+fi
+if [ "$NO_VARIANCE" = "1" ] || [ "$NO_VARIANCE" = "true" ] || [ "$NO_VARIANCE" = "TRUE" ]; then
+    EXTRA_ARGS+=(--no_variance)
+fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 echo "🎯 Config: $CONFIG_PATH"
@@ -114,6 +131,11 @@ echo "🎯 ODE steps: $NUM_STEPS"
 echo "🎯 Output Zarr dir: $OUT_DIR"
 echo "🎯 Ensemble chunk: $ENSEMBLE_CHUNK"
 echo "🎯 ODE batch: $ODE_BATCH_SIZE"
+echo "🎯 Pure noise: $PURE_NOISE"
+echo "🎯 Force variance: $FORCE_VARIANCE"
+echo "🎯 Disable variance: $NO_VARIANCE"
+echo "🎯 Variance rho: PR=$CONFIG_RHO_PR T2M=$CONFIG_RHO_T2M"
+echo "🎯 Variance beta: PR=$CONFIG_BETA_PR T2M=$CONFIG_BETA_T2M coarse=$CONFIG_COARSE"
 echo "🎯 Soft runtime minutes: $MAX_RUNTIME_MINUTES"
 echo "🎯 Auto resubmit: $AUTO_RESUBMIT"
 
@@ -166,7 +188,7 @@ if [ -n "$MISSING_YEARS" ]; then
 
         echo "📡 Resubmitting generation job via $SUBMIT_TARGET..."
         ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" \
-            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' GLOBAL_GEN_CONFIG='$CONFIG_PATH' GLOBAL_GEN_START_YEAR='$START_YEAR' GLOBAL_GEN_END_YEAR='$END_YEAR' GLOBAL_GEN_SKIP_YEARS='$SKIP_YEARS' GLOBAL_GEN_MONTHS='$MONTHS' GLOBAL_GEN_CLIM_ENSEMBLE='$CLIM_ENSEMBLE' GLOBAL_GEN_EVAL_ENSEMBLE='$EVAL_ENSEMBLE' GLOBAL_GEN_EVAL_START_YEAR='$EVAL_START_YEAR' GLOBAL_GEN_STEPS='$NUM_STEPS' GLOBAL_GEN_CHECKPOINT='$CHECKPOINT' GLOBAL_GEN_OUT_DIR='$OUT_DIR' GLOBAL_GEN_BATCH_SIZE='$BATCH_SIZE' GLOBAL_GEN_NUM_WORKERS='$NUM_WORKERS' GLOBAL_GEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' GLOBAL_GEN_ODE_BATCH='$ODE_BATCH_SIZE' GLOBAL_GEN_MEMBER_CHUNK='$MEMBER_CHUNK' GLOBAL_GEN_SEED='$SEED' GLOBAL_GEN_OVERWRITE='0' GLOBAL_GEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' GLOBAL_GEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' sbatch ml_model/submit_generate_forecast_zarr_flow_finalv1_global.sh"
+            "cd $PWD && DATA_DIR_OVERRIDE='$DATA_DIR_OVERRIDE' GLOBAL_GEN_CONFIG='$CONFIG_PATH' GLOBAL_GEN_START_YEAR='$START_YEAR' GLOBAL_GEN_END_YEAR='$END_YEAR' GLOBAL_GEN_SKIP_YEARS='$SKIP_YEARS' GLOBAL_GEN_MONTHS='$MONTHS' GLOBAL_GEN_CLIM_ENSEMBLE='$CLIM_ENSEMBLE' GLOBAL_GEN_EVAL_ENSEMBLE='$EVAL_ENSEMBLE' GLOBAL_GEN_EVAL_START_YEAR='$EVAL_START_YEAR' GLOBAL_GEN_STEPS='$NUM_STEPS' GLOBAL_GEN_CHECKPOINT='$CHECKPOINT' GLOBAL_GEN_OUT_DIR='$OUT_DIR' GLOBAL_GEN_BATCH_SIZE='$BATCH_SIZE' GLOBAL_GEN_NUM_WORKERS='$NUM_WORKERS' GLOBAL_GEN_ENSEMBLE_CHUNK='$ENSEMBLE_CHUNK' GLOBAL_GEN_ODE_BATCH='$ODE_BATCH_SIZE' GLOBAL_GEN_MEMBER_CHUNK='$MEMBER_CHUNK' GLOBAL_GEN_SEED='$SEED' GLOBAL_GEN_OVERWRITE='0' GLOBAL_GEN_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' GLOBAL_GEN_AUTO_RESUBMIT='$AUTO_RESUBMIT' GLOBAL_GEN_PURE_NOISE='$PURE_NOISE' GLOBAL_GEN_FORCE_VARIANCE='$FORCE_VARIANCE' GLOBAL_GEN_NO_VARIANCE='$NO_VARIANCE' sbatch ml_model/submit_generate_forecast_zarr_flow_finalv1_global.sh"
     else
         echo "ℹ️ Auto-resubmit disabled. Rerun this script to continue."
     fi

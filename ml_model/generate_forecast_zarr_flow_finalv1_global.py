@@ -73,6 +73,16 @@ def parse_args():
         help="Stop cleanly after this many minutes, leaving .zarr.tmp resumable.",
     )
     parser.add_argument("--pure_noise", action="store_true", help="Disable EOF-LHS and variance-head scaling.")
+    parser.add_argument(
+        "--force_variance",
+        action="store_true",
+        help="Apply variance-head scaling even if the checkpoint is not marked as variance-phase.",
+    )
+    parser.add_argument(
+        "--no_variance",
+        action="store_true",
+        help="Disable variance-head scaling while still allowing EOF-LHS noise.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -160,6 +170,29 @@ def verify_batch_dates(expected_dates, batch):
 
 def deadline_reached(deadline):
     return deadline is not None and time.monotonic() >= deadline
+
+
+def resolve_noise_modes(args, checkpoint_meta):
+    if args.force_variance and args.no_variance:
+        raise ValueError("--force_variance and --no_variance cannot both be set")
+    checkpoint_is_variance_phase = bool(checkpoint_meta.get("is_variance_phase", False))
+    use_eof_lhs_noise = not args.pure_noise
+    use_flow_variance = (
+        not args.pure_noise
+        and not args.no_variance
+        and (checkpoint_is_variance_phase or args.force_variance)
+    )
+    if args.pure_noise:
+        variance_mode = "off:pure_noise"
+    elif args.no_variance:
+        variance_mode = "off:no_variance"
+    elif args.force_variance:
+        variance_mode = "on:forced"
+    elif checkpoint_is_variance_phase:
+        variance_mode = "on:checkpoint_variance_phase"
+    else:
+        variance_mode = "off:checkpoint_not_variance_phase"
+    return use_eof_lhs_noise, use_flow_variance, variance_mode
 
 
 def valid_times(init_dates):
@@ -467,8 +500,7 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
     )
-    use_eof_lhs_noise = not args.pure_noise
-    use_flow_variance = not args.pure_noise
+    use_eof_lhs_noise, use_flow_variance, variance_mode = resolve_noise_modes(args, checkpoint_meta)
     attrs = {
         "generated_by": os.path.basename(__file__),
         "model_version": "flow_finalv1_global",
@@ -487,6 +519,9 @@ def write_year(year, args, config, model, flow_matcher, device, checkpoint_path,
         "num_steps": int(args.num_steps),
         "use_eof_lhs_noise": bool(use_eof_lhs_noise),
         "use_flow_variance": bool(use_flow_variance),
+        "variance_mode": variance_mode,
+        "force_variance": bool(args.force_variance),
+        "no_variance": bool(args.no_variance),
         "validation_rho_pr": float(config.get("validation_rho_pr", 0.25)),
         "validation_rho_t2m": float(config.get("validation_rho_t2m", 0.08)),
         "validation_var_beta_pr": float(config.get("validation_var_beta_pr", 0.45)),
@@ -627,6 +662,12 @@ def main():
     model.eval()
     flow_matcher = CustomFlowMatcher(device=device)
     noise_context = load_noise_context(config, domain_info)
+    use_eof_lhs_noise, use_flow_variance, variance_mode = resolve_noise_modes(args, checkpoint)
+    rho_pr = float(config.get("validation_rho_pr", 0.25))
+    rho_t2m = float(config.get("validation_rho_t2m", 0.08))
+    beta_pr = float(config.get("validation_var_beta_pr", 0.45))
+    beta_t2m = float(config.get("validation_var_beta_t2m", 0.03))
+    coarse_kernel = config.get("validation_variance_coarse_kernel", 8)
 
     print("\n" + "=" * 88)
     print("Global flow_finalv1_global forecast Zarr generation")
@@ -645,7 +686,11 @@ def main():
     print(f"  Ens chunk    : {args.ensemble_chunk_size}")
     print(f"  ODE batch    : {args.ode_batch_size}")
     print(f"  Soft runtime : {args.max_runtime_minutes if args.max_runtime_minutes else 'disabled'} minutes")
-    print(f"  Noise mode   : {'pure Gaussian' if args.pure_noise else 'EOF-LHS + variance'}")
+    print(f"  Checkpoint variance phase : {bool(checkpoint.get('is_variance_phase', False))}")
+    print(f"  Noise mode   : {'pure Gaussian' if args.pure_noise else 'EOF-LHS'}")
+    print(f"  Variance mode: {variance_mode} (use_flow_variance={use_flow_variance})")
+    print(f"  Rho          : PR={rho_pr:.3f}, T2M={rho_t2m:.3f}")
+    print(f"  Beta         : PR={beta_pr:.3f}, T2M={beta_t2m:.3f}, coarse={coarse_kernel}")
     print("=" * 88 + "\n")
 
     all_complete = True
