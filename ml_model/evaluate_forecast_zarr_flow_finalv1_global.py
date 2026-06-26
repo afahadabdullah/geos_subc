@@ -9,8 +9,11 @@ Each yearly Zarr store is expected to contain:
 
 The evaluator writes:
   - one per-year per-init/per-lead metrics CSV, used for resume
+  - one per-year direct-reduction metric-state CSV, used for resume
   - one combined per-init/per-lead metrics CSV
-  - one grouped summary CSV with all, lead, month, and season aggregations
+  - one grouped direct-reduction summary CSV with all, lead, month, year,
+    and season aggregations
+  - one grouped scalar-mean summary CSV for diagnostics/backward comparison
   - optional diagnostic skill plots
 """
 
@@ -40,6 +43,89 @@ VARIABLES = {
         "units": "K",
     },
 }
+
+
+GROUP_SPECS = [
+    ("all", []),
+    ("year", ["year"]),
+    ("year_lead", ["year", "lead", "lead_label"]),
+    ("lead", ["lead", "lead_label"]),
+    ("init_month", ["init_month", "init_month_label"]),
+    ("init_month_lead", ["init_month", "init_month_label", "lead", "lead_label"]),
+    ("init_season", ["init_season"]),
+    ("init_season_lead", ["init_season", "lead", "lead_label"]),
+    ("valid_month", ["valid_month", "valid_month_label"]),
+    ("valid_month_lead", ["valid_month", "valid_month_label", "lead", "lead_label"]),
+    ("valid_season", ["valid_season"]),
+    ("valid_season_lead", ["valid_season", "lead", "lead_label"]),
+]
+
+GROUP_COLUMNS = [
+    "year",
+    "lead",
+    "lead_label",
+    "init_month",
+    "init_month_label",
+    "init_season",
+    "valid_month",
+    "valid_month_label",
+    "valid_season",
+]
+
+ORDERED_SUMMARY_COLS = [
+    "group_type",
+    "variable",
+    "year",
+    "lead",
+    "lead_label",
+    "init_month",
+    "init_month_label",
+    "init_season",
+    "valid_month",
+    "valid_month_label",
+    "valid_season",
+    "n_samples",
+    "n_init_dates",
+    "model_members",
+    "geos_members",
+    "model_crps",
+    "geos_crps",
+    "crps_skill_vs_geos",
+    "crps_improvement_pct",
+    "model_rmse",
+    "geos_rmse",
+    "rmse_skill_vs_geos",
+    "rmse_improvement_pct",
+    "model_mae",
+    "geos_mae",
+    "mae_skill_vs_geos",
+    "mae_improvement_pct",
+    "model_bias",
+    "geos_bias",
+    "abs_bias_skill_vs_geos",
+    "abs_bias_improvement_pct",
+    "model_spread",
+    "geos_spread",
+]
+
+DIRECT_STATE_SUM_COLUMNS = [
+    "n_samples",
+    "n_init_dates",
+    "model_weight_sum",
+    "geos_weight_sum",
+    "model_crps_weighted_sum",
+    "geos_crps_weighted_sum",
+    "model_sse_weighted_sum",
+    "geos_sse_weighted_sum",
+    "model_ae_weighted_sum",
+    "geos_ae_weighted_sum",
+    "model_bias_weighted_sum",
+    "geos_bias_weighted_sum",
+    "model_spread_weighted_sum",
+    "geos_spread_weighted_sum",
+    "model_member_sum",
+    "geos_member_sum",
+]
 
 
 def parse_args():
@@ -213,10 +299,181 @@ def add_skill_columns(df):
     return df
 
 
-def evaluate_year(year, zarr_path, out_csv, variables, overwrite=False):
-    if os.path.exists(out_csv) and not overwrite:
-        print(f"✅ {year}: using existing per-init metrics {out_csv}")
-        return pd.read_csv(out_csv, parse_dates=["init", "valid_time"])
+def weighted_sums_for_ensemble(ensemble, obs, weights):
+    """
+    Return weighted sums for direct group reduction.
+
+    This mirrors the training/test-mode reduction more closely than averaging
+    already-reduced per-init/per-lead scalar RMSE values:
+      RMSE = sqrt(sum(w * squared_error) / sum(w))
+    CRPS/MAE/bias/spread are also reduced from their weighted gridpoint sums.
+    """
+    ensemble = np.asarray(ensemble, dtype=np.float32)
+    obs = np.asarray(obs, dtype=np.float32)
+    if ensemble.ndim != 3:
+        raise ValueError(f"Expected ensemble [E,H,W], got shape {ensemble.shape}")
+    if obs.ndim != 2:
+        raise ValueError(f"Expected obs [H,W], got shape {obs.shape}")
+
+    finite = np.isfinite(obs) & np.all(np.isfinite(ensemble), axis=0)
+    weighted_mask = np.where(finite, weights, 0.0)
+    weight_sum = float(np.sum(weighted_mask))
+    if weight_sum <= 0:
+        return {
+            "weight_sum": 0.0,
+            "crps_weighted_sum": 0.0,
+            "sse_weighted_sum": 0.0,
+            "ae_weighted_sum": 0.0,
+            "bias_weighted_sum": 0.0,
+            "spread_weighted_sum": 0.0,
+            "members": int(ensemble.shape[0]),
+        }
+
+    ens64 = ensemble.astype(np.float64, copy=False)
+    obs64 = obs.astype(np.float64, copy=False)
+    mean = np.mean(ens64, axis=0)
+    err = mean - obs64
+    spread_map = np.std(ens64, axis=0)
+
+    mae_term = np.mean(np.abs(ens64 - obs64[None, :, :]), axis=0)
+    ens_sorted = np.sort(ens64, axis=0)
+    e = ens_sorted.shape[0]
+    coeff = ((2.0 * np.arange(1, e + 1, dtype=np.float64)) - e - 1.0) / (e * e)
+    spread_term = np.sum(coeff[:, None, None] * ens_sorted, axis=0)
+    crps_map = mae_term - spread_term
+
+    return {
+        "weight_sum": weight_sum,
+        "crps_weighted_sum": float(np.sum(np.where(finite, crps_map, 0.0) * weighted_mask)),
+        "sse_weighted_sum": float(np.sum(np.where(finite, err * err, 0.0) * weighted_mask)),
+        "ae_weighted_sum": float(np.sum(np.where(finite, np.abs(err), 0.0) * weighted_mask)),
+        "bias_weighted_sum": float(np.sum(np.where(finite, err, 0.0) * weighted_mask)),
+        "spread_weighted_sum": float(np.sum(np.where(finite, spread_map, 0.0) * weighted_mask)),
+        "members": int(e),
+    }
+
+
+def _default_group_value(column):
+    if column in {"lead", "init_month", "valid_month", "year"}:
+        return np.nan
+    return "all"
+
+
+def _direct_state_template(group_type, variable, row, group_cols):
+    state = {
+        "group_type": group_type,
+        "variable": variable,
+        "n_samples": 0,
+        "init_dates": set(),
+        "model_weight_sum": 0.0,
+        "geos_weight_sum": 0.0,
+        "model_crps_weighted_sum": 0.0,
+        "geos_crps_weighted_sum": 0.0,
+        "model_sse_weighted_sum": 0.0,
+        "geos_sse_weighted_sum": 0.0,
+        "model_ae_weighted_sum": 0.0,
+        "geos_ae_weighted_sum": 0.0,
+        "model_bias_weighted_sum": 0.0,
+        "geos_bias_weighted_sum": 0.0,
+        "model_spread_weighted_sum": 0.0,
+        "geos_spread_weighted_sum": 0.0,
+        "model_member_sum": 0.0,
+        "geos_member_sum": 0.0,
+    }
+    for column in GROUP_COLUMNS:
+        state[column] = row[column] if column in group_cols else _default_group_value(column)
+    return state
+
+
+def update_direct_accumulators(accumulators, row, variable, model, geos, obs, weights):
+    model_sums = weighted_sums_for_ensemble(model, obs, weights)
+    geos_sums = weighted_sums_for_ensemble(geos, obs, weights)
+    for group_type, group_cols in GROUP_SPECS:
+        key = (group_type, variable, tuple(row[col] for col in group_cols))
+        state = accumulators.get(key)
+        if state is None:
+            state = _direct_state_template(group_type, variable, row, group_cols)
+            accumulators[key] = state
+
+        state["n_samples"] += 1
+        state["init_dates"].add(pd.Timestamp(row["init"]).strftime("%Y-%m-%d"))
+        state["model_weight_sum"] += model_sums["weight_sum"]
+        state["geos_weight_sum"] += geos_sums["weight_sum"]
+        state["model_crps_weighted_sum"] += model_sums["crps_weighted_sum"]
+        state["geos_crps_weighted_sum"] += geos_sums["crps_weighted_sum"]
+        state["model_sse_weighted_sum"] += model_sums["sse_weighted_sum"]
+        state["geos_sse_weighted_sum"] += geos_sums["sse_weighted_sum"]
+        state["model_ae_weighted_sum"] += model_sums["ae_weighted_sum"]
+        state["geos_ae_weighted_sum"] += geos_sums["ae_weighted_sum"]
+        state["model_bias_weighted_sum"] += model_sums["bias_weighted_sum"]
+        state["geos_bias_weighted_sum"] += geos_sums["bias_weighted_sum"]
+        state["model_spread_weighted_sum"] += model_sums["spread_weighted_sum"]
+        state["geos_spread_weighted_sum"] += geos_sums["spread_weighted_sum"]
+        state["model_member_sum"] += model_sums["members"]
+        state["geos_member_sum"] += geos_sums["members"]
+
+
+def direct_accumulators_to_state_df(accumulators):
+    rows = []
+    for state in accumulators.values():
+        row = {k: v for k, v in state.items() if k != "init_dates"}
+        row["n_init_dates"] = len(state["init_dates"])
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=["group_type", "variable", *GROUP_COLUMNS, *DIRECT_STATE_SUM_COLUMNS])
+    out = pd.DataFrame(rows)
+    for column in ["group_type", "variable", *GROUP_COLUMNS, *DIRECT_STATE_SUM_COLUMNS]:
+        if column not in out.columns:
+            out[column] = np.nan
+    return out[["group_type", "variable", *GROUP_COLUMNS, *DIRECT_STATE_SUM_COLUMNS]]
+
+
+def direct_state_to_summary(state_df):
+    if state_df.empty:
+        return pd.DataFrame(columns=ORDERED_SUMMARY_COLS)
+    group_cols = ["group_type", "variable", *GROUP_COLUMNS]
+    numeric_cols = [col for col in DIRECT_STATE_SUM_COLUMNS if col in state_df.columns]
+    grouped = state_df.groupby(group_cols, dropna=False)[numeric_cols].sum().reset_index()
+    rows = []
+    for _, row in grouped.iterrows():
+        model_w = float(row["model_weight_sum"])
+        geos_w = float(row["geos_weight_sum"])
+        n_samples = max(float(row["n_samples"]), 1.0)
+        out = {col: row[col] for col in group_cols}
+        out["n_samples"] = int(row["n_samples"])
+        out["n_init_dates"] = int(row["n_init_dates"])
+        out["model_members"] = float(row["model_member_sum"]) / n_samples
+        out["geos_members"] = float(row["geos_member_sum"]) / n_samples
+
+        for prefix, weight in (("model", model_w), ("geos", geos_w)):
+            if weight <= 0:
+                out[f"{prefix}_crps"] = np.nan
+                out[f"{prefix}_rmse"] = np.nan
+                out[f"{prefix}_mae"] = np.nan
+                out[f"{prefix}_bias"] = np.nan
+                out[f"{prefix}_spread"] = np.nan
+                continue
+            out[f"{prefix}_crps"] = float(row[f"{prefix}_crps_weighted_sum"]) / weight
+            out[f"{prefix}_rmse"] = np.sqrt(float(row[f"{prefix}_sse_weighted_sum"]) / weight)
+            out[f"{prefix}_mae"] = float(row[f"{prefix}_ae_weighted_sum"]) / weight
+            out[f"{prefix}_bias"] = float(row[f"{prefix}_bias_weighted_sum"]) / weight
+            out[f"{prefix}_spread"] = float(row[f"{prefix}_spread_weighted_sum"]) / weight
+        rows.append(out)
+
+    summary = add_skill_columns(pd.DataFrame(rows))
+    for col in ORDERED_SUMMARY_COLS:
+        if col not in summary.columns:
+            summary[col] = np.nan
+    return summary[ORDERED_SUMMARY_COLS]
+
+
+def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwrite=False):
+    if os.path.exists(out_csv) and os.path.exists(direct_state_csv) and not overwrite:
+        print(f"✅ {year}: using existing metrics {out_csv} and {direct_state_csv}")
+        return (
+            pd.read_csv(out_csv, parse_dates=["init", "valid_time"]),
+            pd.read_csv(direct_state_csv),
+        )
 
     print(f"🔎 {year}: evaluating {zarr_path}")
     ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
@@ -226,6 +483,7 @@ def evaluate_year(year, zarr_path, out_csv, variables, overwrite=False):
         init_values = pd.to_datetime(ds["init"].values).normalize()
         lead_values = ds["lead"].values
         rows = []
+        direct_accumulators = {}
 
         for init_idx, init_time in enumerate(init_values):
             init_month = int(init_time.month)
@@ -267,12 +525,24 @@ def evaluate_year(year, zarr_path, out_csv, variables, overwrite=False):
                         row[f"model_{metric}"] = model_metrics[metric]
                         row[f"geos_{metric}"] = geos_metrics[metric]
                     rows.append(row)
+                    update_direct_accumulators(
+                        direct_accumulators,
+                        row,
+                        variable,
+                        model,
+                        geos,
+                        obs,
+                        weights,
+                    )
 
         out = add_skill_columns(pd.DataFrame(rows))
+        direct_state = direct_accumulators_to_state_df(direct_accumulators)
         os.makedirs(os.path.dirname(out_csv), exist_ok=True)
         out.to_csv(out_csv, index=False, float_format="%.6f")
+        direct_state.to_csv(direct_state_csv, index=False, float_format="%.10f")
         print(f"✅ {year}: wrote {len(out)} rows to {out_csv}")
-        return out
+        print(f"✅ {year}: wrote direct metric state to {direct_state_csv}")
+        return out, direct_state
     finally:
         ds.close()
 
@@ -307,70 +577,18 @@ def aggregate_group(df, group_type, group_cols):
             **{col: (col, "mean") for col in value_cols},
         ).reset_index()
     out.insert(0, "group_type", group_type)
-    for col in (
-        "lead",
-        "lead_label",
-        "init_month",
-        "init_month_label",
-        "init_season",
-        "valid_month",
-        "valid_month_label",
-        "valid_season",
-    ):
+    for col in GROUP_COLUMNS:
         if col not in out.columns:
-            out[col] = "all" if col.endswith("label") or col.endswith("season") else np.nan
+            out[col] = _default_group_value(col)
     return add_skill_columns(out)
 
 
 def build_summary(df):
-    groups = [
-        ("all", []),
-        ("lead", ["lead", "lead_label"]),
-        ("init_month", ["init_month", "init_month_label"]),
-        ("init_month_lead", ["init_month", "init_month_label", "lead", "lead_label"]),
-        ("init_season", ["init_season"]),
-        ("init_season_lead", ["init_season", "lead", "lead_label"]),
-        ("valid_month", ["valid_month", "valid_month_label"]),
-        ("valid_month_lead", ["valid_month", "valid_month_label", "lead", "lead_label"]),
-        ("valid_season", ["valid_season"]),
-        ("valid_season_lead", ["valid_season", "lead", "lead_label"]),
-    ]
-    summary = pd.concat([aggregate_group(df, name, cols) for name, cols in groups], ignore_index=True)
-    ordered_cols = [
-        "group_type",
-        "variable",
-        "lead",
-        "lead_label",
-        "init_month",
-        "init_month_label",
-        "init_season",
-        "valid_month",
-        "valid_month_label",
-        "valid_season",
-        "n_samples",
-        "n_init_dates",
-        "model_members",
-        "geos_members",
-        "model_crps",
-        "geos_crps",
-        "crps_skill_vs_geos",
-        "crps_improvement_pct",
-        "model_rmse",
-        "geos_rmse",
-        "rmse_skill_vs_geos",
-        "rmse_improvement_pct",
-        "model_mae",
-        "geos_mae",
-        "mae_skill_vs_geos",
-        "mae_improvement_pct",
-        "model_bias",
-        "geos_bias",
-        "abs_bias_skill_vs_geos",
-        "abs_bias_improvement_pct",
-        "model_spread",
-        "geos_spread",
-    ]
-    return summary[ordered_cols]
+    summary = pd.concat([aggregate_group(df, name, cols) for name, cols in GROUP_SPECS], ignore_index=True)
+    for col in ORDERED_SUMMARY_COLS:
+        if col not in summary.columns:
+            summary[col] = np.nan
+    return summary[ORDERED_SUMMARY_COLS]
 
 
 def maybe_make_plots(summary, out_dir):
@@ -412,6 +630,7 @@ def maybe_make_plots(summary, out_dir):
         plt.close(fig)
 
     plot_group("lead", "lead", "lead_label", "skill_by_lead.png")
+    plot_group("year", "year", "year", "skill_by_year.png")
     plot_group("init_month", "init_month", "init_month_label", "skill_by_init_month.png")
     plot_group("init_season", "init_season", "init_season", "skill_by_init_season.png")
     plot_group("valid_season", "valid_season", "valid_season", "skill_by_valid_season.png")
@@ -459,32 +678,39 @@ def main():
     print("=" * 88 + "\n")
 
     year_frames = []
+    year_direct_states = []
     all_complete = True
     for year in expected_years:
         year_csv = os.path.join(yearly_dir, f"{year}_per_init_lead_metrics.csv")
-        if deadline_reached(deadline) and not os.path.exists(year_csv):
+        year_state_csv = os.path.join(yearly_dir, f"{year}_direct_metric_state.csv")
+        if deadline_reached(deadline) and not (os.path.exists(year_csv) and os.path.exists(year_state_csv)):
             print(f"⏸️ Soft runtime reached before starting {year}.")
             all_complete = False
             break
         zarr_path = os.path.join(args.forecast_dir, f"{year}.zarr")
         if not os.path.isdir(zarr_path):
             raise FileNotFoundError(f"Missing forecast Zarr store for {year}: {zarr_path}")
-        year_df = evaluate_year(
+        year_df, year_direct_state = evaluate_year(
             year=year,
             zarr_path=zarr_path,
             out_csv=year_csv,
+            direct_state_csv=year_state_csv,
             variables=variables,
             overwrite=args.overwrite,
         )
         year_frames.append(year_df)
+        year_direct_states.append(year_direct_state)
 
     missing_metrics = [
         year
         for year in expected_years
-        if not os.path.exists(os.path.join(yearly_dir, f"{year}_per_init_lead_metrics.csv"))
+        if (
+            not os.path.exists(os.path.join(yearly_dir, f"{year}_per_init_lead_metrics.csv"))
+            or not os.path.exists(os.path.join(yearly_dir, f"{year}_direct_metric_state.csv"))
+        )
     ]
     if missing_metrics:
-        print(f"⏸️ Missing per-year metrics: {missing_metrics}")
+        print(f"⏸️ Missing per-year metric/detail-state files: {missing_metrics}")
         all_complete = False
 
     if not all_complete:
@@ -496,15 +722,28 @@ def main():
             pd.read_csv(os.path.join(yearly_dir, f"{year}_per_init_lead_metrics.csv"), parse_dates=["init", "valid_time"])
             for year in expected_years
         ]
+    if not year_direct_states:
+        year_direct_states = [
+            pd.read_csv(os.path.join(yearly_dir, f"{year}_direct_metric_state.csv"))
+            for year in expected_years
+        ]
 
     combined = pd.concat(year_frames, ignore_index=True)
     combined = add_skill_columns(combined)
     combined_csv = os.path.join(args.out_dir, "per_init_lead_metrics.csv")
     combined.to_csv(combined_csv, index=False, float_format="%.6f")
 
-    summary = build_summary(combined)
+    direct_state = pd.concat(year_direct_states, ignore_index=True)
+    direct_state_csv = os.path.join(args.out_dir, "direct_metric_state.csv")
+    direct_state.to_csv(direct_state_csv, index=False, float_format="%.10f")
+
+    summary = direct_state_to_summary(direct_state)
     summary_csv = os.path.join(args.out_dir, "summary_metrics.csv")
     summary.to_csv(summary_csv, index=False, float_format="%.6f")
+
+    scalar_summary = build_summary(combined)
+    scalar_summary_csv = os.path.join(args.out_dir, "summary_metrics_scalar_mean.csv")
+    scalar_summary.to_csv(scalar_summary_csv, index=False, float_format="%.6f")
 
     if args.make_plots:
         maybe_make_plots(summary, args.out_dir)
@@ -519,7 +758,10 @@ def main():
         "variables": variables,
         "n_rows": int(len(combined)),
         "n_init_dates": int(combined["init"].nunique()),
+        "summary_reduction": "direct_gridpoint_weighted",
         "summary_csv": os.path.abspath(summary_csv),
+        "scalar_mean_summary_csv": os.path.abspath(scalar_summary_csv),
+        "direct_metric_state_csv": os.path.abspath(direct_state_csv),
         "per_init_lead_csv": os.path.abspath(combined_csv),
     }
     with open(os.path.join(args.out_dir, "evaluation_overview.json"), "w") as f:
@@ -527,7 +769,9 @@ def main():
 
     print_headline(summary)
     print(f"\n✅ Wrote per-init/per-lead metrics: {combined_csv}")
-    print(f"✅ Wrote grouped summary metrics: {summary_csv}")
+    print(f"✅ Wrote direct grouped summary metrics: {summary_csv}")
+    print(f"✅ Wrote scalar-mean diagnostic summary: {scalar_summary_csv}")
+    print(f"✅ Wrote direct metric state: {direct_state_csv}")
     if args.make_plots:
         print(f"✅ Wrote plots under: {os.path.join(args.out_dir, 'plots')}")
     return 0

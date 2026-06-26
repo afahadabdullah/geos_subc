@@ -95,8 +95,9 @@ missing = []
 for year in range(start_year, end_year + 1):
     if year in skip_years:
         continue
-    path = os.path.join(out_dir, "yearly_metrics", f"{year}_per_init_lead_metrics.csv")
-    if not os.path.isfile(path):
+    detail_path = os.path.join(out_dir, "yearly_metrics", f"{year}_per_init_lead_metrics.csv")
+    state_path = os.path.join(out_dir, "yearly_metrics", f"{year}_direct_metric_state.csv")
+    if not (os.path.isfile(detail_path) and os.path.isfile(state_path)):
         missing.append(str(year))
 print(",".join(missing))
 PY
