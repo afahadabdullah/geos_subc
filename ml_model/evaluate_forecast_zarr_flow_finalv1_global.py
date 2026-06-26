@@ -14,7 +14,7 @@ The evaluator writes:
   - one grouped direct-reduction summary CSV with all, lead, month, year,
     and season aggregations
   - one grouped scalar-mean summary CSV for diagnostics/backward comparison
-  - optional diagnostic skill plots
+  - optional diagnostic skill plots and spatial skill maps
 """
 
 import argparse
@@ -353,6 +353,210 @@ def weighted_sums_for_ensemble(ensemble, obs, weights):
     }
 
 
+def grid_diagnostics_for_ensemble(ensemble, obs):
+    """Per-grid CRPS, squared error, bias, and spread for one ensemble forecast."""
+    ensemble = np.asarray(ensemble, dtype=np.float32)
+    obs = np.asarray(obs, dtype=np.float32)
+    if ensemble.ndim != 3:
+        raise ValueError(f"Expected ensemble [E,H,W], got shape {ensemble.shape}")
+    if obs.ndim != 2:
+        raise ValueError(f"Expected obs [H,W], got shape {obs.shape}")
+
+    finite = np.isfinite(obs) & np.all(np.isfinite(ensemble), axis=0)
+    ens64 = ensemble.astype(np.float64, copy=False)
+    obs64 = obs.astype(np.float64, copy=False)
+    mean = np.mean(ens64, axis=0)
+    err = mean - obs64
+    spread = np.std(ens64, axis=0)
+
+    mae_term = np.mean(np.abs(ens64 - obs64[None, :, :]), axis=0)
+    ens_sorted = np.sort(ens64, axis=0)
+    e = ens_sorted.shape[0]
+    coeff = ((2.0 * np.arange(1, e + 1, dtype=np.float64)) - e - 1.0) / (e * e)
+    spread_term = np.sum(coeff[:, None, None] * ens_sorted, axis=0)
+    crps = mae_term - spread_term
+
+    return {
+        "finite": finite,
+        "crps": np.where(finite, crps, 0.0),
+        "sse": np.where(finite, err * err, 0.0),
+        "bias": np.where(finite, err, 0.0),
+        "spread": np.where(finite, spread, 0.0),
+    }
+
+
+def _spatial_state_template(height, width):
+    return {
+        "count": np.zeros((height, width), dtype=np.float64),
+        "model_crps_sum": np.zeros((height, width), dtype=np.float64),
+        "geos_crps_sum": np.zeros((height, width), dtype=np.float64),
+        "model_sse_sum": np.zeros((height, width), dtype=np.float64),
+        "geos_sse_sum": np.zeros((height, width), dtype=np.float64),
+        "model_bias_sum": np.zeros((height, width), dtype=np.float64),
+        "geos_bias_sum": np.zeros((height, width), dtype=np.float64),
+        "model_spread_sum": np.zeros((height, width), dtype=np.float64),
+        "geos_spread_sum": np.zeros((height, width), dtype=np.float64),
+    }
+
+
+def _update_spatial_group(accumulators, group, variable, model_maps, geos_maps):
+    finite = model_maps["finite"] & geos_maps["finite"]
+    height, width = finite.shape
+    key = (group, variable)
+    if key not in accumulators:
+        accumulators[key] = _spatial_state_template(height, width)
+    state = accumulators[key]
+    finite_f = finite.astype(np.float64)
+    state["count"] += finite_f
+    for metric in ("crps", "sse", "bias", "spread"):
+        state[f"model_{metric}_sum"] += np.where(finite, model_maps[metric], 0.0)
+        state[f"geos_{metric}_sum"] += np.where(finite, geos_maps[metric], 0.0)
+
+
+def _update_spatial_accumulators(accumulators, row, variable, model, geos, obs):
+    model_maps = grid_diagnostics_for_ensemble(model, obs)
+    geos_maps = grid_diagnostics_for_ensemble(geos, obs)
+    groups = [
+        "all",
+        f"year_{int(row['year'])}",
+        f"lead_{row['lead_label']}",
+        f"init_season_{row['init_season']}",
+        f"valid_season_{row['valid_season']}",
+    ]
+    for group in groups:
+        _update_spatial_group(accumulators, group, variable, model_maps, geos_maps)
+
+
+def _spatial_accumulators_to_dataset(accumulators, lats, lons):
+    if not accumulators:
+        raise ValueError("No spatial diagnostics were accumulated.")
+    groups = sorted({key[0] for key in accumulators})
+    variables = [v for v in ("pr", "t2m") if any(key[1] == v for key in accumulators)]
+    shape = (len(groups), len(variables), len(lats), len(lons))
+
+    data = {
+        "sample_count": np.full(shape, np.nan, dtype=np.float32),
+        "model_crps": np.full(shape, np.nan, dtype=np.float32),
+        "geos_crps": np.full(shape, np.nan, dtype=np.float32),
+        "crps_skill_pct": np.full(shape, np.nan, dtype=np.float32),
+        "model_rmse": np.full(shape, np.nan, dtype=np.float32),
+        "geos_rmse": np.full(shape, np.nan, dtype=np.float32),
+        "rmse_skill_pct": np.full(shape, np.nan, dtype=np.float32),
+        "model_bias": np.full(shape, np.nan, dtype=np.float32),
+        "geos_bias": np.full(shape, np.nan, dtype=np.float32),
+        "bias_delta": np.full(shape, np.nan, dtype=np.float32),
+        "model_spread": np.full(shape, np.nan, dtype=np.float32),
+        "geos_spread": np.full(shape, np.nan, dtype=np.float32),
+        "spread_delta": np.full(shape, np.nan, dtype=np.float32),
+    }
+
+    for g_idx, group in enumerate(groups):
+        for v_idx, variable in enumerate(variables):
+            state = accumulators.get((group, variable))
+            if state is None:
+                continue
+            count = state["count"]
+            valid = count > 0
+            with np.errstate(divide="ignore", invalid="ignore"):
+                model_crps = np.where(valid, state["model_crps_sum"] / count, np.nan)
+                geos_crps = np.where(valid, state["geos_crps_sum"] / count, np.nan)
+                model_rmse = np.where(valid, np.sqrt(state["model_sse_sum"] / count), np.nan)
+                geos_rmse = np.where(valid, np.sqrt(state["geos_sse_sum"] / count), np.nan)
+                model_bias = np.where(valid, state["model_bias_sum"] / count, np.nan)
+                geos_bias = np.where(valid, state["geos_bias_sum"] / count, np.nan)
+                model_spread = np.where(valid, state["model_spread_sum"] / count, np.nan)
+                geos_spread = np.where(valid, state["geos_spread_sum"] / count, np.nan)
+                crps_skill = 100.0 * (1.0 - model_crps / geos_crps)
+                rmse_skill = 100.0 * (1.0 - model_rmse / geos_rmse)
+            crps_skill = np.where(np.isfinite(crps_skill) & (geos_crps > 1e-12), crps_skill, np.nan)
+            rmse_skill = np.where(np.isfinite(rmse_skill) & (geos_rmse > 1e-12), rmse_skill, np.nan)
+
+            index = (g_idx, v_idx)
+            data["sample_count"][index] = count.astype(np.float32)
+            data["model_crps"][index] = model_crps.astype(np.float32)
+            data["geos_crps"][index] = geos_crps.astype(np.float32)
+            data["crps_skill_pct"][index] = crps_skill.astype(np.float32)
+            data["model_rmse"][index] = model_rmse.astype(np.float32)
+            data["geos_rmse"][index] = geos_rmse.astype(np.float32)
+            data["rmse_skill_pct"][index] = rmse_skill.astype(np.float32)
+            data["model_bias"][index] = model_bias.astype(np.float32)
+            data["geos_bias"][index] = geos_bias.astype(np.float32)
+            data["bias_delta"][index] = (model_bias - geos_bias).astype(np.float32)
+            data["model_spread"][index] = model_spread.astype(np.float32)
+            data["geos_spread"][index] = geos_spread.astype(np.float32)
+            data["spread_delta"][index] = (model_spread - geos_spread).astype(np.float32)
+
+    coords = {
+        "group": np.asarray(groups, dtype=object),
+        "variable": np.asarray(variables, dtype=object),
+        "lat": np.asarray(lats, dtype=np.float32),
+        "lon": np.asarray(lons, dtype=np.float32),
+    }
+    ds = xr.Dataset(
+        {name: (("group", "variable", "lat", "lon"), values) for name, values in data.items()},
+        coords=coords,
+        attrs={
+            "description": "Spatial model-vs-GEOS skill diagnostics from generated forecast Zarr stores",
+            "skill_definition": "100 * (1 - model_metric / geos_metric); positive means model improves over GEOS",
+        },
+    )
+    ds["crps_skill_pct"].attrs["units"] = "%"
+    ds["rmse_skill_pct"].attrs["units"] = "%"
+    ds["sample_count"].attrs["description"] = "Number of init/lead samples contributing at each grid cell"
+    return ds
+
+
+def build_spatial_metric_maps(forecast_dir, years, variables, out_dir, overwrite=False):
+    map_path = os.path.join(out_dir, "spatial_metric_maps.nc")
+    if os.path.exists(map_path) and not overwrite:
+        print(f"✅ Using existing spatial metric maps: {map_path}")
+        return xr.open_dataset(map_path)
+
+    print("🗺️ Building spatial metric maps from forecast Zarr stores...")
+    accumulators = {}
+    saved_lats = None
+    saved_lons = None
+    for year in years:
+        zarr_path = os.path.join(forecast_dir, f"{year}.zarr")
+        ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
+        try:
+            lats = ds["lat"].values
+            lons = ds["lon"].values
+            if saved_lats is None:
+                saved_lats = lats
+                saved_lons = lons
+            init_values = pd.to_datetime(ds["init"].values).normalize()
+            lead_values = ds["lead"].values
+            for init_idx, init_time in enumerate(init_values):
+                init_month = int(init_time.month)
+                for lead_idx, lead_value in enumerate(lead_values):
+                    if "valid_time" in ds:
+                        valid_time = pd.Timestamp(ds["valid_time"].isel(init=init_idx, lead=lead_idx).values)
+                    else:
+                        valid_time = init_time + pd.to_timedelta(int(lead_value) * 7, unit="D")
+                    row = {
+                        "year": year,
+                        "lead": int(lead_value),
+                        "lead_label": f"week{int(lead_value)}",
+                        "init_season": season_name(init_month),
+                        "valid_season": season_name(int(valid_time.month)),
+                    }
+                    for variable in variables:
+                        names = VARIABLES[variable]
+                        obs = ds[names["obs"]].isel(init=init_idx, lead=lead_idx).values
+                        model = ds[names["model"]].isel(init=init_idx, lead=lead_idx).values
+                        geos = ds[names["geos"]].isel(init=init_idx, lead=lead_idx).values
+                        _update_spatial_accumulators(accumulators, row, variable, model, geos, obs)
+        finally:
+            ds.close()
+
+    map_ds = _spatial_accumulators_to_dataset(accumulators, saved_lats, saved_lons)
+    os.makedirs(out_dir, exist_ok=True)
+    map_ds.to_netcdf(map_path)
+    print(f"✅ Wrote spatial metric maps: {map_path}")
+    return map_ds
+
+
 def _default_group_value(column):
     if column in {"lead", "init_month", "valid_month", "year"}:
         return np.nan
@@ -636,6 +840,145 @@ def maybe_make_plots(summary, out_dir):
     plot_group("valid_season", "valid_season", "valid_season", "skill_by_valid_season.png")
 
 
+def _finite_percentile_limits(field, lower=2, upper=98, symmetric=False):
+    values = np.asarray(field)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return (-1.0, 1.0) if symmetric else (0.0, 1.0)
+    lo, hi = np.nanpercentile(values, [lower, upper])
+    if symmetric:
+        vmax = max(abs(float(lo)), abs(float(hi)), 1e-6)
+        return -vmax, vmax
+    if abs(float(hi) - float(lo)) < 1e-12:
+        pad = max(abs(float(hi)) * 0.05, 1e-6)
+        return float(lo) - pad, float(hi) + pad
+    return float(lo), float(hi)
+
+
+def _plot_spatial_panel(ax, lons, lats, field, title, cmap, vmin=None, vmax=None):
+    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("lon")
+    ax.set_ylabel("lat")
+    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
+    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
+    return mesh
+
+
+def _get_spatial_field(spatial_ds, variable, group, metric):
+    return spatial_ds[metric].sel(variable=variable, group=group).values
+
+
+def _available_groups(spatial_ds, prefix=None):
+    groups = [str(g) for g in spatial_ds["group"].values]
+    if prefix is None:
+        return groups
+    return [g for g in groups if g.startswith(prefix)]
+
+
+def plot_spatial_diagnostics(spatial_ds, out_dir):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_dir = os.path.join(out_dir, "plots", "spatial")
+    os.makedirs(plot_dir, exist_ok=True)
+    lats = spatial_ds["lat"].values
+    lons = spatial_ds["lon"].values
+    variables = [str(v) for v in spatial_ds["variable"].values]
+    groups = _available_groups(spatial_ds)
+
+    def plot_all_panels(variable):
+        if "all" not in groups:
+            return
+        panel_specs = [
+            ("model_crps", "Model CRPS", "viridis", False, None),
+            ("geos_crps", "GEOS CRPS", "viridis", False, None),
+            ("crps_skill_pct", "CRPS skill (%)", "RdBu", True, (-50, 50)),
+            ("model_rmse", "Model RMSE", "viridis", False, None),
+            ("geos_rmse", "GEOS RMSE", "viridis", False, None),
+            ("rmse_skill_pct", "RMSE skill (%)", "RdBu", True, (-50, 50)),
+            ("model_bias", "Model bias", "RdBu_r", True, None),
+            ("geos_bias", "GEOS bias", "RdBu_r", True, None),
+            ("bias_delta", "Model-GEOS bias", "RdBu_r", True, None),
+        ]
+        fig, axes = plt.subplots(3, 3, figsize=(18, 10), constrained_layout=True)
+        for ax, (metric, title, cmap, symmetric, fixed_limits) in zip(axes.flat, panel_specs):
+            field = _get_spatial_field(spatial_ds, variable, "all", metric)
+            if fixed_limits is None:
+                vmin, vmax = _finite_percentile_limits(field, symmetric=symmetric)
+            else:
+                vmin, vmax = fixed_limits
+            mesh = _plot_spatial_panel(
+                ax,
+                lons,
+                lats,
+                field,
+                f"{variable.upper()} {title}",
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
+            fig.colorbar(mesh, ax=ax, shrink=0.75)
+        fig.suptitle(f"{variable.upper()} spatial diagnostics | all samples", fontsize=14)
+        fig.savefig(os.path.join(plot_dir, f"{variable}_spatial_all_metrics.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    def plot_skill_grid(variable, group_list, labels, filename, title):
+        present = [(g, label) for g, label in zip(group_list, labels) if g in groups]
+        if not present:
+            return
+        fig, axes = plt.subplots(2, len(present), figsize=(4.5 * len(present), 7), squeeze=False, constrained_layout=True)
+        for col, (group, label) in enumerate(present):
+            for row, metric in enumerate(("crps_skill_pct", "rmse_skill_pct")):
+                field = _get_spatial_field(spatial_ds, variable, group, metric)
+                mesh = _plot_spatial_panel(
+                    axes[row, col],
+                    lons,
+                    lats,
+                    field,
+                    f"{label} {'CRPS' if row == 0 else 'RMSE'} skill",
+                    cmap="RdBu",
+                    vmin=-50,
+                    vmax=50,
+                )
+                fig.colorbar(mesh, ax=axes[row, col], shrink=0.75)
+        fig.suptitle(f"{variable.upper()} spatial skill vs GEOS | {title}", fontsize=14)
+        fig.savefig(os.path.join(plot_dir, filename), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    for variable in variables:
+        plot_all_panels(variable)
+        plot_skill_grid(
+            variable,
+            [f"lead_week{i}" for i in range(1, 5)],
+            [f"week{i}" for i in range(1, 5)],
+            f"{variable}_spatial_skill_by_lead.png",
+            "by lead",
+        )
+        year_groups = [g for g in _available_groups(spatial_ds, "year_")]
+        year_groups = sorted(year_groups, key=lambda x: int(x.split("_", 1)[1]))
+        plot_skill_grid(
+            variable,
+            year_groups,
+            [g.split("_", 1)[1] for g in year_groups],
+            f"{variable}_spatial_skill_by_year.png",
+            "by year",
+        )
+        for prefix, label in (("init_season", "init season"), ("valid_season", "valid season")):
+            season_groups = [f"{prefix}_{s}" for s in ("DJF", "MAM", "JJA", "SON")]
+            plot_skill_grid(
+                variable,
+                season_groups,
+                ["DJF", "MAM", "JJA", "SON"],
+                f"{variable}_spatial_skill_by_{prefix}.png",
+                label,
+            )
+
+    print(f"✅ Wrote spatial diagnostic plots under: {plot_dir}")
+
+
 def print_headline(summary):
     headline = summary[summary["group_type"].eq("all")].copy()
     if headline.empty:
@@ -745,8 +1088,20 @@ def main():
     scalar_summary_csv = os.path.join(args.out_dir, "summary_metrics_scalar_mean.csv")
     scalar_summary.to_csv(scalar_summary_csv, index=False, float_format="%.6f")
 
+    spatial_map_path = os.path.join(args.out_dir, "spatial_metric_maps.nc")
     if args.make_plots:
         maybe_make_plots(summary, args.out_dir)
+        spatial_ds = build_spatial_metric_maps(
+            forecast_dir=args.forecast_dir,
+            years=expected_years,
+            variables=variables,
+            out_dir=args.out_dir,
+            overwrite=args.overwrite,
+        )
+        try:
+            plot_spatial_diagnostics(spatial_ds, args.out_dir)
+        finally:
+            spatial_ds.close()
 
     overview = {
         "forecast_dir": os.path.abspath(args.forecast_dir),
@@ -762,6 +1117,7 @@ def main():
         "summary_csv": os.path.abspath(summary_csv),
         "scalar_mean_summary_csv": os.path.abspath(scalar_summary_csv),
         "direct_metric_state_csv": os.path.abspath(direct_state_csv),
+        "spatial_metric_maps": os.path.abspath(spatial_map_path) if args.make_plots else None,
         "per_init_lead_csv": os.path.abspath(combined_csv),
     }
     with open(os.path.join(args.out_dir, "evaluation_overview.json"), "w") as f:
@@ -774,6 +1130,7 @@ def main():
     print(f"✅ Wrote direct metric state: {direct_state_csv}")
     if args.make_plots:
         print(f"✅ Wrote plots under: {os.path.join(args.out_dir, 'plots')}")
+        print(f"✅ Wrote spatial metric maps: {spatial_map_path}")
     return 0
 
 
