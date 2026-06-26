@@ -481,6 +481,51 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
     plt.close(fig)
 
 
+def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event_end, out_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    obs = np.asarray(fields["obs"], dtype=np.float64)
+    geos = np.asarray(fields["geos_mean"], dtype=np.float64)
+    model = np.asarray(fields["model_mean"], dtype=np.float64)
+    model_minus_geos = model - geos
+    model_ens_count = int(fields["model_ens"].shape[0])
+    geos_ens_count = int(fields["geos_ens"].shape[0])
+    tmin, tmax = percentile_limits([obs, geos, model], lower=1, upper=99)
+    dmin, dmax = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+
+    def stats_label(name, values):
+        s = field_summary(values)
+        return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8), constrained_layout=True)
+    panels = [
+        (obs, stats_label("Obs T2M", obs), "coolwarm", tmin, tmax),
+        (geos, stats_label(f"GEOS ens mean T2M, N={geos_ens_count}", geos), "coolwarm", tmin, tmax),
+        (model, stats_label(f"ML ens mean T2M, N={model_ens_count}", model), "coolwarm", tmin, tmax),
+        (model_minus_geos, "ML - GEOS ens mean raw K", "RdBu_r", dmin, dmax),
+    ]
+    for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
+        mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
+        fig.colorbar(mesh, ax=ax, shrink=0.82)
+
+    if case["valid_in_event_window"]:
+        event_label = f"inside {event_start} to {event_end} event window"
+    elif case["closest_valid_to_event"]:
+        event_label = f"closest lead to event ({case['valid_event_offset_days']:+d}d)"
+    else:
+        event_label = f"{case['valid_event_offset_days']:+d}d from event"
+    fig.suptitle(
+        f"{event_name} raw generated T2M in K | init {case['init']:%Y-%m-%d} | "
+        f"valid {case['valid']:%Y-%m-%d} | lead week{case['lead']} | {event_label}",
+        fontsize=13,
+    )
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_composite_map(records, lats, lons, units, event_name, composite_label, out_path):
     import matplotlib
 
@@ -528,6 +573,41 @@ def plot_composite_map(records, lats, lons, units, event_name, composite_label, 
     fig.suptitle(
         f"{event_name} composite | {composite_label} | "
         f"{len(records)} init/lead cases",
+        fontsize=13,
+    )
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_raw_k_composite_mean_map(records, lats, lons, event_name, composite_label, out_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    obs = np.nanmean([r["obs"] for r in records], axis=0)
+    geos = np.nanmean([r["geos_mean"] for r in records], axis=0)
+    model = np.nanmean([r["model_mean"] for r in records], axis=0)
+    model_minus_geos = model - geos
+    tmin, tmax = percentile_limits([obs, geos, model], lower=1, upper=99)
+    dmin, dmax = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+
+    def stats_label(name, values):
+        s = field_summary(values)
+        return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8), constrained_layout=True)
+    panels = [
+        (obs, stats_label("Composite obs T2M", obs), "coolwarm", tmin, tmax),
+        (geos, stats_label("Composite GEOS ens mean T2M", geos), "coolwarm", tmin, tmax),
+        (model, stats_label("Composite ML ens mean T2M", model), "coolwarm", tmin, tmax),
+        (model_minus_geos, "Composite ML - GEOS ens mean raw K", "RdBu_r", dmin, dmax),
+    ]
+    for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
+        mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
+        fig.colorbar(mesh, ax=ax, shrink=0.82)
+    fig.suptitle(
+        f"{event_name} raw generated T2M in K | {composite_label} | {len(records)} init/lead cases",
         fontsize=13,
     )
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -583,6 +663,8 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     maps_dir = os.path.join(args.out_dir, "maps")
     os.makedirs(maps_dir, exist_ok=True)
+    raw_k_maps_dir = os.path.join(args.out_dir, "raw_k_mean_maps")
+    os.makedirs(raw_k_maps_dir, exist_ok=True)
 
     zarr_path = os.path.join(args.forecast_dir, f"{args.year}.zarr")
     if not os.path.isdir(zarr_path):
@@ -720,6 +802,20 @@ def main():
                 args.event_end,
                 os.path.join(maps_dir, filename),
             )
+            raw_k_filename = (
+                f"rawK_case_init{case['init']:%Y%m%d}_valid{case['valid']:%Y%m%d}_"
+                f"week{case['lead']}_ens_mean_t2m.png"
+            )
+            plot_raw_k_mean_map(
+                case,
+                fields,
+                lats,
+                lons,
+                args.event_name,
+                args.event_start,
+                args.event_end,
+                os.path.join(raw_k_maps_dir, raw_k_filename),
+            )
 
         metrics_df = pd.DataFrame(metric_rows).sort_values(["init", "lead"])
         metrics_csv = os.path.join(args.out_dir, "event_case_metrics.csv")
@@ -743,6 +839,14 @@ def main():
             "all selected inits/leads",
             os.path.join(args.out_dir, "case_composite_t2m_maps.png"),
         )
+        plot_raw_k_composite_mean_map(
+            records,
+            lats,
+            lons,
+            args.event_name,
+            "all selected inits/leads",
+            os.path.join(args.out_dir, "rawK_case_composite_ens_mean_t2m.png"),
+        )
         closest_records = [r for r in records if r["closest_valid_to_event"]]
         if closest_records:
             plot_composite_map(
@@ -753,6 +857,14 @@ def main():
                 args.event_name,
                 "closest valid lead for each target init",
                 os.path.join(args.out_dir, "case_closest_event_t2m_maps.png"),
+            )
+            plot_raw_k_composite_mean_map(
+                closest_records,
+                lats,
+                lons,
+                args.event_name,
+                "closest valid lead for each target init",
+                os.path.join(args.out_dir, "rawK_case_closest_event_ens_mean_t2m.png"),
             )
 
         orientation = {
@@ -819,9 +931,15 @@ def main():
         print(f"\n✅ Wrote metrics: {metrics_csv}")
         print(f"✅ Wrote raw value summary: {raw_summary_csv}")
         print(f"✅ Wrote maps under: {maps_dir}")
+        print(f"✅ Wrote raw-K ensemble-mean maps under: {raw_k_maps_dir}")
         print(f"✅ Wrote composite map: {os.path.join(args.out_dir, 'case_composite_t2m_maps.png')}")
+        print(f"✅ Wrote raw-K composite map: {os.path.join(args.out_dir, 'rawK_case_composite_ens_mean_t2m.png')}")
         if closest_records:
             print(f"✅ Wrote closest-event composite map: {os.path.join(args.out_dir, 'case_closest_event_t2m_maps.png')}")
+            print(
+                "✅ Wrote raw-K closest-event composite map: "
+                f"{os.path.join(args.out_dir, 'rawK_case_closest_event_ens_mean_t2m.png')}"
+            )
         print(f"✅ Wrote time series: {os.path.join(args.out_dir, 'case_t2m_timeseries_metrics.png')}")
     finally:
         ds.close()
