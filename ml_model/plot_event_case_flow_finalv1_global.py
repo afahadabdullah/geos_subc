@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -112,6 +113,16 @@ EVENT_PRESETS = {
 }
 
 
+MAP_CONTEXT = {
+    "enabled": False,
+    "ccrs": None,
+    "plate_carree": None,
+    "features": [],
+    "lon_formatter": None,
+    "lat_formatter": None,
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot one T2M event case from generated global forecast Zarrs.")
     parser.add_argument(
@@ -164,6 +175,18 @@ def parse_args():
     )
     parser.add_argument("--max_cases", type=int, default=16)
     parser.add_argument(
+        "--map_features",
+        choices=("auto", "cartopy", "plain"),
+        default="auto",
+        help="Use Cartopy coastlines/borders when available. 'plain' disables map overlays.",
+    )
+    parser.add_argument(
+        "--county_boundaries",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Add US county boundaries when Cartopy cached data are available.",
+    )
+    parser.add_argument(
         "--temperature_units",
         choices=("C", "K"),
         default="C",
@@ -184,6 +207,133 @@ def apply_event_preset(args):
             setattr(args, key, value)
     args.event_preset = preset_name
     return args
+
+
+def signed_lon(value):
+    value = float(value)
+    if value > 180.0:
+        return value - 360.0
+    return value
+
+
+def domain_looks_us(args):
+    lon_min = signed_lon(args.lon_min)
+    lon_max = signed_lon(args.lon_max)
+    lon0, lon1 = sorted([lon_min, lon_max])
+    lat0, lat1 = sorted([float(args.lat_min), float(args.lat_max)])
+    return lon1 >= -170.0 and lon0 <= -50.0 and lat1 >= 20.0 and lat0 <= 75.0
+
+
+def _cached_natural_earth_feature(cfeature, ccrs, shapereader, download_warning, resolution, category, name, **kwargs):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", download_warning)
+            path = shapereader.natural_earth(
+                resolution=resolution,
+                category=category,
+                name=name,
+            )
+        geometries = list(shapereader.Reader(path).geometries())
+        if not geometries:
+            return None
+        return cfeature.ShapelyFeature(geometries, ccrs.PlateCarree(), **kwargs)
+    except Exception:
+        return None
+
+
+def configure_map_context(args):
+    MAP_CONTEXT.update(
+        {
+            "enabled": False,
+            "ccrs": None,
+            "plate_carree": None,
+            "features": [],
+            "lon_formatter": None,
+            "lat_formatter": None,
+        }
+    )
+    if args.map_features == "plain":
+        print("🗺️ Map overlays: disabled (--map_features plain).")
+        return
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        from cartopy.io import DownloadWarning, shapereader
+        from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
+    except Exception as exc:
+        message = "required" if args.map_features == "cartopy" else "requested"
+        print(f"⚠️ Cartopy map overlays {message} but unavailable ({exc}). Using plain maps.")
+        return
+
+    features = []
+    feature_specs = [
+        ("50m", "physical", "coastline", {"edgecolor": "black", "facecolor": "none", "linewidth": 0.8}),
+        (
+            "50m",
+            "cultural",
+            "admin_0_boundary_lines_land",
+            {"edgecolor": "black", "facecolor": "none", "linewidth": 0.55},
+        ),
+        (
+            "50m",
+            "cultural",
+            "admin_1_states_provinces_lines",
+            {"edgecolor": "0.25", "facecolor": "none", "linewidth": 0.45},
+        ),
+    ]
+    include_counties = args.county_boundaries == "on" or (
+        args.county_boundaries == "auto" and domain_looks_us(args)
+    )
+    if include_counties:
+        feature_specs.append(
+            (
+                "10m",
+                "cultural",
+                "admin_2_counties",
+                {"edgecolor": "0.35", "facecolor": "none", "linewidth": 0.20, "alpha": 0.65},
+            )
+        )
+
+    skipped = []
+    for resolution, category, name, kwargs in feature_specs:
+        feature = _cached_natural_earth_feature(
+            cfeature,
+            ccrs,
+            shapereader,
+            DownloadWarning,
+            resolution,
+            category,
+            name,
+            **kwargs,
+        )
+        if feature is None:
+            skipped.append(f"{resolution}/{name}")
+        else:
+            features.append(feature)
+
+    if not features and args.map_features == "cartopy":
+        print(
+            "⚠️ Cartopy is installed, but no requested Natural Earth overlays were found in the local cache. "
+            "Using GeoAxes without overlays to avoid runtime downloads."
+        )
+    elif skipped:
+        print(
+            "🗺️ Cartopy overlays enabled. Skipped uncached layers: "
+            + ", ".join(skipped)
+        )
+    else:
+        print("🗺️ Cartopy overlays enabled.")
+
+    MAP_CONTEXT.update(
+        {
+            "enabled": True,
+            "ccrs": ccrs,
+            "plate_carree": ccrs.PlateCarree(),
+            "features": features,
+            "lon_formatter": LongitudeFormatter(),
+            "lat_formatter": LatitudeFormatter(),
+        }
+    )
 
 
 def normalize_lon(lon):
@@ -294,13 +444,57 @@ def percentile_limits(fields, lower=2, upper=98, symmetric=False):
     return float(lo), float(hi)
 
 
+def make_map_subplots(nrows, ncols, figsize, **kwargs):
+    import matplotlib.pyplot as plt
+
+    if MAP_CONTEXT["enabled"]:
+        kwargs.setdefault("subplot_kw", {"projection": MAP_CONTEXT["plate_carree"]})
+    return plt.subplots(nrows, ncols, figsize=figsize, **kwargs)
+
+
+def add_map_overlays(ax, lons, lats):
+    if not MAP_CONTEXT["enabled"]:
+        return
+    plate_carree = MAP_CONTEXT["plate_carree"]
+    ax.set_extent(
+        [
+            float(np.nanmin(lons)),
+            float(np.nanmax(lons)),
+            float(np.nanmin(lats)),
+            float(np.nanmax(lats)),
+        ],
+        crs=plate_carree,
+    )
+    for feature in MAP_CONTEXT["features"]:
+        try:
+            ax.add_feature(feature, zorder=3)
+        except Exception:
+            continue
+    try:
+        xticks = np.linspace(float(np.nanmin(lons)), float(np.nanmax(lons)), 5)
+        yticks = np.linspace(float(np.nanmin(lats)), float(np.nanmax(lats)), 5)
+        ax.set_xticks(xticks, crs=plate_carree)
+        ax.set_yticks(yticks, crs=plate_carree)
+        if MAP_CONTEXT["lon_formatter"] is not None:
+            ax.xaxis.set_major_formatter(MAP_CONTEXT["lon_formatter"])
+        if MAP_CONTEXT["lat_formatter"] is not None:
+            ax.yaxis.set_major_formatter(MAP_CONTEXT["lat_formatter"])
+    except Exception:
+        pass
+
+
 def plot_panel(ax, lons, lats, field, title, cmap, vmin=None, vmax=None):
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    kwargs = {}
+    if MAP_CONTEXT["enabled"]:
+        kwargs["transform"] = MAP_CONTEXT["plate_carree"]
+    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax, **kwargs)
+    add_map_overlays(ax, lons, lats)
     ax.set_title(title, fontsize=10)
     ax.set_xlabel("lon")
     ax.set_ylabel("lat")
-    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
-    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
+    if not MAP_CONTEXT["enabled"]:
+        ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
+        ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
     return mesh
 
 
@@ -444,7 +638,7 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
     geos_abs_mean = weighted_mean(geos_abs_err, weights)
     closeness_mean = weighted_mean(closeness_gain, weights)
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), constrained_layout=True)
+    fig, axes = make_map_subplots(2, 4, figsize=(24, 10.5), constrained_layout=True)
     panels = [
         (obs, f"Observed T2M ({units})", "coolwarm", tmin, tmax),
         (geos, f"GEOS ens mean ({units})\nN={geos_ens_count}", "coolwarm", tmin, tmax),
@@ -500,7 +694,7 @@ def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event
         s = field_summary(values)
         return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8), constrained_layout=True)
+    fig, axes = make_map_subplots(1, 4, figsize=(24, 6.0), constrained_layout=True)
     panels = [
         (obs, stats_label("Obs T2M", obs), "coolwarm", tmin, tmax),
         (geos, stats_label(f"GEOS ens mean T2M, N={geos_ens_count}", geos), "coolwarm", tmin, tmax),
@@ -550,7 +744,7 @@ def plot_composite_map(records, lats, lons, units, event_name, composite_label, 
     abs_min, abs_max = percentile_limits([geos_abs_err, model_abs_err], lower=1, upper=99)
     close_min, close_max = percentile_limits([closeness_gain], lower=1, upper=99, symmetric=True)
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), constrained_layout=True)
+    fig, axes = make_map_subplots(2, 4, figsize=(24, 10.5), constrained_layout=True)
     panels = [
         (obs_u, f"Composite observed T2M ({units})", "coolwarm", tmin, tmax),
         (geos_u, f"Composite GEOS mean ({units})", "coolwarm", tmin, tmax),
@@ -596,7 +790,7 @@ def plot_raw_k_composite_mean_map(records, lats, lons, event_name, composite_lab
         s = field_summary(values)
         return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8), constrained_layout=True)
+    fig, axes = make_map_subplots(1, 4, figsize=(24, 6.0), constrained_layout=True)
     panels = [
         (obs, stats_label("Composite obs T2M", obs), "coolwarm", tmin, tmax),
         (geos, stats_label("Composite GEOS ens mean T2M", geos), "coolwarm", tmin, tmax),
@@ -660,6 +854,7 @@ def plot_case_timeseries(metrics_df, units, event_name, event_start, event_end, 
 
 def main():
     args = apply_event_preset(parse_args())
+    configure_map_context(args)
     os.makedirs(args.out_dir, exist_ok=True)
     maps_dir = os.path.join(args.out_dir, "maps")
     os.makedirs(maps_dir, exist_ok=True)
@@ -877,6 +1072,10 @@ def main():
             "lead_weeks": lead_weeks,
             "model_ensemble_members": model_ens_count,
             "geos_ensemble_members": geos_ens_count,
+            "map_features": args.map_features,
+            "county_boundaries": args.county_boundaries,
+            "cartopy_enabled": bool(MAP_CONTEXT["enabled"]),
+            "cartopy_feature_count": int(len(MAP_CONTEXT["features"])),
             "lat_first": float(ds_region["lat"].values[0]),
             "lat_last": float(ds_region["lat"].values[-1]),
             "lat_strictly_increasing": bool(np.all(np.diff(ds_region["lat"].values) > 0)),
