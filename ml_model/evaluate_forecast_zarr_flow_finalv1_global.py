@@ -421,7 +421,9 @@ def _update_spatial_accumulators(accumulators, row, variable, model, geos, obs):
         f"year_{int(row['year'])}",
         f"lead_{row['lead_label']}",
         f"init_season_{row['init_season']}",
+        f"init_season_lead_{row['init_season']}_{row['lead_label']}",
         f"valid_season_{row['valid_season']}",
+        f"valid_season_lead_{row['valid_season']}_{row['lead_label']}",
     ]
     for group in groups:
         _update_spatial_group(accumulators, group, variable, model_maps, geos_maps)
@@ -509,8 +511,19 @@ def _spatial_accumulators_to_dataset(accumulators, lats, lons):
 def build_spatial_metric_maps(forecast_dir, years, variables, out_dir, overwrite=False):
     map_path = os.path.join(out_dir, "spatial_metric_maps.nc")
     if os.path.exists(map_path) and not overwrite:
-        print(f"✅ Using existing spatial metric maps: {map_path}")
-        return xr.open_dataset(map_path)
+        existing = xr.open_dataset(map_path)
+        existing_groups = {str(g) for g in existing["group"].values}
+        required_groups = {"all", "lead_week1", "lead_week2", "lead_week3", "lead_week4"}
+        required_groups.update(
+            f"init_season_lead_{season}_week{lead}"
+            for season in ("DJF", "MAM", "JJA", "SON")
+            for lead in range(1, 5)
+        )
+        if required_groups.issubset(existing_groups):
+            print(f"✅ Using existing spatial metric maps: {map_path}")
+            return existing
+        existing.close()
+        print(f"♻️ Existing spatial metric maps are missing new diagnostic groups; rebuilding {map_path}")
 
     print("🗺️ Building spatial metric maps from forecast Zarr stores...")
     accumulators = {}
@@ -839,6 +852,41 @@ def maybe_make_plots(summary, out_dir):
     plot_group("init_season", "init_season", "init_season", "skill_by_init_season.png")
     plot_group("valid_season", "valid_season", "valid_season", "skill_by_valid_season.png")
 
+    def plot_init_season_lead(variable):
+        sub = summary[
+            summary["group_type"].eq("init_season_lead")
+            & summary["variable"].eq(variable)
+        ].copy()
+        if sub.empty:
+            return
+        seasons = [s for s in ("DJF", "MAM", "JJA", "SON") if s in set(sub["init_season"].astype(str))]
+        leads = [f"week{i}" for i in range(1, 5)]
+        fig, axes = plt.subplots(len(seasons), 2, figsize=(11, 3.2 * len(seasons)), squeeze=False)
+        for row_idx, season in enumerate(seasons):
+            sdf = sub[sub["init_season"].astype(str).eq(season)].copy()
+            sdf["lead_label"] = sdf["lead_label"].astype(str)
+            sdf = sdf.set_index("lead_label").reindex(leads).reset_index()
+            x = np.arange(len(leads))
+            axes[row_idx, 0].bar(x, sdf["crps_improvement_pct"])
+            axes[row_idx, 0].axhline(0, color="k", linewidth=0.8)
+            axes[row_idx, 0].set_title(f"{variable.upper()} {season} init CRPS skill by lead")
+            axes[row_idx, 0].set_ylabel("Improvement (%)")
+            axes[row_idx, 0].set_xticks(x)
+            axes[row_idx, 0].set_xticklabels(leads, rotation=30, ha="right")
+
+            axes[row_idx, 1].bar(x, sdf["rmse_improvement_pct"])
+            axes[row_idx, 1].axhline(0, color="k", linewidth=0.8)
+            axes[row_idx, 1].set_title(f"{variable.upper()} {season} init RMSE skill by lead")
+            axes[row_idx, 1].set_ylabel("Improvement (%)")
+            axes[row_idx, 1].set_xticks(x)
+            axes[row_idx, 1].set_xticklabels(leads, rotation=30, ha="right")
+        fig.tight_layout()
+        fig.savefig(os.path.join(plot_dir, f"{variable}_skill_by_init_season_lead.png"), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    for variable in [v for v in ("pr", "t2m") if v in set(summary["variable"])]:
+        plot_init_season_lead(variable)
+
 
 def _finite_percentile_limits(field, lower=2, upper=98, symmetric=False):
     values = np.asarray(field)
@@ -948,8 +996,47 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
         fig.savefig(os.path.join(plot_dir, filename), dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+    def plot_model_geos_metric_grid(variable, group_list, labels, metric, filename, title):
+        present = [(g, label) for g, label in zip(group_list, labels) if g in groups]
+        if not present:
+            return
+        model_metric = f"model_{metric}"
+        geos_metric = f"geos_{metric}"
+        combined = []
+        for group, _ in present:
+            combined.append(_get_spatial_field(spatial_ds, variable, group, model_metric))
+            combined.append(_get_spatial_field(spatial_ds, variable, group, geos_metric))
+        vmin, vmax = _finite_percentile_limits(np.stack(combined), lower=1, upper=99)
+        fig, axes = plt.subplots(2, len(present), figsize=(4.5 * len(present), 7), squeeze=False, constrained_layout=True)
+        for col, (group, label) in enumerate(present):
+            for row, source in enumerate(("model", "geos")):
+                field = _get_spatial_field(spatial_ds, variable, group, f"{source}_{metric}")
+                mesh = _plot_spatial_panel(
+                    axes[row, col],
+                    lons,
+                    lats,
+                    field,
+                    f"{label} {'ML' if source == 'model' else 'GEOS'} {metric.upper()}",
+                    cmap="viridis",
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                fig.colorbar(mesh, ax=axes[row, col], shrink=0.75)
+        fig.suptitle(f"{variable.upper()} ML vs GEOS {metric.upper()} | {title}", fontsize=14)
+        fig.savefig(os.path.join(plot_dir, filename), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
     for variable in variables:
         plot_all_panels(variable)
+        for metric in ("crps", "rmse"):
+            plot_model_geos_metric_grid(
+                variable,
+                [f"lead_week{i}" for i in range(1, 5)],
+                [f"week{i}" for i in range(1, 5)],
+                metric,
+                f"{variable}_spatial_{metric}_by_lead_ml_geos.png",
+                "by lead",
+            )
         plot_skill_grid(
             variable,
             [f"lead_week{i}" for i in range(1, 5)],
@@ -975,8 +1062,124 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
                 f"{variable}_spatial_skill_by_{prefix}.png",
                 label,
             )
+        for season in ("DJF", "MAM", "JJA", "SON"):
+            season_lead_groups = [f"init_season_lead_{season}_week{i}" for i in range(1, 5)]
+            plot_skill_grid(
+                variable,
+                season_lead_groups,
+                [f"{season} week{i}" for i in range(1, 5)],
+                f"{variable}_spatial_skill_init_{season}_by_lead.png",
+                f"{season} init by lead",
+            )
+            for metric in ("crps", "rmse"):
+                plot_model_geos_metric_grid(
+                    variable,
+                    season_lead_groups,
+                    [f"{season} week{i}" for i in range(1, 5)],
+                    metric,
+                    f"{variable}_spatial_{metric}_init_{season}_by_lead_ml_geos.png",
+                    f"{season} init by lead",
+                )
 
     print(f"✅ Wrote spatial diagnostic plots under: {plot_dir}")
+
+
+def plot_orientation_diagnostics(forecast_dir, years, variables, out_dir):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_dir = os.path.join(out_dir, "plots", "orientation")
+    os.makedirs(plot_dir, exist_ok=True)
+    first_year = years[0]
+    zarr_path = os.path.join(forecast_dir, f"{first_year}.zarr")
+    ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
+    try:
+        lats = np.asarray(ds["lat"].values)
+        lons = np.asarray(ds["lon"].values)
+        init_time = pd.Timestamp(ds["init"].values[0])
+        lead_value = int(ds["lead"].values[0])
+        report = {
+            "checked_zarr": os.path.abspath(zarr_path),
+            "sample_init": init_time.strftime("%Y-%m-%d"),
+            "sample_lead": lead_value,
+            "lat_first": float(lats[0]),
+            "lat_last": float(lats[-1]),
+            "lat_min": float(np.nanmin(lats)),
+            "lat_max": float(np.nanmax(lats)),
+            "lat_strictly_increasing": bool(np.all(np.diff(lats) > 0)),
+            "lon_first": float(lons[0]),
+            "lon_last": float(lons[-1]),
+            "lon_min": float(np.nanmin(lons)),
+            "lon_max": float(np.nanmax(lons)),
+            "lon_strictly_increasing": bool(np.all(np.diff(lons) > 0)),
+            "plotting_method": "pcolormesh(lon, lat, field) with y limits set to lat min/max; if lat is increasing, south is bottom and north is top.",
+            "expected_global_orientation": "lat[0] should be -90/South Pole and lat[-1] should be +90/North Pole.",
+        }
+        for variable in variables:
+            names = VARIABLES[variable]
+            obs = ds[names["obs"]].isel(init=0, lead=0).values
+            model = ds[names["model"]].isel(init=0, lead=0).mean("ensemble").values
+            geos = ds[names["geos"]].isel(init=0, lead=0).mean("geos_member").values
+            report[f"{variable}_shape_obs"] = list(obs.shape)
+            report[f"{variable}_shape_model_mean"] = list(model.shape)
+            report[f"{variable}_shape_geos_mean"] = list(geos.shape)
+            report[f"{variable}_south_band_obs_mean"] = float(np.nanmean(obs[: max(1, min(10, obs.shape[0])), :]))
+            report[f"{variable}_north_band_obs_mean"] = float(np.nanmean(obs[-max(1, min(10, obs.shape[0])) :, :]))
+
+            fields = [
+                (obs, "Obs", "viridis", False),
+                (geos, "GEOS mean", "viridis", False),
+                (model, "ML mean", "viridis", False),
+                (geos - obs, "GEOS - Obs", "RdBu_r", True),
+                (model - obs, "ML - Obs", "RdBu_r", True),
+                (model - geos, "ML - GEOS", "RdBu_r", True),
+            ]
+            fig, axes = plt.subplots(2, 3, figsize=(17, 7), constrained_layout=True)
+            for ax, (field, title, cmap, symmetric) in zip(axes.flat, fields):
+                if symmetric:
+                    vmin, vmax = _finite_percentile_limits(field, lower=2, upper=98, symmetric=True)
+                else:
+                    vmin, vmax = _finite_percentile_limits(field, lower=2, upper=98)
+                mesh = _plot_spatial_panel(
+                    ax,
+                    lons,
+                    lats,
+                    field,
+                    f"{variable.upper()} {title}",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
+                fig.colorbar(mesh, ax=ax, shrink=0.75)
+            fig.suptitle(
+                f"Orientation check | {variable.upper()} | init {init_time:%Y-%m-%d} lead week{lead_value}\n"
+                f"lat[0]={lats[0]:.1f}, lat[-1]={lats[-1]:.1f}; plotted with latitude coordinate on y-axis",
+                fontsize=13,
+            )
+            fig.savefig(os.path.join(plot_dir, f"{variable}_orientation_sample_fields.png"), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+            fig, ax = plt.subplots(figsize=(6, 8))
+            ax.plot(np.nanmean(obs, axis=1), lats, label="Obs")
+            ax.plot(np.nanmean(geos, axis=1), lats, label="GEOS mean")
+            ax.plot(np.nanmean(model, axis=1), lats, label="ML mean")
+            ax.axhline(0, color="k", linewidth=0.8)
+            ax.set_xlabel(f"{variable.upper()} zonal mean")
+            ax.set_ylabel("latitude")
+            ax.set_title(f"{variable.upper()} zonal mean orientation check")
+            ax.legend()
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, f"{variable}_orientation_zonal_mean.png"), dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        report_path = os.path.join(plot_dir, "orientation_report.json")
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"✅ Wrote orientation diagnostics under: {plot_dir}")
+    finally:
+        ds.close()
 
 
 def print_headline(summary):
@@ -1089,6 +1292,7 @@ def main():
     scalar_summary.to_csv(scalar_summary_csv, index=False, float_format="%.6f")
 
     spatial_map_path = os.path.join(args.out_dir, "spatial_metric_maps.nc")
+    orientation_report_path = os.path.join(args.out_dir, "plots", "orientation", "orientation_report.json")
     if args.make_plots:
         maybe_make_plots(summary, args.out_dir)
         spatial_ds = build_spatial_metric_maps(
@@ -1102,6 +1306,7 @@ def main():
             plot_spatial_diagnostics(spatial_ds, args.out_dir)
         finally:
             spatial_ds.close()
+        plot_orientation_diagnostics(args.forecast_dir, expected_years, variables, args.out_dir)
 
     overview = {
         "forecast_dir": os.path.abspath(args.forecast_dir),
@@ -1118,6 +1323,7 @@ def main():
         "scalar_mean_summary_csv": os.path.abspath(scalar_summary_csv),
         "direct_metric_state_csv": os.path.abspath(direct_state_csv),
         "spatial_metric_maps": os.path.abspath(spatial_map_path) if args.make_plots else None,
+        "orientation_report": os.path.abspath(orientation_report_path) if args.make_plots else None,
         "per_init_lead_csv": os.path.abspath(combined_csv),
     }
     with open(os.path.join(args.out_dir, "evaluation_overview.json"), "w") as f:
@@ -1131,6 +1337,7 @@ def main():
     if args.make_plots:
         print(f"✅ Wrote plots under: {os.path.join(args.out_dir, 'plots')}")
         print(f"✅ Wrote spatial metric maps: {spatial_map_path}")
+        print(f"✅ Wrote orientation report: {orientation_report_path}")
     return 0
 
 

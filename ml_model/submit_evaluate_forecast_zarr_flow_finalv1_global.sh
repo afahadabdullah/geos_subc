@@ -105,16 +105,19 @@ PY
 
 SUMMARY_PATH="$OUT_DIR/summary_metrics.csv"
 SPATIAL_MAP_PATH="$OUT_DIR/spatial_metric_maps.nc"
+ORIENTATION_REPORT_PATH="$OUT_DIR/plots/orientation/orientation_report.json"
 SPATIAL_MISSING=0
-if { [ "$MAKE_PLOTS" = "1" ] || [ "$MAKE_PLOTS" = "true" ] || [ "$MAKE_PLOTS" = "TRUE" ]; } && [ ! -f "$SPATIAL_MAP_PATH" ]; then
-    SPATIAL_MISSING=1
+if [ "$MAKE_PLOTS" = "1" ] || [ "$MAKE_PLOTS" = "true" ] || [ "$MAKE_PLOTS" = "TRUE" ]; then
+    if [ ! -f "$SPATIAL_MAP_PATH" ] || [ ! -f "$ORIENTATION_REPORT_PATH" ]; then
+        SPATIAL_MISSING=1
+    fi
 fi
 
 if [ -n "$MISSING_YEARS" ] || [ ! -f "$SUMMARY_PATH" ] || [ "$SPATIAL_MISSING" = "1" ]; then
     if [ -n "$MISSING_YEARS" ]; then
         echo "⏸️ Missing yearly metric files: $MISSING_YEARS"
     elif [ "$SPATIAL_MISSING" = "1" ]; then
-        echo "⏸️ Spatial metric maps not found yet: $SPATIAL_MAP_PATH"
+        echo "⏸️ Spatial/orientation diagnostics not complete yet: $SPATIAL_MAP_PATH / $ORIENTATION_REPORT_PATH"
     else
         echo "⏸️ Summary not found yet: $SUMMARY_PATH"
     fi
