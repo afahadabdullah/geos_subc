@@ -149,6 +149,23 @@ EVENT_PRESETS = {
             "case_aug2022_pakistan_monsoon_flood_pr_leads1_4"
         ),
     },
+    "meghalaya_sylhet_jun2022_extreme_rain": {
+        "year": 2022,
+        "event_variable": "pr",
+        "event_name": "June 15-18 2022 Meghalaya/Sylhet extreme rainfall",
+        "target_inits": "2022-05-19,2022-05-26,2022-06-02,2022-06-09",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2022-06-15",
+        "event_end": "2022-06-18",
+        "lat_min": 22.0,
+        "lat_max": 28.0,
+        "lon_min": 88.0,
+        "lon_max": 94.5,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jun2022_meghalaya_sylhet_extreme_rain_pr_leads1_4"
+        ),
+    },
 }
 
 
