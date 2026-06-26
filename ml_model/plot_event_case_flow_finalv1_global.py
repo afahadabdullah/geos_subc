@@ -4,16 +4,16 @@ Single-event case-study plots from generated flow_finalv1_global forecast Zarrs.
 
 Default preset: June 19, 2021 Europe heat-wave event.
 Additional presets include major European and western North American heat
-events from 2021-2024.
+events from 2021-2024, plus a July 2021 western Europe flood event.
 
 The script reads a saved yearly forecast Zarr, selects init dates around
-the preset target dates, then compares lead weeks 1-4 T2M:
-  - observed ERA5 T2M
+the preset target dates, then compares lead weeks 1-4 for one variable:
+  - observed target field
   - GEOS ensemble-mean forecast
   - ML ensemble-mean forecast
 
 Outputs include per-init/lead maps, a composite map, a compact lead-tracking
-time series, and a CSV of area-weighted T2M metrics over the requested domain.
+time series, and a CSV of area-weighted metrics over the requested domain.
 The event date/window is used for annotation, so lead weeks outside the target
 date are still plotted for manual event tracking.
 """
@@ -32,6 +32,7 @@ import xarray as xr
 EVENT_PRESETS = {
     "europe_jun2021_heatwave": {
         "year": 2021,
+        "event_variable": "t2m",
         "event_name": "June 19 2021 Europe heat wave",
         "target_inits": "2021-05-27",
         "lead_weeks": "1,2,3,4",
@@ -48,6 +49,7 @@ EVENT_PRESETS = {
     },
     "med_aug2021_sicily_record_heat": {
         "year": 2021,
+        "event_variable": "t2m",
         "event_name": "August 11 2021 Mediterranean/Sicily record heat",
         "target_inits": "2021-07-15,2021-07-22,2021-07-29,2021-08-05",
         "lead_weeks": "1,2,3,4",
@@ -64,6 +66,7 @@ EVENT_PRESETS = {
     },
     "europe_jul2022_heatwave_mortality": {
         "year": 2022,
+        "event_variable": "t2m",
         "event_name": "July 8-19 2022 Europe heat waves",
         "target_inits": "2022-06-16,2022-06-23,2022-06-30,2022-07-07",
         "lead_weeks": "1,2,3,4",
@@ -80,6 +83,7 @@ EVENT_PRESETS = {
     },
     "pnw_jun2021_heat_dome": {
         "year": 2021,
+        "event_variable": "t2m",
         "event_name": "June 28-29 2021 Pacific Northwest heat dome",
         "target_inits": "2021-06-03,2021-06-10,2021-06-17,2021-06-24",
         "lead_weeks": "1,2,3,4",
@@ -96,6 +100,7 @@ EVENT_PRESETS = {
     },
     "death_valley_jul2024_extreme_heat": {
         "year": 2024,
+        "event_variable": "t2m",
         "event_name": "July 7 2024 Death Valley/Furnace Creek extreme heat",
         "target_inits": "2024-06-13,2024-06-20,2024-06-27,2024-07-04",
         "lead_weeks": "1,2,3,4",
@@ -108,6 +113,23 @@ EVENT_PRESETS = {
         "out_dir": (
             "ml_output_flow_finalv1_global_noisectx_t2mres/"
             "case_jul2024_death_valley_extreme_heat_leads1_4"
+        ),
+    },
+    "western_europe_jul2021_floods": {
+        "year": 2021,
+        "event_variable": "pr",
+        "event_name": "July 12-15 2021 western Europe mega-floods",
+        "target_inits": "2021-06-16,2021-06-23,2021-06-30,2021-07-07",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2021-07-12",
+        "event_end": "2021-07-15",
+        "lat_min": 47.0,
+        "lat_max": 53.5,
+        "lon_min": 2.0,
+        "lon_max": 11.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jul2021_western_europe_floods_pr_leads1_4"
         ),
     },
 }
@@ -123,8 +145,34 @@ MAP_CONTEXT = {
 }
 
 
+VARIABLE_SPECS = {
+    "t2m": {
+        "obs": "obs_t2m",
+        "model": "model_t2m",
+        "geos": "geos_t2m",
+        "label": "T2M",
+        "long_label": "2m temperature",
+        "raw_units": "K",
+        "display_cmap": "coolwarm",
+        "difference_cmap": "RdBu_r",
+        "absolute_error_cmap": "YlOrRd",
+    },
+    "pr": {
+        "obs": "obs_pr",
+        "model": "model_pr",
+        "geos": "geos_pr",
+        "label": "PR",
+        "long_label": "precipitation rate",
+        "raw_units": "mm/day",
+        "display_cmap": "YlGnBu",
+        "difference_cmap": "BrBG",
+        "absolute_error_cmap": "YlOrRd",
+    },
+}
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Plot one T2M event case from generated global forecast Zarrs.")
+    parser = argparse.ArgumentParser(description="Plot one event case from generated global forecast Zarrs.")
     parser.add_argument(
         "--forecast_dir",
         type=str,
@@ -139,6 +187,12 @@ def parse_args():
     )
     parser.add_argument("--list_event_presets", action="store_true", help="Print available event presets and exit.")
     parser.add_argument("--year", type=int, default=None)
+    parser.add_argument(
+        "--event_variable",
+        choices=sorted(VARIABLE_SPECS),
+        default=None,
+        help="Forecast variable to evaluate. Presets set this automatically.",
+    )
     parser.add_argument("--event_name", type=str, default=None)
     parser.add_argument(
         "--target_inits",
@@ -420,11 +474,25 @@ def field_summary(values):
     }
 
 
-def to_display_temp(values, units):
+def display_units_for(spec, temperature_units):
+    if spec["label"] == "T2M":
+        return temperature_units
+    return spec["raw_units"]
+
+
+def to_display_values(values, spec, temperature_units):
     values = np.asarray(values, dtype=np.float64)
-    if units == "C":
+    if spec["label"] == "T2M" and temperature_units == "C":
         return values - 273.15
     return values
+
+
+def raw_file_token(spec):
+    if spec["label"] == "T2M":
+        return "rawK"
+    if spec["label"] == "PR":
+        return "rawMMday"
+    return "raw"
 
 
 def percentile_limits(fields, lower=2, upper=98, symmetric=False):
@@ -592,10 +660,16 @@ def find_cases(ds, target_init_dates, lead_weeks, event_start, event_end, max_ca
     return cases
 
 
-def extract_case_fields(ds_region, case):
-    obs = ds_region["obs_t2m"].isel(init=case["init_idx"], lead=case["lead_idx"]).values
-    model_ens = ds_region["model_t2m"].isel(init=case["init_idx"], lead=case["lead_idx"]).values
-    geos_ens = ds_region["geos_t2m"].isel(init=case["init_idx"], lead=case["lead_idx"]).values
+def extract_case_fields(ds_region, case, spec):
+    missing = [name for name in (spec["obs"], spec["model"], spec["geos"]) if name not in ds_region]
+    if missing:
+        raise KeyError(
+            f"Missing required variable(s) for {spec['label']}: {missing}. "
+            f"Available variables: {list(ds_region.data_vars)}"
+        )
+    obs = ds_region[spec["obs"]].isel(init=case["init_idx"], lead=case["lead_idx"]).values
+    model_ens = ds_region[spec["model"]].isel(init=case["init_idx"], lead=case["lead_idx"]).values
+    geos_ens = ds_region[spec["geos"]].isel(init=case["init_idx"], lead=case["lead_idx"]).values
     return {
         "obs": obs,
         "model_ens": model_ens,
@@ -607,15 +681,15 @@ def extract_case_fields(ds_region, case):
     }
 
 
-def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_start, event_end, out_path):
+def plot_case_map(case, fields, lats, lons, weights, spec, units, event_name, event_start, event_end, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    obs = to_display_temp(fields["obs"], units)
-    model = to_display_temp(fields["model_mean"], units)
-    geos = to_display_temp(fields["geos_mean"], units)
+    obs = to_display_values(fields["obs"], spec, units)
+    model = to_display_values(fields["model_mean"], spec, units)
+    geos = to_display_values(fields["geos_mean"], spec, units)
     geos_err = fields["geos_mean"] - fields["obs"]
     model_err = fields["model_mean"] - fields["obs"]
     geos_abs_err = np.abs(geos_err)
@@ -631,6 +705,11 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
     diff_min, diff_max = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
     abs_min, abs_max = percentile_limits([geos_abs_err, model_abs_err], lower=1, upper=99)
     close_min, close_max = percentile_limits([closeness_gain], lower=1, upper=99, symmetric=True)
+    display_units = display_units_for(spec, units)
+    raw_units = spec["raw_units"]
+    display_cmap = spec["display_cmap"]
+    diff_cmap = spec["difference_cmap"]
+    abs_cmap = spec["absolute_error_cmap"]
 
     model_rmse = weighted_rmse(fields["model_mean"], fields["obs"], weights)
     geos_rmse = weighted_rmse(fields["geos_mean"], fields["obs"], weights)
@@ -640,15 +719,15 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
 
     fig, axes = make_map_subplots(2, 4, figsize=(24, 10.5), constrained_layout=True)
     panels = [
-        (obs, f"Observed T2M ({units})", "coolwarm", tmin, tmax),
-        (geos, f"GEOS ens mean ({units})\nN={geos_ens_count}", "coolwarm", tmin, tmax),
-        (model, f"ML ens mean ({units})\nN={model_ens_count}", "coolwarm", tmin, tmax),
-        (model_minus_geos, "ML - GEOS ens mean (K)", "RdBu_r", diff_min, diff_max),
-        (geos_abs_err, f"|GEOS mean - Obs| (K)\narea mean={geos_abs_mean:.2f}", "YlOrRd", abs_min, abs_max),
-        (model_abs_err, f"|ML mean - Obs| (K)\narea mean={model_abs_mean:.2f}", "YlOrRd", abs_min, abs_max),
+        (obs, f"Observed {spec['label']} ({display_units})", display_cmap, tmin, tmax),
+        (geos, f"GEOS ens mean {spec['label']} ({display_units})\nN={geos_ens_count}", display_cmap, tmin, tmax),
+        (model, f"ML ens mean {spec['label']} ({display_units})\nN={model_ens_count}", display_cmap, tmin, tmax),
+        (model_minus_geos, f"ML - GEOS ens mean ({raw_units})", diff_cmap, diff_min, diff_max),
+        (geos_abs_err, f"|GEOS mean - Obs| ({raw_units})\narea mean={geos_abs_mean:.2f}", abs_cmap, abs_min, abs_max),
+        (model_abs_err, f"|ML mean - Obs| ({raw_units})\narea mean={model_abs_mean:.2f}", abs_cmap, abs_min, abs_max),
         (
             closeness_gain,
-            f"Closeness gain: |GEOS-Obs|-|ML-Obs| (K)\npositive/blue = ML closer, mean={closeness_mean:+.2f}",
+            f"Closeness gain: |GEOS-Obs|-|ML-Obs| ({raw_units})\npositive/blue = ML closer, mean={closeness_mean:+.2f}",
             "RdBu",
             close_min,
             close_max,
@@ -675,7 +754,7 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
     plt.close(fig)
 
 
-def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event_end, out_path):
+def plot_raw_mean_map(case, fields, lats, lons, spec, event_name, event_start, event_end, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -689,17 +768,20 @@ def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event
     geos_ens_count = int(fields["geos_ens"].shape[0])
     tmin, tmax = percentile_limits([obs, geos, model], lower=1, upper=99)
     dmin, dmax = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+    raw_units = spec["raw_units"]
+    display_cmap = spec["display_cmap"]
+    diff_cmap = spec["difference_cmap"]
 
     def stats_label(name, values):
         s = field_summary(values)
-        return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
+        return f"{name} raw {raw_units}\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
 
     fig, axes = make_map_subplots(1, 4, figsize=(24, 6.0), constrained_layout=True)
     panels = [
-        (obs, stats_label("Obs T2M", obs), "coolwarm", tmin, tmax),
-        (geos, stats_label(f"GEOS ens mean T2M, N={geos_ens_count}", geos), "coolwarm", tmin, tmax),
-        (model, stats_label(f"ML ens mean T2M, N={model_ens_count}", model), "coolwarm", tmin, tmax),
-        (model_minus_geos, "ML - GEOS ens mean raw K", "RdBu_r", dmin, dmax),
+        (obs, stats_label(f"Obs {spec['label']}", obs), display_cmap, tmin, tmax),
+        (geos, stats_label(f"GEOS ens mean {spec['label']}, N={geos_ens_count}", geos), display_cmap, tmin, tmax),
+        (model, stats_label(f"ML ens mean {spec['label']}, N={model_ens_count}", model), display_cmap, tmin, tmax),
+        (model_minus_geos, f"ML - GEOS ens mean raw {raw_units}", diff_cmap, dmin, dmax),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
@@ -712,7 +794,7 @@ def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event
     else:
         event_label = f"{case['valid_event_offset_days']:+d}d from event"
     fig.suptitle(
-        f"{event_name} raw generated T2M in K | init {case['init']:%Y-%m-%d} | "
+        f"{event_name} raw generated {spec['label']} in {raw_units} | init {case['init']:%Y-%m-%d} | "
         f"valid {case['valid']:%Y-%m-%d} | lead week{case['lead']} | {event_label}",
         fontsize=13,
     )
@@ -720,7 +802,7 @@ def plot_raw_k_mean_map(case, fields, lats, lons, event_name, event_start, event
     plt.close(fig)
 
 
-def plot_composite_map(records, lats, lons, units, event_name, composite_label, out_path):
+def plot_composite_map(records, lats, lons, spec, units, event_name, composite_label, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -736,25 +818,30 @@ def plot_composite_map(records, lats, lons, units, event_name, composite_label, 
     closer_to_obs = np.where(model_abs_err < geos_abs_err, 1.0, -1.0)
     closer_to_obs[np.isclose(model_abs_err, geos_abs_err, atol=1e-6)] = 0.0
 
-    obs_u = to_display_temp(obs, units)
-    geos_u = to_display_temp(geos, units)
-    model_u = to_display_temp(model, units)
+    obs_u = to_display_values(obs, spec, units)
+    geos_u = to_display_values(geos, spec, units)
+    model_u = to_display_values(model, spec, units)
     tmin, tmax = percentile_limits([obs_u, geos_u, model_u], lower=1, upper=99)
     diff_min, diff_max = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
     abs_min, abs_max = percentile_limits([geos_abs_err, model_abs_err], lower=1, upper=99)
     close_min, close_max = percentile_limits([closeness_gain], lower=1, upper=99, symmetric=True)
+    display_units = display_units_for(spec, units)
+    raw_units = spec["raw_units"]
+    display_cmap = spec["display_cmap"]
+    diff_cmap = spec["difference_cmap"]
+    abs_cmap = spec["absolute_error_cmap"]
 
     fig, axes = make_map_subplots(2, 4, figsize=(24, 10.5), constrained_layout=True)
     panels = [
-        (obs_u, f"Composite observed T2M ({units})", "coolwarm", tmin, tmax),
-        (geos_u, f"Composite GEOS mean ({units})", "coolwarm", tmin, tmax),
-        (model_u, f"Composite ML mean ({units})", "coolwarm", tmin, tmax),
-        (model_minus_geos, "Composite ML - GEOS mean (K)", "RdBu_r", diff_min, diff_max),
-        (geos_abs_err, "Mean |GEOS mean - Obs| across cases (K)", "YlOrRd", abs_min, abs_max),
-        (model_abs_err, "Mean |ML mean - Obs| across cases (K)", "YlOrRd", abs_min, abs_max),
+        (obs_u, f"Composite observed {spec['label']} ({display_units})", display_cmap, tmin, tmax),
+        (geos_u, f"Composite GEOS mean {spec['label']} ({display_units})", display_cmap, tmin, tmax),
+        (model_u, f"Composite ML mean {spec['label']} ({display_units})", display_cmap, tmin, tmax),
+        (model_minus_geos, f"Composite ML - GEOS mean ({raw_units})", diff_cmap, diff_min, diff_max),
+        (geos_abs_err, f"Mean |GEOS mean - Obs| across cases ({raw_units})", abs_cmap, abs_min, abs_max),
+        (model_abs_err, f"Mean |ML mean - Obs| across cases ({raw_units})", abs_cmap, abs_min, abs_max),
         (
             closeness_gain,
-            "Mean closeness gain (K)\npositive/blue = ML closer",
+            f"Mean closeness gain ({raw_units})\npositive/blue = ML closer",
             "RdBu",
             close_min,
             close_max,
@@ -773,7 +860,7 @@ def plot_composite_map(records, lats, lons, units, event_name, composite_label, 
     plt.close(fig)
 
 
-def plot_raw_k_composite_mean_map(records, lats, lons, event_name, composite_label, out_path):
+def plot_raw_composite_mean_map(records, lats, lons, spec, event_name, composite_label, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -785,30 +872,33 @@ def plot_raw_k_composite_mean_map(records, lats, lons, event_name, composite_lab
     model_minus_geos = model - geos
     tmin, tmax = percentile_limits([obs, geos, model], lower=1, upper=99)
     dmin, dmax = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+    raw_units = spec["raw_units"]
+    display_cmap = spec["display_cmap"]
+    diff_cmap = spec["difference_cmap"]
 
     def stats_label(name, values):
         s = field_summary(values)
-        return f"{name} raw K\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
+        return f"{name} raw {raw_units}\nmin/mean/max={s['min']:.1f}/{s['mean']:.1f}/{s['max']:.1f}"
 
     fig, axes = make_map_subplots(1, 4, figsize=(24, 6.0), constrained_layout=True)
     panels = [
-        (obs, stats_label("Composite obs T2M", obs), "coolwarm", tmin, tmax),
-        (geos, stats_label("Composite GEOS ens mean T2M", geos), "coolwarm", tmin, tmax),
-        (model, stats_label("Composite ML ens mean T2M", model), "coolwarm", tmin, tmax),
-        (model_minus_geos, "Composite ML - GEOS ens mean raw K", "RdBu_r", dmin, dmax),
+        (obs, stats_label(f"Composite obs {spec['label']}", obs), display_cmap, tmin, tmax),
+        (geos, stats_label(f"Composite GEOS ens mean {spec['label']}", geos), display_cmap, tmin, tmax),
+        (model, stats_label(f"Composite ML ens mean {spec['label']}", model), display_cmap, tmin, tmax),
+        (model_minus_geos, f"Composite ML - GEOS ens mean raw {raw_units}", diff_cmap, dmin, dmax),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
         fig.colorbar(mesh, ax=ax, shrink=0.82)
     fig.suptitle(
-        f"{event_name} raw generated T2M in K | {composite_label} | {len(records)} init/lead cases",
+        f"{event_name} raw generated {spec['label']} in {raw_units} | {composite_label} | {len(records)} init/lead cases",
         fontsize=13,
     )
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_case_timeseries(metrics_df, units, event_name, event_start, event_end, out_path):
+def plot_case_timeseries(metrics_df, spec, units, event_name, event_start, event_end, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -828,21 +918,21 @@ def plot_case_timeseries(metrics_df, units, event_name, event_start, event_end, 
     axes[0].plot(x, metrics_df["geos_domain_mean_display"], marker="o", label="GEOS")
     axes[0].plot(x, metrics_df["model_domain_mean_display"], marker="o", label="ML")
     axes[0].set_title(
-        f"{event_name}: area-mean T2M ({units}); "
+        f"{event_name}: area-mean {spec['label']} ({display_units_for(spec, units)}); "
         f"* = inside {event_start} to {event_end}, † = closest lead"
     )
-    axes[0].set_ylabel(f"T2M ({units})")
+    axes[0].set_ylabel(f"{spec['label']} ({display_units_for(spec, units)})")
     axes[0].set_xticks(x)
     axes[0].set_xticklabels(labels, rotation=45, ha="right")
     axes[0].legend()
     axes[0].grid(alpha=0.3)
 
-    axes[1].plot(x, metrics_df["geos_rmse_k"], marker="o", label="GEOS RMSE")
-    axes[1].plot(x, metrics_df["model_rmse_k"], marker="o", label="ML RMSE")
-    axes[1].plot(x, metrics_df["geos_crps_k"], marker="s", linestyle="--", label="GEOS CRPS")
-    axes[1].plot(x, metrics_df["model_crps_k"], marker="s", linestyle="--", label="ML CRPS")
-    axes[1].set_title("Area-weighted T2M metrics over event domain")
-    axes[1].set_ylabel("K")
+    axes[1].plot(x, metrics_df["geos_rmse_raw"], marker="o", label="GEOS RMSE")
+    axes[1].plot(x, metrics_df["model_rmse_raw"], marker="o", label="ML RMSE")
+    axes[1].plot(x, metrics_df["geos_crps_raw"], marker="s", linestyle="--", label="GEOS CRPS")
+    axes[1].plot(x, metrics_df["model_crps_raw"], marker="s", linestyle="--", label="ML CRPS")
+    axes[1].set_title(f"Area-weighted {spec['label']} metrics over event domain")
+    axes[1].set_ylabel(spec["raw_units"])
     axes[1].set_xticks(x)
     axes[1].set_xticklabels(labels, rotation=45, ha="right")
     axes[1].legend()
@@ -854,12 +944,14 @@ def plot_case_timeseries(metrics_df, units, event_name, event_start, event_end, 
 
 def main():
     args = apply_event_preset(parse_args())
+    spec = VARIABLE_SPECS[args.event_variable]
     configure_map_context(args)
     os.makedirs(args.out_dir, exist_ok=True)
     maps_dir = os.path.join(args.out_dir, "maps")
     os.makedirs(maps_dir, exist_ok=True)
-    raw_k_maps_dir = os.path.join(args.out_dir, "raw_k_mean_maps")
-    os.makedirs(raw_k_maps_dir, exist_ok=True)
+    raw_token = raw_file_token(spec)
+    raw_maps_dir = os.path.join(args.out_dir, f"{raw_token.lower()}_mean_maps")
+    os.makedirs(raw_maps_dir, exist_ok=True)
 
     zarr_path = os.path.join(args.forecast_dir, f"{args.year}.zarr")
     if not os.path.isdir(zarr_path):
@@ -909,7 +1001,7 @@ def main():
         model_ens_count = None
         geos_ens_count = None
         for case in cases:
-            fields = extract_case_fields(ds_region, case)
+            fields = extract_case_fields(ds_region, case, spec)
             model_ens_count = int(fields["model_ens"].shape[0])
             geos_ens_count = int(fields["geos_ens"].shape[0])
             records.append({
@@ -930,11 +1022,11 @@ def main():
             geos_crps = weighted_crps(fields["geos_ens"], fields["obs"], weights)
             model_crps = weighted_crps(fields["model_ens"], fields["obs"], weights)
             for field_name, values in (
-                ("obs_t2m_k", fields["obs"]),
-                ("geos_t2m_k", fields["geos_ens"]),
-                ("geos_mean_t2m_k", fields["geos_mean"]),
-                ("model_t2m_k", fields["model_ens"]),
-                ("model_mean_t2m_k", fields["model_mean"]),
+                (f"obs_{args.event_variable}_{spec['raw_units']}", fields["obs"]),
+                (f"geos_{args.event_variable}_{spec['raw_units']}", fields["geos_ens"]),
+                (f"geos_mean_{args.event_variable}_{spec['raw_units']}", fields["geos_mean"]),
+                (f"model_{args.event_variable}_{spec['raw_units']}", fields["model_ens"]),
+                (f"model_mean_{args.event_variable}_{spec['raw_units']}", fields["model_mean"]),
             ):
                 summary = field_summary(values)
                 raw_summary_rows.append(
@@ -960,30 +1052,36 @@ def main():
                 "valid_event_offset_days": case["valid_event_offset_days"],
                 "model_ensemble_members": model_ens_count,
                 "geos_ensemble_members": geos_ens_count,
-                "obs_domain_mean_k": obs_mean_k,
-                "geos_domain_mean_k": geos_mean_k,
-                "model_domain_mean_k": model_mean_k,
-                "obs_domain_mean_display": obs_mean_k - 273.15 if args.temperature_units == "C" else obs_mean_k,
-                "geos_domain_mean_display": geos_mean_k - 273.15 if args.temperature_units == "C" else geos_mean_k,
-                "model_domain_mean_display": model_mean_k - 273.15 if args.temperature_units == "C" else model_mean_k,
-                "obs_domain_min_k": float(np.nanmin(fields["obs"])),
-                "geos_domain_min_k": float(np.nanmin(fields["geos_mean"])),
-                "model_domain_min_k": float(np.nanmin(fields["model_mean"])),
-                "geos_rmse_k": geos_rmse,
-                "model_rmse_k": model_rmse,
+                "obs_domain_mean_raw": obs_mean_k,
+                "geos_domain_mean_raw": geos_mean_k,
+                "model_domain_mean_raw": model_mean_k,
+                "obs_domain_mean_display": (
+                    obs_mean_k - 273.15 if spec["label"] == "T2M" and args.temperature_units == "C" else obs_mean_k
+                ),
+                "geos_domain_mean_display": (
+                    geos_mean_k - 273.15 if spec["label"] == "T2M" and args.temperature_units == "C" else geos_mean_k
+                ),
+                "model_domain_mean_display": (
+                    model_mean_k - 273.15 if spec["label"] == "T2M" and args.temperature_units == "C" else model_mean_k
+                ),
+                "obs_domain_min_raw": float(np.nanmin(fields["obs"])),
+                "geos_domain_min_raw": float(np.nanmin(fields["geos_mean"])),
+                "model_domain_min_raw": float(np.nanmin(fields["model_mean"])),
+                "geos_rmse_raw": geos_rmse,
+                "model_rmse_raw": model_rmse,
                 "rmse_skill_vs_geos_pct": 100.0 * (1.0 - model_rmse / geos_rmse) if geos_rmse > 1e-12 else np.nan,
-                "geos_crps_k": geos_crps,
-                "model_crps_k": model_crps,
+                "geos_crps_raw": geos_crps,
+                "model_crps_raw": model_crps,
                 "crps_skill_vs_geos_pct": 100.0 * (1.0 - model_crps / geos_crps) if geos_crps > 1e-12 else np.nan,
-                "geos_bias_k": geos_bias,
-                "model_bias_k": model_bias,
-                "model_minus_geos_domain_mean_k": model_mean_k - geos_mean_k,
+                "geos_bias_raw": geos_bias,
+                "model_bias_raw": model_bias,
+                "model_minus_geos_domain_mean_raw": model_mean_k - geos_mean_k,
             }
             metric_rows.append(row)
 
             filename = (
                 f"case_init{case['init']:%Y%m%d}_valid{case['valid']:%Y%m%d}_"
-                f"week{case['lead']}_t2m_maps.png"
+                f"week{case['lead']}_{args.event_variable}_maps.png"
             )
             plot_case_map(
                 case,
@@ -991,25 +1089,27 @@ def main():
                 lats,
                 lons,
                 weights,
+                spec,
                 args.temperature_units,
                 args.event_name,
                 args.event_start,
                 args.event_end,
                 os.path.join(maps_dir, filename),
             )
-            raw_k_filename = (
-                f"rawK_case_init{case['init']:%Y%m%d}_valid{case['valid']:%Y%m%d}_"
-                f"week{case['lead']}_ens_mean_t2m.png"
+            raw_filename = (
+                f"{raw_token}_case_init{case['init']:%Y%m%d}_valid{case['valid']:%Y%m%d}_"
+                f"week{case['lead']}_ens_mean_{args.event_variable}.png"
             )
-            plot_raw_k_mean_map(
+            plot_raw_mean_map(
                 case,
                 fields,
                 lats,
                 lons,
+                spec,
                 args.event_name,
                 args.event_start,
                 args.event_end,
-                os.path.join(raw_k_maps_dir, raw_k_filename),
+                os.path.join(raw_maps_dir, raw_filename),
             )
 
         metrics_df = pd.DataFrame(metric_rows).sort_values(["init", "lead"])
@@ -1019,28 +1119,31 @@ def main():
         pd.DataFrame(raw_summary_rows).to_csv(raw_summary_csv, index=False, float_format="%.6f")
         plot_case_timeseries(
             metrics_df,
+            spec,
             args.temperature_units,
             args.event_name,
             args.event_start,
             args.event_end,
-            os.path.join(args.out_dir, "case_t2m_timeseries_metrics.png"),
+            os.path.join(args.out_dir, f"case_{args.event_variable}_timeseries_metrics.png"),
         )
         plot_composite_map(
             records,
             lats,
             lons,
+            spec,
             args.temperature_units,
             args.event_name,
             "all selected inits/leads",
-            os.path.join(args.out_dir, "case_composite_t2m_maps.png"),
+            os.path.join(args.out_dir, f"case_composite_{args.event_variable}_maps.png"),
         )
-        plot_raw_k_composite_mean_map(
+        plot_raw_composite_mean_map(
             records,
             lats,
             lons,
+            spec,
             args.event_name,
             "all selected inits/leads",
-            os.path.join(args.out_dir, "rawK_case_composite_ens_mean_t2m.png"),
+            os.path.join(args.out_dir, f"{raw_token}_case_composite_ens_mean_{args.event_variable}.png"),
         )
         closest_records = [r for r in records if r["closest_valid_to_event"]]
         if closest_records:
@@ -1048,23 +1151,27 @@ def main():
                 closest_records,
                 lats,
                 lons,
+                spec,
                 args.temperature_units,
                 args.event_name,
                 "closest valid lead for each target init",
-                os.path.join(args.out_dir, "case_closest_event_t2m_maps.png"),
+                os.path.join(args.out_dir, f"case_closest_event_{args.event_variable}_maps.png"),
             )
-            plot_raw_k_composite_mean_map(
+            plot_raw_composite_mean_map(
                 closest_records,
                 lats,
                 lons,
+                spec,
                 args.event_name,
                 "closest valid lead for each target init",
-                os.path.join(args.out_dir, "rawK_case_closest_event_ens_mean_t2m.png"),
+                os.path.join(args.out_dir, f"{raw_token}_case_closest_event_ens_mean_{args.event_variable}.png"),
             )
 
         orientation = {
             "zarr_path": os.path.abspath(zarr_path),
             "event_preset": args.event_preset,
+            "event_variable": args.event_variable,
+            "event_variable_units": spec["raw_units"],
             "event_name": args.event_name,
             "event_start": args.event_start,
             "event_end": args.event_end,
@@ -1118,28 +1225,34 @@ def main():
             "valid_event_offset_days",
             "model_ensemble_members",
             "geos_ensemble_members",
-            "obs_domain_mean_k",
-            "geos_rmse_k",
-            "model_rmse_k",
+            "obs_domain_mean_raw",
+            "geos_rmse_raw",
+            "model_rmse_raw",
             "rmse_skill_vs_geos_pct",
-            "geos_crps_k",
-            "model_crps_k",
+            "geos_crps_raw",
+            "model_crps_raw",
             "crps_skill_vs_geos_pct",
         ]].to_string(index=False))
         print(f"\nEnsemble members used: ML={model_ens_count}, GEOS={geos_ens_count}")
         print(f"\n✅ Wrote metrics: {metrics_csv}")
         print(f"✅ Wrote raw value summary: {raw_summary_csv}")
         print(f"✅ Wrote maps under: {maps_dir}")
-        print(f"✅ Wrote raw-K ensemble-mean maps under: {raw_k_maps_dir}")
-        print(f"✅ Wrote composite map: {os.path.join(args.out_dir, 'case_composite_t2m_maps.png')}")
-        print(f"✅ Wrote raw-K composite map: {os.path.join(args.out_dir, 'rawK_case_composite_ens_mean_t2m.png')}")
+        print(f"✅ Wrote raw ensemble-mean maps under: {raw_maps_dir}")
+        print(f"✅ Wrote composite map: {os.path.join(args.out_dir, f'case_composite_{args.event_variable}_maps.png')}")
+        print(
+            "✅ Wrote raw composite map: "
+            f"{os.path.join(args.out_dir, f'{raw_token}_case_composite_ens_mean_{args.event_variable}.png')}"
+        )
         if closest_records:
-            print(f"✅ Wrote closest-event composite map: {os.path.join(args.out_dir, 'case_closest_event_t2m_maps.png')}")
             print(
-                "✅ Wrote raw-K closest-event composite map: "
-                f"{os.path.join(args.out_dir, 'rawK_case_closest_event_ens_mean_t2m.png')}"
+                "✅ Wrote closest-event composite map: "
+                f"{os.path.join(args.out_dir, f'case_closest_event_{args.event_variable}_maps.png')}"
             )
-        print(f"✅ Wrote time series: {os.path.join(args.out_dir, 'case_t2m_timeseries_metrics.png')}")
+            print(
+                "✅ Wrote raw closest-event composite map: "
+                f"{os.path.join(args.out_dir, f'{raw_token}_case_closest_event_ens_mean_{args.event_variable}.png')}"
+            )
+        print(f"✅ Wrote time series: {os.path.join(args.out_dir, f'case_{args.event_variable}_timeseries_metrics.png')}")
     finally:
         ds.close()
 
