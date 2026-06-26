@@ -86,6 +86,20 @@ EVENT_PRESETS = {
         "lon_min": -10.0,
         "lon_max": 30.0,
         "out_dir": "ml_output_flow_finalv1_global_noisectx_t2mres/event_europe_jul2023_heatwave",
+    },
+    "bangladesh_jun2022_flood": {
+        "year": 2022,
+        "event_variable": "pr",
+        "event_name": "June 2022 Bangladesh India extreme monsoon rain",
+        "target_inits": "2022-05-19,2022-05-26,2022-06-02,2022-06-09,2022-06-16",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2022-06-15",
+        "event_end": "2022-06-22",
+        "lat_min": 20.0,
+        "lat_max": 30.0,
+        "lon_min": 85.0,
+        "lon_max": 98.0,
+        "out_dir": "ml_output_flow_finalv1_global_noisectx_t2mres/event_bangladesh_jun2022_flood",
     }
 }
 
@@ -420,9 +434,11 @@ def main():
     parser.add_argument("--lon_max", type=float, default=None)
     parser.add_argument(
         "--threshold_temp",
+        "--threshold",
+        dest="threshold_temp",
         type=float,
         default=None,
-        help="Custom threshold temperature for Brier score (C/K). If None, 90th percentile is used.",
+        help="Custom threshold for Brier score (C/K for temperature, mm/day for precipitation). If None, 90th percentile of observations is used.",
     )
     parser.add_argument(
         "--temperature_units",
