@@ -2,16 +2,18 @@
 """
 Single-event case-study plots from generated flow_finalv1_global forecast Zarrs.
 
-Default case: February 2021 North American / USA cold event.
+Default case: February 11-20, 2021 North American / USA cold event.
 
 The script reads a saved yearly forecast Zarr, selects init dates around
-2021-01-20 and valid dates during February 2021, then compares T2M:
+2021-01-20 and 2021-01-27, then compares lead weeks 1-4 T2M:
   - observed ERA5 T2M
   - GEOS ensemble-mean forecast
   - ML ensemble-mean forecast
 
-Outputs include per-init/lead maps, a composite map, a compact case time series,
-and a CSV of area-weighted T2M metrics over the requested domain.
+Outputs include per-init/lead maps, a composite map, a compact lead-tracking
+time series, and a CSV of area-weighted T2M metrics over the requested domain.
+The cold-event date window is used for annotation, so lead weeks outside
+February 11-20 are still plotted for manual event tracking.
 """
 
 import argparse
@@ -33,14 +35,27 @@ def parse_args():
         help="Directory containing YEAR.zarr forecast stores.",
     )
     parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--init_start", type=str, default="2021-01-14")
-    parser.add_argument("--init_end", type=str, default="2021-01-28")
-    parser.add_argument("--valid_start", type=str, default="2021-02-01")
-    parser.add_argument("--valid_end", type=str, default="2021-02-28")
+    parser.add_argument(
+        "--target_inits",
+        type=str,
+        default="2021-01-20,2021-01-27",
+        help="Comma-separated target init dates. The closest available init is used for each.",
+    )
+    parser.add_argument(
+        "--lead_weeks",
+        type=str,
+        default="1,2,3,4",
+        help="Comma-separated lead weeks to plot for each selected init.",
+    )
+    parser.add_argument("--event_start", type=str, default="2021-02-11")
+    parser.add_argument("--event_end", type=str, default="2021-02-20")
     parser.add_argument(
         "--out_dir",
         type=str,
-        default="ml_output_flow_finalv1_global_noisectx_t2mres/case_feb2021_usa_cold_event",
+        default=(
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_feb2021_usa_cold_event_jan20_jan27_leads1_4"
+        ),
     )
     parser.add_argument("--lat_min", type=float, default=24.0)
     parser.add_argument("--lat_max", type=float, default=52.0)
@@ -167,27 +182,73 @@ def plot_panel(ax, lons, lats, field, title, cmap, vmin=None, vmax=None):
     return mesh
 
 
-def find_cases(ds, init_start, init_end, valid_start, valid_end, max_cases):
-    init_start = pd.Timestamp(init_start).normalize()
-    init_end = pd.Timestamp(init_end).normalize()
-    valid_start = pd.Timestamp(valid_start).normalize()
-    valid_end = pd.Timestamp(valid_end).normalize()
-    init_values = pd.to_datetime(ds["init"].values).normalize()
-    lead_values = ds["lead"].values
-    cases = []
-    for init_idx, init_time in enumerate(init_values):
-        if init_time < init_start or init_time > init_end:
+def parse_date_list(value):
+    dates = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
             continue
+        dates.append(pd.Timestamp(item).normalize())
+    if not dates:
+        raise ValueError("At least one target init date is required.")
+    return dates
+
+
+def parse_int_list(value):
+    ints = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        ints.append(int(item))
+    if not ints:
+        raise ValueError("At least one lead week is required.")
+    return ints
+
+
+def selected_init_infos(ds, target_init_dates):
+    init_values = pd.to_datetime(ds["init"].values).normalize()
+    infos = []
+    used_indices = set()
+    for target in target_init_dates:
+        day_offsets = np.abs((init_values - target).days)
+        init_idx = int(np.argmin(day_offsets))
+        if init_idx in used_indices:
+            continue
+        used_indices.add(init_idx)
+        infos.append(
+            {
+                "requested_init": pd.Timestamp(target),
+                "init_idx": init_idx,
+                "init": pd.Timestamp(init_values[init_idx]),
+                "init_offset_days": int((init_values[init_idx] - target).days),
+            }
+        )
+    return infos
+
+
+def find_cases(ds, target_init_dates, lead_weeks, event_start, event_end, max_cases):
+    event_start = pd.Timestamp(event_start).normalize()
+    event_end = pd.Timestamp(event_end).normalize()
+    lead_values = np.asarray(ds["lead"].values)
+    lead_lookup = {int(lead): lead_idx for lead_idx, lead in enumerate(lead_values)}
+    missing_leads = [lead for lead in lead_weeks if int(lead) not in lead_lookup]
+    if missing_leads:
+        raise ValueError(f"Requested lead weeks are not available: {missing_leads}. Available: {lead_values.tolist()}")
+
+    cases = []
+    for init_info in selected_init_infos(ds, target_init_dates):
+        init_idx = init_info["init_idx"]
+        init_time = init_info["init"]
         if "valid_time" in ds:
             valid_values = pd.to_datetime(ds["valid_time"].isel(init=init_idx).values).normalize()
         else:
             valid_values = pd.to_datetime(
                 [init_time + pd.to_timedelta(int(lead) * 7, unit="D") for lead in lead_values]
             ).normalize()
-        for lead_idx, lead_value in enumerate(lead_values):
+        for lead_value in lead_weeks:
+            lead_idx = int(lead_lookup[int(lead_value)])
             valid_time = pd.Timestamp(valid_values[lead_idx]).normalize()
-            if valid_time < valid_start or valid_time > valid_end:
-                continue
             cases.append(
                 {
                     "init_idx": int(init_idx),
@@ -195,9 +256,12 @@ def find_cases(ds, init_start, init_end, valid_start, valid_end, max_cases):
                     "lead": int(lead_value),
                     "init": pd.Timestamp(init_time),
                     "valid": valid_time,
+                    "requested_init": init_info["requested_init"],
+                    "init_offset_days": init_info["init_offset_days"],
+                    "valid_in_event_window": bool(event_start <= valid_time <= event_end),
                 }
             )
-    cases = sorted(cases, key=lambda x: (x["valid"], x["init"], x["lead"]))
+    cases = sorted(cases, key=lambda x: (x["init"], x["lead"]))
     if max_cases and max_cases > 0:
         cases = cases[: int(max_cases)]
     return cases
@@ -229,32 +293,52 @@ def plot_case_map(case, fields, lats, lons, weights, units, out_path):
     geos = to_display_temp(fields["geos_mean"], units)
     geos_err = fields["geos_mean"] - fields["obs"]
     model_err = fields["model_mean"] - fields["obs"]
+    geos_abs_err = np.abs(geos_err)
+    model_abs_err = np.abs(model_err)
+    closeness_gain = geos_abs_err - model_abs_err
+    closer_to_obs = np.where(model_abs_err < geos_abs_err, 1.0, -1.0)
+    closer_to_obs[np.isclose(model_abs_err, geos_abs_err, atol=1e-6)] = 0.0
     model_minus_geos = fields["model_mean"] - fields["geos_mean"]
+    model_ens_count = int(fields["model_ens"].shape[0])
+    geos_ens_count = int(fields["geos_ens"].shape[0])
 
     tmin, tmax = percentile_limits([obs, model, geos], lower=1, upper=99)
-    emin, emax = percentile_limits([geos_err, model_err, model_minus_geos], lower=1, upper=99, symmetric=True)
+    diff_min, diff_max = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+    abs_min, abs_max = percentile_limits([geos_abs_err, model_abs_err], lower=1, upper=99)
+    close_min, close_max = percentile_limits([closeness_gain], lower=1, upper=99, symmetric=True)
 
     model_rmse = weighted_rmse(fields["model_mean"], fields["obs"], weights)
     geos_rmse = weighted_rmse(fields["geos_mean"], fields["obs"], weights)
-    model_bias = weighted_bias(fields["model_mean"], fields["obs"], weights)
-    geos_bias = weighted_bias(fields["geos_mean"], fields["obs"], weights)
+    model_abs_mean = weighted_mean(model_abs_err, weights)
+    geos_abs_mean = weighted_mean(geos_abs_err, weights)
+    closeness_mean = weighted_mean(closeness_gain, weights)
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 8), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(20, 8), constrained_layout=True)
     panels = [
         (obs, f"Observed T2M ({units})", "coolwarm", tmin, tmax),
-        (geos, f"GEOS ens mean ({units})", "coolwarm", tmin, tmax),
-        (model, f"ML ens mean ({units})", "coolwarm", tmin, tmax),
-        (geos_err, f"GEOS - Obs (K)\nRMSE={geos_rmse:.2f}, bias={geos_bias:+.2f}", "RdBu_r", emin, emax),
-        (model_err, f"ML - Obs (K)\nRMSE={model_rmse:.2f}, bias={model_bias:+.2f}", "RdBu_r", emin, emax),
-        (model_minus_geos, "ML - GEOS (K)", "RdBu_r", emin, emax),
+        (geos, f"GEOS ens mean ({units})\nN={geos_ens_count}", "coolwarm", tmin, tmax),
+        (model, f"ML ens mean ({units})\nN={model_ens_count}", "coolwarm", tmin, tmax),
+        (model_minus_geos, "ML - GEOS ens mean (K)", "RdBu_r", diff_min, diff_max),
+        (geos_abs_err, f"|GEOS mean - Obs| (K)\narea mean={geos_abs_mean:.2f}", "YlOrRd", abs_min, abs_max),
+        (model_abs_err, f"|ML mean - Obs| (K)\narea mean={model_abs_mean:.2f}", "YlOrRd", abs_min, abs_max),
+        (
+            closeness_gain,
+            f"Closeness gain: |GEOS-Obs|-|ML-Obs| (K)\npositive/blue = ML closer, mean={closeness_mean:+.2f}",
+            "RdBu",
+            close_min,
+            close_max,
+        ),
+        (closer_to_obs, "Closer forecast\nML=+1, tie=0, GEOS=-1", "bwr", -1.0, 1.0),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
         fig.colorbar(mesh, ax=ax, shrink=0.82)
 
+    event_label = "inside Feb 11-20 event window" if case["valid_in_event_window"] else "outside Feb 11-20 event window"
     fig.suptitle(
         f"February 2021 USA cold-event case | init {case['init']:%Y-%m-%d} | "
-        f"valid {case['valid']:%Y-%m-%d} | lead week{case['lead']}",
+        f"valid {case['valid']:%Y-%m-%d} | lead week{case['lead']} | {event_label} | "
+        f"RMSE GEOS={geos_rmse:.2f} ML={model_rmse:.2f}",
         fontsize=13,
     )
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -272,32 +356,51 @@ def plot_composite_map(records, lats, lons, units, out_path):
     model = np.nanmean([r["model_mean"] for r in records], axis=0)
     geos_err = geos - obs
     model_err = model - obs
+    geos_abs_err = np.abs(geos_err)
+    model_abs_err = np.abs(model_err)
+    closeness_gain = geos_abs_err - model_abs_err
+    closer_to_obs = np.where(model_abs_err < geos_abs_err, 1.0, -1.0)
+    closer_to_obs[np.isclose(model_abs_err, geos_abs_err, atol=1e-6)] = 0.0
     model_minus_geos = model - geos
 
     obs_u = to_display_temp(obs, units)
     geos_u = to_display_temp(geos, units)
     model_u = to_display_temp(model, units)
     tmin, tmax = percentile_limits([obs_u, geos_u, model_u], lower=1, upper=99)
-    emin, emax = percentile_limits([geos_err, model_err, model_minus_geos], lower=1, upper=99, symmetric=True)
+    diff_min, diff_max = percentile_limits([model_minus_geos], lower=1, upper=99, symmetric=True)
+    abs_min, abs_max = percentile_limits([geos_abs_err, model_abs_err], lower=1, upper=99)
+    close_min, close_max = percentile_limits([closeness_gain], lower=1, upper=99, symmetric=True)
 
-    fig, axes = plt.subplots(2, 3, figsize=(16, 8), constrained_layout=True)
+    fig, axes = plt.subplots(2, 4, figsize=(20, 8), constrained_layout=True)
     panels = [
         (obs_u, f"Composite observed T2M ({units})", "coolwarm", tmin, tmax),
         (geos_u, f"Composite GEOS mean ({units})", "coolwarm", tmin, tmax),
         (model_u, f"Composite ML mean ({units})", "coolwarm", tmin, tmax),
-        (geos_err, "Composite GEOS - Obs (K)", "RdBu_r", emin, emax),
-        (model_err, "Composite ML - Obs (K)", "RdBu_r", emin, emax),
-        (model_minus_geos, "Composite ML - GEOS (K)", "RdBu_r", emin, emax),
+        (model_minus_geos, "Composite ML - GEOS mean (K)", "RdBu_r", diff_min, diff_max),
+        (geos_abs_err, "Composite |GEOS mean - Obs| (K)", "YlOrRd", abs_min, abs_max),
+        (model_abs_err, "Composite |ML mean - Obs| (K)", "YlOrRd", abs_min, abs_max),
+        (
+            closeness_gain,
+            "Composite closeness gain (K)\npositive/blue = ML closer",
+            "RdBu",
+            close_min,
+            close_max,
+        ),
+        (closer_to_obs, "Composite closer forecast\nML=+1, tie=0, GEOS=-1", "bwr", -1.0, 1.0),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
         fig.colorbar(mesh, ax=ax, shrink=0.82)
-    fig.suptitle(f"February 2021 USA cold-event composite | {len(records)} init/lead cases", fontsize=13)
+    fig.suptitle(
+        f"February 2021 USA cold-event composite | Jan target inits, lead weeks 1-4 | "
+        f"{len(records)} init/lead cases",
+        fontsize=13,
+    )
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_case_timeseries(metrics_df, units, out_path):
+def plot_case_timeseries(metrics_df, units, event_start, event_end, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -307,6 +410,7 @@ def plot_case_timeseries(metrics_df, units, out_path):
         return
     labels = [
         f"{row.init:%m-%d}\nwk{row.lead}\n{row.valid:%m-%d}"
+        f"{'*' if row.valid_in_event_window else ''}"
         for row in metrics_df.itertuples(index=False)
     ]
     x = np.arange(len(metrics_df))
@@ -315,7 +419,9 @@ def plot_case_timeseries(metrics_df, units, out_path):
     axes[0].plot(x, metrics_df["obs_domain_mean_display"], marker="o", label="Obs")
     axes[0].plot(x, metrics_df["geos_domain_mean_display"], marker="o", label="GEOS")
     axes[0].plot(x, metrics_df["model_domain_mean_display"], marker="o", label="ML")
-    axes[0].set_title(f"Area-mean T2M over event domain ({units})")
+    axes[0].set_title(
+        f"Area-mean T2M over event domain ({units}); * = valid date inside {event_start} to {event_end}"
+    )
     axes[0].set_ylabel(f"T2M ({units})")
     axes[0].set_xticks(x)
     axes[0].set_xticklabels(labels, rotation=45, ha="right")
@@ -353,18 +459,20 @@ def main():
         lats = ds_region["lat"].values
         lons = ds_region["lon"].values
         weights = area_weights(lats)
+        target_init_dates = parse_date_list(args.target_inits)
+        lead_weeks = parse_int_list(args.lead_weeks)
         cases = find_cases(
             ds_region,
-            init_start=args.init_start,
-            init_end=args.init_end,
-            valid_start=args.valid_start,
-            valid_end=args.valid_end,
+            target_init_dates=target_init_dates,
+            lead_weeks=lead_weeks,
+            event_start=args.event_start,
+            event_end=args.event_end,
             max_cases=args.max_cases,
         )
         if not cases:
             available = pd.to_datetime(ds_region["init"].values).strftime("%Y-%m-%d").tolist()
             raise RuntimeError(
-                "No init/lead cases matched the requested date windows. "
+                "No init/lead cases matched the requested target init/lead selections. "
                 f"Available init dates include: {available[:20]}"
             )
 
@@ -372,10 +480,25 @@ def main():
             f"Selected {len(cases)} init/lead cases over "
             f"{len(lats)}x{len(lons)} grid cells. Loading one case at a time."
         )
+        print(
+            "Target init dates -> closest available: "
+            + ", ".join(
+                [
+                    f"{case['requested_init']:%Y-%m-%d}->{case['init']:%Y-%m-%d}"
+                    f" ({case['init_offset_days']:+d}d)"
+                    for case in cases
+                    if case["lead"] == lead_weeks[0]
+                ]
+            )
+        )
         records = []
         metric_rows = []
+        model_ens_count = None
+        geos_ens_count = None
         for case in cases:
             fields = extract_case_fields(ds_region, case)
+            model_ens_count = int(fields["model_ens"].shape[0])
+            geos_ens_count = int(fields["geos_ens"].shape[0])
             records.append({
                 "obs": fields["obs"],
                 "geos_mean": fields["geos_mean"],
@@ -392,9 +515,14 @@ def main():
             geos_crps = weighted_crps(fields["geos_ens"], fields["obs"], weights)
             model_crps = weighted_crps(fields["model_ens"], fields["obs"], weights)
             row = {
+                "requested_init": case["requested_init"],
                 "init": case["init"],
+                "init_offset_days": case["init_offset_days"],
                 "valid": case["valid"],
                 "lead": case["lead"],
+                "valid_in_event_window": case["valid_in_event_window"],
+                "model_ensemble_members": model_ens_count,
+                "geos_ensemble_members": geos_ens_count,
                 "obs_domain_mean_k": obs_mean_k,
                 "geos_domain_mean_k": geos_mean_k,
                 "model_domain_mean_k": model_mean_k,
@@ -422,14 +550,26 @@ def main():
             )
             plot_case_map(case, fields, lats, lons, weights, args.temperature_units, os.path.join(maps_dir, filename))
 
-        metrics_df = pd.DataFrame(metric_rows).sort_values(["valid", "init", "lead"])
+        metrics_df = pd.DataFrame(metric_rows).sort_values(["init", "lead"])
         metrics_csv = os.path.join(args.out_dir, "feb2021_usa_cold_event_case_metrics.csv")
         metrics_df.to_csv(metrics_csv, index=False, float_format="%.6f")
-        plot_case_timeseries(metrics_df, args.temperature_units, os.path.join(args.out_dir, "case_t2m_timeseries_metrics.png"))
+        plot_case_timeseries(
+            metrics_df,
+            args.temperature_units,
+            args.event_start,
+            args.event_end,
+            os.path.join(args.out_dir, "case_t2m_timeseries_metrics.png"),
+        )
         plot_composite_map(records, lats, lons, args.temperature_units, os.path.join(args.out_dir, "case_composite_t2m_maps.png"))
 
         orientation = {
             "zarr_path": os.path.abspath(zarr_path),
+            "event_start": args.event_start,
+            "event_end": args.event_end,
+            "target_inits": [d.strftime("%Y-%m-%d") for d in target_init_dates],
+            "lead_weeks": lead_weeks,
+            "model_ensemble_members": model_ens_count,
+            "geos_ensemble_members": geos_ens_count,
             "lat_first": float(ds_region["lat"].values[0]),
             "lat_last": float(ds_region["lat"].values[-1]),
             "lat_strictly_increasing": bool(np.all(np.diff(ds_region["lat"].values) > 0)),
@@ -437,7 +577,14 @@ def main():
             "lon_last": float(ds_region["lon"].values[-1]),
             "lon_strictly_increasing": bool(np.all(np.diff(ds_region["lon"].values) > 0)),
             "selected_cases": [
-                {"init": c["init"].strftime("%Y-%m-%d"), "valid": c["valid"].strftime("%Y-%m-%d"), "lead": c["lead"]}
+                {
+                    "requested_init": c["requested_init"].strftime("%Y-%m-%d"),
+                    "init": c["init"].strftime("%Y-%m-%d"),
+                    "init_offset_days": c["init_offset_days"],
+                    "valid": c["valid"].strftime("%Y-%m-%d"),
+                    "lead": c["lead"],
+                    "valid_in_event_window": c["valid_in_event_window"],
+                }
                 for c in cases
             ],
             "domain": {
@@ -453,9 +600,14 @@ def main():
 
         print("\nSelected cases:")
         print(metrics_df[[
+            "requested_init",
             "init",
+            "init_offset_days",
             "valid",
             "lead",
+            "valid_in_event_window",
+            "model_ensemble_members",
+            "geos_ensemble_members",
             "obs_domain_mean_k",
             "geos_rmse_k",
             "model_rmse_k",
@@ -464,6 +616,7 @@ def main():
             "model_crps_k",
             "crps_skill_vs_geos_pct",
         ]].to_string(index=False))
+        print(f"\nEnsemble members used: ML={model_ens_count}, GEOS={geos_ens_count}")
         print(f"\n✅ Wrote metrics: {metrics_csv}")
         print(f"✅ Wrote maps under: {maps_dir}")
         print(f"✅ Wrote composite map: {os.path.join(args.out_dir, 'case_composite_t2m_maps.png')}")
