@@ -160,6 +160,12 @@ def parse_args():
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--make_plots", action="store_true")
+    parser.add_argument(
+        "--land_mask_file",
+        type=str,
+        default=None,
+        help="Path to a land-ocean mask .pt file (e.g. ml_model/land_ocean_mask_v6.pt).",
+    )
     return parser.parse_args()
 
 
@@ -212,7 +218,7 @@ def weighted_mean(field, weights, mask):
     return float(np.sum(np.where(mask, field, 0.0) * weighted_mask) / denom)
 
 
-def crps_ensemble(ensemble, obs, weights):
+def crps_ensemble(ensemble, obs, weights, land_mask=None):
     """
     Exact empirical CRPS for an ensemble at every grid point, then area-weighted.
 
@@ -227,6 +233,8 @@ def crps_ensemble(ensemble, obs, weights):
         raise ValueError(f"Expected obs [H,W], got shape {obs.shape}")
 
     finite = np.isfinite(obs) & np.all(np.isfinite(ensemble), axis=0)
+    if land_mask is not None:
+        finite = finite & land_mask
     if not finite.any():
         return np.nan
 
@@ -242,12 +250,14 @@ def crps_ensemble(ensemble, obs, weights):
     return weighted_mean(crps_map, weights, finite)
 
 
-def deterministic_metrics(ensemble, obs, weights):
+def deterministic_metrics(ensemble, obs, weights, land_mask=None):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
     mean = np.nanmean(ensemble, axis=0).astype(np.float64, copy=False)
     obs64 = obs.astype(np.float64, copy=False)
     finite = np.isfinite(obs64) & np.isfinite(mean)
+    if land_mask is not None:
+        finite = finite & land_mask
     if not finite.any():
         return {
             "rmse": np.nan,
@@ -270,9 +280,9 @@ def deterministic_metrics(ensemble, obs, weights):
     }
 
 
-def evaluate_ensemble(ensemble, obs, weights):
-    out = deterministic_metrics(ensemble, obs, weights)
-    out["crps"] = crps_ensemble(ensemble, obs, weights)
+def evaluate_ensemble(ensemble, obs, weights, land_mask=None):
+    out = deterministic_metrics(ensemble, obs, weights, land_mask=land_mask)
+    out["crps"] = crps_ensemble(ensemble, obs, weights, land_mask=land_mask)
     out["ensemble_members"] = int(np.asarray(ensemble).shape[0])
     return out
 
@@ -299,7 +309,7 @@ def add_skill_columns(df):
     return df
 
 
-def weighted_sums_for_ensemble(ensemble, obs, weights):
+def weighted_sums_for_ensemble(ensemble, obs, weights, land_mask=None):
     """
     Return weighted sums for direct group reduction.
 
@@ -316,6 +326,8 @@ def weighted_sums_for_ensemble(ensemble, obs, weights):
         raise ValueError(f"Expected obs [H,W], got shape {obs.shape}")
 
     finite = np.isfinite(obs) & np.all(np.isfinite(ensemble), axis=0)
+    if land_mask is not None:
+        finite = finite & land_mask
     weighted_mask = np.where(finite, weights, 0.0)
     weight_sum = float(np.sum(weighted_mask))
     if weight_sum <= 0:
@@ -353,7 +365,7 @@ def weighted_sums_for_ensemble(ensemble, obs, weights):
     }
 
 
-def grid_diagnostics_for_ensemble(ensemble, obs):
+def grid_diagnostics_for_ensemble(ensemble, obs, land_mask=None):
     """Per-grid CRPS, squared error, bias, and spread for one ensemble forecast."""
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
@@ -363,6 +375,8 @@ def grid_diagnostics_for_ensemble(ensemble, obs):
         raise ValueError(f"Expected obs [H,W], got shape {obs.shape}")
 
     finite = np.isfinite(obs) & np.all(np.isfinite(ensemble), axis=0)
+    if land_mask is not None:
+        finite = finite & land_mask
     ens64 = ensemble.astype(np.float64, copy=False)
     obs64 = obs.astype(np.float64, copy=False)
     mean = np.mean(ens64, axis=0)
@@ -413,9 +427,9 @@ def _update_spatial_group(accumulators, group, variable, model_maps, geos_maps):
         state[f"geos_{metric}_sum"] += np.where(finite, geos_maps[metric], 0.0)
 
 
-def _update_spatial_accumulators(accumulators, row, variable, model, geos, obs):
-    model_maps = grid_diagnostics_for_ensemble(model, obs)
-    geos_maps = grid_diagnostics_for_ensemble(geos, obs)
+def _update_spatial_accumulators(accumulators, row, variable, model, geos, obs, land_mask=None):
+    model_maps = grid_diagnostics_for_ensemble(model, obs, land_mask=land_mask)
+    geos_maps = grid_diagnostics_for_ensemble(geos, obs, land_mask=land_mask)
     groups = [
         "all",
         f"year_{int(row['year'])}",
@@ -508,7 +522,7 @@ def _spatial_accumulators_to_dataset(accumulators, lats, lons):
     return ds
 
 
-def build_spatial_metric_maps(forecast_dir, years, variables, out_dir, overwrite=False):
+def build_spatial_metric_maps(forecast_dir, years, variables, out_dir, overwrite=False, land_mask=None):
     map_path = os.path.join(out_dir, "spatial_metric_maps.nc")
     if os.path.exists(map_path) and not overwrite:
         existing = xr.open_dataset(map_path)
@@ -559,7 +573,7 @@ def build_spatial_metric_maps(forecast_dir, years, variables, out_dir, overwrite
                         obs = ds[names["obs"]].isel(init=init_idx, lead=lead_idx).values
                         model = ds[names["model"]].isel(init=init_idx, lead=lead_idx).values
                         geos = ds[names["geos"]].isel(init=init_idx, lead=lead_idx).values
-                        _update_spatial_accumulators(accumulators, row, variable, model, geos, obs)
+                        _update_spatial_accumulators(accumulators, row, variable, model, geos, obs, land_mask=land_mask)
         finally:
             ds.close()
 
@@ -602,9 +616,9 @@ def _direct_state_template(group_type, variable, row, group_cols):
     return state
 
 
-def update_direct_accumulators(accumulators, row, variable, model, geos, obs, weights):
-    model_sums = weighted_sums_for_ensemble(model, obs, weights)
-    geos_sums = weighted_sums_for_ensemble(geos, obs, weights)
+def update_direct_accumulators(accumulators, row, variable, model, geos, obs, weights, land_mask=None):
+    model_sums = weighted_sums_for_ensemble(model, obs, weights, land_mask=land_mask)
+    geos_sums = weighted_sums_for_ensemble(geos, obs, weights, land_mask=land_mask)
     for group_type, group_cols in GROUP_SPECS:
         key = (group_type, variable, tuple(row[col] for col in group_cols))
         state = accumulators.get(key)
@@ -684,7 +698,7 @@ def direct_state_to_summary(state_df):
     return summary[ORDERED_SUMMARY_COLS]
 
 
-def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwrite=False):
+def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwrite=False, land_mask=None):
     if os.path.exists(out_csv) and os.path.exists(direct_state_csv) and not overwrite:
         print(f"✅ {year}: using existing metrics {out_csv} and {direct_state_csv}")
         return (
@@ -696,6 +710,10 @@ def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwri
     ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
     try:
         lats = ds["lat"].values
+        lons = ds["lon"].values
+        if land_mask is not None:
+            if land_mask.shape != (len(lats), len(lons)):
+                raise ValueError(f"Land mask shape {land_mask.shape} does not match grid shape {(len(lats), len(lons))}")
         weights = area_weights_from_lats(lats)
         init_values = pd.to_datetime(ds["init"].values).normalize()
         lead_values = ds["lead"].values
@@ -717,8 +735,8 @@ def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwri
                     model = ds[names["model"]].isel(init=init_idx, lead=lead_idx).values
                     geos = ds[names["geos"]].isel(init=init_idx, lead=lead_idx).values
 
-                    model_metrics = evaluate_ensemble(model, obs, weights)
-                    geos_metrics = evaluate_ensemble(geos, obs, weights)
+                    model_metrics = evaluate_ensemble(model, obs, weights, land_mask=land_mask)
+                    geos_metrics = evaluate_ensemble(geos, obs, weights, land_mask=land_mask)
                     row = {
                         "year": year,
                         "init": init_time,
@@ -750,6 +768,7 @@ def evaluate_year(year, zarr_path, out_csv, direct_state_csv, variables, overwri
                         geos,
                         obs,
                         weights,
+                        land_mask=land_mask,
                     )
 
         out = add_skill_columns(pd.DataFrame(rows))
@@ -1084,7 +1103,7 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
     print(f"✅ Wrote spatial diagnostic plots under: {plot_dir}")
 
 
-def plot_orientation_diagnostics(forecast_dir, years, variables, out_dir):
+def plot_orientation_diagnostics(forecast_dir, years, variables, out_dir, land_mask=None):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1122,6 +1141,10 @@ def plot_orientation_diagnostics(forecast_dir, years, variables, out_dir):
             obs = ds[names["obs"]].isel(init=0, lead=0).values
             model = ds[names["model"]].isel(init=0, lead=0).mean("ensemble").values
             geos = ds[names["geos"]].isel(init=0, lead=0).mean("geos_member").values
+            if land_mask is not None:
+                obs = np.where(land_mask, obs, np.nan)
+                model = np.where(land_mask, model, np.nan)
+                geos = np.where(land_mask, geos, np.nan)
             report[f"{variable}_shape_obs"] = list(obs.shape)
             report[f"{variable}_shape_model_mean"] = list(model.shape)
             report[f"{variable}_shape_geos_mean"] = list(geos.shape)
@@ -1209,6 +1232,16 @@ def main():
     yearly_dir = os.path.join(args.out_dir, "yearly_metrics")
     os.makedirs(yearly_dir, exist_ok=True)
 
+    land_mask = None
+    if getattr(args, "land_mask_file", None):
+        import torch
+        print(f"🌍 Loading land mask from: {args.land_mask_file}")
+        cached = torch.load(args.land_mask_file, map_location="cpu", weights_only=True)
+        if "is_land" not in cached:
+            raise ValueError(f"Land mask file {args.land_mask_file} is missing 'is_land' field.")
+        land_mask = np.asarray(cached["is_land"], dtype=bool).squeeze()
+        print(f"🌍 Land mask loaded. Shape: {land_mask.shape}. Land points: {land_mask.sum()}. Ocean points masked: {land_mask.size - land_mask.sum()}")
+
     deadline = None
     if args.max_runtime_minutes is not None and args.max_runtime_minutes > 0:
         deadline = time.monotonic() + float(args.max_runtime_minutes) * 60.0
@@ -1221,6 +1254,10 @@ def main():
     print(f"  Variables    : {variables}")
     print(f"  Out dir      : {args.out_dir}")
     print(f"  Soft runtime : {args.max_runtime_minutes if args.max_runtime_minutes else 'disabled'} minutes")
+    if land_mask is not None:
+        print(f"  Land mask    : {args.land_mask_file} (active)")
+    else:
+        print(f"  Land mask    : disabled (global evaluation)")
     print("=" * 88 + "\n")
 
     year_frames = []
@@ -1243,6 +1280,7 @@ def main():
             direct_state_csv=year_state_csv,
             variables=variables,
             overwrite=args.overwrite,
+            land_mask=land_mask,
         )
         year_frames.append(year_df)
         year_direct_states.append(year_direct_state)
@@ -1301,12 +1339,13 @@ def main():
             variables=variables,
             out_dir=args.out_dir,
             overwrite=args.overwrite,
+            land_mask=land_mask,
         )
         try:
             plot_spatial_diagnostics(spatial_ds, args.out_dir)
         finally:
             spatial_ds.close()
-        plot_orientation_diagnostics(args.forecast_dir, expected_years, variables, args.out_dir)
+        plot_orientation_diagnostics(args.forecast_dir, expected_years, variables, args.out_dir, land_mask=land_mask)
 
     overview = {
         "forecast_dir": os.path.abspath(args.forecast_dir),

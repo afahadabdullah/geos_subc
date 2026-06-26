@@ -50,6 +50,7 @@ MAX_RUNTIME_MINUTES="${GLOBAL_EVAL_MAX_RUNTIME_MINUTES:-105}"
 AUTO_RESUBMIT="${GLOBAL_EVAL_AUTO_RESUBMIT:-1}"
 OVERWRITE="${GLOBAL_EVAL_OVERWRITE:-0}"
 MAKE_PLOTS="${GLOBAL_EVAL_MAKE_PLOTS:-1}"
+LAND_MASK_FILE="${GLOBAL_EVAL_LAND_MASK_FILE:-}"
 
 if [ ! -d "$FORECAST_DIR" ]; then
     echo "❌ Forecast dir not found: $FORECAST_DIR"
@@ -63,6 +64,9 @@ fi
 if [ "$MAKE_PLOTS" = "1" ] || [ "$MAKE_PLOTS" = "true" ] || [ "$MAKE_PLOTS" = "TRUE" ]; then
     EXTRA_ARGS+=(--make_plots)
 fi
+if [ -n "$LAND_MASK_FILE" ]; then
+    EXTRA_ARGS+=(--land_mask_file "$LAND_MASK_FILE")
+fi
 
 echo "📌 Using checked-out code at $(git rev-parse --short HEAD) on branch $(git branch --show-current)"
 echo "🎯 Forecast dir: $FORECAST_DIR"
@@ -74,6 +78,11 @@ echo "🎯 Soft runtime minutes: $MAX_RUNTIME_MINUTES"
 echo "🎯 Auto resubmit: $AUTO_RESUBMIT"
 echo "🎯 Overwrite yearly metrics: $OVERWRITE"
 echo "🎯 Make plots: $MAKE_PLOTS"
+if [ -n "$LAND_MASK_FILE" ]; then
+    echo "🎯 Land mask file: $LAND_MASK_FILE"
+else
+    echo "🎯 Land mask file: disabled (global evaluation)"
+fi
 
 python ml_model/evaluate_forecast_zarr_flow_finalv1_global.py \
     --forecast_dir "$FORECAST_DIR" \
@@ -130,7 +139,7 @@ if [ -n "$MISSING_YEARS" ] || [ ! -f "$SUMMARY_PATH" ] || [ "$SPATIAL_MISSING" =
 
         echo "📡 Resubmitting evaluation job via $SUBMIT_TARGET..."
         ssh -o StrictHostKeyChecking=no "$SUBMIT_TARGET" \
-            "cd $PWD && GLOBAL_EVAL_FORECAST_DIR='$FORECAST_DIR' GLOBAL_EVAL_START_YEAR='$START_YEAR' GLOBAL_EVAL_END_YEAR='$END_YEAR' GLOBAL_EVAL_SKIP_YEARS='$SKIP_YEARS' GLOBAL_EVAL_OUT_DIR='$OUT_DIR' GLOBAL_EVAL_VARIABLES='$VARIABLES' GLOBAL_EVAL_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' GLOBAL_EVAL_AUTO_RESUBMIT='$AUTO_RESUBMIT' GLOBAL_EVAL_OVERWRITE='0' GLOBAL_EVAL_MAKE_PLOTS='$MAKE_PLOTS' sbatch ml_model/submit_evaluate_forecast_zarr_flow_finalv1_global.sh"
+            "cd $PWD && GLOBAL_EVAL_FORECAST_DIR='$FORECAST_DIR' GLOBAL_EVAL_START_YEAR='$START_YEAR' GLOBAL_EVAL_END_YEAR='$END_YEAR' GLOBAL_EVAL_SKIP_YEARS='$SKIP_YEARS' GLOBAL_EVAL_OUT_DIR='$OUT_DIR' GLOBAL_EVAL_VARIABLES='$VARIABLES' GLOBAL_EVAL_MAX_RUNTIME_MINUTES='$MAX_RUNTIME_MINUTES' GLOBAL_EVAL_AUTO_RESUBMIT='$AUTO_RESUBMIT' GLOBAL_EVAL_OVERWRITE='0' GLOBAL_EVAL_MAKE_PLOTS='$MAKE_PLOTS' GLOBAL_EVAL_LAND_MASK_FILE='$LAND_MASK_FILE' sbatch ml_model/submit_evaluate_forecast_zarr_flow_finalv1_global.sh"
     else
         echo "ℹ️ Auto-resubmit disabled. Rerun this script to continue."
     fi
