@@ -2,10 +2,12 @@
 """
 Single-event case-study plots from generated flow_finalv1_global forecast Zarrs.
 
-Default case: June 19, 2021 Europe heat-wave event.
+Default preset: June 19, 2021 Europe heat-wave event.
+Additional presets include the August 11, 2021 Mediterranean/Sicily record
+heat event and the July 8-19, 2022 Europe heat-wave period.
 
 The script reads a saved yearly forecast Zarr, selects init dates around
-late May 2021, then compares lead weeks 1-4 T2M:
+the preset target dates, then compares lead weeks 1-4 T2M:
   - observed ERA5 T2M
   - GEOS ensemble-mean forecast
   - ML ensemble-mean forecast
@@ -26,6 +28,58 @@ import pandas as pd
 import xarray as xr
 
 
+EVENT_PRESETS = {
+    "europe_jun2021_heatwave": {
+        "year": 2021,
+        "event_name": "June 19 2021 Europe heat wave",
+        "target_inits": "2021-05-27",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2021-06-19",
+        "event_end": "2021-06-19",
+        "lat_min": 35.0,
+        "lat_max": 72.0,
+        "lon_min": -12.0,
+        "lon_max": 45.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jun2021_europe_heatwave_endmay_leads1_4"
+        ),
+    },
+    "med_aug2021_sicily_record_heat": {
+        "year": 2021,
+        "event_name": "August 11 2021 Mediterranean/Sicily record heat",
+        "target_inits": "2021-07-15,2021-07-22,2021-07-29,2021-08-05",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2021-08-11",
+        "event_end": "2021-08-11",
+        "lat_min": 30.0,
+        "lat_max": 48.0,
+        "lon_min": -10.0,
+        "lon_max": 35.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_aug2021_mediterranean_sicily_record_heat_leads1_4"
+        ),
+    },
+    "europe_jul2022_heatwave_mortality": {
+        "year": 2022,
+        "event_name": "July 8-19 2022 Europe heat waves",
+        "target_inits": "2022-06-16,2022-06-23,2022-06-30,2022-07-07",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2022-07-08",
+        "event_end": "2022-07-19",
+        "lat_min": 35.0,
+        "lat_max": 72.0,
+        "lon_min": -12.0,
+        "lon_max": 45.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jul2022_europe_heatwave_mortality_leads1_4"
+        ),
+    },
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot one T2M event case from generated global forecast Zarrs.")
     parser.add_argument(
@@ -34,42 +88,46 @@ def parse_args():
         default="dataprocess/gen_flow_finalv1_global_fullyear_2021_2024_e90_s50",
         help="Directory containing YEAR.zarr forecast stores.",
     )
-    parser.add_argument("--year", type=int, default=2021)
-    parser.add_argument("--event_name", type=str, default="June 19 2021 Europe heat wave")
+    parser.add_argument(
+        "--event_preset",
+        choices=sorted(EVENT_PRESETS),
+        default=None,
+        help="Named event preset. Defaults to europe_jun2021_heatwave if event fields are not supplied.",
+    )
+    parser.add_argument("--list_event_presets", action="store_true", help="Print available event presets and exit.")
+    parser.add_argument("--year", type=int, default=None)
+    parser.add_argument("--event_name", type=str, default=None)
     parser.add_argument(
         "--target_inits",
         type=str,
-        default="2021-05-27",
+        default=None,
         help="Comma-separated target init dates. The closest available init is used for each.",
     )
     parser.add_argument(
         "--lead_weeks",
         type=str,
-        default="1,2,3,4",
+        default=None,
         help="Comma-separated lead weeks to plot for each selected init.",
     )
-    parser.add_argument("--event_start", type=str, default="2021-06-19")
-    parser.add_argument("--event_end", type=str, default="2021-06-19")
+    parser.add_argument("--event_start", type=str, default=None)
+    parser.add_argument("--event_end", type=str, default=None)
     parser.add_argument(
         "--out_dir",
         type=str,
-        default=(
-            "ml_output_flow_finalv1_global_noisectx_t2mres/"
-            "case_jun2021_europe_heatwave_endmay_leads1_4"
-        ),
+        default=None,
     )
-    parser.add_argument("--lat_min", type=float, default=35.0)
-    parser.add_argument("--lat_max", type=float, default=72.0)
+    parser.add_argument("--lat_min", type=float, default=None)
+    parser.add_argument("--lat_max", type=float, default=None)
     parser.add_argument(
         "--lon_min",
         type=float,
-        default=-12.0,
+        default=None,
         help="Domain western longitude. Use 0..360 or negative degrees; default -12 = 12W.",
     )
     parser.add_argument(
         "--lon_max",
         type=float,
-        default=45.0,
+        default=None,
         help="Domain eastern longitude. Use 0..360 or negative degrees; default 45E.",
     )
     parser.add_argument("--max_cases", type=int, default=16)
@@ -81,6 +139,19 @@ def parse_args():
     )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
+
+
+def apply_event_preset(args):
+    if args.list_event_presets:
+        print(json.dumps(EVENT_PRESETS, indent=2))
+        sys.exit(0)
+    preset_name = args.event_preset or "europe_jun2021_heatwave"
+    preset = EVENT_PRESETS[preset_name]
+    for key, value in preset.items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
+    args.event_preset = preset_name
+    return args
 
 
 def normalize_lon(lon):
@@ -462,7 +533,7 @@ def plot_case_timeseries(metrics_df, units, event_name, event_start, event_end, 
 
 
 def main():
-    args = parse_args()
+    args = apply_event_preset(parse_args())
     os.makedirs(args.out_dir, exist_ok=True)
     maps_dir = os.path.join(args.out_dir, "maps")
     os.makedirs(maps_dir, exist_ok=True)
@@ -603,6 +674,7 @@ def main():
 
         orientation = {
             "zarr_path": os.path.abspath(zarr_path),
+            "event_preset": args.event_preset,
             "event_name": args.event_name,
             "event_start": args.event_start,
             "event_end": args.event_end,
