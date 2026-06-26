@@ -132,6 +132,23 @@ EVENT_PRESETS = {
             "case_jul2021_western_europe_floods_pr_leads1_4"
         ),
     },
+    "pakistan_aug2022_monsoon_flood": {
+        "year": 2022,
+        "event_variable": "pr",
+        "event_name": "August 24-26 2022 Pakistan monsoon flood",
+        "target_inits": "2022-07-28,2022-08-04,2022-08-11,2022-08-18",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2022-08-24",
+        "event_end": "2022-08-26",
+        "lat_min": 23.0,
+        "lat_max": 37.0,
+        "lon_min": 60.0,
+        "lon_max": 78.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_aug2022_pakistan_monsoon_flood_pr_leads1_4"
+        ),
+    },
 }
 
 
