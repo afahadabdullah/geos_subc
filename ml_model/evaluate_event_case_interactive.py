@@ -142,6 +142,134 @@ def weighted_brier_score(ensemble, obs, weights, threshold):
     brier_map = (prob - obs_binary) ** 2
     return float(np.sum(np.where(finite, brier_map, 0.0) * weighted_mask) / denom)
 
+def gridpoint_crps_map(ensemble, obs):
+    ensemble = np.asarray(ensemble, dtype=np.float64)
+    obs = np.asarray(obs, dtype=np.float64)
+    mae_term = np.mean(np.abs(ensemble - obs[None, :, :]), axis=0)
+    ens_sorted = np.sort(ensemble, axis=0)
+    e = ens_sorted.shape[0]
+    coeff = ((2.0 * np.arange(1, e + 1, dtype=np.float64)) - e - 1.0) / (e * e)
+    spread_term = np.sum(coeff[:, None, None] * ens_sorted, axis=0)
+    return mae_term - spread_term
+
+def plot_spatial_skill_maps(rows, lats, lons, weights, threshold, lead_week, spec_names, event_name, out_dir):
+    lead_rows = [r for r in rows if r["lead"] == lead_week]
+    if not lead_rows:
+        print(f"⚠️ No cases for lead week {lead_week} to plot spatial skill maps.")
+        return
+        
+    obs_stack = []
+    model_mean_stack = []
+    geos_mean_stack = []
+    
+    for r in lead_rows:
+        fields = r["raw_fields"]
+        obs_stack.append(fields["obs"])
+        model_mean_stack.append(fields["model_mean"])
+        geos_mean_stack.append(fields["geos_mean"])
+        
+    obs_stack = np.asarray(obs_stack)
+    model_mean_stack = np.asarray(model_mean_stack)
+    geos_mean_stack = np.asarray(geos_mean_stack)
+    
+    model_rmse_map = np.sqrt(np.mean((model_mean_stack - obs_stack)**2, axis=0))
+    geos_rmse_map = np.sqrt(np.mean((geos_mean_stack - obs_stack)**2, axis=0))
+    rmse_skill_map = 1.0 - (model_rmse_map / geos_rmse_map)
+    rmse_skill_map = np.where(np.isfinite(rmse_skill_map) & (geos_rmse_map > 1e-12), rmse_skill_map, np.nan)
+    
+    model_crps_cases = []
+    geos_crps_cases = []
+    for r in lead_rows:
+        fields = r["raw_fields"]
+        model_crps_cases.append(gridpoint_crps_map(fields["model_ens"], fields["obs"]))
+        geos_crps_cases.append(gridpoint_crps_map(fields["geos_ens"], fields["obs"]))
+    
+    model_crps_map = np.mean(model_crps_cases, axis=0)
+    geos_crps_map = np.mean(geos_crps_cases, axis=0)
+    crps_skill_map = 1.0 - (model_crps_map / geos_crps_map)
+    crps_skill_map = np.where(np.isfinite(crps_skill_map) & (geos_crps_map > 1e-12), crps_skill_map, np.nan)
+    
+    model_bs_cases = []
+    geos_bs_cases = []
+    for r in lead_rows:
+        fields = r["raw_fields"]
+        obs_binary = (fields["obs"] > threshold).astype(np.float64)
+        
+        model_prob = np.mean(fields["model_ens"] > threshold, axis=0)
+        geos_prob = np.mean(fields["geos_ens"] > threshold, axis=0)
+        
+        model_bs_cases.append((model_prob - obs_binary)**2)
+        geos_bs_cases.append((geos_prob - obs_binary)**2)
+        
+    model_bs_map = np.mean(model_bs_cases, axis=0)
+    geos_bs_map = np.mean(geos_bs_cases, axis=0)
+    bss_map = 1.0 - (model_bs_map / geos_bs_map)
+    bss_map = np.where(np.isfinite(bss_map) & (geos_bs_map > 1e-12), bss_map, np.nan)
+    
+    cartopy_enabled = False
+    ccrs = None
+    cfeature = None
+    try:
+        import cartopy.crs as ccrs_lib
+        import cartopy.feature as cfeature_lib
+        ccrs = ccrs_lib
+        cfeature = cfeature_lib
+        cartopy_enabled = True
+    except Exception as e:
+        print(f"⚠️ Cartopy is not available ({e}). Plotting plain skill maps.")
+        
+    fig, axes = plt.subplots(
+        1, 3, 
+        figsize=(18, 5), 
+        subplot_kw={"projection": ccrs.PlateCarree()} if cartopy_enabled else None, 
+        constrained_layout=True
+    )
+    
+    maps_data = [
+        (rmse_skill_map, "RMSE Skill Score", "RdBu_r", -0.5, 0.5),
+        (crps_skill_map, "CRPS Skill Score", "RdBu_r", -0.5, 0.5),
+        (bss_map, "Brier Skill Score (BSS)", "RdBu_r", -0.5, 0.5)
+    ]
+    
+    for ax, (data_map, title, cmap, vmin, vmax) in zip(axes, maps_data):
+        if cartopy_enabled:
+            ax.set_extent([np.nanmin(lons), np.nanmax(lons), np.nanmin(lats), np.nanmax(lats)], crs=ccrs.PlateCarree())
+            ax.add_feature(cfeature.COASTLINE, edgecolor="black", linewidth=1.0)
+            ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=0.8)
+            try:
+                states_provinces = cfeature.NaturalEarthFeature(
+                    category='cultural',
+                    name='admin_1_states_provinces_lines',
+                    scale='50m',
+                    facecolor='none',
+                    edgecolor='gray',
+                    linewidth=0.6
+                )
+                ax.add_feature(states_provinces)
+            except Exception:
+                try:
+                    ax.add_feature(cfeature.STATES, edgecolor="gray", linewidth=0.6)
+                except Exception:
+                    pass
+            
+            mesh = ax.pcolormesh(lons, lats, data_map, transform=ccrs.PlateCarree(), shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+        else:
+            mesh = ax.pcolormesh(lons, lats, data_map, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+            ax.set_xlim(np.nanmin(lons), np.nanmax(lons))
+            ax.set_ylim(np.nanmin(lats), np.nanmax(lats))
+            ax.set_xlabel("longitude")
+            ax.set_ylabel("latitude")
+            
+        fig.colorbar(mesh, ax=ax, orientation="horizontal", shrink=0.8, pad=0.05, label="Skill Score (Positive = ML improves over GEOS)")
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        
+    fig.suptitle(f"{event_name}: Spatial Skill Maps vs GEOS (Lead Week {lead_week})", fontsize=15, fontweight="bold", y=1.05)
+    
+    plot_path = os.path.join(out_dir, f"event_spatial_skill_maps_lead_week_{lead_week}.png")
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"🗺️ Saved spatial skill maps to: {plot_path}")
+
 def parse_date_list(value):
     dates = []
     for item in str(value).split(","):
@@ -431,57 +559,70 @@ def main():
                   f"{r['bss']:<8.3f} {r['model_spread']:<8.3f} {r['geos_spread']:<8.3f} {in_window_marker}")
         print("=" * 120 + "\n")
         
-        # Generate Plot 1: Valid-date tracking for a fixed lead
-        lead_cases = [r for r in rows if r["lead"] == args.plot_lead]
-        if len(lead_cases) >= 2:
-            lead_cases = sorted(lead_cases, key=lambda x: x["valid"])
-            valid_dates = [r["valid"] for r in lead_cases]
-            obs_series = [r["obs_mean"] for r in lead_cases]
-            model_means = [r["model_mean"] for r in lead_cases]
-            geos_means = [r["geos_mean"] for r in lead_cases]
-            
-            # Ensemble bounds
-            model_low = []
-            model_high = []
-            geos_low = []
-            geos_high = []
-            for r in lead_cases:
-                fields = r["raw_fields"]
-                # Mean over space of each ensemble member
-                m_ens_means = [weighted_mean(fields["model_ens"][e], weights) for e in range(fields["model_ens"].shape[0])]
-                g_ens_means = [weighted_mean(fields["geos_ens"][e], weights) for e in range(fields["geos_ens"].shape[0])]
+        # Generate Plot 1: Valid-date tracking for each lead week
+        for pl in lead_weeks:
+            lead_cases = [r for r in rows if r["lead"] == pl]
+            if len(lead_cases) >= 2:
+                lead_cases = sorted(lead_cases, key=lambda x: x["valid"])
+                valid_dates = [r["valid"] for r in lead_cases]
+                obs_series = [r["obs_mean"] for r in lead_cases]
+                model_means = [r["model_mean"] for r in lead_cases]
+                geos_means = [r["geos_mean"] for r in lead_cases]
                 
-                # Conversion to C if requested
-                if args.event_variable == "t2m" and args.temperature_units == "C":
-                    m_ens_means = [v - 273.15 for v in m_ens_means]
-                    g_ens_means = [v - 273.15 for v in g_ens_means]
+                # Ensemble bounds
+                model_low = []
+                model_high = []
+                geos_low = []
+                geos_high = []
+                for r in lead_cases:
+                    fields = r["raw_fields"]
+                    m_ens_means = [weighted_mean(fields["model_ens"][e], weights) for e in range(fields["model_ens"].shape[0])]
+                    g_ens_means = [weighted_mean(fields["geos_ens"][e], weights) for e in range(fields["geos_ens"].shape[0])]
+                    
+                    if args.event_variable == "t2m" and args.temperature_units == "C":
+                        m_ens_means = [v - 273.15 for v in m_ens_means]
+                        g_ens_means = [v - 273.15 for v in g_ens_means]
+                    
+                    model_low.append(np.percentile(m_ens_means, 10))
+                    model_high.append(np.percentile(m_ens_means, 90))
+                    geos_low.append(np.percentile(g_ens_means, 10))
+                    geos_high.append(np.percentile(g_ens_means, 90))
+                    
+                fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+                ax.plot(valid_dates, obs_series, marker="o", color="black", linewidth=2.0, label="Observations")
+                ax.plot(valid_dates, model_means, marker="s", color="royalblue", linewidth=1.5, label="ML Forecast (Mean)")
+                ax.fill_between(valid_dates, model_low, model_high, color="royalblue", alpha=0.2, label="ML 10th-90th Percentile")
                 
-                model_low.append(np.percentile(m_ens_means, 10))
-                model_high.append(np.percentile(m_ens_means, 90))
-                geos_low.append(np.percentile(g_ens_means, 10))
-                geos_high.append(np.percentile(g_ens_means, 90))
+                ax.plot(valid_dates, geos_means, marker="^", color="darkorange", linewidth=1.5, label="GEOS Forecast (Mean)")
+                ax.fill_between(valid_dates, geos_low, geos_high, color="darkorange", alpha=0.2, label="GEOS 10th-90th Percentile")
                 
-            fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
-            ax.plot(valid_dates, obs_series, marker="o", color="black", linewidth=2.0, label="Observations")
-            ax.plot(valid_dates, model_means, marker="s", color="royalblue", linewidth=1.5, label="ML Forecast (Mean)")
-            ax.fill_between(valid_dates, model_low, model_high, color="royalblue", alpha=0.2, label="ML 10th-90th Percentile")
-            
-            ax.plot(valid_dates, geos_means, marker="^", color="darkorange", linewidth=1.5, label="GEOS Forecast (Mean)")
-            ax.fill_between(valid_dates, geos_low, geos_high, color="darkorange", alpha=0.2, label="GEOS 10th-90th Percentile")
-            
-            unit_label = f"({args.temperature_units})" if args.event_variable == "t2m" else f"({spec_names['units']})"
-            ax.set_title(f"{args.event_name}: Valid-date Tracking at Lead Week {args.plot_lead}")
-            ax.set_xlabel("Valid Date")
-            ax.set_ylabel(f"Domain Area-weighted Mean {args.event_variable.upper()} {unit_label}")
-            ax.grid(alpha=0.3)
-            ax.legend(loc="best")
-            
-            plot_path1 = os.path.join(out_dir, f"event_valid_date_tracking_lead_week_{args.plot_lead}.png")
-            fig.savefig(plot_path1, dpi=150)
-            plt.close(fig)
-            print(f"📈 Saved valid-date tracking plot to: {plot_path1}")
-        else:
-            print("⚠️ Not enough cases matching lead week {} to plot valid-date tracking.".format(args.plot_lead))
+                unit_label = f"({args.temperature_units})" if args.event_variable == "t2m" else f"({spec_names['units']})"
+                ax.set_title(f"{args.event_name}: Valid-date Tracking at Lead Week {pl}")
+                ax.set_xlabel("Valid Date")
+                ax.set_ylabel(f"Domain Area-weighted Mean {args.event_variable.upper()} {unit_label}")
+                ax.grid(alpha=0.3)
+                ax.legend(loc="best")
+                
+                plot_path1 = os.path.join(out_dir, f"event_valid_date_tracking_lead_week_{pl}.png")
+                fig.savefig(plot_path1, dpi=150)
+                plt.close(fig)
+                print(f"📈 Saved valid-date tracking plot to: {plot_path1}")
+            else:
+                print(f"⚠️ Not enough cases matching lead week {pl} to plot valid-date tracking.")
+
+        # Generate Plot 1B: Spatial skill maps for each lead week
+        for pl in lead_weeks:
+            plot_spatial_skill_maps(
+                rows=rows,
+                lats=lats,
+                lons=lons,
+                weights=weights,
+                threshold=threshold,
+                lead_week=pl,
+                spec_names=spec_names,
+                event_name=args.event_name,
+                out_dir=out_dir
+            )
 
         # Generate Plot 2: Lead week timeseries for the best forecast initialization date
         # (closest initialization prior to or at the start of the event window)
