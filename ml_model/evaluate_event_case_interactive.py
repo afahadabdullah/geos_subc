@@ -790,6 +790,101 @@ def main():
             print(f"📈 Saved forecast evolution plot to: {plot_path2}")
         else:
             print("⚠️ No initialization date found before or at the start of the event window.")
+
+        # Generate Plot 3: Target-Period Forecast Convergence Plot
+        # (Aggregates only the forecasts that target valid dates within the event window,
+        # comparing different lead times/initializations for the same target event)
+        event_cases = [r for r in rows if r["in_event_window"]]
+        if len(event_cases) >= 1:
+            # Group by lead week
+            lead_groups = {}
+            for r in event_cases:
+                lead = r["lead"]
+                if lead not in lead_groups:
+                    lead_groups[lead] = []
+                lead_groups[lead].append(r)
+                
+            plot_leads = sorted(lead_groups.keys(), reverse=True) # E.g., [4, 3, 2, 1]
+            
+            leads_x = []
+            obs_vals = []
+            model_means = []
+            geos_means = []
+            model_lows = []
+            model_highs = []
+            geos_lows = []
+            geos_highs = []
+            init_dates_labels = []
+            
+            for pl in plot_leads:
+                cases_at_lead = lead_groups[pl]
+                # Average metrics over all valid dates inside event window for this lead week
+                obs_mean_val = np.mean([c["obs_mean"] for c in cases_at_lead])
+                m_mean_val = np.mean([c["model_mean"] for c in cases_at_lead])
+                g_mean_val = np.mean([c["geos_mean"] for c in cases_at_lead])
+                
+                # Retrieve individual member forecasts for spread calculations
+                m_ens_all = []
+                g_ens_all = []
+                for c in cases_at_lead:
+                    fields = c["raw_fields"]
+                    m_ens_means = [weighted_mean(fields["model_ens"][e], weights) for e in range(fields["model_ens"].shape[0])]
+                    g_ens_means = [weighted_mean(fields["geos_ens"][e], weights) for e in range(fields["geos_ens"].shape[0])]
+                    if args.event_variable == "t2m" and args.temperature_units == "C":
+                        m_ens_means = [v - 273.15 for v in m_ens_means]
+                        g_ens_means = [v - 273.15 for v in g_ens_means]
+                    m_ens_all.append(m_ens_means)
+                    g_ens_all.append(g_ens_means)
+                
+                # Combine across valid dates for this lead
+                m_ens_combined = np.mean(m_ens_all, axis=0) # Average each member across the event window cases
+                g_ens_combined = np.mean(g_ens_all, axis=0)
+                
+                leads_x.append(pl)
+                obs_vals.append(obs_mean_val)
+                model_means.append(m_mean_val)
+                geos_means.append(g_mean_val)
+                model_lows.append(np.percentile(m_ens_combined, 10))
+                model_highs.append(np.percentile(m_ens_combined, 90))
+                geos_lows.append(np.percentile(g_ens_combined, 10))
+                geos_highs.append(np.percentile(g_ens_combined, 90))
+                
+                # Form label showing initialization date range
+                inits = sorted(list(set([c["init"].strftime("%m-%d") for c in cases_at_lead])))
+                init_dates_labels.append(", ".join(inits))
+                
+            fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+            x_vals = np.arange(len(leads_x))
+            
+            # Observations (constant or mean observations over the targeted window)
+            obs_mean_event = np.mean(obs_vals)
+            ax.axhline(obs_mean_event, color="black", linestyle="--", linewidth=2.0, label=f"Observed Mean ({obs_mean_event:.2f})")
+            
+            # Plot model and geos means and spreads
+            ax.plot(x_vals, model_means, marker="s", color="royalblue", linewidth=2.0, label="ML Forecast (Mean)")
+            ax.fill_between(x_vals, model_lows, model_highs, color="royalblue", alpha=0.2, label="ML 10th-90th Percentile")
+            
+            ax.plot(x_vals, geos_means, marker="^", color="darkorange", linewidth=2.0, label="GEOS Forecast (Mean)")
+            ax.fill_between(x_vals, geos_lows, geos_highs, color="darkorange", alpha=0.2, label="GEOS 10th-90th Percentile")
+            
+            unit_label = f"({args.temperature_units})" if args.event_variable == "t2m" else f"({spec_names['units']})"
+            ax.set_title(f"{args.event_name}: Forecast Convergence for Event Window ({args.event_start} to {args.event_end})")
+            ax.set_xlabel("Lead Week (Initialization Date)")
+            ax.set_ylabel(f"Domain Area-weighted Mean {args.event_variable.upper()} {unit_label}")
+            ax.set_xticks(x_vals)
+            
+            # Label format: "Week 4\n(Init: 05-19)"
+            x_labels = [f"Week {l}\n(Init: {lbl})" for l, lbl in zip(leads_x, init_dates_labels)]
+            ax.set_xticklabels(x_labels)
+            ax.grid(alpha=0.3)
+            ax.legend(loc="best")
+            
+            plot_path3 = os.path.join(out_dir, "event_forecast_convergence.png")
+            fig.savefig(plot_path3, dpi=150)
+            plt.close(fig)
+            print(f"📈 Saved forecast convergence plot to: {plot_path3}")
+        else:
+            print("⚠️ No cases found falling in the event window for Plot 3.")
             
     finally:
         ds.close()
