@@ -728,19 +728,13 @@ def main():
                 out_dir=out_dir
             )
 
-        # Generate Plot 2: Lead week timeseries for the best forecast initialization date
-        # (closest initialization prior to or at the start of the event window)
-        event_start_dt = pd.Timestamp(args.event_start).normalize()
-        best_init = None
-        for case, _ in case_records:
-            if case["init"] <= event_start_dt:
-                if best_init is None or case["init"] > best_init["init"]:
-                    best_init = case
-                    
-        if best_init is not None:
-            init_dt = best_init["init"]
+        # Generate Plot 2: Forecast evolution for each target initialization date
+        unique_inits = sorted(list(set(r["init"] for r in rows)))
+        for init_dt in unique_inits:
             init_cases = [r for r in rows if r["init"] == init_dt]
             init_cases = sorted(init_cases, key=lambda x: x["lead"])
+            if not init_cases:
+                continue
             
             leads = [r["lead"] for r in init_cases]
             valid_labels = [r["valid"].strftime("%m-%d") for r in init_cases]
@@ -788,8 +782,6 @@ def main():
             fig.savefig(plot_path2, dpi=150)
             plt.close(fig)
             print(f"📈 Saved forecast evolution plot to: {plot_path2}")
-        else:
-            print("⚠️ No initialization date found before or at the start of the event window.")
 
         # Generate Plot 3: Target-Period Forecast Convergence Plot
         # (Aggregates only the forecasts that target valid dates within the event window,
