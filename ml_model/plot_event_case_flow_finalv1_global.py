@@ -3,8 +3,8 @@
 Single-event case-study plots from generated flow_finalv1_global forecast Zarrs.
 
 Default preset: June 19, 2021 Europe heat-wave event.
-Additional presets include the August 11, 2021 Mediterranean/Sicily record
-heat event and the July 8-19, 2022 Europe heat-wave period.
+Additional presets include major European and western North American heat
+events from 2021-2024.
 
 The script reads a saved yearly forecast Zarr, selects init dates around
 the preset target dates, then compares lead weeks 1-4 T2M:
@@ -75,6 +75,38 @@ EVENT_PRESETS = {
         "out_dir": (
             "ml_output_flow_finalv1_global_noisectx_t2mres/"
             "case_jul2022_europe_heatwave_mortality_leads1_4"
+        ),
+    },
+    "pnw_jun2021_heat_dome": {
+        "year": 2021,
+        "event_name": "June 28-29 2021 Pacific Northwest heat dome",
+        "target_inits": "2021-06-03,2021-06-10,2021-06-17,2021-06-24",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2021-06-28",
+        "event_end": "2021-06-29",
+        "lat_min": 40.0,
+        "lat_max": 55.0,
+        "lon_min": -130.0,
+        "lon_max": -110.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jun2021_pnw_heat_dome_leads1_4"
+        ),
+    },
+    "death_valley_jul2024_extreme_heat": {
+        "year": 2024,
+        "event_name": "July 7 2024 Death Valley/Furnace Creek extreme heat",
+        "target_inits": "2024-06-13,2024-06-20,2024-06-27,2024-07-04",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2024-07-07",
+        "event_end": "2024-07-07",
+        "lat_min": 30.0,
+        "lat_max": 42.0,
+        "lon_min": -125.0,
+        "lon_max": -110.0,
+        "out_dir": (
+            "ml_output_flow_finalv1_global_noisectx_t2mres/"
+            "case_jul2024_death_valley_extreme_heat_leads1_4"
         ),
     },
 }
@@ -163,8 +195,11 @@ def normalize_lon(lon):
 
 def select_domain(ds, lat_min, lat_max, lon_min, lon_max):
     lat0, lat1 = sorted([float(lat_min), float(lat_max)])
-    lon0 = normalize_lon(lon_min)
-    lon1 = normalize_lon(lon_max)
+    raw_lon_min = float(lon_min)
+    raw_lon_max = float(lon_max)
+    lon0 = normalize_lon(raw_lon_min)
+    lon1 = normalize_lon(raw_lon_max)
+    use_signed_plot_lons = raw_lon_min < 0.0 or raw_lon_max < 0.0 or lon0 > lon1
     out = ds.sel(lat=slice(lat0, lat1))
     if lon0 <= lon1:
         out = out.sel(lon=slice(lon0, lon1))
@@ -172,6 +207,7 @@ def select_domain(ds, lat_min, lat_max, lon_min, lon_max):
         west = out.sel(lon=slice(lon0, 360.0))
         east = out.sel(lon=slice(0.0, lon1))
         out = xr.concat([west, east], dim="lon")
+    if use_signed_plot_lons:
         plot_lons = xr.where(out["lon"] > 180.0, out["lon"] - 360.0, out["lon"])
         out = out.assign_coords(lon=plot_lons).sortby("lon")
     if out.sizes.get("lat", 0) == 0 or out.sizes.get("lon", 0) == 0:
