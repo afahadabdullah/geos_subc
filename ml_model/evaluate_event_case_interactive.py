@@ -58,8 +58,37 @@ EVENT_PRESETS = {
         "lon_min": -100.0,
         "lon_max": -85.0,
         "out_dir": "ml_output_flow_finalv1_global_noisectx_t2mres/event_central_us_aug2023_heatwave",
+    },
+    "europe_jul2022_heatwave": {
+        "year": 2022,
+        "event_variable": "t2m",
+        "event_name": "July 2022 Europe heatwave",
+        "target_inits": "2022-06-16,2022-06-23,2022-06-30,2022-07-07,2022-07-14",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2022-07-15",
+        "event_end": "2022-07-20",
+        "lat_min": 35.0,
+        "lat_max": 60.0,
+        "lon_min": -15.0,
+        "lon_max": 25.0,
+        "out_dir": "ml_output_flow_finalv1_global_noisectx_t2mres/event_europe_jul2022_heatwave",
+    },
+    "europe_jul2023_heatwave": {
+        "year": 2023,
+        "event_variable": "t2m",
+        "event_name": "July 2023 Southern Europe heatwave",
+        "target_inits": "2023-06-15,2023-06-22,2023-06-29,2023-07-06,2023-07-13,2023-07-20",
+        "lead_weeks": "1,2,3,4",
+        "event_start": "2023-07-15",
+        "event_end": "2023-07-25",
+        "lat_min": 35.0,
+        "lat_max": 48.0,
+        "lon_min": -10.0,
+        "lon_max": 30.0,
+        "out_dir": "ml_output_flow_finalv1_global_noisectx_t2mres/event_europe_jul2023_heatwave",
     }
 }
+
 
 VARIABLES = {
     "pr": {"obs": "obs_pr", "model": "model_pr", "geos": "geos_pr", "units": "mm/day"},
@@ -414,6 +443,17 @@ def main():
         default=None,
         help="Output directory for plots/CSV. Defaults to preset folder.",
     )
+    parser.add_argument(
+        "--dynamic_core",
+        action="store_true",
+        help="Find epicenter of heat dynamically based on observed temperature during the event, and average over a smaller region around it.",
+    )
+    parser.add_argument(
+        "--core_width",
+        type=float,
+        default=10.0,
+        help="Bounding box width (degrees) to center around dynamic core epicenter.",
+    )
     args = parser.parse_args()
     args = apply_preset(args)
 
@@ -423,6 +463,8 @@ def main():
 
     spec_names = VARIABLES[args.event_variable]
     out_dir = args.out_dir or f"ml_output_flow_finalv1_global_noisectx_t2mres/event_{args.preset or 'custom'}"
+    if args.dynamic_core:
+        out_dir = out_dir + "_dynamic"
     os.makedirs(out_dir, exist_ok=True)
 
     zarr_path = os.path.join(args.forecast_dir, f"{args.year}.zarr")
@@ -434,13 +476,59 @@ def main():
     ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
     
     try:
-        ds_region = select_domain(ds, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+        target_inits = parse_date_list(args.target_inits)
+        lead_weeks = parse_int_list(args.lead_weeks)
+
+        if args.dynamic_core:
+            print("🔥 Finding heat epicenter dynamically within search domain...")
+            # 1. Slice to broad search domain
+            ds_search = select_domain(ds, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+            # 2. Find cases in search domain to identify validation dates
+            search_cases = find_cases(ds_search, target_inits, lead_weeks, args.event_start, args.event_end)
+            window_cases = [c for c in search_cases if c["valid_in_event_window"]]
+            
+            if not window_cases:
+                print("⚠️ Warning: No cases fall within the event window. Using static domain.")
+                ds_region = ds_search
+            else:
+                # 3. Load observations for all window cases
+                obs_list = []
+                for case in window_cases:
+                    obs_val = ds_search[spec_names["obs"]].isel(init=case["init_idx"], lead=case["lead_idx"]).values
+                    obs_list.append(obs_val)
+                
+                # 4. Average observations over the event window cases
+                mean_obs = np.nanmean(np.asarray(obs_list), axis=0) # Shape: (lat, lon)
+                
+                # 5. Find coordinate of max heat
+                lat_idx, lon_idx = np.unravel_index(np.nanargmax(mean_obs), mean_obs.shape)
+                lat_peak = float(ds_search["lat"].values[lat_idx])
+                lon_peak = float(ds_search["lon"].values[lon_idx])
+                
+                # Print information
+                peak_val = mean_obs[lat_idx, lon_idx]
+                if args.event_variable == "t2m" and args.temperature_units == "C":
+                    peak_val_display = f"{peak_val - 273.15:.1f}°C"
+                else:
+                    peak_val_display = f"{peak_val:.1f} {spec_names['units']}"
+                print(f"🔥 Epicenter detected at lat={lat_peak:.2f}, lon={lon_peak:.2f} (Peak Avg Temp: {peak_val_display})")
+                
+                # 6. Calculate dynamic core bounds
+                lat_min_core = max(-90.0, lat_peak - args.core_width / 2)
+                lat_max_core = min(90.0, lat_peak + args.core_width / 2)
+                lon_min_core = lon_peak - args.core_width / 2
+                lon_max_core = lon_peak + args.core_width / 2
+                
+                print(f"🔥 Dynamic core domain (width={args.core_width}°): lat=[{lat_min_core:.2f}..{lat_max_core:.2f}], lon=[{lon_min_core:.2f}..{lon_max_core:.2f}]")
+                
+                # 7. Slices dataset to the dynamic core region
+                ds_region = select_domain(ds, lat_min_core, lat_max_core, lon_min_core, lon_max_core)
+        else:
+            ds_region = select_domain(ds, args.lat_min, args.lat_max, args.lon_min, args.lon_max)
+
         lats = ds_region["lat"].values
         lons = ds_region["lon"].values
         weights = area_weights(lats)
-        
-        target_inits = parse_date_list(args.target_inits)
-        lead_weeks = parse_int_list(args.lead_weeks)
         cases = find_cases(ds_region, target_inits, lead_weeks, args.event_start, args.event_end)
         
         if not cases:
