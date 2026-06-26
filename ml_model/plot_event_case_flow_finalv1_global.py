@@ -258,6 +258,18 @@ def weighted_crps(ensemble, obs, weights):
     return float(np.sum(np.where(finite, crps_map, 0.0) * weighted_mask) / denom)
 
 
+def field_summary(values):
+    values = np.asarray(values, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {"min": np.nan, "mean": np.nan, "max": np.nan}
+    return {
+        "min": float(np.nanmin(finite)),
+        "mean": float(np.nanmean(finite)),
+        "max": float(np.nanmax(finite)),
+    }
+
+
 def to_display_temp(values, units):
     values = np.asarray(values, dtype=np.float64)
     if units == "C":
@@ -447,7 +459,7 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
             close_min,
             close_max,
         ),
-        (closer_to_obs, "Closer forecast\nML=+1, tie=0, GEOS=-1", "bwr", -1.0, 1.0),
+        (closer_to_obs, "Closer forecast\nML=+1/blue, tie=0, GEOS=-1/red", "RdBu", -1.0, 1.0),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
@@ -469,7 +481,7 @@ def plot_case_map(case, fields, lats, lons, weights, units, event_name, event_st
     plt.close(fig)
 
 
-def plot_composite_map(records, lats, lons, units, event_name, out_path):
+def plot_composite_map(records, lats, lons, units, event_name, composite_label, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -478,14 +490,12 @@ def plot_composite_map(records, lats, lons, units, event_name, out_path):
     obs = np.nanmean([r["obs"] for r in records], axis=0)
     geos = np.nanmean([r["geos_mean"] for r in records], axis=0)
     model = np.nanmean([r["model_mean"] for r in records], axis=0)
-    geos_err = geos - obs
-    model_err = model - obs
-    geos_abs_err = np.abs(geos_err)
-    model_abs_err = np.abs(model_err)
+    model_minus_geos = np.nanmean([r["model_mean"] - r["geos_mean"] for r in records], axis=0)
+    geos_abs_err = np.nanmean([np.abs(r["geos_mean"] - r["obs"]) for r in records], axis=0)
+    model_abs_err = np.nanmean([np.abs(r["model_mean"] - r["obs"]) for r in records], axis=0)
     closeness_gain = geos_abs_err - model_abs_err
     closer_to_obs = np.where(model_abs_err < geos_abs_err, 1.0, -1.0)
     closer_to_obs[np.isclose(model_abs_err, geos_abs_err, atol=1e-6)] = 0.0
-    model_minus_geos = model - geos
 
     obs_u = to_display_temp(obs, units)
     geos_u = to_display_temp(geos, units)
@@ -501,22 +511,22 @@ def plot_composite_map(records, lats, lons, units, event_name, out_path):
         (geos_u, f"Composite GEOS mean ({units})", "coolwarm", tmin, tmax),
         (model_u, f"Composite ML mean ({units})", "coolwarm", tmin, tmax),
         (model_minus_geos, "Composite ML - GEOS mean (K)", "RdBu_r", diff_min, diff_max),
-        (geos_abs_err, "Composite |GEOS mean - Obs| (K)", "YlOrRd", abs_min, abs_max),
-        (model_abs_err, "Composite |ML mean - Obs| (K)", "YlOrRd", abs_min, abs_max),
+        (geos_abs_err, "Mean |GEOS mean - Obs| across cases (K)", "YlOrRd", abs_min, abs_max),
+        (model_abs_err, "Mean |ML mean - Obs| across cases (K)", "YlOrRd", abs_min, abs_max),
         (
             closeness_gain,
-            "Composite closeness gain (K)\npositive/blue = ML closer",
+            "Mean closeness gain (K)\npositive/blue = ML closer",
             "RdBu",
             close_min,
             close_max,
         ),
-        (closer_to_obs, "Composite closer forecast\nML=+1, tie=0, GEOS=-1", "bwr", -1.0, 1.0),
+        (closer_to_obs, "Mean-error closer forecast\nML=+1/blue, tie=0, GEOS=-1/red", "RdBu", -1.0, 1.0),
     ]
     for ax, (field, title, cmap, vmin, vmax) in zip(axes.flat, panels):
         mesh = plot_panel(ax, lons, lats, field, title, cmap=cmap, vmin=vmin, vmax=vmax)
         fig.colorbar(mesh, ax=ax, shrink=0.82)
     fig.suptitle(
-        f"{event_name} composite | selected target inits, lead weeks | "
+        f"{event_name} composite | {composite_label} | "
         f"{len(records)} init/lead cases",
         fontsize=13,
     )
@@ -618,6 +628,7 @@ def main():
         )
         records = []
         metric_rows = []
+        raw_summary_rows = []
         model_ens_count = None
         geos_ens_count = None
         for case in cases:
@@ -628,6 +639,8 @@ def main():
                 "obs": fields["obs"],
                 "geos_mean": fields["geos_mean"],
                 "model_mean": fields["model_mean"],
+                "closest_valid_to_event": case["closest_valid_to_event"],
+                "valid_in_event_window": case["valid_in_event_window"],
             })
 
             obs_mean_k = weighted_mean(fields["obs"], weights)
@@ -639,6 +652,26 @@ def main():
             model_bias = weighted_bias(fields["model_mean"], fields["obs"], weights)
             geos_crps = weighted_crps(fields["geos_ens"], fields["obs"], weights)
             model_crps = weighted_crps(fields["model_ens"], fields["obs"], weights)
+            for field_name, values in (
+                ("obs_t2m_k", fields["obs"]),
+                ("geos_t2m_k", fields["geos_ens"]),
+                ("geos_mean_t2m_k", fields["geos_mean"]),
+                ("model_t2m_k", fields["model_ens"]),
+                ("model_mean_t2m_k", fields["model_mean"]),
+            ):
+                summary = field_summary(values)
+                raw_summary_rows.append(
+                    {
+                        "requested_init": case["requested_init"],
+                        "init": case["init"],
+                        "valid": case["valid"],
+                        "lead": case["lead"],
+                        "field": field_name,
+                        "min": summary["min"],
+                        "mean": summary["mean"],
+                        "max": summary["max"],
+                    }
+                )
             row = {
                 "requested_init": case["requested_init"],
                 "init": case["init"],
@@ -691,6 +724,8 @@ def main():
         metrics_df = pd.DataFrame(metric_rows).sort_values(["init", "lead"])
         metrics_csv = os.path.join(args.out_dir, "event_case_metrics.csv")
         metrics_df.to_csv(metrics_csv, index=False, float_format="%.6f")
+        raw_summary_csv = os.path.join(args.out_dir, "event_case_raw_value_summary.csv")
+        pd.DataFrame(raw_summary_rows).to_csv(raw_summary_csv, index=False, float_format="%.6f")
         plot_case_timeseries(
             metrics_df,
             args.temperature_units,
@@ -705,8 +740,20 @@ def main():
             lons,
             args.temperature_units,
             args.event_name,
+            "all selected inits/leads",
             os.path.join(args.out_dir, "case_composite_t2m_maps.png"),
         )
+        closest_records = [r for r in records if r["closest_valid_to_event"]]
+        if closest_records:
+            plot_composite_map(
+                closest_records,
+                lats,
+                lons,
+                args.temperature_units,
+                args.event_name,
+                "closest valid lead for each target init",
+                os.path.join(args.out_dir, "case_closest_event_t2m_maps.png"),
+            )
 
         orientation = {
             "zarr_path": os.path.abspath(zarr_path),
@@ -770,8 +817,11 @@ def main():
         ]].to_string(index=False))
         print(f"\nEnsemble members used: ML={model_ens_count}, GEOS={geos_ens_count}")
         print(f"\n✅ Wrote metrics: {metrics_csv}")
+        print(f"✅ Wrote raw value summary: {raw_summary_csv}")
         print(f"✅ Wrote maps under: {maps_dir}")
         print(f"✅ Wrote composite map: {os.path.join(args.out_dir, 'case_composite_t2m_maps.png')}")
+        if closest_records:
+            print(f"✅ Wrote closest-event composite map: {os.path.join(args.out_dir, 'case_closest_event_t2m_maps.png')}")
         print(f"✅ Wrote time series: {os.path.join(args.out_dir, 'case_t2m_timeseries_metrics.png')}")
     finally:
         ds.close()
