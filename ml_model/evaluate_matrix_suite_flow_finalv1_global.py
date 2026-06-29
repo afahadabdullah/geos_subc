@@ -933,19 +933,8 @@ def scalar_rows_from_states(states):
     return pd.DataFrame(rows)
 
 
-def spatial_dataset_from_states(states, lats, lons):
-    group_values = SEASONS + MONTHS
-    shape = (len(SUBSETS), len(VARIABLES), len(GROUP_TYPES), len(group_values), len(LEADS), len(lats), len(lons))
-    coords = {
-        "subset": SUBSETS,
-        "variable": list(VARIABLES),
-        "group_type": GROUP_TYPES,
-        "group_value": group_values,
-        "lead": LEADS,
-        "lat": np.asarray(lats, dtype=np.float32),
-        "lon": np.asarray(lons, dtype=np.float32),
-    }
-    out_vars = [
+def spatial_metric_names():
+    return [
         "sample_count",
         "model_rmse",
         "geos_rmse",
@@ -970,80 +959,128 @@ def spatial_dataset_from_states(states, lats, lons):
         "model_spread",
         "geos_spread",
     ]
-    data = {name: np.full(shape, np.nan, dtype=np.float32) for name in out_vars}
-    idx = {
+
+
+def spatial_index_maps():
+    group_values = SEASONS + MONTHS
+    return {
         "subset": {v: i for i, v in enumerate(SUBSETS)},
         "variable": {v: i for i, v in enumerate(VARIABLES)},
         "group_type": {v: i for i, v in enumerate(GROUP_TYPES)},
         "group_value": {v: i for i, v in enumerate(group_values)},
         "lead": {v: i for i, v in enumerate(LEADS)},
     }
-    for key, state in states.items():
-        subset, variable, group_type, group_value, lead = key
-        if group_type not in idx["group_type"] or group_value not in idx["group_value"]:
-            continue
-        count = state["count"].astype(np.float64)
-        valid = count > 0
-        pos = (
-            idx["subset"][subset],
-            idx["variable"][variable],
-            idx["group_type"][group_type],
-            idx["group_value"][group_value],
-            idx["lead"][int(lead)],
-        )
-        data["sample_count"][pos] = count.astype(np.float32)
-        for prefix in ("model", "geos"):
-            with np.errstate(divide="ignore", invalid="ignore"):
-                rmse = np.where(valid, np.sqrt(state[f"{prefix}_sse"] / count), np.nan)
-                mae = np.where(valid, state[f"{prefix}_ae"] / count, np.nan)
-                bias = np.where(valid, state[f"{prefix}_bias"] / count, np.nan)
-                crps = np.where(valid, state[f"{prefix}_crps"] / count, np.nan)
-                spread = np.where(valid, state[f"{prefix}_spread"] / count, np.nan)
-                bss = np.where(
-                    valid & (state["ref_bs"] > 1e-12),
-                    1.0 - state[f"{prefix}_bs"] / state["ref_bs"],
-                    np.nan,
-                )
-                cbss = np.where(
-                    valid & (state["ref_bs"] > 1e-12),
-                    1.0 - state[f"{prefix}_bs_cal"] / state["ref_bs"],
-                    np.nan,
-                )
-            corr = correlation_from_sums(
-                state[f"{prefix}_x"],
-                state["obs_y"],
-                state[f"{prefix}_x2"],
-                state["obs_y2"],
-                state[f"{prefix}_xy"],
-                count,
-            )
-            data[f"{prefix}_rmse"][pos] = rmse.astype(np.float32)
-            data[f"{prefix}_mae"][pos] = mae.astype(np.float32)
-            data[f"{prefix}_bias"][pos] = bias.astype(np.float32)
-            data[f"{prefix}_crps"][pos] = crps.astype(np.float32)
-            data[f"{prefix}_spread"][pos] = spread.astype(np.float32)
-            data[f"{prefix}_bss"][pos] = bss.astype(np.float32)
-            data[f"{prefix}_calibrated_bss"][pos] = cbss.astype(np.float32)
-            data[f"{prefix}_corr"][pos] = corr.astype(np.float32)
+
+
+def compute_spatial_metric_maps(state):
+    count = state["count"].astype(np.float64)
+    valid = count > 0
+    maps = {"sample_count": count.astype(np.float32)}
+    for prefix in ("model", "geos"):
         with np.errstate(divide="ignore", invalid="ignore"):
-            data["rmse_skill_pct"][pos] = (100.0 * (1.0 - data["model_rmse"][pos] / data["geos_rmse"][pos])).astype(np.float32)
-            data["mae_skill_pct"][pos] = (100.0 * (1.0 - data["model_mae"][pos] / data["geos_mae"][pos])).astype(np.float32)
-            data["crps_skill_pct"][pos] = (100.0 * (1.0 - data["model_crps"][pos] / data["geos_crps"][pos])).astype(np.float32)
-        data["corr_diff"][pos] = (data["model_corr"][pos] - data["geos_corr"][pos]).astype(np.float32)
-        data["bss_diff"][pos] = (data["model_bss"][pos] - data["geos_bss"][pos]).astype(np.float32)
-        data["calibrated_bss_diff"][pos] = (
-            data["model_calibrated_bss"][pos] - data["geos_calibrated_bss"][pos]
-        ).astype(np.float32)
-    ds = xr.Dataset(
-        {name: (("subset", "variable", "group_type", "group_value", "lead", "lat", "lon"), values) for name, values in data.items()},
-        coords=coords,
-        attrs={
-            "description": "Season/month x lead spatial matrix diagnostics for flow_finalv1_global.",
-            "skill_definition": "100 * (1 - ML metric / GEOS metric); positive means ML improves over GEOS.",
-            "bss_reference": "local observed event climatology matching the selected observed threshold source/group.",
-        },
-    )
-    return ds
+            maps[f"{prefix}_rmse"] = np.where(valid, np.sqrt(state[f"{prefix}_sse"] / count), np.nan)
+            maps[f"{prefix}_mae"] = np.where(valid, state[f"{prefix}_ae"] / count, np.nan)
+            maps[f"{prefix}_bias"] = np.where(valid, state[f"{prefix}_bias"] / count, np.nan)
+            maps[f"{prefix}_crps"] = np.where(valid, state[f"{prefix}_crps"] / count, np.nan)
+            maps[f"{prefix}_spread"] = np.where(valid, state[f"{prefix}_spread"] / count, np.nan)
+            maps[f"{prefix}_bss"] = np.where(
+                valid & (state["ref_bs"] > 1e-12),
+                1.0 - state[f"{prefix}_bs"] / state["ref_bs"],
+                np.nan,
+            )
+            maps[f"{prefix}_calibrated_bss"] = np.where(
+                valid & (state["ref_bs"] > 1e-12),
+                1.0 - state[f"{prefix}_bs_cal"] / state["ref_bs"],
+                np.nan,
+            )
+        maps[f"{prefix}_corr"] = correlation_from_sums(
+            state[f"{prefix}_x"],
+            state["obs_y"],
+            state[f"{prefix}_x2"],
+            state["obs_y2"],
+            state[f"{prefix}_xy"],
+            count,
+        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        maps["rmse_skill_pct"] = 100.0 * (1.0 - maps["model_rmse"] / maps["geos_rmse"])
+        maps["mae_skill_pct"] = 100.0 * (1.0 - maps["model_mae"] / maps["geos_mae"])
+        maps["crps_skill_pct"] = 100.0 * (1.0 - maps["model_crps"] / maps["geos_crps"])
+    maps["corr_diff"] = maps["model_corr"] - maps["geos_corr"]
+    maps["bss_diff"] = maps["model_bss"] - maps["geos_bss"]
+    maps["calibrated_bss_diff"] = maps["model_calibrated_bss"] - maps["geos_calibrated_bss"]
+    return {name: np.asarray(maps[name], dtype=np.float32) for name in spatial_metric_names()}
+
+
+def write_spatial_metrics_netcdf(states, lats, lons, out_path):
+    from netCDF4 import Dataset
+
+    group_values = SEASONS + MONTHS
+    dims = ("subset", "variable", "group_type", "group_value", "lead", "lat", "lon")
+    idx = spatial_index_maps()
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    print(f"🗺️ Writing spatial metrics incrementally: {out_path}")
+    with Dataset(out_path, "w", format="NETCDF4") as nc:
+        nc.createDimension("subset", len(SUBSETS))
+        nc.createDimension("variable", len(VARIABLES))
+        nc.createDimension("group_type", len(GROUP_TYPES))
+        nc.createDimension("group_value", len(group_values))
+        nc.createDimension("lead", len(LEADS))
+        nc.createDimension("lat", len(lats))
+        nc.createDimension("lon", len(lons))
+
+        coord_values = {
+            "subset": np.asarray(SUBSETS, dtype=object),
+            "variable": np.asarray(list(VARIABLES), dtype=object),
+            "group_type": np.asarray(GROUP_TYPES, dtype=object),
+            "group_value": np.asarray(group_values, dtype=object),
+            "lead": np.asarray(LEADS, dtype=np.int32),
+            "lat": np.asarray(lats, dtype=np.float32),
+            "lon": np.asarray(lons, dtype=np.float32),
+        }
+        for name, values in coord_values.items():
+            dtype = str if values.dtype == object else values.dtype
+            var = nc.createVariable(name, dtype, (name,))
+            var[:] = values
+
+        nc.description = "Season/month x lead spatial matrix diagnostics for flow_finalv1_global."
+        nc.skill_definition = "100 * (1 - ML metric / GEOS metric); positive means ML improves over GEOS."
+        nc.bss_reference = "local observed event climatology matching the selected observed threshold source/group."
+        nc.spatial_write_mode = "incremental_per_metric_slice"
+
+        chunksizes = (1, 1, 1, 1, 1, len(lats), len(lons))
+        variables = {}
+        for name in spatial_metric_names():
+            variables[name] = nc.createVariable(
+                name,
+                "f4",
+                dims,
+                zlib=True,
+                complevel=1,
+                shuffle=True,
+                fill_value=np.float32(np.nan),
+                chunksizes=chunksizes,
+            )
+
+        written_slices = 0
+        for key, state in states.items():
+            subset, variable, group_type, group_value, lead = key
+            if group_type not in idx["group_type"] or group_value not in idx["group_value"]:
+                continue
+            pos = (
+                idx["subset"][subset],
+                idx["variable"][variable],
+                idx["group_type"][group_type],
+                idx["group_value"][group_value],
+                idx["lead"][int(lead)],
+            )
+            metric_maps = compute_spatial_metric_maps(state)
+            for name, field in metric_maps.items():
+                variables[name][pos] = field
+            written_slices += 1
+    print(f"✅ Wrote spatial metric NetCDF slices: {written_slices}")
 
 
 def _find_coord_name(ds, candidates):
@@ -1573,8 +1610,7 @@ def evaluate(
         finally:
             ds.close()
     summary = scalar_rows_from_states(scalar_states)
-    spatial = spatial_dataset_from_states(spatial_states, lats, lons)
-    return summary, spatial
+    return summary, spatial_states
 
 
 def _add_bundle_to_dataset_parts(data_vars, coords, name, bundle, group_dim):
@@ -1973,7 +2009,7 @@ def main():
         calibration_table.to_csv(calibration_path, index=False, float_format="%.8f")
         print(f"✅ Wrote BSS calibration parameters: {calibration_path}")
     save_threshold_dataset(thresholds, obs_clim, fcst_clim, lats, lons, args.out_dir)
-    summary, spatial = evaluate(
+    summary, spatial_states = evaluate(
         args.forecast_dir,
         years,
         variables,
@@ -1989,7 +2025,8 @@ def main():
     )
 
     summary.to_csv(summary_path, index=False, float_format="%.6f")
-    spatial.to_netcdf(spatial_path)
+    write_spatial_metrics_netcdf(spatial_states, lats, lons, spatial_path)
+    del spatial_states
     lead_season_table_path = write_lead_season_skill_table(summary, args.out_dir)
     metadata = {
         "forecast_dir": os.path.abspath(args.forecast_dir),
@@ -2048,8 +2085,9 @@ def main():
     print(f"✅ Wrote metadata: {metadata_path}")
     if args.make_plots:
         make_scalar_matrix_plots(summary, args.out_dir)
+        spatial = xr.open_dataset(spatial_path)
         make_spatial_plots(spatial, args.out_dir)
-    spatial.close()
+        spatial.close()
 
 
 if __name__ == "__main__":
