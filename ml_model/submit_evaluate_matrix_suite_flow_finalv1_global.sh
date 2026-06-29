@@ -37,6 +37,11 @@ MAKE_PLOTS="${MATRIX_EVAL_MAKE_PLOTS:-1}"
 OVERWRITE="${MATRIX_EVAL_OVERWRITE:-0}"
 MAP_FEATURES="${MATRIX_EVAL_MAP_FEATURES:-auto}"
 COUNTY_BOUNDARIES="${MATRIX_EVAL_COUNTY_BOUNDARIES:-off}"
+BSS_CALIBRATION="${MATRIX_EVAL_BSS_CALIBRATION:-logistic_cv}"
+BSS_CALIBRATION_GROUPING="${MATRIX_EVAL_BSS_CALIBRATION_GROUPING:-lead_season}"
+BSS_CALIBRATION_BINS="${MATRIX_EVAL_BSS_CALIBRATION_BINS:-41}"
+BSS_CALIBRATION_RIDGE="${MATRIX_EVAL_BSS_CALIBRATION_RIDGE:-1.0}"
+BSS_CALIBRATION_MIN_WEIGHT="${MATRIX_EVAL_BSS_CALIBRATION_MIN_WEIGHT:-100.0}"
 EXTREME_Q_PR="${MATRIX_EVAL_EXTREME_Q_PR:-0.95}"
 EXTREME_Q_T2M="${MATRIX_EVAL_EXTREME_Q_T2M:-0.95}"
 PR_MIN_THRESHOLD="${MATRIX_EVAL_PR_MIN_THRESHOLD:-5.0}"
@@ -57,6 +62,7 @@ echo "🎯 Variables: $VARIABLES"
 echo "🎯 Output: $OUT_DIR"
 echo "🎯 Extreme q: PR=$EXTREME_Q_PR T2M=$EXTREME_Q_T2M PR min=$PR_MIN_THRESHOLD"
 echo "🎯 Spatial maps: map_features=$MAP_FEATURES county_boundaries=$COUNTY_BOUNDARIES"
+echo "🎯 BSS calibration: $BSS_CALIBRATION grouping=$BSS_CALIBRATION_GROUPING bins=$BSS_CALIBRATION_BINS ridge=$BSS_CALIBRATION_RIDGE"
 
 python ml_model/evaluate_matrix_suite_flow_finalv1_global.py \
     --forecast_dir "$FORECAST_DIR" \
@@ -68,6 +74,11 @@ python ml_model/evaluate_matrix_suite_flow_finalv1_global.py \
     --extreme_quantile_pr "$EXTREME_Q_PR" \
     --extreme_quantile_t2m "$EXTREME_Q_T2M" \
     --pr_min_threshold "$PR_MIN_THRESHOLD" \
+    --bss_calibration "$BSS_CALIBRATION" \
+    --bss_calibration_grouping "$BSS_CALIBRATION_GROUPING" \
+    --bss_calibration_bins "$BSS_CALIBRATION_BINS" \
+    --bss_calibration_ridge "$BSS_CALIBRATION_RIDGE" \
+    --bss_calibration_min_weight "$BSS_CALIBRATION_MIN_WEIGHT" \
     --map_features "$MAP_FEATURES" \
     --county_boundaries "$COUNTY_BOUNDARIES" \
     --max_runtime_minutes "$MAX_RUNTIME_MINUTES" \

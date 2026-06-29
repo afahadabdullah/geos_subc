@@ -19,10 +19,11 @@ BSS event definition:
   threshold is also constrained to be at least --pr_min_threshold mm/day.
 
 Calibrated BSS:
-  forecast event probabilities are adjusted with a simple logit climatological
-  frequency correction at each grid point:
-    logit(p_cal) = logit(p_raw) + logit(obs_event_freq) - logit(fcst_event_freq)
-  This is a light-weight diagnostic, not a full cross-validated calibration.
+  by default, forecast event probabilities are adjusted with leave-one-year-out
+  logistic reliability calibration:
+    logit(p_cal) = a + b * logit(p_raw)
+  Coefficients are fit from area-weighted binned reliability counts, grouped by
+  variable/source/lead/valid-season, with broader fallbacks for sparse groups.
 """
 
 import argparse
@@ -93,6 +94,25 @@ def parse_args():
     parser.add_argument("--extreme_quantile_t2m", type=float, default=0.95)
     parser.add_argument("--pr_min_threshold", type=float, default=5.0)
     parser.add_argument("--epsilon_probability", type=float, default=1e-4)
+    parser.add_argument(
+        "--bss_calibration",
+        choices=("logistic_cv", "base_rate", "none"),
+        default="logistic_cv",
+        help=(
+            "Probability calibration for calibrated BSS. logistic_cv uses leave-one-year-out "
+            "Platt/logistic calibration from binned reliability counts; base_rate is the old "
+            "local logit climatology correction; none uses raw ensemble probabilities."
+        ),
+    )
+    parser.add_argument(
+        "--bss_calibration_grouping",
+        choices=("lead_season", "lead", "global"),
+        default="lead_season",
+        help="Grouping used for logistic_cv calibration before fallback broadening.",
+    )
+    parser.add_argument("--bss_calibration_bins", type=int, default=41)
+    parser.add_argument("--bss_calibration_ridge", type=float, default=1.0)
+    parser.add_argument("--bss_calibration_min_weight", type=float, default=100.0)
     parser.add_argument("--make_plots", action="store_true")
     parser.add_argument(
         "--map_features",
@@ -370,6 +390,132 @@ def calibrate_probability(prob, obs_event_freq, forecast_event_freq, eps=1e-4):
     return np.clip(inv_logit(logit(prob, eps) + offset), 0.0, 1.0)
 
 
+def apply_probability_calibration(
+    prob,
+    obs_event_freq=None,
+    forecast_event_freq=None,
+    eps=1e-4,
+    method="base_rate",
+    calibrator=None,
+):
+    prob = np.asarray(prob, dtype=np.float64)
+    if method == "none":
+        return np.clip(prob, 0.0, 1.0)
+    if method == "logistic_cv" and calibrator is not None:
+        intercept = float(calibrator.get("intercept", 0.0))
+        slope = float(calibrator.get("slope", 1.0))
+        return np.clip(inv_logit(intercept + slope * logit(prob, eps)), 0.0, 1.0)
+    if forecast_event_freq is None or obs_event_freq is None:
+        return np.clip(prob, 0.0, 1.0)
+    return calibrate_probability(prob, obs_event_freq, forecast_event_freq, eps=eps)
+
+
+def empty_calibration_count_state(num_bins):
+    return {
+        "total": np.zeros(num_bins, dtype=np.float64),
+        "event": np.zeros(num_bins, dtype=np.float64),
+        "prob": np.zeros(num_bins, dtype=np.float64),
+    }
+
+
+def update_calibration_count_state(state, prob, event, finite, weights, num_bins):
+    prob = np.asarray(prob, dtype=np.float64)
+    event = np.asarray(event, dtype=bool)
+    finite = np.asarray(finite, dtype=bool) & np.isfinite(prob)
+    if not finite.any():
+        return
+    weight_field = np.broadcast_to(weights, prob.shape).astype(np.float64, copy=False)
+    flat_prob = np.clip(prob[finite], 0.0, 1.0)
+    flat_event = event[finite].astype(np.float64)
+    flat_weight = weight_field[finite]
+    bin_idx = np.floor(flat_prob * num_bins).astype(np.int64)
+    bin_idx = np.clip(bin_idx, 0, num_bins - 1)
+    state["total"] += np.bincount(bin_idx, weights=flat_weight, minlength=num_bins)
+    state["event"] += np.bincount(bin_idx, weights=flat_weight * flat_event, minlength=num_bins)
+    state["prob"] += np.bincount(bin_idx, weights=flat_weight * flat_prob, minlength=num_bins)
+
+
+def merge_calibration_count_states(states, num_bins):
+    merged = empty_calibration_count_state(num_bins)
+    for state in states:
+        merged["total"] += state["total"]
+        merged["event"] += state["event"]
+        merged["prob"] += state["prob"]
+    return merged
+
+
+def fit_logistic_from_binned_counts(count_state, eps=1e-4, ridge=1.0, min_weight=100.0):
+    total = np.asarray(count_state["total"], dtype=np.float64)
+    event = np.asarray(count_state["event"], dtype=np.float64)
+    prob_sum = np.asarray(count_state["prob"], dtype=np.float64)
+    total_weight = float(np.sum(total))
+    event_weight = float(np.sum(event))
+    if total_weight < float(min_weight):
+        return None
+    event_rate = event_weight / total_weight
+    if not np.isfinite(event_rate) or event_rate <= eps or event_rate >= 1.0 - eps:
+        return None
+
+    valid = total > 0.0
+    if not valid.any():
+        return None
+    p_mean = np.where(valid, prob_sum / np.maximum(total, 1e-12), np.nan)
+    x = logit(p_mean[valid], eps)
+    n = total[valid]
+    y = event[valid]
+    unique_x = np.unique(np.round(x[np.isfinite(x)], 8))
+    if unique_x.size < 2:
+        return {
+            "method": "climatology",
+            "intercept": float(logit(event_rate, eps)),
+            "slope": 0.0,
+            "total_weight": total_weight,
+            "event_rate": float(event_rate),
+            "bins_used": int(valid.sum()),
+        }
+
+    beta = np.array([logit(event_rate, eps), 0.0], dtype=np.float64)
+    x = np.where(np.isfinite(x), x, 0.0)
+    design = np.column_stack([np.ones_like(x), x])
+    ridge_matrix = np.diag([0.0, float(ridge)])
+    for _ in range(50):
+        eta = np.clip(design @ beta, -30.0, 30.0)
+        mu = inv_logit(eta)
+        score = design.T @ (y - n * mu) - ridge_matrix @ beta
+        info = (design.T * (n * mu * (1.0 - mu))) @ design + ridge_matrix
+        try:
+            delta = np.linalg.solve(info, score)
+        except np.linalg.LinAlgError:
+            return {
+                "method": "climatology",
+                "intercept": float(logit(event_rate, eps)),
+                "slope": 0.0,
+                "total_weight": total_weight,
+                "event_rate": float(event_rate),
+                "bins_used": int(valid.sum()),
+            }
+        beta += delta
+        if float(np.max(np.abs(delta))) < 1e-6:
+            break
+
+    beta[0] = float(np.clip(beta[0], -20.0, 20.0))
+    beta[1] = float(np.clip(beta[1], 0.0, 10.0))
+    if beta[1] <= 1e-8:
+        beta[0] = float(logit(event_rate, eps))
+        beta[1] = 0.0
+        method = "climatology"
+    else:
+        method = "logistic"
+    return {
+        "method": method,
+        "intercept": float(beta[0]),
+        "slope": float(beta[1]),
+        "total_weight": total_weight,
+        "event_rate": float(event_rate),
+        "bins_used": int(valid.sum()),
+    }
+
+
 def crps_map(ensemble, obs):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
@@ -383,7 +529,16 @@ def crps_map(ensemble, obs):
     return mae_term - spread_term
 
 
-def ensemble_diagnostics(ensemble, obs, threshold, obs_event_freq, fcst_event_freq, eps):
+def ensemble_diagnostics(
+    ensemble,
+    obs,
+    threshold,
+    obs_event_freq,
+    fcst_event_freq,
+    eps,
+    calibration_method="base_rate",
+    calibrator=None,
+):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
     mean = np.nanmean(ensemble, axis=0).astype(np.float64, copy=False)
@@ -392,7 +547,14 @@ def ensemble_diagnostics(ensemble, obs, threshold, obs_event_freq, fcst_event_fr
     finite = np.isfinite(obs64) & np.isfinite(mean) & np.isfinite(threshold)
     prob = np.nanmean(ensemble >= threshold[None, :, :], axis=0).astype(np.float64, copy=False)
     event = obs64 >= threshold
-    prob_cal = calibrate_probability(prob, obs_event_freq, fcst_event_freq, eps=eps)
+    prob_cal = apply_probability_calibration(
+        prob,
+        obs_event_freq=obs_event_freq,
+        forecast_event_freq=fcst_event_freq,
+        eps=eps,
+        method=calibration_method,
+        calibrator=calibrator,
+    )
     return {
         "finite": finite,
         "mean": mean,
@@ -788,6 +950,189 @@ def collect_forecast_event_climatology(forecast_dir, years, variables, threshold
     return out
 
 
+def collect_forecast_calibration_inputs(forecast_dir, years, variables, thresholds, lats, args, deadline=None):
+    num_bins = int(args.bss_calibration_bins)
+    if num_bins < 3:
+        raise ValueError("--bss_calibration_bins must be >= 3")
+    weights = area_weights_from_lats(lats)
+    fcst_clim = {}
+    calibration_counts = {}
+    print("🎯 Building forecast event climatology and BSS calibration reliability counts...")
+    for variable in variables:
+        threshold = thresholds[variable]
+        shape = threshold.shape
+        sums = {"model": np.zeros(shape, dtype=np.float64), "geos": np.zeros(shape, dtype=np.float64)}
+        count = np.zeros(shape, dtype=np.float64)
+        spec = VARIABLES[variable]
+        for year in years:
+            if deadline_reached(deadline):
+                raise TimeoutError("Soft runtime limit reached while building BSS calibration inputs.")
+            ds = xr.open_zarr(os.path.join(forecast_dir, f"{year}.zarr"), consolidated=False, chunks=None)
+            try:
+                init_values = pd.to_datetime(ds["init"].values).normalize()
+                lead_values = ds["lead"].values
+                n_init = ds.sizes["init"]
+                n_lead = ds.sizes["lead"]
+                for init_idx, init_time in enumerate(init_values):
+                    if "valid_time" in ds:
+                        valid_values = pd.to_datetime(ds["valid_time"].isel(init=init_idx).values).normalize()
+                    else:
+                        valid_values = pd.to_datetime(
+                            [init_time + pd.to_timedelta(int(lead) * 7, unit="D") for lead in lead_values]
+                        ).normalize()
+                    for lead_idx in range(n_lead):
+                        lead_value = int(lead_values[lead_idx])
+                        valid_time = pd.Timestamp(valid_values[lead_idx])
+                        valid_season = season_name(int(valid_time.month))
+                        obs = ds[spec["obs"]].isel(init=init_idx, lead=lead_idx).values
+                        finite = np.isfinite(obs) & np.isfinite(threshold)
+                        if not finite.any():
+                            continue
+                        event = obs >= threshold
+                        count += finite.astype(np.float64)
+                        for source, member_dim in (("model", "ensemble"), ("geos", "geos_member")):
+                            ensemble = ds[spec[source]].isel(init=init_idx, lead=lead_idx).values
+                            prob = np.nanmean(ensemble >= threshold[None, :, :], axis=0).astype(np.float64, copy=False)
+                            sums[source] += np.where(finite, prob, 0.0)
+                            key = (variable, source, int(year), lead_value, valid_season)
+                            if key not in calibration_counts:
+                                calibration_counts[key] = empty_calibration_count_state(num_bins)
+                            update_calibration_count_state(
+                                calibration_counts[key],
+                                prob,
+                                event,
+                                finite,
+                                weights,
+                                num_bins,
+                            )
+            finally:
+                ds.close()
+        fcst_clim[variable] = {
+            "model": np.where(count > 0, sums["model"] / count, np.nan).astype(np.float32),
+            "geos": np.where(count > 0, sums["geos"] / count, np.nan).astype(np.float32),
+        }
+        print(
+            f"   {variable}: mean model event p={float(np.nanmean(fcst_clim[variable]['model'])):.4f}, "
+            f"GEOS event p={float(np.nanmean(fcst_clim[variable]['geos'])):.4f}"
+        )
+    return fcst_clim, calibration_counts
+
+
+def calibration_candidate_groups(grouping, lead, season):
+    if grouping == "global":
+        return [(None, None, "global")]
+    if grouping == "lead":
+        return [(lead, None, "lead"), (None, None, "global")]
+    return [
+        (lead, season, "lead_season"),
+        (lead, None, "lead"),
+        (None, season, "season"),
+        (None, None, "global"),
+    ]
+
+
+def aggregate_calibration_counts(calibration_counts, variable, source, train_years, lead, season, num_bins):
+    selected = []
+    train_years = set(int(y) for y in train_years)
+    for (v, s, year, key_lead, key_season), state in calibration_counts.items():
+        if v != variable or s != source or int(year) not in train_years:
+            continue
+        if lead is not None and int(key_lead) != int(lead):
+            continue
+        if season is not None and str(key_season) != str(season):
+            continue
+        selected.append(state)
+    if not selected:
+        return None
+    return merge_calibration_count_states(selected, num_bins)
+
+
+def fit_bss_calibration_models(years, variables, calibration_counts, args):
+    models = {}
+    rows = []
+    method = args.bss_calibration
+    if method != "logistic_cv":
+        return models, pd.DataFrame(rows)
+
+    num_bins = int(args.bss_calibration_bins)
+    eps = float(args.epsilon_probability)
+    all_years = [int(y) for y in years]
+    for variable in variables:
+        for source in ("model", "geos"):
+            for holdout_year in all_years:
+                train_years = [year for year in all_years if year != holdout_year]
+                cv_mode = "leave_one_year_out"
+                if not train_years:
+                    train_years = all_years
+                    cv_mode = "in_sample_single_year"
+                for lead in LEADS:
+                    for season in SEASONS:
+                        fitted = None
+                        group_used = None
+                        for candidate_lead, candidate_season, candidate_group in calibration_candidate_groups(
+                            args.bss_calibration_grouping,
+                            lead,
+                            season,
+                        ):
+                            counts = aggregate_calibration_counts(
+                                calibration_counts,
+                                variable,
+                                source,
+                                train_years,
+                                candidate_lead,
+                                candidate_season,
+                                num_bins,
+                            )
+                            if counts is None:
+                                continue
+                            fitted = fit_logistic_from_binned_counts(
+                                counts,
+                                eps=eps,
+                                ridge=float(args.bss_calibration_ridge),
+                                min_weight=float(args.bss_calibration_min_weight),
+                            )
+                            if fitted is not None:
+                                group_used = candidate_group
+                                break
+                        if fitted is None:
+                            fitted = {
+                                "method": "identity",
+                                "intercept": 0.0,
+                                "slope": 1.0,
+                                "total_weight": 0.0,
+                                "event_rate": np.nan,
+                                "bins_used": 0,
+                            }
+                            group_used = "identity_fallback"
+                        fitted = dict(fitted)
+                        fitted.update(
+                            {
+                                "variable": variable,
+                                "source": source,
+                                "holdout_year": int(holdout_year),
+                                "lead": int(lead),
+                                "season": season,
+                                "train_years": ",".join(str(y) for y in train_years),
+                                "cv_mode": cv_mode,
+                                "group_used": group_used,
+                            }
+                        )
+                        models[(variable, source, int(holdout_year), int(lead), season)] = fitted
+                        rows.append(fitted)
+
+    table = pd.DataFrame(rows)
+    if not table.empty:
+        print(
+            "🎚️ Fitted logistic BSS calibrators: "
+            f"{len(table)} groups; method counts={table['method'].value_counts().to_dict()}"
+        )
+    return models, table
+
+
+def get_bss_calibrator(calibration_models, variable, source, year, lead, season):
+    return calibration_models.get((variable, source, int(year), int(lead), str(season)))
+
+
 def group_keys_for_sample(subset, variable, valid_time, lead_value):
     valid_month = f"{int(valid_time.month):02d}"
     valid_season = season_name(int(valid_time.month))
@@ -797,7 +1142,19 @@ def group_keys_for_sample(subset, variable, valid_time, lead_value):
     ]
 
 
-def evaluate(forecast_dir, years, variables, thresholds, obs_clim, fcst_clim, lats, lons, args, deadline=None):
+def evaluate(
+    forecast_dir,
+    years,
+    variables,
+    thresholds,
+    obs_clim,
+    fcst_clim,
+    calibration_models,
+    lats,
+    lons,
+    args,
+    deadline=None,
+):
     weights = area_weights_from_lats(lats)
     scalar_states = {}
     spatial_states = {}
@@ -822,6 +1179,7 @@ def evaluate(forecast_dir, years, variables, thresholds, obs_clim, fcst_clim, la
                     ).normalize()
                 for lead_idx, lead_value in enumerate(lead_values):
                     valid_time = pd.Timestamp(valid_values[lead_idx])
+                    valid_season = season_name(int(valid_time.month))
                     for variable in variables:
                         spec = VARIABLES[variable]
                         threshold = thresholds[variable]
@@ -836,6 +1194,15 @@ def evaluate(forecast_dir, years, variables, thresholds, obs_clim, fcst_clim, la
                             obs_event_freq,
                             fcst_clim[variable]["model"],
                             eps,
+                            calibration_method=args.bss_calibration,
+                            calibrator=get_bss_calibrator(
+                                calibration_models,
+                                variable,
+                                "model",
+                                year,
+                                int(lead_value),
+                                valid_season,
+                            ),
                         )
                         geos = ensemble_diagnostics(
                             geos_ens,
@@ -844,6 +1211,15 @@ def evaluate(forecast_dir, years, variables, thresholds, obs_clim, fcst_clim, la
                             obs_event_freq,
                             fcst_clim[variable]["geos"],
                             eps,
+                            calibration_method=args.bss_calibration,
+                            calibrator=get_bss_calibrator(
+                                calibration_models,
+                                variable,
+                                "geos",
+                                year,
+                                int(lead_value),
+                                valid_season,
+                            ),
                         )
                         event_mask = obs >= threshold
                         masks = {
@@ -1177,6 +1553,7 @@ def main():
     summary_path = os.path.join(args.out_dir, "matrix_summary_metrics.csv")
     spatial_path = os.path.join(args.out_dir, "matrix_spatial_metrics.nc")
     metadata_path = os.path.join(args.out_dir, "matrix_eval_metadata.json")
+    calibration_path = os.path.join(args.out_dir, "bss_calibration_params.csv")
     if os.path.exists(summary_path) and (not args.make_plots or os.path.exists(spatial_path)) and not args.overwrite:
         print(f"✅ Existing matrix evaluation found: {summary_path}")
         summary = pd.read_csv(summary_path)
@@ -1196,7 +1573,24 @@ def main():
     thresholds, obs_clim, lats, lons = collect_obs_thresholds(args.forecast_dir, years, variables, args)
     if deadline_reached(deadline):
         raise TimeoutError("Soft runtime limit reached after threshold pass.")
-    fcst_clim = collect_forecast_event_climatology(args.forecast_dir, years, variables, thresholds, deadline=deadline)
+    fcst_clim, calibration_counts = collect_forecast_calibration_inputs(
+        args.forecast_dir,
+        years,
+        variables,
+        thresholds,
+        lats,
+        args,
+        deadline=deadline,
+    )
+    calibration_models, calibration_table = fit_bss_calibration_models(
+        years,
+        variables,
+        calibration_counts,
+        args,
+    )
+    if not calibration_table.empty:
+        calibration_table.to_csv(calibration_path, index=False, float_format="%.8f")
+        print(f"✅ Wrote BSS calibration parameters: {calibration_path}")
     save_threshold_dataset(thresholds, obs_clim, fcst_clim, lats, lons, args.out_dir)
     summary, spatial = evaluate(
         args.forecast_dir,
@@ -1205,6 +1599,7 @@ def main():
         thresholds,
         obs_clim,
         fcst_clim,
+        calibration_models,
         lats,
         lons,
         args,
@@ -1224,7 +1619,17 @@ def main():
         "extreme_quantile_pr": args.extreme_quantile_pr,
         "extreme_quantile_t2m": args.extreme_quantile_t2m,
         "pr_min_threshold": args.pr_min_threshold,
-        "calibrated_bss": "logit climatological frequency correction, diagnostic/not cross-validated",
+        "calibrated_bss": (
+            "leave-one-year-out logistic reliability calibration from area-weighted binned counts"
+            if args.bss_calibration == "logistic_cv"
+            else args.bss_calibration
+        ),
+        "bss_calibration": args.bss_calibration,
+        "bss_calibration_grouping": args.bss_calibration_grouping,
+        "bss_calibration_bins": args.bss_calibration_bins,
+        "bss_calibration_ridge": args.bss_calibration_ridge,
+        "bss_calibration_min_weight": args.bss_calibration_min_weight,
+        "bss_calibration_params": os.path.abspath(calibration_path) if os.path.exists(calibration_path) else None,
         "map_features": args.map_features,
         "county_boundaries": args.county_boundaries,
         "cartopy_enabled": bool(MAP_CONTEXT["enabled"]),
