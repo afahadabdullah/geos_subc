@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,16 @@ VARIABLES = {
         "obs": "obs_t2m",
         "units": "K",
     },
+}
+
+MAP_CONTEXT = {
+    "enabled": False,
+    "ccrs": None,
+    "plate_carree": None,
+    "data_crs": None,
+    "features": [],
+    "lon_formatter": None,
+    "lat_formatter": None,
 }
 
 
@@ -161,6 +172,18 @@ def parse_args():
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--make_plots", action="store_true")
     parser.add_argument(
+        "--map_features",
+        choices=("auto", "cartopy", "plain"),
+        default="auto",
+        help="Use Cartopy coastlines/borders for spatial and orientation map plots when available.",
+    )
+    parser.add_argument(
+        "--county_boundaries",
+        choices=("auto", "on", "off"),
+        default="off",
+        help="Add US county boundaries to spatial maps when cached and requested.",
+    )
+    parser.add_argument(
         "--land_mask_file",
         type=str,
         default=None,
@@ -181,6 +204,202 @@ def parse_variables(text):
     if not variables:
         raise ValueError("--variables cannot be empty")
     return variables
+
+
+def _cached_natural_earth_feature(cfeature, ccrs, shapereader, download_warning, resolution, category, name, **kwargs):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", download_warning)
+            path = shapereader.natural_earth(resolution=resolution, category=category, name=name)
+        geometries = list(shapereader.Reader(path).geometries())
+        if not geometries:
+            return None
+        return cfeature.ShapelyFeature(geometries, ccrs.PlateCarree(), **kwargs)
+    except Exception:
+        return None
+
+
+def configure_map_context(args):
+    MAP_CONTEXT.update(
+        {
+            "enabled": False,
+            "ccrs": None,
+            "plate_carree": None,
+            "data_crs": None,
+            "features": [],
+            "lon_formatter": None,
+            "lat_formatter": None,
+        }
+    )
+    if args.map_features == "plain":
+        print("🗺️ Spatial/orientation maps: plain matplotlib axes (--map_features plain).")
+        return
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        from cartopy.io import DownloadWarning, shapereader
+        from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
+    except Exception as exc:
+        label = "required" if args.map_features == "cartopy" else "requested"
+        print(f"⚠️ Cartopy maps {label}, but Cartopy is unavailable ({exc}). Falling back to plain axes.")
+        return
+
+    feature_specs = [
+        ("50m", "physical", "coastline", {"edgecolor": "black", "facecolor": "none", "linewidth": 0.45}),
+        (
+            "50m",
+            "cultural",
+            "admin_0_boundary_lines_land",
+            {"edgecolor": "black", "facecolor": "none", "linewidth": 0.35},
+        ),
+        (
+            "50m",
+            "cultural",
+            "admin_1_states_provinces_lines",
+            {"edgecolor": "0.35", "facecolor": "none", "linewidth": 0.25, "alpha": 0.75},
+        ),
+    ]
+    if args.county_boundaries in ("on", "auto"):
+        feature_specs.append(
+            (
+                "10m",
+                "cultural",
+                "admin_2_counties",
+                {"edgecolor": "0.35", "facecolor": "none", "linewidth": 0.15, "alpha": 0.45},
+            )
+        )
+
+    features = []
+    skipped = []
+    for resolution, category, name, kwargs in feature_specs:
+        feature = _cached_natural_earth_feature(
+            cfeature,
+            ccrs,
+            shapereader,
+            DownloadWarning,
+            resolution,
+            category,
+            name,
+            **kwargs,
+        )
+        if feature is None:
+            skipped.append(f"{resolution}/{name}")
+        else:
+            features.append(feature)
+
+    if skipped:
+        print("🗺️ Cartopy maps enabled. Skipped uncached layers: " + ", ".join(skipped))
+    else:
+        print("🗺️ Cartopy maps enabled with Natural Earth overlays.")
+    if not features:
+        print("⚠️ No cached Natural Earth overlays found; using Cartopy GeoAxes without coast/border layers.")
+
+    plate_carree = ccrs.PlateCarree()
+    MAP_CONTEXT.update(
+        {
+            "enabled": True,
+            "ccrs": ccrs,
+            "plate_carree": plate_carree,
+            "data_crs": plate_carree,
+            "features": features,
+            "lon_formatter": LongitudeFormatter(),
+            "lat_formatter": LatitudeFormatter(),
+        }
+    )
+
+
+def _add_cyclic_if_global(lons, field):
+    lons = np.asarray(lons, dtype=np.float64)
+    field = np.asarray(field)
+    if lons.size < 3 or field.shape[-1] != lons.size:
+        return lons, field
+    diffs = np.diff(lons)
+    positive_diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    if positive_diffs.size == 0:
+        return lons, field
+    dx = float(np.nanmedian(positive_diffs))
+    span = float(np.nanmax(lons) - np.nanmin(lons) + dx)
+    if span < 350.0:
+        return lons, field
+    cyclic_lons = np.concatenate([lons, [lons[-1] + dx]])
+    cyclic_field = np.concatenate([field, field[..., :1]], axis=-1)
+    return cyclic_lons, cyclic_field
+
+
+def prepare_spatial_field_for_plot(lons, lats, field):
+    plot_lons = np.asarray(lons, dtype=np.float64)
+    plot_lats = np.asarray(lats, dtype=np.float64)
+    plot_field = np.asarray(field)
+
+    if plot_lats.ndim == 1 and plot_field.shape[-2] == plot_lats.size and plot_lats[0] > plot_lats[-1]:
+        plot_lats = plot_lats[::-1]
+        plot_field = plot_field[..., ::-1, :]
+
+    if MAP_CONTEXT["enabled"] and plot_lons.ndim == 1 and plot_field.shape[-1] == plot_lons.size:
+        if np.nanmax(plot_lons) > 180.0:
+            plot_lons = ((plot_lons + 180.0) % 360.0) - 180.0
+        order = np.argsort(plot_lons)
+        plot_lons = plot_lons[order]
+        plot_field = plot_field[..., order]
+        unique_mask = np.concatenate([[True], np.diff(np.round(plot_lons, 7)) > 0])
+        if unique_mask.size == plot_lons.size and not np.all(unique_mask):
+            plot_lons = plot_lons[unique_mask]
+            plot_field = plot_field[..., unique_mask]
+        plot_lons, plot_field = _add_cyclic_if_global(plot_lons, plot_field)
+
+    return plot_lons, plot_lats, plot_field
+
+
+def make_map_subplots(nrows, ncols, figsize, **kwargs):
+    import matplotlib.pyplot as plt
+
+    if MAP_CONTEXT["enabled"]:
+        kwargs.setdefault("subplot_kw", {"projection": MAP_CONTEXT["plate_carree"]})
+    return plt.subplots(nrows, ncols, figsize=figsize, **kwargs)
+
+
+def add_map_overlays(ax, lons, lats):
+    if not MAP_CONTEXT["enabled"]:
+        return
+    plate_carree = MAP_CONTEXT["plate_carree"]
+    lon_min = float(np.nanmin(lons))
+    lon_max = float(np.nanmax(lons))
+    lat_min = float(np.nanmin(lats))
+    lat_max = float(np.nanmax(lats))
+    try:
+        if lon_max - lon_min >= 350.0 and lat_max - lat_min >= 170.0:
+            ax.set_global()
+        else:
+            ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=plate_carree)
+    except Exception:
+        pass
+    for feature in MAP_CONTEXT["features"]:
+        try:
+            ax.add_feature(feature, zorder=3)
+        except Exception:
+            continue
+    try:
+        ax.gridlines(crs=plate_carree, linewidth=0.2, color="0.55", alpha=0.35, linestyle="-")
+    except Exception:
+        pass
+    try:
+        if lon_max - lon_min >= 300.0:
+            xticks = np.arange(-180.0, 181.0, 60.0)
+        else:
+            xticks = np.linspace(lon_min, lon_max, 5)
+        if lat_max - lat_min >= 120.0:
+            yticks = np.arange(-90.0, 91.0, 30.0)
+        else:
+            yticks = np.linspace(lat_min, lat_max, 5)
+        ax.set_xticks(xticks, crs=plate_carree)
+        ax.set_yticks(yticks, crs=plate_carree)
+        if MAP_CONTEXT["lon_formatter"] is not None:
+            ax.xaxis.set_major_formatter(MAP_CONTEXT["lon_formatter"])
+        if MAP_CONTEXT["lat_formatter"] is not None:
+            ax.yaxis.set_major_formatter(MAP_CONTEXT["lat_formatter"])
+        ax.tick_params(labelsize=6)
+    except Exception:
+        pass
 
 
 def season_name(month):
@@ -923,12 +1142,29 @@ def _finite_percentile_limits(field, lower=2, upper=98, symmetric=False):
 
 
 def _plot_spatial_panel(ax, lons, lats, field, title, cmap, vmin=None, vmax=None):
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    plot_lons, plot_lats, plot_field = prepare_spatial_field_for_plot(lons, lats, field)
+    mesh_kwargs = {}
+    if MAP_CONTEXT["enabled"]:
+        mesh_kwargs["transform"] = MAP_CONTEXT["data_crs"]
+    mesh = ax.pcolormesh(
+        plot_lons,
+        plot_lats,
+        plot_field,
+        shading="auto",
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        rasterized=True,
+        **mesh_kwargs,
+    )
+    add_map_overlays(ax, plot_lons, plot_lats)
     ax.set_title(title, fontsize=10)
-    ax.set_xlabel("lon")
-    ax.set_ylabel("lat")
-    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
-    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
+    ax.set_xlabel("lon", fontsize=8)
+    ax.set_ylabel("lat", fontsize=8)
+    if not MAP_CONTEXT["enabled"]:
+        ax.set_xlim(float(np.nanmin(plot_lons)), float(np.nanmax(plot_lons)))
+        ax.set_ylim(float(np.nanmin(plot_lats)), float(np.nanmax(plot_lats)))
+        ax.tick_params(labelsize=7)
     return mesh
 
 
@@ -970,7 +1206,12 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
             ("geos_bias", "GEOS bias", "RdBu_r", True, None),
             ("bias_delta", "Model-GEOS bias", "RdBu_r", True, None),
         ]
-        fig, axes = plt.subplots(3, 3, figsize=(18, 10), constrained_layout=True)
+        fig, axes = make_map_subplots(
+            3,
+            3,
+            figsize=(20, 11) if MAP_CONTEXT["enabled"] else (18, 10),
+            constrained_layout=True,
+        )
         for ax, (metric, title, cmap, symmetric, fixed_limits) in zip(axes.flat, panel_specs):
             field = _get_spatial_field(spatial_ds, variable, "all", metric)
             if fixed_limits is None:
@@ -996,7 +1237,14 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
         present = [(g, label) for g, label in zip(group_list, labels) if g in groups]
         if not present:
             return
-        fig, axes = plt.subplots(2, len(present), figsize=(4.5 * len(present), 7), squeeze=False, constrained_layout=True)
+        panel_width = 5.2 if MAP_CONTEXT["enabled"] else 4.5
+        fig, axes = make_map_subplots(
+            2,
+            len(present),
+            figsize=(panel_width * len(present), 7.5 if MAP_CONTEXT["enabled"] else 7),
+            squeeze=False,
+            constrained_layout=True,
+        )
         for col, (group, label) in enumerate(present):
             for row, metric in enumerate(("crps_skill_pct", "rmse_skill_pct")):
                 field = _get_spatial_field(spatial_ds, variable, group, metric)
@@ -1026,7 +1274,14 @@ def plot_spatial_diagnostics(spatial_ds, out_dir):
             combined.append(_get_spatial_field(spatial_ds, variable, group, model_metric))
             combined.append(_get_spatial_field(spatial_ds, variable, group, geos_metric))
         vmin, vmax = _finite_percentile_limits(np.stack(combined), lower=1, upper=99)
-        fig, axes = plt.subplots(2, len(present), figsize=(4.5 * len(present), 7), squeeze=False, constrained_layout=True)
+        panel_width = 5.2 if MAP_CONTEXT["enabled"] else 4.5
+        fig, axes = make_map_subplots(
+            2,
+            len(present),
+            figsize=(panel_width * len(present), 7.5 if MAP_CONTEXT["enabled"] else 7),
+            squeeze=False,
+            constrained_layout=True,
+        )
         for col, (group, label) in enumerate(present):
             for row, source in enumerate(("model", "geos")):
                 field = _get_spatial_field(spatial_ds, variable, group, f"{source}_{metric}")
@@ -1159,7 +1414,12 @@ def plot_orientation_diagnostics(forecast_dir, years, variables, out_dir, land_m
                 (model - obs, "ML - Obs", "RdBu_r", True),
                 (model - geos, "ML - GEOS", "RdBu_r", True),
             ]
-            fig, axes = plt.subplots(2, 3, figsize=(17, 7), constrained_layout=True)
+            fig, axes = make_map_subplots(
+                2,
+                3,
+                figsize=(19, 8) if MAP_CONTEXT["enabled"] else (17, 7),
+                constrained_layout=True,
+            )
             for ax, (field, title, cmap, symmetric) in zip(axes.flat, fields):
                 if symmetric:
                     vmin, vmax = _finite_percentile_limits(field, lower=2, upper=98, symmetric=True)
@@ -1229,6 +1489,8 @@ def main():
     skip_years = parse_years(args.skip_years)
     expected_years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.make_plots:
+        configure_map_context(args)
     yearly_dir = os.path.join(args.out_dir, "yearly_metrics")
     os.makedirs(yearly_dir, exist_ok=True)
 
@@ -1254,6 +1516,7 @@ def main():
     print(f"  Variables    : {variables}")
     print(f"  Out dir      : {args.out_dir}")
     print(f"  Soft runtime : {args.max_runtime_minutes if args.max_runtime_minutes else 'disabled'} minutes")
+    print(f"  Map plots    : {args.map_features} (cartopy_enabled={MAP_CONTEXT['enabled']})")
     if land_mask is not None:
         print(f"  Land mask    : {args.land_mask_file} (active)")
     else:
@@ -1363,6 +1626,10 @@ def main():
         "direct_metric_state_csv": os.path.abspath(direct_state_csv),
         "spatial_metric_maps": os.path.abspath(spatial_map_path) if args.make_plots else None,
         "orientation_report": os.path.abspath(orientation_report_path) if args.make_plots else None,
+        "map_features": args.map_features,
+        "county_boundaries": args.county_boundaries,
+        "cartopy_enabled": bool(MAP_CONTEXT["enabled"]),
+        "cartopy_feature_count": int(len(MAP_CONTEXT["features"])),
         "per_init_lead_csv": os.path.abspath(combined_csv),
     }
     with open(os.path.join(args.out_dir, "evaluation_overview.json"), "w") as f:
