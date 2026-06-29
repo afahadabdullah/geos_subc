@@ -28,6 +28,7 @@ Calibrated BSS:
 """
 
 import argparse
+import gc
 import json
 import os
 import time
@@ -1011,12 +1012,112 @@ def compute_spatial_metric_maps(state):
     return {name: np.asarray(maps[name], dtype=np.float32) for name in spatial_metric_names()}
 
 
+def _ratio_chunk(num, den, valid):
+    out = np.full(np.asarray(num).shape, np.nan, dtype=np.float32)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        np.divide(num, den, out=out, where=valid)
+    return out
+
+
+def _prefix_metric_chunk(state, prefix, metric, rows):
+    count = state["count"][rows].astype(np.float32, copy=False)
+    valid = count > 0
+    if metric == "rmse":
+        out = _ratio_chunk(state[f"{prefix}_sse"][rows], count, valid)
+        with np.errstate(invalid="ignore"):
+            np.sqrt(out, out=out, where=np.isfinite(out))
+        return out.astype(np.float32, copy=False)
+    if metric == "mae":
+        return _ratio_chunk(state[f"{prefix}_ae"][rows], count, valid)
+    if metric == "bias":
+        return _ratio_chunk(state[f"{prefix}_bias"][rows], count, valid)
+    if metric == "crps":
+        return _ratio_chunk(state[f"{prefix}_crps"][rows], count, valid)
+    if metric == "spread":
+        return _ratio_chunk(state[f"{prefix}_spread"][rows], count, valid)
+    if metric == "bss":
+        ref = state["ref_bs"][rows].astype(np.float32, copy=False)
+        ratio = _ratio_chunk(state[f"{prefix}_bs"][rows], ref, valid & (ref > 1e-12))
+        out = np.full(ratio.shape, np.nan, dtype=np.float32)
+        np.subtract(1.0, ratio, out=out, where=np.isfinite(ratio))
+        return out
+    if metric == "calibrated_bss":
+        ref = state["ref_bs"][rows].astype(np.float32, copy=False)
+        ratio = _ratio_chunk(state[f"{prefix}_bs_cal"][rows], ref, valid & (ref > 1e-12))
+        out = np.full(ratio.shape, np.nan, dtype=np.float32)
+        np.subtract(1.0, ratio, out=out, where=np.isfinite(ratio))
+        return out
+    if metric == "corr":
+        x = state[f"{prefix}_x"][rows].astype(np.float32, copy=False)
+        y = state["obs_y"][rows].astype(np.float32, copy=False)
+        x2 = state[f"{prefix}_x2"][rows].astype(np.float32, copy=False)
+        y2 = state["obs_y2"][rows].astype(np.float32, copy=False)
+        xy = state[f"{prefix}_xy"][rows].astype(np.float32, copy=False)
+        mx = _ratio_chunk(x, count, valid)
+        my = _ratio_chunk(y, count, valid)
+        cov = _ratio_chunk(xy, count, valid)
+        cov -= mx * my
+        vx = _ratio_chunk(x2, count, valid)
+        vx -= mx * mx
+        vy = _ratio_chunk(y2, count, valid)
+        vy -= my * my
+        np.maximum(vx, 0.0, out=vx)
+        np.maximum(vy, 0.0, out=vy)
+        denom = np.sqrt(vx * vy, dtype=np.float32)
+        return _ratio_chunk(cov, denom, valid & (denom > 1e-12))
+    raise KeyError(f"Unknown spatial prefix metric: {prefix}_{metric}")
+
+
+def compute_spatial_metric_chunk(state, metric_name, rows):
+    if metric_name == "sample_count":
+        return state["count"][rows].astype(np.float32, copy=False)
+    for prefix in ("model", "geos"):
+        prefix_text = f"{prefix}_"
+        if metric_name.startswith(prefix_text):
+            return _prefix_metric_chunk(state, prefix, metric_name[len(prefix_text):], rows)
+    if metric_name == "rmse_skill_pct":
+        model = _prefix_metric_chunk(state, "model", "rmse", rows)
+        geos = _prefix_metric_chunk(state, "geos", "rmse", rows)
+    elif metric_name == "mae_skill_pct":
+        model = _prefix_metric_chunk(state, "model", "mae", rows)
+        geos = _prefix_metric_chunk(state, "geos", "mae", rows)
+    elif metric_name == "crps_skill_pct":
+        model = _prefix_metric_chunk(state, "model", "crps", rows)
+        geos = _prefix_metric_chunk(state, "geos", "crps", rows)
+    elif metric_name == "corr_diff":
+        model = _prefix_metric_chunk(state, "model", "corr", rows)
+        geos = _prefix_metric_chunk(state, "geos", "corr", rows)
+        out = model - geos
+        return out.astype(np.float32, copy=False)
+    elif metric_name == "bss_diff":
+        model = _prefix_metric_chunk(state, "model", "bss", rows)
+        geos = _prefix_metric_chunk(state, "geos", "bss", rows)
+        out = model - geos
+        return out.astype(np.float32, copy=False)
+    elif metric_name == "calibrated_bss_diff":
+        model = _prefix_metric_chunk(state, "model", "calibrated_bss", rows)
+        geos = _prefix_metric_chunk(state, "geos", "calibrated_bss", rows)
+        out = model - geos
+        return out.astype(np.float32, copy=False)
+    else:
+        raise KeyError(f"Unknown spatial metric: {metric_name}")
+
+    out = np.full(model.shape, np.nan, dtype=np.float32)
+    valid = np.isfinite(model) & np.isfinite(geos) & (np.abs(geos) > 1e-12)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        np.divide(model, geos, out=out, where=valid)
+    out = 100.0 * (1.0 - out)
+    out[~valid] = np.nan
+    return out.astype(np.float32, copy=False)
+
+
 def write_spatial_metrics_netcdf(states, lats, lons, out_path):
     from netCDF4 import Dataset
 
     group_values = SEASONS + MONTHS
     dims = ("subset", "variable", "group_type", "group_value", "lead", "lat", "lon")
     idx = spatial_index_maps()
+    row_chunk = min(24, len(lats))
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     if os.path.exists(out_path):
         os.remove(out_path)
@@ -1050,7 +1151,7 @@ def write_spatial_metrics_netcdf(states, lats, lons, out_path):
         nc.bss_reference = "local observed event climatology matching the selected observed threshold source/group."
         nc.spatial_write_mode = "incremental_per_metric_slice"
 
-        chunksizes = (1, 1, 1, 1, 1, len(lats), len(lons))
+        chunksizes = (1, 1, 1, 1, 1, row_chunk, len(lons))
         variables = {}
         for name in spatial_metric_names():
             variables[name] = nc.createVariable(
@@ -1065,7 +1166,8 @@ def write_spatial_metrics_netcdf(states, lats, lons, out_path):
             )
 
         written_slices = 0
-        for key, state in states.items():
+        for write_idx, key in enumerate(list(states.keys()), start=1):
+            state = states.pop(key)
             subset, variable, group_type, group_value, lead = key
             if group_type not in idx["group_type"] or group_value not in idx["group_value"]:
                 continue
@@ -1076,10 +1178,15 @@ def write_spatial_metrics_netcdf(states, lats, lons, out_path):
                 idx["group_value"][group_value],
                 idx["lead"][int(lead)],
             )
-            metric_maps = compute_spatial_metric_maps(state)
-            for name, field in metric_maps.items():
-                variables[name][pos] = field
+            for row_start in range(0, len(lats), row_chunk):
+                rows = slice(row_start, min(row_start + row_chunk, len(lats)))
+                target = pos + (rows, slice(None))
+                for name in spatial_metric_names():
+                    variables[name][target] = compute_spatial_metric_chunk(state, name, rows)
             written_slices += 1
+            del state
+            if write_idx % 16 == 0:
+                gc.collect()
     print(f"✅ Wrote spatial metric NetCDF slices: {written_slices}")
 
 
