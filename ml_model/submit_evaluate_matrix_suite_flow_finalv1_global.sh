@@ -45,6 +45,14 @@ BSS_CALIBRATION_MIN_WEIGHT="${MATRIX_EVAL_BSS_CALIBRATION_MIN_WEIGHT:-100.0}"
 EXTREME_Q_PR="${MATRIX_EVAL_EXTREME_Q_PR:-0.95}"
 EXTREME_Q_T2M="${MATRIX_EVAL_EXTREME_Q_T2M:-0.95}"
 PR_MIN_THRESHOLD="${MATRIX_EVAL_PR_MIN_THRESHOLD:-5.0}"
+THRESHOLD_FILE="${MATRIX_EVAL_THRESHOLD_FILE:-}"
+THRESHOLD_FORECAST_DIR="${MATRIX_EVAL_THRESHOLD_FORECAST_DIR:-}"
+THRESHOLD_START_YEAR="${MATRIX_EVAL_THRESHOLD_START_YEAR:-}"
+THRESHOLD_END_YEAR="${MATRIX_EVAL_THRESHOLD_END_YEAR:-}"
+THRESHOLD_SKIP_YEARS="${MATRIX_EVAL_THRESHOLD_SKIP_YEARS:-}"
+THRESHOLD_GROUPING="${MATRIX_EVAL_THRESHOLD_GROUPING:-monthly}"
+EVAL_MASK="${MATRIX_EVAL_MASK:-all}"
+LAND_MASK_FILE="${MATRIX_EVAL_LAND_MASK_FILE:-}"
 
 EXTRA_ARGS=()
 if [ "$MAKE_PLOTS" = "1" ] || [ "$MAKE_PLOTS" = "true" ] || [ "$MAKE_PLOTS" = "TRUE" ]; then
@@ -52,6 +60,24 @@ if [ "$MAKE_PLOTS" = "1" ] || [ "$MAKE_PLOTS" = "true" ] || [ "$MAKE_PLOTS" = "T
 fi
 if [ "$OVERWRITE" = "1" ] || [ "$OVERWRITE" = "true" ] || [ "$OVERWRITE" = "TRUE" ]; then
     EXTRA_ARGS+=(--overwrite)
+fi
+if [ -n "$THRESHOLD_FILE" ]; then
+    EXTRA_ARGS+=(--threshold_file "$THRESHOLD_FILE")
+fi
+if [ -n "$THRESHOLD_FORECAST_DIR" ]; then
+    EXTRA_ARGS+=(--threshold_forecast_dir "$THRESHOLD_FORECAST_DIR")
+fi
+if [ -n "$THRESHOLD_START_YEAR" ]; then
+    EXTRA_ARGS+=(--threshold_start_year "$THRESHOLD_START_YEAR")
+fi
+if [ -n "$THRESHOLD_END_YEAR" ]; then
+    EXTRA_ARGS+=(--threshold_end_year "$THRESHOLD_END_YEAR")
+fi
+if [ -n "$THRESHOLD_SKIP_YEARS" ]; then
+    EXTRA_ARGS+=(--threshold_skip_years "$THRESHOLD_SKIP_YEARS")
+fi
+if [ -n "$LAND_MASK_FILE" ]; then
+    EXTRA_ARGS+=(--land_mask_file "$LAND_MASK_FILE")
 fi
 
 echo "🚀 Matrix evaluation started at $(date) on $(hostname)"
@@ -61,6 +87,8 @@ echo "🎯 Years: $START_YEAR-$END_YEAR skip=$SKIP_YEARS"
 echo "🎯 Variables: $VARIABLES"
 echo "🎯 Output: $OUT_DIR"
 echo "🎯 Extreme q: PR=$EXTREME_Q_PR T2M=$EXTREME_Q_T2M PR min=$PR_MIN_THRESHOLD"
+echo "🎯 Threshold source: file=${THRESHOLD_FILE:-none} forecast_dir=${THRESHOLD_FORECAST_DIR:-$FORECAST_DIR} years=${THRESHOLD_START_YEAR:-$START_YEAR}-${THRESHOLD_END_YEAR:-$END_YEAR} grouping=$THRESHOLD_GROUPING"
+echo "🎯 Evaluation mask: $EVAL_MASK land_mask_file=${LAND_MASK_FILE:-none}"
 echo "🎯 Spatial maps: map_features=$MAP_FEATURES county_boundaries=$COUNTY_BOUNDARIES"
 echo "🎯 BSS calibration: $BSS_CALIBRATION grouping=$BSS_CALIBRATION_GROUPING bins=$BSS_CALIBRATION_BINS ridge=$BSS_CALIBRATION_RIDGE"
 
@@ -74,6 +102,8 @@ python ml_model/evaluate_matrix_suite_flow_finalv1_global.py \
     --extreme_quantile_pr "$EXTREME_Q_PR" \
     --extreme_quantile_t2m "$EXTREME_Q_T2M" \
     --pr_min_threshold "$PR_MIN_THRESHOLD" \
+    --threshold_grouping "$THRESHOLD_GROUPING" \
+    --eval_mask "$EVAL_MASK" \
     --bss_calibration "$BSS_CALIBRATION" \
     --bss_calibration_grouping "$BSS_CALIBRATION_GROUPING" \
     --bss_calibration_bins "$BSS_CALIBRATION_BINS" \

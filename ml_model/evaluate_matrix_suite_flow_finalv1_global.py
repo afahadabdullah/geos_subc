@@ -14,8 +14,9 @@ Metrics:
   RMSE, MAE, bias, Pearson correlation, CRPS, BSS, calibrated BSS, spread.
 
 BSS event definition:
-  observation >= local observed threshold map. By default thresholds are the
-  gridpoint 95th percentile over the evaluation period. For precipitation, the
+  observation >= local observed threshold map. By default thresholds are local
+  gridpoint 95th percentiles. Prefer building/providing long-term observed
+  thresholds; evaluation-year thresholds are a fallback. For precipitation, the
   threshold is also constrained to be at least --pr_min_threshold mm/day.
 
 Calibrated BSS:
@@ -93,6 +94,42 @@ def parse_args():
     parser.add_argument("--extreme_quantile_pr", type=float, default=0.95)
     parser.add_argument("--extreme_quantile_t2m", type=float, default=0.95)
     parser.add_argument("--pr_min_threshold", type=float, default=5.0)
+    parser.add_argument(
+        "--threshold_file",
+        type=str,
+        default=None,
+        help=(
+            "Optional observed-threshold NetCDF from build_observed_extreme_thresholds_flow_finalv1_global.py. "
+            "If omitted, thresholds are built from --threshold_forecast_dir/years."
+        ),
+    )
+    parser.add_argument(
+        "--threshold_forecast_dir",
+        type=str,
+        default=None,
+        help="Forecast Zarr directory used only for observed thresholds; defaults to --forecast_dir.",
+    )
+    parser.add_argument("--threshold_start_year", type=int, default=None)
+    parser.add_argument("--threshold_end_year", type=int, default=None)
+    parser.add_argument("--threshold_skip_years", type=str, default="")
+    parser.add_argument(
+        "--threshold_grouping",
+        choices=("pooled", "monthly", "seasonal"),
+        default="monthly",
+        help="Observed threshold grouping. monthly is usually best for long-term observed climatology.",
+    )
+    parser.add_argument(
+        "--eval_mask",
+        choices=("all", "land", "ocean"),
+        default="all",
+        help="Spatial mask for scalar/spatial evaluation. Use land to prevent ocean-dominated maps/tables.",
+    )
+    parser.add_argument(
+        "--land_mask_file",
+        type=str,
+        default=None,
+        help="Optional .pt land mask with is_land or land_mask. Required for --eval_mask land/ocean.",
+    )
     parser.add_argument("--epsilon_probability", type=float, default=1e-4)
     parser.add_argument(
         "--bss_calibration",
@@ -358,6 +395,143 @@ def season_name(month):
     if month in (6, 7, 8):
         return "JJA"
     return "SON"
+
+
+def threshold_group_values(grouping):
+    if grouping == "monthly":
+        return MONTHS
+    if grouping == "seasonal":
+        return SEASONS
+    return ["pooled"]
+
+
+def group_label_for_time(grouping, valid_time):
+    if grouping == "monthly":
+        return f"{int(pd.Timestamp(valid_time).month):02d}"
+    if grouping == "seasonal":
+        return season_name(int(pd.Timestamp(valid_time).month))
+    return "pooled"
+
+
+def make_threshold_bundle(values, grouping="pooled", group_values=None, source=None):
+    values = np.asarray(values, dtype=np.float32)
+    grouping = str(grouping or "pooled")
+    if values.ndim == 2:
+        grouping = "pooled" if grouping not in ("monthly", "seasonal") else grouping
+        group_values = ["pooled"] if group_values is None else list(group_values)
+    elif values.ndim == 3:
+        if group_values is None:
+            group_values = threshold_group_values(grouping)
+        group_values = [str(v) for v in group_values]
+        if len(group_values) != values.shape[0]:
+            raise ValueError(
+                f"Threshold group count mismatch: values has {values.shape[0]} groups, "
+                f"but group_values={group_values}"
+            )
+    else:
+        raise ValueError(f"Expected 2D or 3D threshold/climatology values, got shape {values.shape}")
+    return {
+        "values": values,
+        "grouping": grouping,
+        "group_values": group_values,
+        "source": source,
+    }
+
+
+def _as_threshold_bundle(obj, default_grouping="pooled"):
+    if isinstance(obj, dict) and "values" in obj:
+        return obj
+    return make_threshold_bundle(obj, grouping=default_grouping)
+
+
+def select_grouped_map(bundle, valid_time):
+    bundle = _as_threshold_bundle(bundle)
+    values = np.asarray(bundle["values"], dtype=np.float32)
+    if values.ndim == 2:
+        return values
+    label = group_label_for_time(bundle.get("grouping", "pooled"), valid_time)
+    group_values = [str(v) for v in bundle.get("group_values", [])]
+    if label not in group_values:
+        raise KeyError(f"Threshold group {label!r} not available in {group_values}")
+    return values[group_values.index(label)]
+
+
+def first_threshold_map(bundle):
+    values = np.asarray(_as_threshold_bundle(bundle)["values"], dtype=np.float32)
+    return values[0] if values.ndim == 3 else values
+
+
+def bundle_shape(bundle):
+    values = np.asarray(_as_threshold_bundle(bundle)["values"])
+    return tuple(values.shape[-2:])
+
+
+def group_values_from_coord(coord_values, grouping):
+    if grouping == "monthly":
+        out = []
+        for value in coord_values:
+            if np.issubdtype(np.asarray(value).dtype, np.number):
+                out.append(f"{int(value):02d}")
+            else:
+                text = str(value)
+                out.append(f"{int(text):02d}" if text.isdigit() else text)
+        return out
+    if grouping == "seasonal":
+        return [str(v) for v in coord_values]
+    return ["pooled"]
+
+
+def infer_threshold_grouping(data_array):
+    dims = tuple(data_array.dims)
+    for dim in dims:
+        lower = dim.lower()
+        if lower in ("month", "valid_month"):
+            return "monthly", dim
+        if lower in ("season", "valid_season"):
+            return "seasonal", dim
+        if "threshold_group" in lower or lower in ("group", "clim_group"):
+            values = [str(v) for v in data_array[dim].values]
+            if set(values).issubset(set(MONTHS)) or all(v.isdigit() and 1 <= int(v) <= 12 for v in values):
+                return "monthly", dim
+            if set(values).issubset(set(SEASONS)):
+                return "seasonal", dim
+            return str(data_array.attrs.get("threshold_grouping", "pooled")), dim
+    return str(data_array.attrs.get("threshold_grouping", "pooled")), None
+
+
+def valid_times_for_dataset(ds, init_idx, init_time, lead_values):
+    if "valid_time" in ds:
+        return pd.to_datetime(ds["valid_time"].isel(init=init_idx).values).normalize()
+    return pd.to_datetime(
+        [init_time + pd.to_timedelta(int(lead) * 7, unit="D") for lead in lead_values]
+    ).normalize()
+
+
+def load_evaluation_mask(args, lats, lons):
+    shape = (len(lats), len(lons))
+    if args.eval_mask == "all":
+        print("🌍 Evaluation mask: all grid points.")
+        return np.ones(shape, dtype=bool), "all"
+    if not args.land_mask_file:
+        raise ValueError("--land_mask_file is required when --eval_mask is land or ocean.")
+    import torch
+
+    print(f"🌍 Loading evaluation land/ocean mask from: {args.land_mask_file}")
+    cached = torch.load(args.land_mask_file, map_location="cpu", weights_only=True)
+    if "is_land" in cached:
+        land_mask = np.asarray(cached["is_land"], dtype=bool).squeeze()
+    elif "land_mask" in cached:
+        land_mask = np.asarray(cached["land_mask"], dtype=bool).squeeze()
+    else:
+        raise ValueError(f"Mask file {args.land_mask_file} is missing 'is_land' or 'land_mask'.")
+    if land_mask.shape != shape:
+        raise ValueError(f"Evaluation mask shape {land_mask.shape} does not match forecast grid {shape}.")
+    eval_mask = land_mask if args.eval_mask == "land" else ~land_mask
+    print(
+        f"🌍 Evaluation mask active: {args.eval_mask}; "
+        f"kept={int(eval_mask.sum())} masked={int(eval_mask.size - eval_mask.sum())}"
+    )
+    return eval_mask.astype(bool), os.path.abspath(args.land_mask_file)
 
 
 def deadline_reached(deadline):
@@ -866,46 +1040,200 @@ def spatial_dataset_from_states(states, lats, lons):
         attrs={
             "description": "Season/month x lead spatial matrix diagnostics for flow_finalv1_global.",
             "skill_definition": "100 * (1 - ML metric / GEOS metric); positive means ML improves over GEOS.",
-            "bss_reference": "local observed event climatology from selected evaluation years.",
+            "bss_reference": "local observed event climatology matching the selected observed threshold source/group.",
         },
     )
     return ds
 
 
+def _find_coord_name(ds, candidates):
+    for candidate in candidates:
+        if candidate in ds.coords:
+            return candidate
+        if candidate in ds.dims:
+            return candidate
+    lowered = {str(name).lower(): name for name in list(ds.coords) + list(ds.dims)}
+    for candidate in candidates:
+        if candidate.lower() in lowered:
+            return lowered[candidate.lower()]
+    return None
+
+
+def _threshold_array_to_bundle(data_array, variable, args, fallback_source, apply_min_threshold=False):
+    lat_dim = next((dim for dim in data_array.dims if str(dim).lower() in ("lat", "latitude", "y")), None)
+    lon_dim = next((dim for dim in data_array.dims if str(dim).lower() in ("lon", "longitude", "x")), None)
+    if lat_dim is None or lon_dim is None:
+        raise ValueError(f"{data_array.name} is missing recognizable lat/lon dims; dims={data_array.dims}")
+
+    grouping, group_dim = infer_threshold_grouping(data_array)
+    if group_dim is None:
+        values = data_array.transpose(lat_dim, lon_dim).values.astype(np.float32, copy=False)
+        group_values = ["pooled"]
+        grouping = "pooled"
+    else:
+        values = data_array.transpose(group_dim, lat_dim, lon_dim).values.astype(np.float32, copy=False)
+        group_values = group_values_from_coord(data_array[group_dim].values, grouping)
+
+    min_arg = VARIABLES[variable]["min_threshold_arg"]
+    if apply_min_threshold and min_arg is not None:
+        values = np.maximum(values, float(getattr(args, min_arg))).astype(np.float32)
+    return make_threshold_bundle(values, grouping=grouping, group_values=group_values, source=fallback_source)
+
+
+def load_thresholds_from_file(path, variables, args):
+    print(f"📏 Loading observed extreme thresholds from: {path}")
+    ds = xr.open_dataset(path)
+    try:
+        lat_name = _find_coord_name(ds, ("lat", "latitude", "Y"))
+        lon_name = _find_coord_name(ds, ("lon", "longitude", "X"))
+        if lat_name is None or lon_name is None:
+            raise ValueError(f"Threshold file {path} is missing lat/lon coordinates.")
+        lats = ds[lat_name].values
+        lons = ds[lon_name].values
+        thresholds = {}
+        climatology = {}
+        for variable in variables:
+            threshold_name = f"{variable}_threshold"
+            if threshold_name not in ds:
+                raise ValueError(f"Threshold file {path} is missing variable {threshold_name}.")
+            thresholds[variable] = _threshold_array_to_bundle(
+                ds[threshold_name],
+                variable,
+                args,
+                os.path.abspath(path),
+                apply_min_threshold=True,
+            )
+
+            freq_name = f"{variable}_obs_event_frequency"
+            if freq_name in ds:
+                climatology[variable] = _threshold_array_to_bundle(
+                    ds[freq_name],
+                    variable,
+                    args,
+                    os.path.abspath(path),
+                    apply_min_threshold=False,
+                )
+            else:
+                q = float(getattr(args, VARIABLES[variable]["extreme_quantile_arg"]))
+                threshold_values = thresholds[variable]["values"]
+                frequency = np.full_like(threshold_values, 1.0 - q, dtype=np.float32)
+                frequency = np.where(np.isfinite(threshold_values), frequency, np.nan).astype(np.float32)
+                print(
+                    f"⚠️ {freq_name} missing in threshold file; using nominal frequency={1.0 - q:.3f}. "
+                    "For precipitation with a minimum threshold, build a threshold file with observed frequencies."
+                )
+                climatology[variable] = make_threshold_bundle(
+                    frequency,
+                    grouping=thresholds[variable]["grouping"],
+                    group_values=thresholds[variable]["group_values"],
+                    source=os.path.abspath(path),
+                )
+
+            values = thresholds[variable]["values"]
+            freq = climatology[variable]["values"]
+            group_info = (
+                f"{thresholds[variable]['grouping']} groups={thresholds[variable]['group_values']}"
+                if values.ndim == 3
+                else "pooled"
+            )
+            print(
+                f"   {variable}: {group_info}; threshold mean={float(np.nanmean(values)):.3f} "
+                f"{VARIABLES[variable]['units']}, obs event freq mean={float(np.nanmean(freq)):.4f}"
+            )
+        return thresholds, climatology, lats, lons
+    finally:
+        ds.close()
+
+
 def collect_obs_thresholds(forecast_dir, years, variables, args):
+    if args.threshold_file:
+        return load_thresholds_from_file(args.threshold_file, variables, args)
+
+    threshold_dir = args.threshold_forecast_dir or forecast_dir
+    threshold_start = args.threshold_start_year if args.threshold_start_year is not None else min(years)
+    threshold_end = args.threshold_end_year if args.threshold_end_year is not None else max(years)
+    threshold_skip = parse_years(args.threshold_skip_years)
+    threshold_years = [
+        year for year in range(int(threshold_start), int(threshold_end) + 1) if year not in threshold_skip
+    ]
+    if not threshold_years:
+        raise ValueError("No threshold years selected.")
+
     thresholds = {}
     climatology = {}
     saved_lats = None
     saved_lons = None
-    print("📏 Building observed extreme thresholds...")
+    group_values = threshold_group_values(args.threshold_grouping)
+    print(
+        "📏 Building observed extreme thresholds from forecast-store observations: "
+        f"{threshold_dir}, years={threshold_years}, grouping={args.threshold_grouping}"
+    )
     for variable in variables:
         spec = VARIABLES[variable]
-        obs_chunks = []
-        for year in years:
-            zarr_path = os.path.join(forecast_dir, f"{year}.zarr")
+        obs_by_group = {group_value: [] for group_value in group_values}
+        for year in threshold_years:
+            zarr_path = os.path.join(threshold_dir, f"{year}.zarr")
             ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
             try:
                 if saved_lats is None:
                     saved_lats = ds["lat"].values
                     saved_lons = ds["lon"].values
-                obs = ds[spec["obs"]].values.astype(np.float32, copy=False)
-                obs_chunks.append(obs.reshape(-1, obs.shape[-2], obs.shape[-1]))
+                init_values = pd.to_datetime(ds["init"].values).normalize()
+                lead_values = ds["lead"].values
+                n_lead = ds.sizes["lead"]
+                for init_idx, init_time in enumerate(init_values):
+                    valid_values = valid_times_for_dataset(ds, init_idx, init_time, lead_values)
+                    for lead_idx in range(n_lead):
+                        valid_time = pd.Timestamp(valid_values[lead_idx])
+                        group_value = group_label_for_time(args.threshold_grouping, valid_time)
+                        obs = ds[spec["obs"]].isel(init=init_idx, lead=lead_idx).values.astype(np.float32, copy=False)
+                        obs_by_group[group_value].append(obs)
             finally:
                 ds.close()
-        stack = np.concatenate(obs_chunks, axis=0)
+
         q = float(getattr(args, spec["extreme_quantile_arg"]))
-        threshold = np.nanquantile(stack, q, axis=0).astype(np.float32)
+        threshold_maps = []
+        frequency_maps = []
+        shape = (len(saved_lats), len(saved_lons))
         min_arg = spec["min_threshold_arg"]
-        if min_arg is not None:
-            threshold = np.maximum(threshold, float(getattr(args, min_arg))).astype(np.float32)
-        events = stack >= threshold[None, :, :]
-        event_freq = np.nanmean(events, axis=0).astype(np.float32)
-        event_freq = np.where(np.isfinite(event_freq), event_freq, np.nan).astype(np.float32)
-        thresholds[variable] = threshold
-        climatology[variable] = event_freq
+        for group_value in group_values:
+            chunks = obs_by_group[group_value]
+            if not chunks:
+                threshold = np.full(shape, np.nan, dtype=np.float32)
+                event_freq = np.full(shape, np.nan, dtype=np.float32)
+            else:
+                stack = np.stack(chunks, axis=0).astype(np.float32, copy=False)
+                threshold = np.nanquantile(stack, q, axis=0).astype(np.float32)
+                if min_arg is not None:
+                    threshold = np.maximum(threshold, float(getattr(args, min_arg))).astype(np.float32)
+                events = stack >= threshold[None, :, :]
+                event_freq = np.nanmean(events, axis=0).astype(np.float32)
+                event_freq = np.where(np.isfinite(event_freq), event_freq, np.nan).astype(np.float32)
+            threshold_maps.append(threshold)
+            frequency_maps.append(event_freq)
+
+        if args.threshold_grouping == "pooled":
+            threshold_values = threshold_maps[0]
+            frequency_values = frequency_maps[0]
+        else:
+            threshold_values = np.stack(threshold_maps, axis=0)
+            frequency_values = np.stack(frequency_maps, axis=0)
+        thresholds[variable] = make_threshold_bundle(
+            threshold_values,
+            grouping=args.threshold_grouping,
+            group_values=group_values,
+            source=os.path.abspath(threshold_dir),
+        )
+        climatology[variable] = make_threshold_bundle(
+            frequency_values,
+            grouping=args.threshold_grouping,
+            group_values=group_values,
+            source=os.path.abspath(threshold_dir),
+        )
         print(
-            f"   {variable}: q={q:.3f}, threshold mean={float(np.nanmean(threshold)):.3f} "
-            f"{spec['units']}, event freq mean={float(np.nanmean(event_freq)):.4f}"
+            f"   {variable}: q={q:.3f}, grouping={args.threshold_grouping}, "
+            f"threshold mean={float(np.nanmean(threshold_values)):.3f} {spec['units']}, "
+            f"obs event freq mean={float(np.nanmean(frequency_values)):.4f}"
         )
     return thresholds, climatology, saved_lats, saved_lons
 
@@ -914,8 +1242,7 @@ def collect_forecast_event_climatology(forecast_dir, years, variables, threshold
     out = {}
     print("🎯 Building forecast event-probability climatology for calibrated BSS...")
     for variable in variables:
-        threshold = thresholds[variable]
-        shape = threshold.shape
+        shape = bundle_shape(thresholds[variable])
         sums = {"model": np.zeros(shape, dtype=np.float64), "geos": np.zeros(shape, dtype=np.float64)}
         count = np.zeros(shape, dtype=np.float64)
         spec = VARIABLES[variable]
@@ -924,10 +1251,14 @@ def collect_forecast_event_climatology(forecast_dir, years, variables, threshold
                 raise TimeoutError("Soft runtime limit reached while building forecast event climatology.")
             ds = xr.open_zarr(os.path.join(forecast_dir, f"{year}.zarr"), consolidated=False, chunks=None)
             try:
+                init_values = pd.to_datetime(ds["init"].values).normalize()
+                lead_values = ds["lead"].values
                 n_init = ds.sizes["init"]
                 n_lead = ds.sizes["lead"]
-                for init_idx in range(n_init):
+                for init_idx, init_time in enumerate(init_values):
+                    valid_values = valid_times_for_dataset(ds, init_idx, init_time, lead_values)
                     for lead_idx in range(n_lead):
+                        threshold = select_grouped_map(thresholds[variable], pd.Timestamp(valid_values[lead_idx]))
                         obs = ds[spec["obs"]].isel(init=init_idx, lead=lead_idx).values
                         finite = np.isfinite(obs) & np.isfinite(threshold)
                         if not finite.any():
@@ -950,17 +1281,28 @@ def collect_forecast_event_climatology(forecast_dir, years, variables, threshold
     return out
 
 
-def collect_forecast_calibration_inputs(forecast_dir, years, variables, thresholds, lats, args, deadline=None):
+def collect_forecast_calibration_inputs(
+    forecast_dir,
+    years,
+    variables,
+    thresholds,
+    lats,
+    lons,
+    args,
+    evaluation_mask=None,
+    deadline=None,
+):
     num_bins = int(args.bss_calibration_bins)
     if num_bins < 3:
         raise ValueError("--bss_calibration_bins must be >= 3")
     weights = area_weights_from_lats(lats)
+    if evaluation_mask is None:
+        evaluation_mask = np.ones((len(lats), len(lons)), dtype=bool)
     fcst_clim = {}
     calibration_counts = {}
     print("🎯 Building forecast event climatology and BSS calibration reliability counts...")
     for variable in variables:
-        threshold = thresholds[variable]
-        shape = threshold.shape
+        shape = bundle_shape(thresholds[variable])
         sums = {"model": np.zeros(shape, dtype=np.float64), "geos": np.zeros(shape, dtype=np.float64)}
         count = np.zeros(shape, dtype=np.float64)
         spec = VARIABLES[variable]
@@ -974,18 +1316,14 @@ def collect_forecast_calibration_inputs(forecast_dir, years, variables, threshol
                 n_init = ds.sizes["init"]
                 n_lead = ds.sizes["lead"]
                 for init_idx, init_time in enumerate(init_values):
-                    if "valid_time" in ds:
-                        valid_values = pd.to_datetime(ds["valid_time"].isel(init=init_idx).values).normalize()
-                    else:
-                        valid_values = pd.to_datetime(
-                            [init_time + pd.to_timedelta(int(lead) * 7, unit="D") for lead in lead_values]
-                        ).normalize()
+                    valid_values = valid_times_for_dataset(ds, init_idx, init_time, lead_values)
                     for lead_idx in range(n_lead):
                         lead_value = int(lead_values[lead_idx])
                         valid_time = pd.Timestamp(valid_values[lead_idx])
                         valid_season = season_name(int(valid_time.month))
+                        threshold = select_grouped_map(thresholds[variable], valid_time)
                         obs = ds[spec["obs"]].isel(init=init_idx, lead=lead_idx).values
-                        finite = np.isfinite(obs) & np.isfinite(threshold)
+                        finite = np.isfinite(obs) & np.isfinite(threshold) & evaluation_mask
                         if not finite.any():
                             continue
                         event = obs >= threshold
@@ -1153,12 +1491,15 @@ def evaluate(
     lats,
     lons,
     args,
+    evaluation_mask=None,
     deadline=None,
 ):
     weights = area_weights_from_lats(lats)
     scalar_states = {}
     spatial_states = {}
     shape = (len(lats), len(lons))
+    if evaluation_mask is None:
+        evaluation_mask = np.ones(shape, dtype=bool)
     eps = float(args.epsilon_probability)
     print("🧮 Evaluating matrix metrics...")
     for year in years:
@@ -1171,19 +1512,14 @@ def evaluate(
             init_values = pd.to_datetime(ds["init"].values).normalize()
             lead_values = ds["lead"].values
             for init_idx, init_time in enumerate(init_values):
-                if "valid_time" in ds:
-                    valid_values = pd.to_datetime(ds["valid_time"].isel(init=init_idx).values).normalize()
-                else:
-                    valid_values = pd.to_datetime(
-                        [init_time + pd.to_timedelta(int(lead) * 7, unit="D") for lead in lead_values]
-                    ).normalize()
+                valid_values = valid_times_for_dataset(ds, init_idx, init_time, lead_values)
                 for lead_idx, lead_value in enumerate(lead_values):
                     valid_time = pd.Timestamp(valid_values[lead_idx])
                     valid_season = season_name(int(valid_time.month))
                     for variable in variables:
                         spec = VARIABLES[variable]
-                        threshold = thresholds[variable]
-                        obs_event_freq = obs_clim[variable]
+                        threshold = select_grouped_map(thresholds[variable], valid_time)
+                        obs_event_freq = select_grouped_map(obs_clim[variable], valid_time)
                         obs = ds[spec["obs"]].isel(init=init_idx, lead=lead_idx).values
                         model_ens = ds[spec["model"]].isel(init=init_idx, lead=lead_idx).values
                         geos_ens = ds[spec["geos"]].isel(init=init_idx, lead=lead_idx).values
@@ -1223,8 +1559,8 @@ def evaluate(
                         )
                         event_mask = obs >= threshold
                         masks = {
-                            "all_data": np.ones(shape, dtype=bool),
-                            "extreme_events": event_mask,
+                            "all_data": evaluation_mask,
+                            "extreme_events": event_mask & evaluation_mask,
                         }
                         for subset, subset_mask in masks.items():
                             for key in group_keys_for_sample(subset, variable, valid_time, lead_value):
@@ -1241,17 +1577,42 @@ def evaluate(
     return summary, spatial
 
 
+def _add_bundle_to_dataset_parts(data_vars, coords, name, bundle, group_dim):
+    bundle = _as_threshold_bundle(bundle)
+    values = np.asarray(bundle["values"], dtype=np.float32)
+    if values.ndim == 2:
+        data_vars[name] = (("lat", "lon"), values.astype(np.float32))
+        return
+    group_values = [str(v) for v in bundle.get("group_values", threshold_group_values(bundle.get("grouping", "pooled")))]
+    coords[group_dim] = group_values
+    data_vars[name] = ((group_dim, "lat", "lon"), values.astype(np.float32))
+
+
 def save_threshold_dataset(thresholds, obs_clim, fcst_clim, lats, lons, out_dir):
     data_vars = {}
+    coords = {"lat": np.asarray(lats, dtype=np.float32), "lon": np.asarray(lons, dtype=np.float32)}
     for variable in thresholds:
-        data_vars[f"{variable}_threshold"] = (("lat", "lon"), thresholds[variable].astype(np.float32))
-        data_vars[f"{variable}_obs_event_frequency"] = (("lat", "lon"), obs_clim[variable].astype(np.float32))
+        group_dim = f"{variable}_threshold_group"
+        _add_bundle_to_dataset_parts(data_vars, coords, f"{variable}_threshold", thresholds[variable], group_dim)
+        _add_bundle_to_dataset_parts(
+            data_vars,
+            coords,
+            f"{variable}_obs_event_frequency",
+            obs_clim[variable],
+            group_dim,
+        )
         data_vars[f"{variable}_model_event_frequency"] = (("lat", "lon"), fcst_clim[variable]["model"].astype(np.float32))
         data_vars[f"{variable}_geos_event_frequency"] = (("lat", "lon"), fcst_clim[variable]["geos"].astype(np.float32))
     ds = xr.Dataset(
         data_vars,
-        coords={"lat": np.asarray(lats, dtype=np.float32), "lon": np.asarray(lons, dtype=np.float32)},
-        attrs={"description": "Event thresholds and event frequencies used by matrix evaluation suite."},
+        coords=coords,
+        attrs={
+            "description": "Event thresholds and event frequencies used by matrix evaluation suite.",
+            "threshold_grouping_note": (
+                "Grouped thresholds are selected by valid time before scoring. "
+                "Forecast event frequencies are pooled over evaluated init/lead samples."
+            ),
+        },
     )
     path = os.path.join(out_dir, "event_thresholds_and_frequencies.nc")
     ds.to_netcdf(path)
@@ -1571,6 +1932,24 @@ def main():
         )
 
     thresholds, obs_clim, lats, lons = collect_obs_thresholds(args.forecast_dir, years, variables, args)
+    first_forecast = os.path.join(args.forecast_dir, f"{years[0]}.zarr")
+    grid_ds = xr.open_zarr(first_forecast, consolidated=False, chunks=None)
+    try:
+        forecast_lats = np.asarray(grid_ds["lat"].values)
+        forecast_lons = np.asarray(grid_ds["lon"].values)
+    finally:
+        grid_ds.close()
+    if len(forecast_lats) != len(lats) or len(forecast_lons) != len(lons):
+        raise ValueError(
+            f"Threshold grid shape {(len(lats), len(lons))} does not match forecast grid "
+            f"{(len(forecast_lats), len(forecast_lons))}."
+        )
+    if not (np.allclose(forecast_lats, lats, equal_nan=True) and np.allclose(forecast_lons, lons, equal_nan=True)):
+        raise ValueError(
+            "Threshold latitude/longitude coordinates do not match the forecast Zarr grid. "
+            "Rebuild thresholds on the same grid before evaluating."
+        )
+    evaluation_mask, evaluation_mask_source = load_evaluation_mask(args, lats, lons)
     if deadline_reached(deadline):
         raise TimeoutError("Soft runtime limit reached after threshold pass.")
     fcst_clim, calibration_counts = collect_forecast_calibration_inputs(
@@ -1579,7 +1958,9 @@ def main():
         variables,
         thresholds,
         lats,
+        lons,
         args,
+        evaluation_mask=evaluation_mask,
         deadline=deadline,
     )
     calibration_models, calibration_table = fit_bss_calibration_models(
@@ -1603,6 +1984,7 @@ def main():
         lats,
         lons,
         args,
+        evaluation_mask=evaluation_mask,
         deadline=deadline,
     )
 
@@ -1615,10 +1997,32 @@ def main():
         "variables": variables,
         "subsets": SUBSETS,
         "group_types": GROUP_TYPES,
-        "extreme_definition": "obs >= local observed threshold map",
+        "extreme_definition": (
+            "obs >= local observed climatological threshold map selected by valid time; "
+            "thresholds should preferably come from long-term observations."
+        ),
+        "threshold_file": os.path.abspath(args.threshold_file) if args.threshold_file else None,
+        "threshold_forecast_dir": os.path.abspath(args.threshold_forecast_dir or args.forecast_dir),
+        "threshold_years": None
+        if args.threshold_file
+        else [
+            year
+            for year in range(
+                int(args.threshold_start_year if args.threshold_start_year is not None else min(years)),
+                int(args.threshold_end_year if args.threshold_end_year is not None else max(years)) + 1,
+            )
+            if year not in parse_years(args.threshold_skip_years)
+        ],
+        "threshold_grouping": {
+            variable: thresholds[variable].get("grouping", "pooled")
+            for variable in variables
+        },
         "extreme_quantile_pr": args.extreme_quantile_pr,
         "extreme_quantile_t2m": args.extreme_quantile_t2m,
         "pr_min_threshold": args.pr_min_threshold,
+        "eval_mask": args.eval_mask,
+        "land_mask_file": os.path.abspath(args.land_mask_file) if args.land_mask_file else None,
+        "evaluation_mask_source": evaluation_mask_source,
         "calibrated_bss": (
             "leave-one-year-out logistic reliability calibration from area-weighted binned counts"
             if args.bss_calibration == "logistic_cv"
