@@ -1049,6 +1049,122 @@ def make_spatial_plots(spatial, out_dir):
     print(f"✅ Wrote spatial matrix plots under: {plot_dir}")
 
 
+def build_lead_season_skill_table(summary):
+    required = {
+        "subset",
+        "variable",
+        "group_type",
+        "group_value",
+        "lead",
+        "lead_label",
+        "n_forecasts",
+        "model_crps",
+        "geos_crps",
+        "crps_skill_pct",
+        "model_rmse",
+        "geos_rmse",
+        "rmse_skill_pct",
+        "model_calibrated_bss",
+        "geos_calibrated_bss",
+        "calibrated_bss_diff",
+    }
+    missing = sorted(required - set(summary.columns))
+    if missing:
+        raise ValueError(f"Cannot build lead-season skill table; summary is missing columns: {missing}")
+
+    table = summary[summary["group_type"].eq("valid_season_lead")].copy()
+    if table.empty:
+        return table
+    season_order = {season: i for i, season in enumerate(SEASONS)}
+    subset_order = {subset: i for i, subset in enumerate(SUBSETS)}
+    table["season"] = table["group_value"].astype(str)
+    table["lead_week"] = table["lead"].astype(int)
+    table["subset_order"] = table["subset"].map(subset_order).fillna(999).astype(int)
+    table["season_order"] = table["season"].map(season_order).fillna(999).astype(int)
+    table["ml_better_crps"] = table["crps_skill_pct"] > 0.0
+    table["ml_better_rmse"] = table["rmse_skill_pct"] > 0.0
+    table["ml_better_calibrated_bss"] = table["calibrated_bss_diff"] > 0.0
+    table["ml_better_all_three"] = (
+        table["ml_better_crps"] & table["ml_better_rmse"] & table["ml_better_calibrated_bss"]
+    )
+    table = table.rename(
+        columns={
+            "n_forecasts": "n_cases",
+            "model_crps": "ml_crps",
+            "model_rmse": "ml_rmse",
+            "model_calibrated_bss": "ml_calibrated_bss",
+            "geos_calibrated_bss": "geos_calibrated_bss",
+            "crps_skill_pct": "crps_improvement_pct",
+            "rmse_skill_pct": "rmse_improvement_pct",
+            "calibrated_bss_diff": "calibrated_bss_gain",
+        }
+    )
+    ordered_columns = [
+        "variable",
+        "subset",
+        "season",
+        "lead_week",
+        "lead_label",
+        "n_cases",
+        "geos_crps",
+        "ml_crps",
+        "crps_improvement_pct",
+        "geos_rmse",
+        "ml_rmse",
+        "rmse_improvement_pct",
+        "geos_calibrated_bss",
+        "ml_calibrated_bss",
+        "calibrated_bss_gain",
+        "ml_better_crps",
+        "ml_better_rmse",
+        "ml_better_calibrated_bss",
+        "ml_better_all_three",
+        "subset_order",
+        "season_order",
+    ]
+    table = table[ordered_columns]
+    table = table.sort_values(["variable", "subset_order", "season_order", "lead_week"]).reset_index(drop=True)
+    return table.drop(columns=["subset_order", "season_order"])
+
+
+def write_lead_season_skill_table(summary, out_dir):
+    table = build_lead_season_skill_table(summary)
+    table_path = os.path.join(out_dir, "lead_season_skill_table.csv")
+    table.to_csv(table_path, index=False, float_format="%.6f")
+    print(f"✅ Wrote lead-season skill table: {table_path}")
+    if table.empty:
+        print("⚠️ Lead-season skill table is empty.")
+        return table_path
+
+    print("\nLead-season skill summary")
+    print(
+        "  CRPS/RMSE improvement (%) = 100 * (1 - ML/GEOS), positive means ML lower error.\n"
+        "  Calibrated BSS gain = ML calibrated BSS - GEOS calibrated BSS, positive means ML better."
+    )
+    display_columns = [
+        "variable",
+        "subset",
+        "season",
+        "lead_label",
+        "n_cases",
+        "geos_crps",
+        "ml_crps",
+        "crps_improvement_pct",
+        "geos_rmse",
+        "ml_rmse",
+        "rmse_improvement_pct",
+        "geos_calibrated_bss",
+        "ml_calibrated_bss",
+        "calibrated_bss_gain",
+        "ml_better_all_three",
+    ]
+    display = table[display_columns].copy()
+    with pd.option_context("display.max_rows", 200, "display.width", 220):
+        print(display.to_string(index=False, float_format=lambda value: f"{value:8.3f}"))
+    print()
+    return table_path
+
+
 def main():
     args = parse_args()
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in parse_years(args.skip_years)]
@@ -1063,8 +1179,9 @@ def main():
     metadata_path = os.path.join(args.out_dir, "matrix_eval_metadata.json")
     if os.path.exists(summary_path) and os.path.exists(spatial_path) and not args.overwrite:
         print(f"✅ Existing matrix evaluation found: {summary_path}")
+        summary = pd.read_csv(summary_path)
+        write_lead_season_skill_table(summary, args.out_dir)
         if args.make_plots:
-            summary = pd.read_csv(summary_path)
             spatial = xr.open_dataset(spatial_path)
             make_scalar_matrix_plots(summary, args.out_dir)
             make_spatial_plots(spatial, args.out_dir)
@@ -1091,6 +1208,7 @@ def main():
 
     summary.to_csv(summary_path, index=False, float_format="%.6f")
     spatial.to_netcdf(spatial_path)
+    lead_season_table_path = write_lead_season_skill_table(summary, args.out_dir)
     metadata = {
         "forecast_dir": os.path.abspath(args.forecast_dir),
         "years": years,
@@ -1106,6 +1224,7 @@ def main():
         "county_boundaries": args.county_boundaries,
         "cartopy_enabled": bool(MAP_CONTEXT["enabled"]),
         "cartopy_feature_count": int(len(MAP_CONTEXT["features"])),
+        "lead_season_skill_table": os.path.abspath(lead_season_table_path),
     }
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
