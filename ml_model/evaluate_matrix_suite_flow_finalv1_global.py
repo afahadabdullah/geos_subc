@@ -1177,7 +1177,7 @@ def main():
     summary_path = os.path.join(args.out_dir, "matrix_summary_metrics.csv")
     spatial_path = os.path.join(args.out_dir, "matrix_spatial_metrics.nc")
     metadata_path = os.path.join(args.out_dir, "matrix_eval_metadata.json")
-    if os.path.exists(summary_path) and os.path.exists(spatial_path) and not args.overwrite:
+    if os.path.exists(summary_path) and (not args.make_plots or os.path.exists(spatial_path)) and not args.overwrite:
         print(f"✅ Existing matrix evaluation found: {summary_path}")
         summary = pd.read_csv(summary_path)
         write_lead_season_skill_table(summary, args.out_dir)
@@ -1187,6 +1187,11 @@ def main():
             make_spatial_plots(spatial, args.out_dir)
             spatial.close()
         return
+    if os.path.exists(summary_path) and args.make_plots and not os.path.exists(spatial_path) and not args.overwrite:
+        print(
+            f"♻️ Existing summary found, but spatial plots were requested and {spatial_path} is missing. "
+            "Recomputing full matrix evaluation."
+        )
 
     thresholds, obs_clim, lats, lons = collect_obs_thresholds(args.forecast_dir, years, variables, args)
     if deadline_reached(deadline):
