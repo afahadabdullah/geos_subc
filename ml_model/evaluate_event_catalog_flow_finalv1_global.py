@@ -741,6 +741,26 @@ def skill_pct(model_value, geos_value):
     return float(100.0 * (1.0 - model_value / geos_value))
 
 
+def robust_limits(fields, center_zero=False, lower=5, upper=95, fallback=(-1.0, 1.0)):
+    finite_parts = []
+    for field in fields:
+        arr = np.asarray(field, dtype=np.float64)
+        vals = arr[np.isfinite(arr)]
+        if vals.size:
+            finite_parts.append(vals)
+    if not finite_parts:
+        return fallback
+    vals = np.concatenate(finite_parts)
+    if center_zero:
+        vmax = max(float(np.nanpercentile(np.abs(vals), upper)), 1e-6)
+        return -vmax, vmax
+    vmin, vmax = np.nanpercentile(vals, [lower, upper])
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or abs(vmax - vmin) <= 1e-12:
+        mid = float(np.nanmean(vals)) if vals.size else 0.0
+        return mid - 1.0, mid + 1.0
+    return float(vmin), float(vmax)
+
+
 def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights, calibrator=None, tail_fraction=DEFAULT_TAIL_FRACTION):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
@@ -862,6 +882,7 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "obs_event_fraction": obs_event_fraction,
         "model_mean": model["mean"],
         "geos_mean": geos["mean"],
+        "area_mean_closeness_gain": abs(geos["mean"] - obs_mean) - abs(model["mean"] - obs_mean),
         "model_spread_region_mean": model["spread_region_mean"],
         "geos_spread_region_mean": geos["spread_region_mean"],
         "model_q10_region_mean": model["q10_region_mean"],
@@ -876,12 +897,14 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "model_tail_q90": model["tail_q90"],
         "geos_tail_q10": geos["tail_q10"],
         "geos_tail_q90": geos["tail_q90"],
+        "tail_closeness_gain": abs(geos["tail_mean"] - obs_tail_mean) - abs(model["tail_mean"] - obs_tail_mean),
         "model_rmse": model["rmse"],
         "geos_rmse": geos["rmse"],
         "rmse_skill_pct": skill_pct(model["rmse"], geos["rmse"]),
         "model_mae": model["mae"],
         "geos_mae": geos["mae"],
         "mae_skill_pct": skill_pct(model["mae"], geos["mae"]),
+        "mae_closeness_gain": geos["mae"] - model["mae"],
         "model_bias": model["bias"],
         "geos_bias": geos["bias"],
         "model_crps": model["crps"],
@@ -999,7 +1022,7 @@ def plot_event_timeseries(event, rows, out_dir):
     df["valid_time_dt"] = pd.to_datetime(df["valid_time"])
     event_start = pd.Timestamp(event["event_start"])
     event_end = pd.Timestamp(event["event_end"])
-    fig, axes = plt.subplots(len(DEFAULT_LEADS), 3, figsize=(17, 3.6 * len(DEFAULT_LEADS) + 1.0), sharex="col")
+    fig, axes = plt.subplots(len(DEFAULT_LEADS), 4, figsize=(22, 3.6 * len(DEFAULT_LEADS) + 1.0), sharex="col")
     axes = np.asarray(axes)
     if axes.ndim == 1:
         axes = axes.reshape(1, -1)
@@ -1098,6 +1121,26 @@ def plot_event_timeseries(event, rows, out_dir):
         ax.set_ylim(-0.03, 1.03)
         ax.set_title(f"lead week {lead}: threshold-event area/prob")
         ax.grid(alpha=0.25)
+
+        ax = axes[row_idx, 3]
+        ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0, label="tie")
+        ax.plot(
+            x,
+            p["area_mean_closeness_gain"],
+            color="#1f77b4",
+            marker="o",
+            label="area mean closeness gain",
+        )
+        ax.plot(
+            x,
+            p["tail_closeness_gain"],
+            color="#9467bd",
+            marker="o",
+            label="tail closeness gain",
+        )
+        ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
+        ax.set_title(f"lead week {lead}: closeness vs obs\npositive = ML closer")
+        ax.grid(alpha=0.25)
     _unique_legend(fig, axes, ncol=4)
     fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.83)
     fig.autofmt_xdate()
@@ -1134,31 +1177,53 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     offset = VARIABLES[variable]["offset"]
     units = VARIABLES[variable]["plot_units"]
     intensity_cmap = "coolwarm" if variable == "t2m" else "viridis"
+    obs_plot = maps["obs"] + offset
+    threshold_plot = maps["threshold"] + offset
+    geos_plot = maps["geos_mean"] + offset
+    model_plot = maps["model_mean"] + offset
+    model_minus_geos = maps["model_mean"] - maps["geos_mean"]
+    geos_abs_error = np.abs(maps["geos_mean"] - maps["obs"])
+    model_abs_error = np.abs(maps["model_mean"] - maps["obs"])
+    closeness_gain = geos_abs_error - model_abs_error
+    closer_forecast = np.where(
+        np.isfinite(closeness_gain),
+        np.where(closeness_gain > 0, 1.0, np.where(closeness_gain < 0, -1.0, 0.0)),
+        np.nan,
+    )
+    crps_skill = np.where(
+        np.abs(maps["geos_crps"]) > 1e-12,
+        100.0 * (1.0 - maps["model_crps"] / maps["geos_crps"]),
+        np.nan,
+    )
+    raw_prob_diff = maps["model_prob"] - maps["geos_prob"]
+    cal_prob_diff = maps["model_prob_cal"] - maps["geos_prob_cal"]
+    intensity_vmin, intensity_vmax = robust_limits([obs_plot, threshold_plot, geos_plot, model_plot])
+    error_vmin, error_vmax = robust_limits([geos_abs_error, model_abs_error], lower=0, upper=95, fallback=(0.0, 1.0))
+    diff_vmin, diff_vmax = robust_limits([model_minus_geos], center_zero=True)
+    closeness_vmin, closeness_vmax = robust_limits([closeness_gain], center_zero=True)
+    crps_vmin, crps_vmax = robust_limits([crps_skill], center_zero=True)
+    raw_prob_diff_vmin, raw_prob_diff_vmax = robust_limits([raw_prob_diff], center_zero=True, fallback=(-1.0, 1.0))
+    cal_prob_diff_vmin, cal_prob_diff_vmax = robust_limits([cal_prob_diff], center_zero=True, fallback=(-1.0, 1.0))
     panels = [
-        ("Observed", maps["obs"] + offset, intensity_cmap, False, None, None),
-        ("Obs clim threshold", maps["threshold"] + offset, intensity_cmap, False, None, None),
+        ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("Obs clim threshold", threshold_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Observed extreme mask", maps["obs_event"], "Greys", False, 0.0, 1.0),
-        ("GEOS mean", maps["geos_mean"] + offset, intensity_cmap, False, None, None),
-        ("ML mean", maps["model_mean"] + offset, intensity_cmap, False, None, None),
-        ("ML - GEOS", maps["model_mean"] - maps["geos_mean"], "RdBu", True, None, None),
-        ("|GEOS - Obs|", np.abs(maps["geos_mean"] - maps["obs"]), "magma", False, None, None),
-        ("|ML - Obs|", np.abs(maps["model_mean"] - maps["obs"]), "magma", False, None, None),
-        (
-            "CRPS skill %",
-            np.where(np.abs(maps["geos_crps"]) > 1e-12, 100.0 * (1.0 - maps["model_crps"] / maps["geos_crps"]), np.nan),
-            "RdBu",
-            True,
-            None,
-            None,
-        ),
+        ("GEOS mean", geos_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML mean", model_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML - GEOS", model_minus_geos, "RdBu", True, diff_vmin, diff_vmax),
+        ("|GEOS - Obs|", geos_abs_error, "magma", False, error_vmin, error_vmax),
+        ("|ML - Obs|", model_abs_error, "magma", False, error_vmin, error_vmax),
+        ("Closeness gain\n|GEOS-Obs|-|ML-Obs|\nblue = ML closer", closeness_gain, "RdBu", True, closeness_vmin, closeness_vmax),
+        ("Closer forecast\nML=+1 blue, GEOS=-1 red", closer_forecast, "RdBu", False, -1.0, 1.0),
+        ("CRPS skill %", crps_skill, "RdBu", True, crps_vmin, crps_vmax),
         ("GEOS raw event prob", maps["geos_prob"], "viridis", False, 0.0, 1.0),
         ("ML raw event prob", maps["model_prob"], "viridis", False, 0.0, 1.0),
-        ("Raw event prob ML-GEOS", maps["model_prob"] - maps["geos_prob"], "RdBu", True, None, None),
+        ("Raw event prob ML-GEOS", raw_prob_diff, "RdBu", True, raw_prob_diff_vmin, raw_prob_diff_vmax),
         ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False, 0.0, 1.0),
         ("ML cal event prob", maps["model_prob_cal"], "viridis", False, 0.0, 1.0),
-        ("Cal event prob ML-GEOS", maps["model_prob_cal"] - maps["geos_prob_cal"], "RdBu", True, None, None),
+        ("Cal event prob ML-GEOS", cal_prob_diff, "RdBu", True, cal_prob_diff_vmin, cal_prob_diff_vmax),
     ]
-    fig, axes = make_map_subplots(4, 4, figsize=(18, 14), squeeze=False, constrained_layout=True)
+    fig, axes = make_map_subplots(4, 5, figsize=(22, 14), squeeze=False, constrained_layout=True)
     for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
         plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
         finite = plot_field[np.isfinite(plot_field)]
