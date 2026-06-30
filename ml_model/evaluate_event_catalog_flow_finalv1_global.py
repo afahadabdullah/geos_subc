@@ -1894,16 +1894,60 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         center_zero=True,
         fallback=(-1.0, 1.0),
     )
-    panels = [
+    def save_spatial_panel_grid(panels, nrows, ncols, figsize, suffix, title_extra):
+        fig, axes = make_map_subplots(nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True)
+        from evaluate_matrix_suite_flow_finalv1_global import MAP_CONTEXT
+
+        for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
+            plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
+            finite = plot_field[np.isfinite(plot_field)]
+            if fixed_vmin is not None and fixed_vmax is not None:
+                vmin, vmax = fixed_vmin, fixed_vmax
+            elif finite.size:
+                if center_zero:
+                    vmax = max(float(np.nanpercentile(np.abs(finite), 95)), 1e-6)
+                    vmin = -vmax
+                else:
+                    vmin, vmax = np.nanpercentile(finite, [5, 95])
+            else:
+                vmin, vmax = (-1, 1) if center_zero else (0, 1)
+
+            kwargs = {}
+            if MAP_CONTEXT["enabled"]:
+                kwargs["transform"] = MAP_CONTEXT["data_crs"]
+            mesh = ax.pcolormesh(
+                plot_lons,
+                plot_lats,
+                plot_field,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                shading="auto",
+                **kwargs,
+            )
+            add_map_overlays(ax, plot_lons, plot_lats)
+            ax.set_title(title, fontsize=9)
+            ax.set_xlabel("lon", fontsize=8)
+            ax.set_ylabel("lat", fontsize=8)
+            fig.colorbar(mesh, ax=ax, shrink=0.75)
+        for ax in axes.ravel()[len(panels) :]:
+            ax.set_visible(False)
+        fig.suptitle(
+            f"{event['region_label']} | {event['event_name']} | {variable.upper()} | {title_extra} | "
+            f"init {sample_row['init_time']} valid {sample_row['valid_time']} lead week {sample_row['lead']} | {units}",
+            fontsize=12,
+        )
+        out_path = os.path.join(plot_dir, f"{event['event_id']}_lead{sample_row['lead']}_{suffix}.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return out_path
+
+    risk_panels = [
         ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Obs clim threshold", threshold_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Observed extreme mask", maps["obs_event"], "Greys", False, 0.0, 1.0),
         (f"GEOS {q_label}", geos_upper_plot, intensity_cmap, False, upper_vmin, upper_vmax),
         (f"ML {q_label}", model_upper_plot, intensity_cmap, False, upper_vmin, upper_vmax),
-        ("GEOS mean\nsecondary", geos_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
-        ("ML mean\nsecondary", model_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
-        ("ML - GEOS mean", model_minus_geos, "RdBu", True, diff_vmin, diff_vmax),
-        (f"ML - GEOS {q_label}", upper_minus_geos, "RdBu", True, upper_diff_vmin, upper_diff_vmax),
         (f"{q_label} closeness gain\nblue = ML closer", upper_closeness_gain, "RdBu", True, upper_closeness_vmin, upper_closeness_vmax),
         ("GEOS raw event prob", maps["geos_prob"], "viridis", False, 0.0, 1.0),
         ("ML raw event prob", maps["model_prob"], "viridis", False, 0.0, 1.0),
@@ -1911,52 +1955,40 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         (f"GEOS neighborhood prob\nr={DEFAULT_NEIGHBORHOOD_RADIUS}", maps["geos_prob_neighborhood"], "viridis", False, 0.0, 1.0),
         (f"ML neighborhood prob\nr={DEFAULT_NEIGHBORHOOD_RADIUS}", maps["model_prob_neighborhood"], "viridis", False, 0.0, 1.0),
         ("Neighborhood prob ML-GEOS", neighborhood_prob_diff, "RdBu", True, neighborhood_prob_diff_vmin, neighborhood_prob_diff_vmax),
-        ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False, 0.0, 1.0),
-        ("ML cal event prob", maps["model_prob_cal"], "viridis", False, 0.0, 1.0),
-        ("Cal event prob ML-GEOS", cal_prob_diff, "RdBu", True, cal_prob_diff_vmin, cal_prob_diff_vmax),
-        ("CRPS skill %", crps_skill, "RdBu", True, crps_vmin, crps_vmax),
-        ("BSS ML-GEOS", bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
-        ("Cal BSS ML-GEOS", cal_bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
+    ]
+    verification_panels = [
+        ("GEOS mean\nsecondary", geos_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML mean\nsecondary", model_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML - GEOS mean", model_minus_geos, "RdBu", True, diff_vmin, diff_vmax),
+        (f"ML - GEOS {q_label}", upper_minus_geos, "RdBu", True, upper_diff_vmin, upper_diff_vmax),
         ("|GEOS mean - Obs|", geos_abs_error, "magma", False, error_vmin, error_vmax),
         ("|ML mean - Obs|", model_abs_error, "magma", False, error_vmin, error_vmax),
         ("Mean closeness gain\nblue = ML closer", closeness_gain, "RdBu", True, closeness_vmin, closeness_vmax),
+        ("CRPS skill %", crps_skill, "RdBu", True, crps_vmin, crps_vmax),
+        ("BSS ML-GEOS", bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
+        ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False, 0.0, 1.0),
+        ("ML cal event prob", maps["model_prob_cal"], "viridis", False, 0.0, 1.0),
+        ("Cal event prob ML-GEOS", cal_prob_diff, "RdBu", True, cal_prob_diff_vmin, cal_prob_diff_vmax),
+        ("Cal BSS ML-GEOS", cal_bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
     ]
-    fig, axes = make_map_subplots(5, 5, figsize=(24, 17), squeeze=False, constrained_layout=True)
-    for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
-        plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
-        finite = plot_field[np.isfinite(plot_field)]
-        if fixed_vmin is not None and fixed_vmax is not None:
-            vmin, vmax = fixed_vmin, fixed_vmax
-        elif finite.size:
-            if center_zero:
-                vmax = max(float(np.nanpercentile(np.abs(finite), 95)), 1e-6)
-                vmin = -vmax
-            else:
-                vmin, vmax = np.nanpercentile(finite, [5, 95])
-        else:
-            vmin, vmax = (-1, 1) if center_zero else (0, 1)
-        from evaluate_matrix_suite_flow_finalv1_global import MAP_CONTEXT
-
-        kwargs = {}
-        if MAP_CONTEXT["enabled"]:
-            kwargs["transform"] = MAP_CONTEXT["data_crs"]
-        mesh = ax.pcolormesh(plot_lons, plot_lats, plot_field, cmap=cmap, vmin=vmin, vmax=vmax, shading="auto", **kwargs)
-        add_map_overlays(ax, plot_lons, plot_lats)
-        ax.set_title(title, fontsize=9)
-        ax.set_xlabel("lon", fontsize=8)
-        ax.set_ylabel("lat", fontsize=8)
-        fig.colorbar(mesh, ax=ax, shrink=0.75)
-    for ax in axes.ravel()[len(panels) :]:
-        ax.set_visible(False)
-    fig.suptitle(
-        f"{event['region_label']} | {event['event_name']} | {variable.upper()} | "
-        f"init {sample_row['init_time']} valid {sample_row['valid_time']} lead week {sample_row['lead']} | {units}",
-        fontsize=12,
-    )
-    out_path = os.path.join(plot_dir, f"{event['event_id']}_lead{sample_row['lead']}_spatial.png")
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    return out_path
+    return {
+        "spatial_risk": save_spatial_panel_grid(
+            risk_panels,
+            3,
+            4,
+            (19, 11),
+            "spatial_risk",
+            "extreme-risk diagnostics",
+        ),
+        "spatial_verification": save_spatial_panel_grid(
+            verification_panels,
+            4,
+            4,
+            (19, 13),
+            "spatial_verification",
+            "supporting verification",
+        ),
+    }
 
 
 def plot_event_matrix(event_metrics, out_dir):
@@ -2104,8 +2136,9 @@ def main():
 
         if args.make_plots:
             for lead, (row, maps) in selected_maps.items():
-                map_path = plot_event_spatial(event, row, maps, lons, lats, mask, args.out_dir)
-                plot_records.append({"event_id": event["event_id"], "lead": lead, "plot_type": "spatial", "path": map_path})
+                map_paths = plot_event_spatial(event, row, maps, lons, lats, mask, args.out_dir)
+                for plot_type, map_path in map_paths.items():
+                    plot_records.append({"event_id": event["event_id"], "lead": lead, "plot_type": plot_type, "path": map_path})
 
     timeseries = pd.DataFrame(timeseries_rows)
     event_metrics = pd.DataFrame(event_metric_rows)
@@ -2165,7 +2198,9 @@ def main():
             "on that date for event-overlap selection. Time series show weekly valid times around each event. "
             "Large-ensemble event diagnostics emphasize exceedance probabilities, upper quantiles, neighborhood "
             "probabilities, and top-tail intensity; ensemble means are retained as secondary references. Spread "
-            "bands are p10-p90 of regional ensemble-mean or top-tail values."
+            "bands are p10-p90 of regional ensemble-mean or top-tail values. Spatial maps are split into compact "
+            "extreme-risk and supporting-verification figures to avoid mixing the main forecast-risk story with "
+            "secondary mean/error diagnostics."
         ),
     }
     metadata_path = os.path.join(args.out_dir, "event_catalog_eval_metadata.json")
