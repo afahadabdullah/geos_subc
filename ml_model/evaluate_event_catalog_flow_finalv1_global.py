@@ -776,8 +776,13 @@ def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights,
         "spread_grid": weighted_mean(np.nanstd(ensemble.astype(np.float64, copy=False), axis=0), valid_weights),
         "event_probability": weighted_mean(prob, valid_weights),
         "event_probability_calibrated": weighted_mean(prob_cal, valid_weights),
+        "event_probability_top_tail": weighted_top_mean(prob, valid_weights, fraction=tail_fraction),
+        "event_probability_calibrated_top_tail": weighted_top_mean(prob_cal, valid_weights, fraction=tail_fraction),
+        "event_probability_on_obs_extreme": weighted_mean(prob, np.where(event, valid_weights, 0.0)),
+        "event_probability_on_obs_nonextreme": weighted_mean(prob, np.where(~event, valid_weights, 0.0)),
         "cal_event_probability_on_obs_extreme": weighted_mean(prob_cal, np.where(event, valid_weights, 0.0)),
         "cal_event_probability_on_obs_nonextreme": weighted_mean(prob_cal, np.where(~event, valid_weights, 0.0)),
+        "event_area_fraction_prob50": weighted_mean((prob >= 0.5).astype(np.float32), valid_weights),
         "cal_event_area_fraction_prob50": weighted_mean((prob_cal >= 0.5).astype(np.float32), valid_weights),
         "brier": bs,
         "brier_calibrated": bs_cal,
@@ -888,6 +893,20 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "geos_event_probability": geos["event_probability"],
         "model_event_probability_calibrated": model["event_probability_calibrated"],
         "geos_event_probability_calibrated": geos["event_probability_calibrated"],
+        "model_event_probability_top_tail": model["event_probability_top_tail"],
+        "geos_event_probability_top_tail": geos["event_probability_top_tail"],
+        "model_event_probability_calibrated_top_tail": model["event_probability_calibrated_top_tail"],
+        "geos_event_probability_calibrated_top_tail": geos["event_probability_calibrated_top_tail"],
+        "model_event_probability_on_obs_extreme": model["event_probability_on_obs_extreme"],
+        "geos_event_probability_on_obs_extreme": geos["event_probability_on_obs_extreme"],
+        "event_probability_on_obs_extreme_diff": (
+            model["event_probability_on_obs_extreme"] - geos["event_probability_on_obs_extreme"]
+        ),
+        "model_event_probability_on_obs_nonextreme": model["event_probability_on_obs_nonextreme"],
+        "geos_event_probability_on_obs_nonextreme": geos["event_probability_on_obs_nonextreme"],
+        "event_probability_on_obs_nonextreme_diff": (
+            model["event_probability_on_obs_nonextreme"] - geos["event_probability_on_obs_nonextreme"]
+        ),
         "model_cal_event_probability_on_obs_extreme": model["cal_event_probability_on_obs_extreme"],
         "geos_cal_event_probability_on_obs_extreme": geos["cal_event_probability_on_obs_extreme"],
         "cal_event_probability_on_obs_extreme_diff": (
@@ -898,6 +917,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "cal_event_probability_on_obs_nonextreme_diff": (
             model["cal_event_probability_on_obs_nonextreme"] - geos["cal_event_probability_on_obs_nonextreme"]
         ),
+        "model_event_area_fraction_prob50": model["event_area_fraction_prob50"],
+        "geos_event_area_fraction_prob50": geos["event_area_fraction_prob50"],
         "model_cal_event_area_fraction_prob50": model["cal_event_area_fraction_prob50"],
         "geos_cal_event_area_fraction_prob50": geos["cal_event_area_fraction_prob50"],
         "model_bss": model["bss"],
@@ -915,6 +936,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "geos_mean": geos["mean_map"],
         "model_crps": model["crps_map"],
         "geos_crps": geos["crps_map"],
+        "model_prob": model["prob_map"],
+        "geos_prob": geos["prob_map"],
         "model_prob_cal": model["prob_cal_map"],
         "geos_prob_cal": geos["prob_cal_map"],
     }
@@ -946,7 +969,7 @@ def plot_units(row, variable):
     return out
 
 
-def _unique_legend(fig, axes, ncol=5):
+def _unique_legend(fig, axes, ncol=4):
     handles = []
     labels = []
     seen = set()
@@ -957,7 +980,7 @@ def _unique_legend(fig, axes, ncol=5):
                 labels.append(label)
                 seen.add(label)
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncol=ncol, bbox_to_anchor=(0.5, 0.995), fontsize=8)
+        fig.legend(handles, labels, loc="upper center", ncol=ncol, bbox_to_anchor=(0.5, 0.995), fontsize=7)
 
 
 def plot_event_timeseries(event, rows, out_dir):
@@ -976,7 +999,7 @@ def plot_event_timeseries(event, rows, out_dir):
     df["valid_time_dt"] = pd.to_datetime(df["valid_time"])
     event_start = pd.Timestamp(event["event_start"])
     event_end = pd.Timestamp(event["event_end"])
-    fig, axes = plt.subplots(len(DEFAULT_LEADS), 3, figsize=(17, 3.4 * len(DEFAULT_LEADS)), sharex="col")
+    fig, axes = plt.subplots(len(DEFAULT_LEADS), 3, figsize=(17, 3.6 * len(DEFAULT_LEADS) + 1.0), sharex="col")
     axes = np.asarray(axes)
     if axes.ndim == 1:
         axes = axes.reshape(1, -1)
@@ -1043,26 +1066,42 @@ def plot_event_timeseries(event, rows, out_dir):
         ax.plot(x, p["obs_event_fraction"], color="black", marker="o", label="Obs extreme area fraction")
         ax.plot(
             x,
-            p["model_event_probability_calibrated"],
+            p["model_event_probability"],
             color="#1f77b4",
             marker="o",
+            label="ML raw event probability",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability"],
+            color="#ff7f0e",
+            marker="o",
+            label="GEOS raw event probability",
+        )
+        ax.plot(
+            x,
+            p["model_event_probability_calibrated"],
+            color="#1f77b4",
+            linestyle="--",
+            linewidth=1.2,
             label="ML calibrated event probability",
         )
         ax.plot(
             x,
             p["geos_event_probability_calibrated"],
             color="#ff7f0e",
-            marker="o",
+            linestyle="--",
+            linewidth=1.2,
             label="GEOS calibrated event probability",
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
         ax.set_ylim(-0.03, 1.03)
         ax.set_title(f"lead week {lead}: threshold-event area/prob")
         ax.grid(alpha=0.25)
-    _unique_legend(fig, axes, ncol=5)
-    fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.89)
+    _unique_legend(fig, axes, ncol=4)
+    fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.83)
     fig.autofmt_xdate()
-    fig.tight_layout(rect=[0, 0, 1, 0.82])
+    fig.tight_layout(rect=[0, 0, 1, 0.76])
     out_path = os.path.join(plot_dir, f"{event['event_id']}_timeseries.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1096,29 +1135,36 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     units = VARIABLES[variable]["plot_units"]
     intensity_cmap = "coolwarm" if variable == "t2m" else "viridis"
     panels = [
-        ("Observed", maps["obs"] + offset, intensity_cmap, False),
-        ("Obs clim threshold", maps["threshold"] + offset, intensity_cmap, False),
-        ("Observed extreme mask", maps["obs_event"], "Greys", False),
-        ("GEOS mean", maps["geos_mean"] + offset, intensity_cmap, False),
-        ("ML mean", maps["model_mean"] + offset, intensity_cmap, False),
-        ("ML - GEOS", maps["model_mean"] - maps["geos_mean"], "RdBu", True),
-        ("|GEOS - Obs|", np.abs(maps["geos_mean"] - maps["obs"]), "magma", False),
-        ("|ML - Obs|", np.abs(maps["model_mean"] - maps["obs"]), "magma", False),
+        ("Observed", maps["obs"] + offset, intensity_cmap, False, None, None),
+        ("Obs clim threshold", maps["threshold"] + offset, intensity_cmap, False, None, None),
+        ("Observed extreme mask", maps["obs_event"], "Greys", False, 0.0, 1.0),
+        ("GEOS mean", maps["geos_mean"] + offset, intensity_cmap, False, None, None),
+        ("ML mean", maps["model_mean"] + offset, intensity_cmap, False, None, None),
+        ("ML - GEOS", maps["model_mean"] - maps["geos_mean"], "RdBu", True, None, None),
+        ("|GEOS - Obs|", np.abs(maps["geos_mean"] - maps["obs"]), "magma", False, None, None),
+        ("|ML - Obs|", np.abs(maps["model_mean"] - maps["obs"]), "magma", False, None, None),
         (
             "CRPS skill %",
             np.where(np.abs(maps["geos_crps"]) > 1e-12, 100.0 * (1.0 - maps["model_crps"] / maps["geos_crps"]), np.nan),
             "RdBu",
             True,
+            None,
+            None,
         ),
-        ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False),
-        ("ML cal event prob", maps["model_prob_cal"], "viridis", False),
-        ("Cal event prob ML-GEOS", maps["model_prob_cal"] - maps["geos_prob_cal"], "RdBu", True),
+        ("GEOS raw event prob", maps["geos_prob"], "viridis", False, 0.0, 1.0),
+        ("ML raw event prob", maps["model_prob"], "viridis", False, 0.0, 1.0),
+        ("Raw event prob ML-GEOS", maps["model_prob"] - maps["geos_prob"], "RdBu", True, None, None),
+        ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False, 0.0, 1.0),
+        ("ML cal event prob", maps["model_prob_cal"], "viridis", False, 0.0, 1.0),
+        ("Cal event prob ML-GEOS", maps["model_prob_cal"] - maps["geos_prob_cal"], "RdBu", True, None, None),
     ]
-    fig, axes = make_map_subplots(3, 4, figsize=(18, 11), squeeze=False, constrained_layout=True)
-    for ax, (title, field, cmap, center_zero) in zip(axes.ravel(), panels):
+    fig, axes = make_map_subplots(4, 4, figsize=(18, 14), squeeze=False, constrained_layout=True)
+    for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
         plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
         finite = plot_field[np.isfinite(plot_field)]
-        if finite.size:
+        if fixed_vmin is not None and fixed_vmax is not None:
+            vmin, vmax = fixed_vmin, fixed_vmax
+        elif finite.size:
             if center_zero:
                 vmax = max(float(np.nanpercentile(np.abs(finite), 95)), 1e-6)
                 vmin = -vmax
@@ -1137,6 +1183,8 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         ax.set_xlabel("lon", fontsize=8)
         ax.set_ylabel("lat", fontsize=8)
         fig.colorbar(mesh, ax=ax, shrink=0.75)
+    for ax in axes.ravel()[len(panels) :]:
+        ax.set_visible(False)
     fig.suptitle(
         f"{event['region_label']} | {event['event_name']} | {variable.upper()} | "
         f"init {sample_row['init_time']} valid {sample_row['valid_time']} lead week {sample_row['lead']} | {units}",
