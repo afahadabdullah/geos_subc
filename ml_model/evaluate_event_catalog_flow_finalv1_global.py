@@ -482,6 +482,7 @@ def parse_args():
     parser.add_argument("--regions", type=str, default="all")
     parser.add_argument("--variables", type=str, default="pr,t2m")
     parser.add_argument("--leads", type=str, default="3,4")
+    parser.add_argument("--progression_leads", type=str, default="1,2,3,4")
     parser.add_argument(
         "--regional_weighting",
         choices=("uniform", "area"),
@@ -668,6 +669,28 @@ def target_window_for_valid_time(valid_time):
     return valid_time - pd.Timedelta(days=6), valid_time
 
 
+def build_sample_record(zarr_path, zarr_year, init_idx, lead_idx, lead_value, init_time, valid_time, event):
+    event_start_core = pd.Timestamp(event["event_start"]).normalize()
+    event_end_core = pd.Timestamp(event["event_end"]).normalize()
+    target_start, target_end = target_window_for_valid_time(valid_time)
+    event_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_core, event_end_core)
+    return {
+        "zarr_path": zarr_path,
+        "zarr_year": int(zarr_year),
+        "init_idx": int(init_idx),
+        "lead_idx": int(lead_idx),
+        "lead": int(lead_value),
+        "init_time": pd.Timestamp(init_time).normalize(),
+        "valid_time": pd.Timestamp(valid_time).normalize(),
+        "target_window_start": target_start,
+        "target_window_end": target_end,
+        "event_overlap_days": int(event_overlap_days),
+        "event_overlap_fraction": float(event_overlap_days / 7.0),
+        "event_distance_days": interval_distance_days(target_start, target_end, event_start_core, event_end_core),
+        "in_event_window": bool(event_overlap_days > 0),
+    }
+
+
 def inclusive_overlap_days(start_a, end_a, start_b, end_b):
     start = max(pd.Timestamp(start_a).normalize(), pd.Timestamp(start_b).normalize())
     end = min(pd.Timestamp(end_a).normalize(), pd.Timestamp(end_b).normalize())
@@ -715,30 +738,59 @@ def find_candidate_samples(forecast_dir, event, leads, timeseries_window_days, e
                     valid_time = pd.Timestamp(valid_values[lead_idx]).normalize()
                     target_start, target_end = target_window_for_valid_time(valid_time)
                     if target_end >= ts_start and target_start <= ts_end:
-                        event_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_core, event_end_core)
-                        tolerance_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_tol, event_end_tol)
-                        samples.append(
-                            {
-                                "zarr_path": path,
-                                "zarr_year": int(year),
-                                "init_idx": int(init_idx),
-                                "lead_idx": int(lead_idx),
-                                "lead": int(lead_value),
-                                "init_time": pd.Timestamp(init_time).normalize(),
-                                "valid_time": valid_time,
-                                "target_window_start": target_start,
-                                "target_window_end": target_end,
-                                "event_overlap_days": int(event_overlap_days),
-                                "event_overlap_fraction": float(event_overlap_days / 7.0),
-                                "tolerance_overlap_days": int(tolerance_overlap_days),
-                                "event_distance_days": interval_distance_days(target_start, target_end, event_start_core, event_end_core),
-                                "in_event_window": bool(event_overlap_days > 0),
-                                "in_event_tolerance_window": bool(tolerance_overlap_days > 0),
-                            }
+                        sample = build_sample_record(
+                            path,
+                            year,
+                            init_idx,
+                            lead_idx,
+                            lead_value,
+                            init_time,
+                            valid_time,
+                            event,
                         )
+                        tolerance_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_tol, event_end_tol)
+                        sample["tolerance_overlap_days"] = int(tolerance_overlap_days)
+                        sample["in_event_tolerance_window"] = bool(tolerance_overlap_days > 0)
+                        samples.append(sample)
         finally:
             ds.close()
     return samples
+
+
+def fixed_init_progression_samples(selected_samples, event, progression_leads):
+    samples = []
+    seen = set()
+    for selected in selected_samples:
+        key = (selected["zarr_path"], int(selected["zarr_year"]), int(selected["init_idx"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        zarr_path, zarr_year, init_idx = key
+        ds = xr.open_zarr(zarr_path, consolidated=False, chunks=None)
+        try:
+            init_values = pd.to_datetime(ds["init"].values).normalize()
+            init_time = pd.Timestamp(init_values[init_idx]).normalize()
+            lead_values = ds["lead"].values
+            valid_values = valid_times_for_dataset(ds, init_idx, init_time, lead_values)
+            for lead_idx, lead_value in enumerate(lead_values):
+                lead_value = int(lead_value)
+                if lead_value not in progression_leads:
+                    continue
+                sample = build_sample_record(
+                    zarr_path,
+                    zarr_year,
+                    init_idx,
+                    lead_idx,
+                    lead_value,
+                    init_time,
+                    pd.Timestamp(valid_values[lead_idx]).normalize(),
+                    event,
+                )
+                sample["selection_mode"] = "fixed_init_progression"
+                samples.append(sample)
+        finally:
+            ds.close()
+    return sorted(samples, key=lambda item: (item["init_time"], item["lead"]))
 
 
 def choose_event_samples(samples, leads):
@@ -1219,6 +1271,153 @@ def plot_event_timeseries(event, rows, out_dir):
     return out_path
 
 
+def shade_event_overlap_by_lead(ax, df):
+    for _, row in df.iterrows():
+        overlap = float(row.get("event_overlap_fraction", 0.0))
+        if overlap <= 0:
+            continue
+        lead = float(row["lead"])
+        ax.axvspan(lead - 0.38, lead + 0.38, color="0.2", alpha=min(0.25, 0.05 + 0.25 * overlap))
+
+
+def plot_fixed_init_progression(event, rows, out_dir):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    variable = event["variable"]
+    units = VARIABLES[variable]["plot_units"]
+    plot_dir = os.path.join(out_dir, "plots", "fixed_init_progression")
+    os.makedirs(plot_dir, exist_ok=True)
+    df = pd.DataFrame(rows).copy()
+    if df.empty:
+        return []
+    out_paths = []
+    for init_time, group in df.groupby("init_time", sort=True):
+        group = group.sort_values("lead")
+        p = group.apply(lambda row: plot_units(row, variable), axis=1, result_type="expand")
+        x = p["lead"].astype(float).values
+        fig, axes = plt.subplots(1, 4, figsize=(21, 4.4), sharex=True)
+
+        ax = axes[0]
+        shade_event_overlap_by_lead(ax, p)
+        ax.plot(x, p["obs_mean"], color="black", marker="o", label="Obs")
+        ax.plot(x, p["model_mean"], color="#1f77b4", marker="o", label="ML mean")
+        ax.fill_between(
+            x,
+            p["model_q10_region_mean"].astype(float),
+            p["model_q90_region_mean"].astype(float),
+            color="#1f77b4",
+            alpha=0.20,
+            label="ML p10-p90",
+        )
+        ax.plot(x, p["geos_mean"], color="#ff7f0e", marker="o", label="GEOS mean")
+        ax.fill_between(
+            x,
+            p["geos_q10_region_mean"].astype(float),
+            p["geos_q90_region_mean"].astype(float),
+            color="#ff7f0e",
+            alpha=0.18,
+            label="GEOS p10-p90",
+        )
+        ax.set_ylabel(f"{variable.upper()} ({units})")
+        ax.set_title("area mean")
+        ax.grid(alpha=0.25)
+
+        ax = axes[1]
+        shade_event_overlap_by_lead(ax, p)
+        ax.plot(x, p["obs_tail_mean"], color="black", marker="o", label="Obs tail")
+        ax.plot(x, p["threshold_tail_mean"], color="0.35", linestyle="--", linewidth=1.2, label="obs-clim tail threshold")
+        ax.plot(x, p["model_tail_mean"], color="#1f77b4", marker="o", label="ML tail")
+        ax.fill_between(
+            x,
+            p["model_tail_q10"].astype(float),
+            p["model_tail_q90"].astype(float),
+            color="#1f77b4",
+            alpha=0.20,
+            label="ML tail p10-p90",
+        )
+        ax.plot(x, p["geos_tail_mean"], color="#ff7f0e", marker="o", label="GEOS tail")
+        ax.fill_between(
+            x,
+            p["geos_tail_q10"].astype(float),
+            p["geos_tail_q90"].astype(float),
+            color="#ff7f0e",
+            alpha=0.18,
+            label="GEOS tail p10-p90",
+        )
+        ax.set_title(f"top {DEFAULT_TAIL_FRACTION:.0%} intensity")
+        ax.grid(alpha=0.25)
+
+        ax = axes[2]
+        shade_event_overlap_by_lead(ax, p)
+        ax.plot(x, p["obs_event_fraction"], color="black", marker="o", label="Obs extreme area fraction")
+        ax.plot(x, p["model_event_probability"], color="#1f77b4", marker="o", label="ML raw event prob")
+        ax.plot(x, p["geos_event_probability"], color="#ff7f0e", marker="o", label="GEOS raw event prob")
+        ax.plot(
+            x,
+            p["model_event_probability_calibrated"],
+            color="#1f77b4",
+            linestyle="--",
+            linewidth=1.2,
+            label="ML calibrated event prob",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_calibrated"],
+            color="#ff7f0e",
+            linestyle="--",
+            linewidth=1.2,
+            label="GEOS calibrated event prob",
+        )
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_title("threshold-event area/prob")
+        ax.grid(alpha=0.25)
+
+        ax = axes[3]
+        shade_event_overlap_by_lead(ax, p)
+        ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0, label="tie")
+        ax.plot(x, p["area_mean_closeness_gain"], color="#1f77b4", marker="o", label="area mean closeness")
+        ax.plot(x, p["tail_closeness_gain"], color="#9467bd", marker="o", label="tail closeness")
+        ax.set_title("closeness vs obs\npositive = ML closer")
+        ax.grid(alpha=0.25)
+
+        for ax in axes:
+            ax.set_xticks(x)
+            ax.set_xticklabels([f"week{int(v)}" for v in x])
+            ax.set_xlabel("lead")
+
+        handles = []
+        labels = []
+        seen = set()
+        for ax in axes:
+            for handle, label in zip(*ax.get_legend_handles_labels()):
+                if label and label not in seen:
+                    handles.append(handle)
+                    labels.append(label)
+                    seen.add(label)
+        if handles:
+            fig.legend(handles, labels, loc="upper center", ncol=6, fontsize=6, bbox_to_anchor=(0.5, 0.995))
+        valid_windows = ", ".join(
+            f"w{int(row.lead)}:{row.target_window_start}..{row.target_window_end}"
+            for row in group.itertuples(index=False)
+        )
+        fig.suptitle(
+            f"{event['region_label']} | {event['event_name']} | {variable.upper()} | "
+            f"fixed init {init_time} | target windows {valid_windows}",
+            y=0.84,
+            fontsize=9,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.74])
+        init_label = pd.Timestamp(init_time).strftime("%Y%m%d")
+        out_path = os.path.join(plot_dir, f"{event['event_id']}_init{init_label}_lead_progression.png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        out_paths.append(out_path)
+    return out_paths
+
+
 def prepare_region_plot(lons, lats, field, bbox, mask):
     lon180 = lon_to_180(lons)
     order = np.argsort(lon180)
@@ -1245,6 +1444,9 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     offset = VARIABLES[variable]["offset"]
     units = VARIABLES[variable]["plot_units"]
     intensity_cmap = "coolwarm" if variable == "t2m" else "viridis"
+    def masked_for_limits(field):
+        return np.where(mask, field, np.nan)
+
     obs_plot = maps["obs"] + offset
     threshold_plot = maps["threshold"] + offset
     geos_plot = maps["geos_mean"] + offset
@@ -1265,13 +1467,21 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     )
     raw_prob_diff = maps["model_prob"] - maps["geos_prob"]
     cal_prob_diff = maps["model_prob_cal"] - maps["geos_prob_cal"]
-    intensity_vmin, intensity_vmax = robust_limits([obs_plot, threshold_plot, geos_plot, model_plot])
-    error_vmin, error_vmax = robust_limits([geos_abs_error, model_abs_error], lower=0, upper=95, fallback=(0.0, 1.0))
-    diff_vmin, diff_vmax = robust_limits([model_minus_geos], center_zero=True)
-    closeness_vmin, closeness_vmax = robust_limits([closeness_gain], center_zero=True)
-    crps_vmin, crps_vmax = robust_limits([crps_skill], center_zero=True)
-    raw_prob_diff_vmin, raw_prob_diff_vmax = robust_limits([raw_prob_diff], center_zero=True, fallback=(-1.0, 1.0))
-    cal_prob_diff_vmin, cal_prob_diff_vmax = robust_limits([cal_prob_diff], center_zero=True, fallback=(-1.0, 1.0))
+    intensity_vmin, intensity_vmax = robust_limits(
+        [masked_for_limits(obs_plot), masked_for_limits(threshold_plot), masked_for_limits(geos_plot), masked_for_limits(model_plot)]
+    )
+    error_vmin, error_vmax = robust_limits(
+        [masked_for_limits(geos_abs_error), masked_for_limits(model_abs_error)], lower=0, upper=95, fallback=(0.0, 1.0)
+    )
+    diff_vmin, diff_vmax = robust_limits([masked_for_limits(model_minus_geos)], center_zero=True)
+    closeness_vmin, closeness_vmax = robust_limits([masked_for_limits(closeness_gain)], center_zero=True)
+    crps_vmin, crps_vmax = robust_limits([masked_for_limits(crps_skill)], center_zero=True)
+    raw_prob_diff_vmin, raw_prob_diff_vmax = robust_limits(
+        [masked_for_limits(raw_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
+    )
+    cal_prob_diff_vmin, cal_prob_diff_vmax = robust_limits(
+        [masked_for_limits(cal_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
+    )
     panels = [
         ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Obs clim threshold", threshold_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
@@ -1369,6 +1579,7 @@ def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     leads = parse_list(args.leads, int)
+    progression_leads = parse_list(args.progression_leads, int)
     global DEFAULT_LEADS
     DEFAULT_LEADS = leads
     if not (0.0 < float(args.tail_fraction) <= 1.0):
@@ -1401,6 +1612,7 @@ def main():
 
     timeseries_rows = []
     event_metric_rows = []
+    progression_rows = []
     plot_records = []
     for _, event_row in catalog.iterrows():
         event = event_row.to_dict()
@@ -1447,18 +1659,38 @@ def main():
             ts_path = plot_event_timeseries(event, sample_rows, args.out_dir)
             if ts_path:
                 plot_records.append({"event_id": event["event_id"], "plot_type": "timeseries", "path": ts_path})
+
+        fixed_samples = fixed_init_progression_samples(selected, event, progression_leads)
+        fixed_rows = []
+        for sample in fixed_samples:
+            row, _ = evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights)
+            row["selected_for_event_metrics"] = False
+            row["selection_mode"] = sample.get("selection_mode", "fixed_init_progression")
+            fixed_rows.append(row)
+            progression_rows.append(row)
+        if args.make_plots and fixed_rows:
+            for path in plot_fixed_init_progression(event, fixed_rows, args.out_dir):
+                plot_records.append({"event_id": event["event_id"], "plot_type": "fixed_init_progression", "path": path})
+        if fixed_rows:
+            print(f"   ↳ fixed-init progression rows: {len(fixed_rows)} across {len(set(row['init_time'] for row in fixed_rows))} init(s)")
+
+        if args.make_plots:
             for lead, (row, maps) in selected_maps.items():
                 map_path = plot_event_spatial(event, row, maps, lons, lats, mask, args.out_dir)
                 plot_records.append({"event_id": event["event_id"], "lead": lead, "plot_type": "spatial", "path": map_path})
 
     timeseries = pd.DataFrame(timeseries_rows)
     event_metrics = pd.DataFrame(event_metric_rows)
+    progression = pd.DataFrame(progression_rows)
     timeseries_path = os.path.join(args.out_dir, "event_timeseries_metrics.csv")
     event_metrics_path = os.path.join(args.out_dir, "event_selected_lead_metrics.csv")
+    progression_path = os.path.join(args.out_dir, "event_fixed_init_progression_metrics.csv")
     timeseries.to_csv(timeseries_path, index=False, float_format="%.6f")
     event_metrics.to_csv(event_metrics_path, index=False, float_format="%.6f")
+    progression.to_csv(progression_path, index=False, float_format="%.6f")
     print(f"✅ Wrote event time-series metrics: {timeseries_path}")
     print(f"✅ Wrote selected event-lead metrics: {event_metrics_path}")
+    print(f"✅ Wrote fixed-init progression metrics: {progression_path}")
 
     if not event_metrics.empty:
         overall_rows = []
@@ -1492,6 +1724,7 @@ def main():
         "calibration_params": os.path.abspath(args.calibration_params) if os.path.exists(args.calibration_params) else None,
         "land_mask_file": land_source,
         "leads": leads,
+        "progression_leads": progression_leads,
         "tail_fraction": float(DEFAULT_TAIL_FRACTION),
         "regional_weighting": args.regional_weighting,
         "timeseries_window_days": args.timeseries_window_days,

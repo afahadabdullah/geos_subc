@@ -21,6 +21,7 @@ EVENT_CATALOG="${EVENT_CATALOG:-default}"
 REGIONS="${EVENT_REGIONS:-all}"
 VARIABLES="${EVENT_VARIABLES:-pr,t2m}"
 LEADS="${EVENT_LEADS:-3,4}"
+PROGRESSION_LEADS="${EVENT_PROGRESSION_LEADS:-1,2,3,4}"
 REGIONAL_WEIGHTING="${EVENT_REGIONAL_WEIGHTING:-uniform}"
 TAIL_FRACTION="${EVENT_TAIL_FRACTION:-0.10}"
 START_YEAR="${EVENT_START_YEAR:-2021}"
@@ -49,6 +50,7 @@ echo "   Output dir: $OUT_DIR"
 echo "   Regions: $REGIONS"
 echo "   Variables: $VARIABLES"
 echo "   Leads: $LEADS"
+echo "   Fixed-init progression leads: $PROGRESSION_LEADS"
 echo "   Regional weighting: $REGIONAL_WEIGHTING"
 echo "   Tail fraction: $TAIL_FRACTION"
 
@@ -62,6 +64,7 @@ python ml_model/evaluate_event_catalog_flow_finalv1_global.py \
   --regions "$REGIONS" \
   --variables "$VARIABLES" \
   --leads "$LEADS" \
+  --progression_leads "$PROGRESSION_LEADS" \
   --regional_weighting "$REGIONAL_WEIGHTING" \
   --tail_fraction "$TAIL_FRACTION" \
   --start_year "$START_YEAR" \
