@@ -54,6 +54,8 @@ VARIABLES = {
 
 DEFAULT_LEADS = [3, 4]
 DEFAULT_TAIL_FRACTION = 0.10
+DEFAULT_MAP_QUANTILE = 0.95
+DEFAULT_NEIGHBORHOOD_RADIUS = 1
 
 
 DEFAULT_EVENT_CATALOG = [
@@ -605,6 +607,18 @@ def parse_args():
     )
     parser.add_argument("--extreme_quantile_pr", type=float, default=0.95)
     parser.add_argument("--extreme_quantile_t2m", type=float, default=0.95)
+    parser.add_argument(
+        "--map_quantile",
+        type=float,
+        default=DEFAULT_MAP_QUANTILE,
+        help="Ensemble upper quantile shown in event maps/time series; default 0.95.",
+    )
+    parser.add_argument(
+        "--neighborhood_radius",
+        type=int,
+        default=DEFAULT_NEIGHBORHOOD_RADIUS,
+        help="Grid-cell radius for neighborhood exceedance probability. 0 disables neighborhood expansion.",
+    )
     parser.add_argument("--pr_min_threshold", type=float, default=5.0)
     parser.add_argument("--timeseries_window_days", type=int, default=42)
     parser.add_argument("--event_tolerance_days", type=int, default=10)
@@ -965,6 +979,40 @@ def skill_pct(model_value, geos_value):
     return float(100.0 * (1.0 - model_value / geos_value))
 
 
+def shift_no_wrap_bool(arr, dy, dx):
+    """Shift a boolean (..., lat, lon) array without longitude wrapping."""
+    arr = np.asarray(arr, dtype=bool)
+    out = np.zeros_like(arr, dtype=bool)
+    nlat, nlon = arr.shape[-2:]
+    src_lat0 = max(0, -dy)
+    src_lat1 = nlat - max(0, dy)
+    dst_lat0 = max(0, dy)
+    dst_lat1 = nlat - max(0, -dy)
+    src_lon0 = max(0, -dx)
+    src_lon1 = nlon - max(0, dx)
+    dst_lon0 = max(0, dx)
+    dst_lon1 = nlon - max(0, -dx)
+    if src_lat0 >= src_lat1 or src_lon0 >= src_lon1:
+        return out
+    out[..., dst_lat0:dst_lat1, dst_lon0:dst_lon1] = arr[..., src_lat0:src_lat1, src_lon0:src_lon1]
+    return out
+
+
+def neighborhood_event_probability(ensemble, threshold, radius=DEFAULT_NEIGHBORHOOD_RADIUS):
+    """Probability that an ensemble member exceeds threshold within a local grid-cell neighborhood."""
+    radius = int(radius)
+    threshold = np.asarray(threshold, dtype=np.float32)
+    ensemble = np.asarray(ensemble, dtype=np.float32)
+    exceed = np.isfinite(ensemble) & np.isfinite(threshold)[None, :, :] & (ensemble >= threshold[None, :, :])
+    if radius <= 0:
+        return np.nanmean(exceed.astype(np.float32), axis=0).astype(np.float32)
+    neighborhood = np.zeros_like(exceed, dtype=bool)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            neighborhood |= shift_no_wrap_bool(exceed, dy, dx)
+    return np.nanmean(neighborhood.astype(np.float32), axis=0).astype(np.float32)
+
+
 def robust_limits(fields, center_zero=False, lower=5, upper=95, fallback=(-1.0, 1.0)):
     finite_parts = []
     for field in fields:
@@ -985,18 +1033,37 @@ def robust_limits(fields, center_zero=False, lower=5, upper=95, fallback=(-1.0, 
     return float(vmin), float(vmax)
 
 
-def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights, calibrator=None, tail_fraction=DEFAULT_TAIL_FRACTION):
+def evaluate_ensemble_metrics(
+    ensemble,
+    obs,
+    threshold,
+    obs_event_freq,
+    weights,
+    calibrator=None,
+    tail_fraction=DEFAULT_TAIL_FRACTION,
+    map_quantile=DEFAULT_MAP_QUANTILE,
+    neighborhood_radius=DEFAULT_NEIGHBORHOOD_RADIUS,
+):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
     ens_mean = np.nanmean(ensemble, axis=0)
+    ens_upper = np.nanquantile(ensemble, float(map_quantile), axis=0).astype(np.float32)
     err = ens_mean - obs
     valid_weights = np.where(np.isfinite(obs) & np.isfinite(ens_mean) & np.isfinite(threshold), weights, 0.0)
     prob = np.nanmean(ensemble >= threshold[None, :, :], axis=0).astype(np.float64, copy=False)
     prob_cal = apply_calibration(prob, calibrator)
+    prob_neighborhood = neighborhood_event_probability(
+        ensemble,
+        threshold,
+        radius=neighborhood_radius,
+    ).astype(np.float64, copy=False)
     event = obs >= threshold
     brier = (prob - event) ** 2
     brier_cal = (prob_cal - event) ** 2
     ref_brier = (obs_event_freq - event) ** 2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bss_map = np.where(ref_brier > 1e-12, 1.0 - brier / ref_brier, np.nan)
+        bss_cal_map = np.where(ref_brier > 1e-12, 1.0 - brier_cal / ref_brier, np.nan)
     crps = crps_map(ensemble, obs)
     sse = weighted_mean(err * err, valid_weights)
     bs = weighted_mean(brier, valid_weights)
@@ -1004,30 +1071,51 @@ def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights,
     ref_bs = weighted_mean(ref_brier, valid_weights)
     regional_members = regional_member_values(ensemble, valid_weights)
     regional_tail_members = regional_member_tail_values(ensemble, valid_weights, fraction=tail_fraction)
+    obs_extreme_weights = np.where(event, valid_weights, 0.0)
     return {
         "mean": weighted_mean(ens_mean, valid_weights),
         "spread_region_mean": float(np.nanstd(regional_members)) if regional_members.size else np.nan,
         "q10_region_mean": float(np.nanquantile(regional_members, 0.10)) if regional_members.size else np.nan,
         "q90_region_mean": float(np.nanquantile(regional_members, 0.90)) if regional_members.size else np.nan,
+        "q95_region_mean": float(np.nanquantile(regional_members, 0.95)) if regional_members.size else np.nan,
+        "upper_quantile_mean": weighted_mean(ens_upper, valid_weights),
+        "upper_quantile_tail_mean": weighted_top_mean(ens_upper, valid_weights, fraction=tail_fraction),
         "tail_mean": weighted_top_mean(ens_mean, valid_weights, fraction=tail_fraction),
         "tail_spread": float(np.nanstd(regional_tail_members)) if regional_tail_members.size else np.nan,
         "tail_q10": float(np.nanquantile(regional_tail_members, 0.10)) if regional_tail_members.size else np.nan,
         "tail_q90": float(np.nanquantile(regional_tail_members, 0.90)) if regional_tail_members.size else np.nan,
+        "tail_q95": float(np.nanquantile(regional_tail_members, 0.95)) if regional_tail_members.size else np.nan,
         "rmse": float(np.sqrt(sse)) if np.isfinite(sse) else np.nan,
         "mae": weighted_mean(np.abs(err), valid_weights),
         "bias": weighted_mean(err, valid_weights),
         "crps": weighted_mean(crps, valid_weights),
+        "crps_on_obs_extreme": weighted_mean(crps, obs_extreme_weights),
         "spread_grid": weighted_mean(np.nanstd(ensemble.astype(np.float64, copy=False), axis=0), valid_weights),
         "event_probability": weighted_mean(prob, valid_weights),
         "event_probability_calibrated": weighted_mean(prob_cal, valid_weights),
+        "event_probability_neighborhood": weighted_mean(prob_neighborhood, valid_weights),
         "event_probability_top_tail": weighted_top_mean(prob, valid_weights, fraction=tail_fraction),
         "event_probability_calibrated_top_tail": weighted_top_mean(prob_cal, valid_weights, fraction=tail_fraction),
+        "event_probability_neighborhood_top_tail": weighted_top_mean(
+            prob_neighborhood,
+            valid_weights,
+            fraction=tail_fraction,
+        ),
         "event_probability_on_obs_extreme": weighted_mean(prob, np.where(event, valid_weights, 0.0)),
         "event_probability_on_obs_nonextreme": weighted_mean(prob, np.where(~event, valid_weights, 0.0)),
+        "event_probability_neighborhood_on_obs_extreme": weighted_mean(prob_neighborhood, obs_extreme_weights),
+        "event_probability_neighborhood_on_obs_nonextreme": weighted_mean(
+            prob_neighborhood,
+            np.where(~event, valid_weights, 0.0),
+        ),
         "cal_event_probability_on_obs_extreme": weighted_mean(prob_cal, np.where(event, valid_weights, 0.0)),
         "cal_event_probability_on_obs_nonextreme": weighted_mean(prob_cal, np.where(~event, valid_weights, 0.0)),
         "event_area_fraction_prob50": weighted_mean((prob >= 0.5).astype(np.float32), valid_weights),
         "cal_event_area_fraction_prob50": weighted_mean((prob_cal >= 0.5).astype(np.float32), valid_weights),
+        "neighborhood_event_area_fraction_prob50": weighted_mean(
+            (prob_neighborhood >= 0.5).astype(np.float32),
+            valid_weights,
+        ),
         "brier": bs,
         "brier_calibrated": bs_cal,
         "ref_brier": ref_bs,
@@ -1035,9 +1123,13 @@ def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights,
         "calibrated_bss": 1.0 - bs_cal / ref_bs if np.isfinite(ref_bs) and ref_bs > 1e-12 else np.nan,
         "members_region_mean": regional_members,
         "mean_map": ens_mean,
+        "upper_quantile_map": ens_upper,
         "crps_map": crps,
+        "bss_map": bss_map,
+        "bss_cal_map": bss_cal_map,
         "prob_map": prob,
         "prob_cal_map": prob_cal,
+        "prob_neighborhood_map": prob_neighborhood,
     }
 
 
@@ -1069,6 +1161,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         weights,
         calibrator=model_cal,
         tail_fraction=DEFAULT_TAIL_FRACTION,
+        map_quantile=DEFAULT_MAP_QUANTILE,
+        neighborhood_radius=DEFAULT_NEIGHBORHOOD_RADIUS,
     )
     geos = evaluate_ensemble_metrics(
         geos_ens,
@@ -1078,6 +1172,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         weights,
         calibrator=geos_cal,
         tail_fraction=DEFAULT_TAIL_FRACTION,
+        map_quantile=DEFAULT_MAP_QUANTILE,
+        neighborhood_radius=DEFAULT_NEIGHBORHOOD_RADIUS,
     )
     obs_mean = weighted_mean(obs, weights)
     threshold_mean = weighted_mean(threshold, weights)
@@ -1115,16 +1211,31 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "geos_spread_region_mean": geos["spread_region_mean"],
         "model_q10_region_mean": model["q10_region_mean"],
         "model_q90_region_mean": model["q90_region_mean"],
+        "model_q95_region_mean": model["q95_region_mean"],
         "geos_q10_region_mean": geos["q10_region_mean"],
         "geos_q90_region_mean": geos["q90_region_mean"],
+        "geos_q95_region_mean": geos["q95_region_mean"],
+        "model_upper_quantile_mean": model["upper_quantile_mean"],
+        "geos_upper_quantile_mean": geos["upper_quantile_mean"],
+        "upper_quantile_mean_closeness_gain": (
+            abs(geos["upper_quantile_mean"] - obs_mean) - abs(model["upper_quantile_mean"] - obs_mean)
+        ),
+        "model_upper_quantile_tail_mean": model["upper_quantile_tail_mean"],
+        "geos_upper_quantile_tail_mean": geos["upper_quantile_tail_mean"],
+        "upper_quantile_tail_closeness_gain": (
+            abs(geos["upper_quantile_tail_mean"] - obs_tail_mean)
+            - abs(model["upper_quantile_tail_mean"] - obs_tail_mean)
+        ),
         "model_tail_mean": model["tail_mean"],
         "geos_tail_mean": geos["tail_mean"],
         "model_tail_spread": model["tail_spread"],
         "geos_tail_spread": geos["tail_spread"],
         "model_tail_q10": model["tail_q10"],
         "model_tail_q90": model["tail_q90"],
+        "model_tail_q95": model["tail_q95"],
         "geos_tail_q10": geos["tail_q10"],
         "geos_tail_q90": geos["tail_q90"],
+        "geos_tail_q95": geos["tail_q95"],
         "tail_closeness_gain": abs(geos["tail_mean"] - obs_tail_mean) - abs(model["tail_mean"] - obs_tail_mean),
         "model_rmse": model["rmse"],
         "geos_rmse": geos["rmse"],
@@ -1138,16 +1249,29 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "model_crps": model["crps"],
         "geos_crps": geos["crps"],
         "crps_skill_pct": skill_pct(model["crps"], geos["crps"]),
+        "model_crps_on_obs_extreme": model["crps_on_obs_extreme"],
+        "geos_crps_on_obs_extreme": geos["crps_on_obs_extreme"],
+        "crps_on_obs_extreme_skill_pct": skill_pct(model["crps_on_obs_extreme"], geos["crps_on_obs_extreme"]),
         "model_spread_grid": model["spread_grid"],
         "geos_spread_grid": geos["spread_grid"],
         "model_event_probability": model["event_probability"],
         "geos_event_probability": geos["event_probability"],
         "model_event_probability_calibrated": model["event_probability_calibrated"],
         "geos_event_probability_calibrated": geos["event_probability_calibrated"],
+        "model_event_probability_neighborhood": model["event_probability_neighborhood"],
+        "geos_event_probability_neighborhood": geos["event_probability_neighborhood"],
+        "event_probability_neighborhood_diff": (
+            model["event_probability_neighborhood"] - geos["event_probability_neighborhood"]
+        ),
         "model_event_probability_top_tail": model["event_probability_top_tail"],
         "geos_event_probability_top_tail": geos["event_probability_top_tail"],
         "model_event_probability_calibrated_top_tail": model["event_probability_calibrated_top_tail"],
         "geos_event_probability_calibrated_top_tail": geos["event_probability_calibrated_top_tail"],
+        "model_event_probability_neighborhood_top_tail": model["event_probability_neighborhood_top_tail"],
+        "geos_event_probability_neighborhood_top_tail": geos["event_probability_neighborhood_top_tail"],
+        "event_probability_neighborhood_top_tail_diff": (
+            model["event_probability_neighborhood_top_tail"] - geos["event_probability_neighborhood_top_tail"]
+        ),
         "model_event_probability_on_obs_extreme": model["event_probability_on_obs_extreme"],
         "geos_event_probability_on_obs_extreme": geos["event_probability_on_obs_extreme"],
         "event_probability_on_obs_extreme_diff": (
@@ -1157,6 +1281,22 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "geos_event_probability_on_obs_nonextreme": geos["event_probability_on_obs_nonextreme"],
         "event_probability_on_obs_nonextreme_diff": (
             model["event_probability_on_obs_nonextreme"] - geos["event_probability_on_obs_nonextreme"]
+        ),
+        "model_event_probability_neighborhood_on_obs_extreme": model["event_probability_neighborhood_on_obs_extreme"],
+        "geos_event_probability_neighborhood_on_obs_extreme": geos["event_probability_neighborhood_on_obs_extreme"],
+        "event_probability_neighborhood_on_obs_extreme_diff": (
+            model["event_probability_neighborhood_on_obs_extreme"]
+            - geos["event_probability_neighborhood_on_obs_extreme"]
+        ),
+        "model_event_probability_neighborhood_on_obs_nonextreme": model[
+            "event_probability_neighborhood_on_obs_nonextreme"
+        ],
+        "geos_event_probability_neighborhood_on_obs_nonextreme": geos[
+            "event_probability_neighborhood_on_obs_nonextreme"
+        ],
+        "event_probability_neighborhood_on_obs_nonextreme_diff": (
+            model["event_probability_neighborhood_on_obs_nonextreme"]
+            - geos["event_probability_neighborhood_on_obs_nonextreme"]
         ),
         "model_cal_event_probability_on_obs_extreme": model["cal_event_probability_on_obs_extreme"],
         "geos_cal_event_probability_on_obs_extreme": geos["cal_event_probability_on_obs_extreme"],
@@ -1172,6 +1312,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "geos_event_area_fraction_prob50": geos["event_area_fraction_prob50"],
         "model_cal_event_area_fraction_prob50": model["cal_event_area_fraction_prob50"],
         "geos_cal_event_area_fraction_prob50": geos["cal_event_area_fraction_prob50"],
+        "model_neighborhood_event_area_fraction_prob50": model["neighborhood_event_area_fraction_prob50"],
+        "geos_neighborhood_event_area_fraction_prob50": geos["neighborhood_event_area_fraction_prob50"],
         "model_bss": model["bss"],
         "geos_bss": geos["bss"],
         "bss_diff": model["bss"] - geos["bss"],
@@ -1185,12 +1327,20 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "obs_event": (obs >= threshold).astype(np.float32),
         "model_mean": model["mean_map"],
         "geos_mean": geos["mean_map"],
+        "model_upper_quantile": model["upper_quantile_map"],
+        "geos_upper_quantile": geos["upper_quantile_map"],
         "model_crps": model["crps_map"],
         "geos_crps": geos["crps_map"],
+        "model_bss": model["bss_map"],
+        "geos_bss": geos["bss_map"],
+        "model_bss_cal": model["bss_cal_map"],
+        "geos_bss_cal": geos["bss_cal_map"],
         "model_prob": model["prob_map"],
         "geos_prob": geos["prob_map"],
         "model_prob_cal": model["prob_cal_map"],
         "geos_prob_cal": geos["prob_cal_map"],
+        "model_prob_neighborhood": model["prob_neighborhood_map"],
+        "geos_prob_neighborhood": geos["prob_neighborhood_map"],
     }
     return row, maps
 
@@ -1207,14 +1357,22 @@ def plot_units(row, variable):
         "geos_mean",
         "model_q10_region_mean",
         "model_q90_region_mean",
+        "model_q95_region_mean",
         "geos_q10_region_mean",
         "geos_q90_region_mean",
+        "geos_q95_region_mean",
+        "model_upper_quantile_mean",
+        "geos_upper_quantile_mean",
+        "model_upper_quantile_tail_mean",
+        "geos_upper_quantile_tail_mean",
         "model_tail_mean",
         "geos_tail_mean",
         "model_tail_q10",
         "model_tail_q90",
+        "model_tail_q95",
         "geos_tail_q10",
         "geos_tail_q90",
+        "geos_tail_q95",
     ]:
         out[col] = out[col] + offset if np.isfinite(out[col]) else out[col]
     return out
@@ -1250,7 +1408,8 @@ def plot_event_timeseries(event, rows, out_dir):
     df["valid_time_dt"] = pd.to_datetime(df["valid_time"])
     event_start = pd.Timestamp(event["event_start"])
     event_end = pd.Timestamp(event["event_end"])
-    fig, axes = plt.subplots(len(DEFAULT_LEADS), 4, figsize=(22, 3.6 * len(DEFAULT_LEADS) + 1.0), sharex="col")
+    q_label = f"p{int(round(DEFAULT_MAP_QUANTILE * 100))}"
+    fig, axes = plt.subplots(len(DEFAULT_LEADS), 5, figsize=(27, 3.8 * len(DEFAULT_LEADS) + 1.0), sharex="col")
     axes = np.asarray(axes)
     if axes.ndim == 1:
         axes = axes.reshape(1, -1)
@@ -1285,7 +1444,7 @@ def plot_event_timeseries(event, rows, out_dir):
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10, label="event window")
         ax.set_ylabel(f"{variable.upper()} ({units})")
-        ax.set_title(f"lead week {lead}: area mean")
+        ax.set_title(f"lead week {lead}: area mean\nsecondary diagnostic")
         ax.grid(alpha=0.25)
 
         ax = axes[row_idx, 1]
@@ -1300,6 +1459,14 @@ def plot_event_timeseries(event, rows, out_dir):
             alpha=0.20,
             label="ML tail p10-p90",
         )
+        ax.plot(
+            x,
+            p["model_upper_quantile_tail_mean"],
+            color="#1f77b4",
+            linestyle="-.",
+            linewidth=1.3,
+            label=f"ML {q_label} tail",
+        )
         ax.plot(x, p["geos_tail_mean"], color="#ff7f0e", marker="o", label="GEOS tail")
         ax.fill_between(
             x,
@@ -1308,6 +1475,14 @@ def plot_event_timeseries(event, rows, out_dir):
             color="#ff7f0e",
             alpha=0.18,
             label="GEOS tail p10-p90",
+        )
+        ax.plot(
+            x,
+            p["geos_upper_quantile_tail_mean"],
+            color="#ff7f0e",
+            linestyle="-.",
+            linewidth=1.3,
+            label=f"GEOS {q_label} tail",
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
         ax.set_title(f"lead week {lead}: top {DEFAULT_TAIL_FRACTION:.0%} intensity")
@@ -1347,32 +1522,75 @@ def plot_event_timeseries(event, rows, out_dir):
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
         ax.set_ylim(-0.03, 1.03)
-        ax.set_title(f"lead week {lead}: threshold-event area/prob")
+        ax.set_title(f"lead week {lead}: event-box risk")
         ax.grid(alpha=0.25)
 
         ax = axes[row_idx, 3]
+        ax.plot(
+            x,
+            p["obs_event_fraction"],
+            color="black",
+            marker="o",
+            label="Obs extreme area fraction",
+        )
+        ax.plot(
+            x,
+            p["model_event_probability_on_obs_extreme"],
+            color="#1f77b4",
+            marker="o",
+            label="ML prob on obs-extreme cells",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_on_obs_extreme"],
+            color="#ff7f0e",
+            marker="o",
+            label="GEOS prob on obs-extreme cells",
+        )
+        ax.plot(
+            x,
+            p["model_event_probability_neighborhood_on_obs_extreme"],
+            color="#1f77b4",
+            linestyle=":",
+            linewidth=1.4,
+            label=f"ML neighborhood prob r={DEFAULT_NEIGHBORHOOD_RADIUS}",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_neighborhood_on_obs_extreme"],
+            color="#ff7f0e",
+            linestyle=":",
+            linewidth=1.4,
+            label=f"GEOS neighborhood prob r={DEFAULT_NEIGHBORHOOD_RADIUS}",
+        )
+        ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_title(f"lead week {lead}: risk where obs was extreme")
+        ax.grid(alpha=0.25)
+
+        ax = axes[row_idx, 4]
         ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0, label="tie")
         ax.plot(
             x,
-            p["area_mean_closeness_gain"],
+            p["tail_closeness_gain"],
             color="#1f77b4",
             marker="o",
-            label="area mean closeness gain",
+            label="mean-tail closeness",
         )
         ax.plot(
             x,
-            p["tail_closeness_gain"],
+            p["upper_quantile_tail_closeness_gain"],
             color="#9467bd",
             marker="o",
-            label="tail closeness gain",
+            label=f"{q_label}-tail closeness",
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
-        ax.set_title(f"lead week {lead}: closeness vs obs\npositive = ML closer")
+        ax.set_title(f"lead week {lead}: tail closeness vs obs\npositive = ML closer")
         ax.grid(alpha=0.25)
-    _unique_legend(fig, axes, ncol=4)
+    _unique_legend(fig, axes, ncol=5)
     fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.83)
     fig.autofmt_xdate()
-    fig.tight_layout(rect=[0, 0, 1, 0.76])
+    fig.tight_layout(rect=[0, 0, 1, 0.75])
     out_path = os.path.join(plot_dir, f"{event['event_id']}_timeseries.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -1402,11 +1620,12 @@ def plot_fixed_init_progression(event, rows, out_dir):
     if df.empty:
         return []
     out_paths = []
+    q_label = f"p{int(round(DEFAULT_MAP_QUANTILE * 100))}"
     for init_time, group in df.groupby("init_time", sort=True):
         group = group.sort_values("lead")
         p = group.apply(lambda row: plot_units(row, variable), axis=1, result_type="expand")
         x = p["lead"].astype(float).values
-        fig, axes = plt.subplots(1, 4, figsize=(21, 4.4), sharex=True)
+        fig, axes = plt.subplots(1, 5, figsize=(26, 4.6), sharex=True)
 
         ax = axes[0]
         shade_event_overlap_by_lead(ax, p)
@@ -1430,7 +1649,7 @@ def plot_fixed_init_progression(event, rows, out_dir):
             label="GEOS p10-p90",
         )
         ax.set_ylabel(f"{variable.upper()} ({units})")
-        ax.set_title("area mean")
+        ax.set_title("area mean\nsecondary diagnostic")
         ax.grid(alpha=0.25)
 
         ax = axes[1]
@@ -1446,6 +1665,14 @@ def plot_fixed_init_progression(event, rows, out_dir):
             alpha=0.20,
             label="ML tail p10-p90",
         )
+        ax.plot(
+            x,
+            p["model_upper_quantile_tail_mean"],
+            color="#1f77b4",
+            linestyle="-.",
+            linewidth=1.3,
+            label=f"ML {q_label} tail",
+        )
         ax.plot(x, p["geos_tail_mean"], color="#ff7f0e", marker="o", label="GEOS tail")
         ax.fill_between(
             x,
@@ -1454,6 +1681,14 @@ def plot_fixed_init_progression(event, rows, out_dir):
             color="#ff7f0e",
             alpha=0.18,
             label="GEOS tail p10-p90",
+        )
+        ax.plot(
+            x,
+            p["geos_upper_quantile_tail_mean"],
+            color="#ff7f0e",
+            linestyle="-.",
+            linewidth=1.3,
+            label=f"GEOS {q_label} tail",
         )
         ax.set_title(f"top {DEFAULT_TAIL_FRACTION:.0%} intensity")
         ax.grid(alpha=0.25)
@@ -1480,15 +1715,58 @@ def plot_fixed_init_progression(event, rows, out_dir):
             label="GEOS calibrated event prob",
         )
         ax.set_ylim(-0.03, 1.03)
-        ax.set_title("threshold-event area/prob")
+        ax.set_title("event-box risk")
         ax.grid(alpha=0.25)
 
         ax = axes[3]
         shade_event_overlap_by_lead(ax, p)
+        ax.plot(x, p["obs_event_fraction"], color="black", marker="o", label="Obs extreme area fraction")
+        ax.plot(
+            x,
+            p["model_event_probability_on_obs_extreme"],
+            color="#1f77b4",
+            marker="o",
+            label="ML prob on obs-extreme cells",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_on_obs_extreme"],
+            color="#ff7f0e",
+            marker="o",
+            label="GEOS prob on obs-extreme cells",
+        )
+        ax.plot(
+            x,
+            p["model_event_probability_neighborhood_on_obs_extreme"],
+            color="#1f77b4",
+            linestyle=":",
+            linewidth=1.4,
+            label=f"ML neighborhood prob r={DEFAULT_NEIGHBORHOOD_RADIUS}",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_neighborhood_on_obs_extreme"],
+            color="#ff7f0e",
+            linestyle=":",
+            linewidth=1.4,
+            label=f"GEOS neighborhood prob r={DEFAULT_NEIGHBORHOOD_RADIUS}",
+        )
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_title("risk where obs was extreme")
+        ax.grid(alpha=0.25)
+
+        ax = axes[4]
+        shade_event_overlap_by_lead(ax, p)
         ax.axhline(0.0, color="0.35", linestyle="--", linewidth=1.0, label="tie")
-        ax.plot(x, p["area_mean_closeness_gain"], color="#1f77b4", marker="o", label="area mean closeness")
-        ax.plot(x, p["tail_closeness_gain"], color="#9467bd", marker="o", label="tail closeness")
-        ax.set_title("closeness vs obs\npositive = ML closer")
+        ax.plot(x, p["tail_closeness_gain"], color="#1f77b4", marker="o", label="mean-tail closeness")
+        ax.plot(
+            x,
+            p["upper_quantile_tail_closeness_gain"],
+            color="#9467bd",
+            marker="o",
+            label=f"{q_label}-tail closeness",
+        )
+        ax.set_title("tail closeness vs obs\npositive = ML closer")
         ax.grid(alpha=0.25)
 
         for ax in axes:
@@ -1506,7 +1784,7 @@ def plot_fixed_init_progression(event, rows, out_dir):
                     labels.append(label)
                     seen.add(label)
         if handles:
-            fig.legend(handles, labels, loc="upper center", ncol=6, fontsize=6, bbox_to_anchor=(0.5, 0.995))
+            fig.legend(handles, labels, loc="upper center", ncol=7, fontsize=6, bbox_to_anchor=(0.5, 0.995))
         valid_windows = ", ".join(
             f"w{int(row.lead)}:{row.target_window_start}..{row.target_window_end}"
             for row in group.itertuples(index=False)
@@ -1514,7 +1792,7 @@ def plot_fixed_init_progression(event, rows, out_dir):
         fig.suptitle(
             f"{event['region_label']} | {event['event_name']} | {variable.upper()} | "
             f"fixed init {init_time} | target windows {valid_windows}",
-            y=0.84,
+            y=0.85,
             fontsize=9,
         )
         fig.tight_layout(rect=[0, 0, 1, 0.74])
@@ -1559,15 +1837,16 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     threshold_plot = maps["threshold"] + offset
     geos_plot = maps["geos_mean"] + offset
     model_plot = maps["model_mean"] + offset
+    geos_upper_plot = maps["geos_upper_quantile"] + offset
+    model_upper_plot = maps["model_upper_quantile"] + offset
     model_minus_geos = maps["model_mean"] - maps["geos_mean"]
+    upper_minus_geos = maps["model_upper_quantile"] - maps["geos_upper_quantile"]
     geos_abs_error = np.abs(maps["geos_mean"] - maps["obs"])
     model_abs_error = np.abs(maps["model_mean"] - maps["obs"])
     closeness_gain = geos_abs_error - model_abs_error
-    closer_forecast = np.where(
-        np.isfinite(closeness_gain),
-        np.where(closeness_gain > 0, 1.0, np.where(closeness_gain < 0, -1.0, 0.0)),
-        np.nan,
-    )
+    geos_upper_abs_error = np.abs(maps["geos_upper_quantile"] - maps["obs"])
+    model_upper_abs_error = np.abs(maps["model_upper_quantile"] - maps["obs"])
+    upper_closeness_gain = geos_upper_abs_error - model_upper_abs_error
     crps_skill = np.where(
         np.abs(maps["geos_crps"]) > 1e-12,
         100.0 * (1.0 - maps["model_crps"] / maps["geos_crps"]),
@@ -1575,14 +1854,31 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     )
     raw_prob_diff = maps["model_prob"] - maps["geos_prob"]
     cal_prob_diff = maps["model_prob_cal"] - maps["geos_prob_cal"]
+    neighborhood_prob_diff = maps["model_prob_neighborhood"] - maps["geos_prob_neighborhood"]
+    bss_diff = maps["model_bss"] - maps["geos_bss"]
+    cal_bss_diff = maps["model_bss_cal"] - maps["geos_bss_cal"]
+    q_label = f"p{int(round(DEFAULT_MAP_QUANTILE * 100))}"
     intensity_vmin, intensity_vmax = robust_limits(
         [masked_for_limits(obs_plot), masked_for_limits(threshold_plot), masked_for_limits(geos_plot), masked_for_limits(model_plot)]
+    )
+    upper_vmin, upper_vmax = robust_limits(
+        [
+            masked_for_limits(obs_plot),
+            masked_for_limits(threshold_plot),
+            masked_for_limits(geos_upper_plot),
+            masked_for_limits(model_upper_plot),
+        ]
     )
     error_vmin, error_vmax = robust_limits(
         [masked_for_limits(geos_abs_error), masked_for_limits(model_abs_error)], lower=0, upper=95, fallback=(0.0, 1.0)
     )
     diff_vmin, diff_vmax = robust_limits([masked_for_limits(model_minus_geos)], center_zero=True)
+    upper_diff_vmin, upper_diff_vmax = robust_limits([masked_for_limits(upper_minus_geos)], center_zero=True)
     closeness_vmin, closeness_vmax = robust_limits([masked_for_limits(closeness_gain)], center_zero=True)
+    upper_closeness_vmin, upper_closeness_vmax = robust_limits(
+        [masked_for_limits(upper_closeness_gain)],
+        center_zero=True,
+    )
     crps_vmin, crps_vmax = robust_limits([masked_for_limits(crps_skill)], center_zero=True)
     raw_prob_diff_vmin, raw_prob_diff_vmax = robust_limits(
         [masked_for_limits(raw_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
@@ -1590,26 +1886,42 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     cal_prob_diff_vmin, cal_prob_diff_vmax = robust_limits(
         [masked_for_limits(cal_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
     )
+    neighborhood_prob_diff_vmin, neighborhood_prob_diff_vmax = robust_limits(
+        [masked_for_limits(neighborhood_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
+    )
+    bss_diff_vmin, bss_diff_vmax = robust_limits(
+        [masked_for_limits(bss_diff), masked_for_limits(cal_bss_diff)],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
     panels = [
         ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Obs clim threshold", threshold_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
         ("Observed extreme mask", maps["obs_event"], "Greys", False, 0.0, 1.0),
-        ("GEOS mean", geos_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
-        ("ML mean", model_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
-        ("ML - GEOS", model_minus_geos, "RdBu", True, diff_vmin, diff_vmax),
-        ("|GEOS - Obs|", geos_abs_error, "magma", False, error_vmin, error_vmax),
-        ("|ML - Obs|", model_abs_error, "magma", False, error_vmin, error_vmax),
-        ("Closeness gain\n|GEOS-Obs|-|ML-Obs|\nblue = ML closer", closeness_gain, "RdBu", True, closeness_vmin, closeness_vmax),
-        ("Closer forecast\nML=+1 blue, GEOS=-1 red", closer_forecast, "RdBu", False, -1.0, 1.0),
-        ("CRPS skill %", crps_skill, "RdBu", True, crps_vmin, crps_vmax),
+        (f"GEOS {q_label}", geos_upper_plot, intensity_cmap, False, upper_vmin, upper_vmax),
+        (f"ML {q_label}", model_upper_plot, intensity_cmap, False, upper_vmin, upper_vmax),
+        ("GEOS mean\nsecondary", geos_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML mean\nsecondary", model_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("ML - GEOS mean", model_minus_geos, "RdBu", True, diff_vmin, diff_vmax),
+        (f"ML - GEOS {q_label}", upper_minus_geos, "RdBu", True, upper_diff_vmin, upper_diff_vmax),
+        (f"{q_label} closeness gain\nblue = ML closer", upper_closeness_gain, "RdBu", True, upper_closeness_vmin, upper_closeness_vmax),
         ("GEOS raw event prob", maps["geos_prob"], "viridis", False, 0.0, 1.0),
         ("ML raw event prob", maps["model_prob"], "viridis", False, 0.0, 1.0),
         ("Raw event prob ML-GEOS", raw_prob_diff, "RdBu", True, raw_prob_diff_vmin, raw_prob_diff_vmax),
+        (f"GEOS neighborhood prob\nr={DEFAULT_NEIGHBORHOOD_RADIUS}", maps["geos_prob_neighborhood"], "viridis", False, 0.0, 1.0),
+        (f"ML neighborhood prob\nr={DEFAULT_NEIGHBORHOOD_RADIUS}", maps["model_prob_neighborhood"], "viridis", False, 0.0, 1.0),
+        ("Neighborhood prob ML-GEOS", neighborhood_prob_diff, "RdBu", True, neighborhood_prob_diff_vmin, neighborhood_prob_diff_vmax),
         ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False, 0.0, 1.0),
         ("ML cal event prob", maps["model_prob_cal"], "viridis", False, 0.0, 1.0),
         ("Cal event prob ML-GEOS", cal_prob_diff, "RdBu", True, cal_prob_diff_vmin, cal_prob_diff_vmax),
+        ("CRPS skill %", crps_skill, "RdBu", True, crps_vmin, crps_vmax),
+        ("BSS ML-GEOS", bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
+        ("Cal BSS ML-GEOS", cal_bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
+        ("|GEOS mean - Obs|", geos_abs_error, "magma", False, error_vmin, error_vmax),
+        ("|ML mean - Obs|", model_abs_error, "magma", False, error_vmin, error_vmax),
+        ("Mean closeness gain\nblue = ML closer", closeness_gain, "RdBu", True, closeness_vmin, closeness_vmax),
     ]
-    fig, axes = make_map_subplots(4, 5, figsize=(22, 14), squeeze=False, constrained_layout=True)
+    fig, axes = make_map_subplots(5, 5, figsize=(24, 17), squeeze=False, constrained_layout=True)
     for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
         plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
         finite = plot_field[np.isfinite(plot_field)]
@@ -1694,6 +2006,14 @@ def main():
         raise ValueError("--tail_fraction must be >0 and <=1")
     global DEFAULT_TAIL_FRACTION
     DEFAULT_TAIL_FRACTION = float(args.tail_fraction)
+    if not (0.0 < float(args.map_quantile) < 1.0):
+        raise ValueError("--map_quantile must be >0 and <1")
+    global DEFAULT_MAP_QUANTILE
+    DEFAULT_MAP_QUANTILE = float(args.map_quantile)
+    if int(args.neighborhood_radius) < 0:
+        raise ValueError("--neighborhood_radius must be >=0")
+    global DEFAULT_NEIGHBORHOOD_RADIUS
+    DEFAULT_NEIGHBORHOOD_RADIUS = int(args.neighborhood_radius)
     regions = parse_list(args.regions)
     if regions == ["all"]:
         regions = ["all"]
@@ -1834,6 +2154,8 @@ def main():
         "leads": leads,
         "progression_leads": progression_leads,
         "tail_fraction": float(DEFAULT_TAIL_FRACTION),
+        "map_quantile": float(DEFAULT_MAP_QUANTILE),
+        "neighborhood_radius": int(DEFAULT_NEIGHBORHOOD_RADIUS),
         "regional_weighting": args.regional_weighting,
         "timeseries_window_days": args.timeseries_window_days,
         "event_tolerance_days": args.event_tolerance_days,
@@ -1841,7 +2163,9 @@ def main():
         "note": (
             "Forecast data are weekly lead targets. Each valid date is treated as a 7-day target window ending "
             "on that date for event-overlap selection. Time series show weekly valid times around each event. "
-            "Spread bands are p10-p90 of regional ensemble-mean values."
+            "Large-ensemble event diagnostics emphasize exceedance probabilities, upper quantiles, neighborhood "
+            "probabilities, and top-tail intensity; ensemble means are retained as secondary references. Spread "
+            "bands are p10-p90 of regional ensemble-mean or top-tail values."
         ),
     }
     metadata_path = os.path.join(args.out_dir, "event_catalog_eval_metadata.json")

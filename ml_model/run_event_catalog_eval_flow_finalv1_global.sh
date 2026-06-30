@@ -24,6 +24,8 @@ LEADS="${EVENT_LEADS:-3,4}"
 PROGRESSION_LEADS="${EVENT_PROGRESSION_LEADS:-1,2,3,4}"
 REGIONAL_WEIGHTING="${EVENT_REGIONAL_WEIGHTING:-uniform}"
 TAIL_FRACTION="${EVENT_TAIL_FRACTION:-0.10}"
+MAP_QUANTILE="${EVENT_MAP_QUANTILE:-0.95}"
+NEIGHBORHOOD_RADIUS="${EVENT_NEIGHBORHOOD_RADIUS:-1}"
 START_YEAR="${EVENT_START_YEAR:-2021}"
 END_YEAR="${EVENT_END_YEAR:-2023}"
 WINDOW_DAYS="${EVENT_TIMESERIES_WINDOW_DAYS:-42}"
@@ -53,6 +55,8 @@ echo "   Leads: $LEADS"
 echo "   Fixed-init progression leads: $PROGRESSION_LEADS"
 echo "   Regional weighting: $REGIONAL_WEIGHTING"
 echo "   Tail fraction: $TAIL_FRACTION"
+echo "   Map/tail quantile: $MAP_QUANTILE"
+echo "   Neighborhood radius: $NEIGHBORHOOD_RADIUS grid cell(s)"
 
 python ml_model/evaluate_event_catalog_flow_finalv1_global.py \
   --forecast_dir "$FORECAST_DIR" \
@@ -67,6 +71,8 @@ python ml_model/evaluate_event_catalog_flow_finalv1_global.py \
   --progression_leads "$PROGRESSION_LEADS" \
   --regional_weighting "$REGIONAL_WEIGHTING" \
   --tail_fraction "$TAIL_FRACTION" \
+  --map_quantile "$MAP_QUANTILE" \
+  --neighborhood_radius "$NEIGHBORHOOD_RADIUS" \
   --start_year "$START_YEAR" \
   --end_year "$END_YEAR" \
   --timeseries_window_days "$WINDOW_DAYS" \
