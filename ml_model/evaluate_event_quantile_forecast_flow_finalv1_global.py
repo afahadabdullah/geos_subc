@@ -36,13 +36,16 @@ from evaluate_event_catalog_flow_finalv1_global import (
     open_forecast_grid,
     parse_bbox,
     parse_list,
+    prepare_region_plot,
     region_weights,
     regional_member_tail_values,
     regional_member_values,
+    robust_limits,
     select_grouped_map,
     weighted_mean,
     weighted_top_mean,
 )
+from evaluate_matrix_suite_flow_finalv1_global import add_map_overlays, configure_map_context, make_map_subplots
 
 
 INTENSITY_METRICS = {"area_mean", "top_tail_intensity", "spatial_q95_intensity"}
@@ -116,6 +119,8 @@ def parse_args():
     parser.add_argument("--start_year", type=int, default=2021)
     parser.add_argument("--end_year", type=int, default=2023)
     parser.add_argument("--make_plots", action="store_true")
+    parser.add_argument("--map_features", choices=("auto", "cartopy", "plain"), default="auto")
+    parser.add_argument("--county_boundaries", choices=("auto", "on", "off"), default="off")
     parser.add_argument("--write_member_values", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -591,6 +596,151 @@ def plot_progression(event, progression_summary, out_dir):
     return out_paths
 
 
+def plot_quantile_spatial(event, sample, thresholds, lons, lats, mask, out_dir, map_quantile=0.95):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    variable = str(event["variable"])
+    spec = VARIABLES[variable]
+    offset = float(spec["offset"])
+    units = spec["plot_units"]
+    intensity_cmap = "coolwarm" if variable == "t2m" else "viridis"
+    q_label = f"p{int(round(float(map_quantile) * 100))}"
+    plot_dir = os.path.join(out_dir, "plots", "quantile_spatial_maps")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    ds = xr.open_zarr(sample["zarr_path"], consolidated=False, chunks=None)
+    try:
+        obs = ds[spec["obs"]].isel(init=sample["init_idx"], lead=sample["lead_idx"]).values.astype(np.float32)
+        model_ens = ds[spec["model"]].isel(init=sample["init_idx"], lead=sample["lead_idx"]).values.astype(np.float32)
+        geos_ens = ds[spec["geos"]].isel(init=sample["init_idx"], lead=sample["lead_idx"]).values.astype(np.float32)
+    finally:
+        ds.close()
+
+    threshold = select_grouped_map(thresholds[variable], pd.Timestamp(sample["valid_time"]))
+    obs_event = (obs >= threshold).astype(np.float32)
+    model_q = np.nanquantile(model_ens, float(map_quantile), axis=0).astype(np.float32)
+    geos_q = np.nanquantile(geos_ens, float(map_quantile), axis=0).astype(np.float32)
+    model_prob_threshold = np.nanmean(model_ens >= threshold[None, :, :], axis=0).astype(np.float32)
+    geos_prob_threshold = np.nanmean(geos_ens >= threshold[None, :, :], axis=0).astype(np.float32)
+    model_prob_obs_or_more = np.nanmean(model_ens >= obs[None, :, :], axis=0).astype(np.float32)
+    geos_prob_obs_or_more = np.nanmean(geos_ens >= obs[None, :, :], axis=0).astype(np.float32)
+    model_obs_percentile = np.nanmean(model_ens <= obs[None, :, :], axis=0).astype(np.float32)
+    geos_obs_percentile = np.nanmean(geos_ens <= obs[None, :, :], axis=0).astype(np.float32)
+
+    q_diff = model_q - geos_q
+    q_closeness_gain = np.abs(geos_q - obs) - np.abs(model_q - obs)
+    prob_threshold_diff = model_prob_threshold - geos_prob_threshold
+    prob_obs_diff = model_prob_obs_or_more - geos_prob_obs_or_more
+    obs_percentile_diff = model_obs_percentile - geos_obs_percentile
+
+    def masked_for_limits(field):
+        return np.where(mask, field, np.nan)
+
+    obs_plot = obs + offset
+    threshold_plot = threshold + offset
+    model_q_plot = model_q + offset
+    geos_q_plot = geos_q + offset
+    intensity_vmin, intensity_vmax = robust_limits(
+        [
+            masked_for_limits(obs_plot),
+            masked_for_limits(threshold_plot),
+            masked_for_limits(model_q_plot),
+            masked_for_limits(geos_q_plot),
+        ]
+    )
+    q_diff_vmin, q_diff_vmax = robust_limits([masked_for_limits(q_diff)], center_zero=True)
+    q_close_vmin, q_close_vmax = robust_limits([masked_for_limits(q_closeness_gain)], center_zero=True)
+    prob_threshold_diff_vmin, prob_threshold_diff_vmax = robust_limits(
+        [masked_for_limits(prob_threshold_diff)],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
+    prob_obs_diff_vmin, prob_obs_diff_vmax = robust_limits(
+        [masked_for_limits(prob_obs_diff)],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
+    percentile_diff_vmin, percentile_diff_vmax = robust_limits(
+        [masked_for_limits(obs_percentile_diff)],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
+    panels = [
+        ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("Obs-clim threshold", threshold_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("Observed extreme mask", obs_event, "Greys", False, 0.0, 1.0),
+        (f"{q_label} closeness gain\nblue = ML closer", q_closeness_gain, "RdBu", True, q_close_vmin, q_close_vmax),
+        (f"GEOS {q_label}", geos_q_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        (f"ML {q_label}", model_q_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        (f"ML - GEOS {q_label}", q_diff, "RdBu", True, q_diff_vmin, q_diff_vmax),
+        ("Obs percentile ML-GEOS", obs_percentile_diff, "RdBu_r", True, percentile_diff_vmin, percentile_diff_vmax),
+        ("GEOS P(forecast ≥ threshold)", geos_prob_threshold, "viridis", False, 0.0, 1.0),
+        ("ML P(forecast ≥ threshold)", model_prob_threshold, "viridis", False, 0.0, 1.0),
+        ("P(threshold) ML-GEOS", prob_threshold_diff, "RdBu", True, prob_threshold_diff_vmin, prob_threshold_diff_vmax),
+        ("GEOS obs percentile", geos_obs_percentile, "viridis", False, 0.0, 1.0),
+        ("GEOS P(forecast ≥ obs)", geos_prob_obs_or_more, "viridis", False, 0.0, 1.0),
+        ("ML P(forecast ≥ obs)", model_prob_obs_or_more, "viridis", False, 0.0, 1.0),
+        ("P(obs+) ML-GEOS", prob_obs_diff, "RdBu", True, prob_obs_diff_vmin, prob_obs_diff_vmax),
+        ("ML obs percentile", model_obs_percentile, "viridis", False, 0.0, 1.0),
+    ]
+
+    fig, axes = make_map_subplots(4, 4, figsize=(18, 13), squeeze=False, constrained_layout=True)
+    from evaluate_matrix_suite_flow_finalv1_global import MAP_CONTEXT
+
+    for ax, (title, field, cmap, center_zero, fixed_vmin, fixed_vmax) in zip(axes.ravel(), panels):
+        plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
+        finite = plot_field[np.isfinite(plot_field)]
+        if fixed_vmin is not None and fixed_vmax is not None:
+            vmin, vmax = fixed_vmin, fixed_vmax
+        elif finite.size:
+            if center_zero:
+                vmax = max(float(np.nanpercentile(np.abs(finite), 95)), 1e-6)
+                vmin = -vmax
+            else:
+                vmin, vmax = np.nanpercentile(finite, [5, 95])
+        else:
+            vmin, vmax = (-1.0, 1.0) if center_zero else (0.0, 1.0)
+        kwargs = {}
+        if MAP_CONTEXT["enabled"]:
+            kwargs["transform"] = MAP_CONTEXT["data_crs"]
+        mesh = ax.pcolormesh(
+            plot_lons,
+            plot_lats,
+            plot_field,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+            **kwargs,
+        )
+        add_map_overlays(ax, plot_lons, plot_lats)
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("lon", fontsize=8)
+        ax.set_ylabel("lat", fontsize=8)
+        fig.colorbar(mesh, ax=ax, shrink=0.75)
+
+    fig.suptitle(
+        f"{event['region_label']} | {event['event_name']} | {variable.upper()} spatial quantile forecast | "
+        f"init {pd.Timestamp(sample['init_time']).date()} valid {pd.Timestamp(sample['valid_time']).date()} "
+        f"lead week {int(sample['lead'])} | {units}",
+        fontsize=12,
+    )
+    out_path = os.path.join(
+        plot_dir,
+        (
+            f"{event['event_id']}_init{pd.Timestamp(sample['init_time']).strftime('%Y%m%d')}"
+            f"_valid{pd.Timestamp(sample['valid_time']).strftime('%Y%m%d')}"
+            f"_lead{int(sample['lead'])}_quantile_spatial.png"
+        ),
+    )
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
@@ -608,6 +758,8 @@ def main():
         raise ValueError("--spatial_quantile must be >0 and <1")
     if not (0.0 <= float(args.event_area_fraction_threshold) <= 1.0):
         raise ValueError("--event_area_fraction_threshold must be between 0 and 1")
+    if args.make_plots:
+        configure_map_context(argparse.Namespace(map_features=args.map_features, county_boundaries=args.county_boundaries))
 
     catalog = normalize_catalog(load_event_catalog(args.event_catalog), regions, variables, args.start_year, args.end_year)
     catalog_path = os.path.join(args.out_dir, "event_catalog_used.csv")
@@ -676,6 +828,25 @@ def main():
                             "lead": int(sample["lead"]),
                             "plot_type": "quantile_distribution",
                             "path": plot_path,
+                        }
+                    )
+                spatial_path = plot_quantile_spatial(
+                    event,
+                    sample,
+                    thresholds,
+                    lons,
+                    lats,
+                    mask,
+                    args.out_dir,
+                    map_quantile=float(args.spatial_quantile),
+                )
+                if spatial_path:
+                    plot_records.append(
+                        {
+                            "event_id": event["event_id"],
+                            "lead": int(sample["lead"]),
+                            "plot_type": "quantile_spatial",
+                            "path": spatial_path,
                         }
                     )
 

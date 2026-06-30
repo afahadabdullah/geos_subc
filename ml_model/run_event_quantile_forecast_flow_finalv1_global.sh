@@ -34,6 +34,8 @@ TOLERANCE_DAYS="${EVENT_TOLERANCE_DAYS:-10}"
 PR_QUANTILE="${EVENT_PR_QUANTILE:-0.95}"
 T2M_QUANTILE="${EVENT_T2M_QUANTILE:-0.95}"
 PR_MIN_THRESHOLD="${EVENT_PR_MIN_THRESHOLD:-5.0}"
+MAP_FEATURES="${EVENT_MAP_FEATURES:-auto}"
+COUNTY_BOUNDARIES="${EVENT_COUNTY_BOUNDARIES:-off}"
 
 plot_args=()
 if [[ "${EVENT_MAKE_PLOTS:-1}" != "0" ]]; then
@@ -60,6 +62,8 @@ echo "   Spatial quantile: $SPATIAL_QUANTILE"
 echo "   Ensemble quantiles: $ENSEMBLE_QUANTILES"
 echo "   Loss quantiles: $LOSS_QUANTILES"
 echo "   Event-area fraction threshold: $EVENT_AREA_FRACTION_THRESHOLD"
+echo "   Map features: $MAP_FEATURES"
+echo "   County boundaries: $COUNTY_BOUNDARIES"
 
 python ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py \
   --forecast_dir "$FORECAST_DIR" \
@@ -84,4 +88,6 @@ python ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py \
   --extreme_quantile_pr "$PR_QUANTILE" \
   --extreme_quantile_t2m "$T2M_QUANTILE" \
   --pr_min_threshold "$PR_MIN_THRESHOLD" \
+  --map_features "$MAP_FEATURES" \
+  --county_boundaries "$COUNTY_BOUNDARIES" \
   "${plot_args[@]}"
