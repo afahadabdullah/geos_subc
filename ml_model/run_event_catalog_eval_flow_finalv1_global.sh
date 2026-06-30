@@ -21,6 +21,7 @@ EVENT_CATALOG="${EVENT_CATALOG:-default}"
 REGIONS="${EVENT_REGIONS:-all}"
 VARIABLES="${EVENT_VARIABLES:-pr,t2m}"
 LEADS="${EVENT_LEADS:-3,4}"
+TAIL_FRACTION="${EVENT_TAIL_FRACTION:-0.10}"
 START_YEAR="${EVENT_START_YEAR:-2021}"
 END_YEAR="${EVENT_END_YEAR:-2023}"
 WINDOW_DAYS="${EVENT_TIMESERIES_WINDOW_DAYS:-42}"
@@ -47,6 +48,7 @@ echo "   Output dir: $OUT_DIR"
 echo "   Regions: $REGIONS"
 echo "   Variables: $VARIABLES"
 echo "   Leads: $LEADS"
+echo "   Tail fraction: $TAIL_FRACTION"
 
 python ml_model/evaluate_event_catalog_flow_finalv1_global.py \
   --forecast_dir "$FORECAST_DIR" \
@@ -58,6 +60,7 @@ python ml_model/evaluate_event_catalog_flow_finalv1_global.py \
   --regions "$REGIONS" \
   --variables "$VARIABLES" \
   --leads "$LEADS" \
+  --tail_fraction "$TAIL_FRACTION" \
   --start_year "$START_YEAR" \
   --end_year "$END_YEAR" \
   --timeseries_window_days "$WINDOW_DAYS" \

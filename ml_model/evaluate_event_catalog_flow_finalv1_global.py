@@ -53,6 +53,7 @@ VARIABLES = {
 }
 
 DEFAULT_LEADS = [3, 4]
+DEFAULT_TAIL_FRACTION = 0.10
 
 
 DEFAULT_EVENT_CATALOG = [
@@ -481,6 +482,12 @@ def parse_args():
     parser.add_argument("--regions", type=str, default="all")
     parser.add_argument("--variables", type=str, default="pr,t2m")
     parser.add_argument("--leads", type=str, default="3,4")
+    parser.add_argument(
+        "--tail_fraction",
+        type=float,
+        default=DEFAULT_TAIL_FRACTION,
+        help="Fraction of event-box land grid cells used for the top-tail intensity time series.",
+    )
     parser.add_argument("--extreme_quantile_pr", type=float, default=0.95)
     parser.add_argument("--extreme_quantile_t2m", type=float, default=0.95)
     parser.add_argument("--pr_min_threshold", type=float, default=5.0)
@@ -582,10 +589,41 @@ def weighted_mean(field, weights):
     return float(np.sum(field[finite] * weights[finite]) / np.sum(weights[finite]))
 
 
+def weighted_top_mean(field, weights, fraction=DEFAULT_TAIL_FRACTION):
+    field = np.asarray(field, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    finite = np.isfinite(field) & np.isfinite(weights) & (weights > 0)
+    if not finite.any():
+        return np.nan
+    values = field[finite]
+    w = weights[finite]
+    order = np.argsort(values)[::-1]
+    values = values[order]
+    w = w[order]
+    total_weight = float(np.sum(w))
+    if total_weight <= 0:
+        return np.nan
+    target_weight = max(float(fraction), 1e-6) * total_weight
+    cumulative = np.cumsum(w)
+    keep = cumulative <= target_weight
+    if not keep.any():
+        keep[0] = True
+    elif keep.sum() < len(keep) and cumulative[keep].max(initial=0.0) < target_weight:
+        keep[keep.sum()] = True
+    return float(np.sum(values[keep] * w[keep]) / np.sum(w[keep]))
+
+
 def regional_member_values(ensemble, weights):
     values = []
     for member in np.asarray(ensemble):
         values.append(weighted_mean(member, weights))
+    return np.asarray(values, dtype=np.float64)
+
+
+def regional_member_tail_values(ensemble, weights, fraction=DEFAULT_TAIL_FRACTION):
+    values = []
+    for member in np.asarray(ensemble):
+        values.append(weighted_top_mean(member, weights, fraction=fraction))
     return np.asarray(values, dtype=np.float64)
 
 
@@ -703,7 +741,7 @@ def skill_pct(model_value, geos_value):
     return float(100.0 * (1.0 - model_value / geos_value))
 
 
-def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights, calibrator=None):
+def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights, calibrator=None, tail_fraction=DEFAULT_TAIL_FRACTION):
     ensemble = np.asarray(ensemble, dtype=np.float32)
     obs = np.asarray(obs, dtype=np.float32)
     ens_mean = np.nanmean(ensemble, axis=0)
@@ -721,11 +759,16 @@ def evaluate_ensemble_metrics(ensemble, obs, threshold, obs_event_freq, weights,
     bs_cal = weighted_mean(brier_cal, valid_weights)
     ref_bs = weighted_mean(ref_brier, valid_weights)
     regional_members = regional_member_values(ensemble, valid_weights)
+    regional_tail_members = regional_member_tail_values(ensemble, valid_weights, fraction=tail_fraction)
     return {
         "mean": weighted_mean(ens_mean, valid_weights),
         "spread_region_mean": float(np.nanstd(regional_members)) if regional_members.size else np.nan,
         "q10_region_mean": float(np.nanquantile(regional_members, 0.10)) if regional_members.size else np.nan,
         "q90_region_mean": float(np.nanquantile(regional_members, 0.90)) if regional_members.size else np.nan,
+        "tail_mean": weighted_top_mean(ens_mean, valid_weights, fraction=tail_fraction),
+        "tail_spread": float(np.nanstd(regional_tail_members)) if regional_tail_members.size else np.nan,
+        "tail_q10": float(np.nanquantile(regional_tail_members, 0.10)) if regional_tail_members.size else np.nan,
+        "tail_q90": float(np.nanquantile(regional_tail_members, 0.90)) if regional_tail_members.size else np.nan,
         "rmse": float(np.sqrt(sse)) if np.isfinite(sse) else np.nan,
         "mae": weighted_mean(np.abs(err), valid_weights),
         "bias": weighted_mean(err, valid_weights),
@@ -769,10 +812,28 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
     calibration_year = int(sample["zarr_year"])
     model_cal = calibrators.get((variable, "model", calibration_year, int(sample["lead"]), season))
     geos_cal = calibrators.get((variable, "geos", calibration_year, int(sample["lead"]), season))
-    model = evaluate_ensemble_metrics(model_ens, obs, threshold, obs_event_freq, weights, calibrator=model_cal)
-    geos = evaluate_ensemble_metrics(geos_ens, obs, threshold, obs_event_freq, weights, calibrator=geos_cal)
+    model = evaluate_ensemble_metrics(
+        model_ens,
+        obs,
+        threshold,
+        obs_event_freq,
+        weights,
+        calibrator=model_cal,
+        tail_fraction=DEFAULT_TAIL_FRACTION,
+    )
+    geos = evaluate_ensemble_metrics(
+        geos_ens,
+        obs,
+        threshold,
+        obs_event_freq,
+        weights,
+        calibrator=geos_cal,
+        tail_fraction=DEFAULT_TAIL_FRACTION,
+    )
     obs_mean = weighted_mean(obs, weights)
     threshold_mean = weighted_mean(threshold, weights)
+    obs_tail_mean = weighted_top_mean(obs, weights, fraction=DEFAULT_TAIL_FRACTION)
+    threshold_tail_mean = weighted_top_mean(threshold, weights, fraction=DEFAULT_TAIL_FRACTION)
     obs_event_fraction = weighted_mean((obs >= threshold).astype(np.float32), weights)
     row = {
         "event_id": event["event_id"],
@@ -791,6 +852,8 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "selection_mode": sample.get("selection_mode", "timeseries"),
         "obs_mean": obs_mean,
         "threshold_mean": threshold_mean,
+        "obs_tail_mean": obs_tail_mean,
+        "threshold_tail_mean": threshold_tail_mean,
         "obs_event_fraction": obs_event_fraction,
         "model_mean": model["mean"],
         "geos_mean": geos["mean"],
@@ -800,6 +863,14 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "model_q90_region_mean": model["q90_region_mean"],
         "geos_q10_region_mean": geos["q10_region_mean"],
         "geos_q90_region_mean": geos["q90_region_mean"],
+        "model_tail_mean": model["tail_mean"],
+        "geos_tail_mean": geos["tail_mean"],
+        "model_tail_spread": model["tail_spread"],
+        "geos_tail_spread": geos["tail_spread"],
+        "model_tail_q10": model["tail_q10"],
+        "model_tail_q90": model["tail_q90"],
+        "geos_tail_q10": geos["tail_q10"],
+        "geos_tail_q90": geos["tail_q90"],
         "model_rmse": model["rmse"],
         "geos_rmse": geos["rmse"],
         "rmse_skill_pct": skill_pct(model["rmse"], geos["rmse"]),
@@ -856,15 +927,37 @@ def plot_units(row, variable):
     for col in [
         "obs_mean",
         "threshold_mean",
+        "obs_tail_mean",
+        "threshold_tail_mean",
         "model_mean",
         "geos_mean",
         "model_q10_region_mean",
         "model_q90_region_mean",
         "geos_q10_region_mean",
         "geos_q90_region_mean",
+        "model_tail_mean",
+        "geos_tail_mean",
+        "model_tail_q10",
+        "model_tail_q90",
+        "geos_tail_q10",
+        "geos_tail_q90",
     ]:
         out[col] = out[col] + offset if np.isfinite(out[col]) else out[col]
     return out
+
+
+def _unique_legend(fig, axes, ncol=5):
+    handles = []
+    labels = []
+    seen = set()
+    for ax in np.asarray(axes).ravel():
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label and label not in seen:
+                handles.append(handle)
+                labels.append(label)
+                seen.add(label)
+    if handles:
+        fig.legend(handles, labels, loc="upper center", ncol=ncol, bbox_to_anchor=(0.5, 0.995), fontsize=8)
 
 
 def plot_event_timeseries(event, rows, out_dir):
@@ -883,18 +976,21 @@ def plot_event_timeseries(event, rows, out_dir):
     df["valid_time_dt"] = pd.to_datetime(df["valid_time"])
     event_start = pd.Timestamp(event["event_start"])
     event_end = pd.Timestamp(event["event_end"])
-    fig, axes = plt.subplots(len(DEFAULT_LEADS), 1, figsize=(10, 3.2 * len(DEFAULT_LEADS)), sharex=True)
-    if len(DEFAULT_LEADS) == 1:
-        axes = [axes]
-    for ax, lead in zip(axes, DEFAULT_LEADS):
+    fig, axes = plt.subplots(len(DEFAULT_LEADS), 3, figsize=(17, 3.4 * len(DEFAULT_LEADS)), sharex="col")
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes.reshape(1, -1)
+    for row_idx, lead in enumerate(DEFAULT_LEADS):
         lead_df = df[df["lead"].eq(lead)].sort_values("valid_time_dt")
         if lead_df.empty:
-            ax.set_visible(False)
+            for ax in axes[row_idx]:
+                ax.set_visible(False)
             continue
         p = lead_df.apply(lambda row: plot_units(row, variable), axis=1, result_type="expand")
         x = lead_df["valid_time_dt"].values
+
+        ax = axes[row_idx, 0]
         ax.plot(x, p["obs_mean"], color="black", marker="o", label="Obs")
-        ax.plot(x, p["threshold_mean"], color="0.35", linestyle="--", linewidth=1.2, label="obs clim threshold")
         ax.plot(x, p["model_mean"], color="#1f77b4", marker="o", label="ML mean")
         ax.fill_between(
             x,
@@ -915,13 +1011,58 @@ def plot_event_timeseries(event, rows, out_dir):
         )
         ax.axvspan(event_start, event_end, color="0.2", alpha=0.10, label="event window")
         ax.set_ylabel(f"{variable.upper()} ({units})")
-        ax.set_title(f"lead week {lead}")
+        ax.set_title(f"lead week {lead}: area mean")
         ax.grid(alpha=0.25)
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=5)
-    fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.99)
+
+        ax = axes[row_idx, 1]
+        ax.plot(x, p["obs_tail_mean"], color="black", marker="o", label="Obs tail")
+        ax.plot(x, p["threshold_tail_mean"], color="0.35", linestyle="--", linewidth=1.2, label="obs-clim tail threshold")
+        ax.plot(x, p["model_tail_mean"], color="#1f77b4", marker="o", label="ML tail")
+        ax.fill_between(
+            x,
+            p["model_tail_q10"].astype(float),
+            p["model_tail_q90"].astype(float),
+            color="#1f77b4",
+            alpha=0.20,
+            label="ML tail p10-p90",
+        )
+        ax.plot(x, p["geos_tail_mean"], color="#ff7f0e", marker="o", label="GEOS tail")
+        ax.fill_between(
+            x,
+            p["geos_tail_q10"].astype(float),
+            p["geos_tail_q90"].astype(float),
+            color="#ff7f0e",
+            alpha=0.18,
+            label="GEOS tail p10-p90",
+        )
+        ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
+        ax.set_title(f"lead week {lead}: top {DEFAULT_TAIL_FRACTION:.0%} intensity")
+        ax.grid(alpha=0.25)
+
+        ax = axes[row_idx, 2]
+        ax.plot(x, p["obs_event_fraction"], color="black", marker="o", label="Obs extreme area fraction")
+        ax.plot(
+            x,
+            p["model_event_probability_calibrated"],
+            color="#1f77b4",
+            marker="o",
+            label="ML calibrated event probability",
+        )
+        ax.plot(
+            x,
+            p["geos_event_probability_calibrated"],
+            color="#ff7f0e",
+            marker="o",
+            label="GEOS calibrated event probability",
+        )
+        ax.axvspan(event_start, event_end, color="0.2", alpha=0.10)
+        ax.set_ylim(-0.03, 1.03)
+        ax.set_title(f"lead week {lead}: threshold-event area/prob")
+        ax.grid(alpha=0.25)
+    _unique_legend(fig, axes, ncol=5)
+    fig.suptitle(f"{event['region_label']} | {event['event_name']} | {variable.upper()}", y=0.89)
     fig.autofmt_xdate()
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.tight_layout(rect=[0, 0, 1, 0.82])
     out_path = os.path.join(plot_dir, f"{event['event_id']}_timeseries.png")
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -953,10 +1094,13 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     variable = event["variable"]
     offset = VARIABLES[variable]["offset"]
     units = VARIABLES[variable]["plot_units"]
+    intensity_cmap = "coolwarm" if variable == "t2m" else "viridis"
     panels = [
-        ("Observed", maps["obs"] + offset, "coolwarm" if variable == "t2m" else "viridis", False),
-        ("GEOS mean", maps["geos_mean"] + offset, "coolwarm" if variable == "t2m" else "viridis", False),
-        ("ML mean", maps["model_mean"] + offset, "coolwarm" if variable == "t2m" else "viridis", False),
+        ("Observed", maps["obs"] + offset, intensity_cmap, False),
+        ("Obs clim threshold", maps["threshold"] + offset, intensity_cmap, False),
+        ("Observed extreme mask", maps["obs_event"], "Greys", False),
+        ("GEOS mean", maps["geos_mean"] + offset, intensity_cmap, False),
+        ("ML mean", maps["model_mean"] + offset, intensity_cmap, False),
         ("ML - GEOS", maps["model_mean"] - maps["geos_mean"], "RdBu", True),
         ("|GEOS - Obs|", np.abs(maps["geos_mean"] - maps["obs"]), "magma", False),
         ("|ML - Obs|", np.abs(maps["model_mean"] - maps["obs"]), "magma", False),
@@ -966,9 +1110,11 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
             "RdBu",
             True,
         ),
+        ("GEOS cal event prob", maps["geos_prob_cal"], "viridis", False),
+        ("ML cal event prob", maps["model_prob_cal"], "viridis", False),
         ("Cal event prob ML-GEOS", maps["model_prob_cal"] - maps["geos_prob_cal"], "RdBu", True),
     ]
-    fig, axes = make_map_subplots(2, 4, figsize=(18, 8), squeeze=False, constrained_layout=True)
+    fig, axes = make_map_subplots(3, 4, figsize=(18, 11), squeeze=False, constrained_layout=True)
     for ax, (title, field, cmap, center_zero) in zip(axes.ravel(), panels):
         plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
         finite = plot_field[np.isfinite(plot_field)]
@@ -1044,6 +1190,10 @@ def main():
     leads = parse_list(args.leads, int)
     global DEFAULT_LEADS
     DEFAULT_LEADS = leads
+    if not (0.0 < float(args.tail_fraction) <= 1.0):
+        raise ValueError("--tail_fraction must be >0 and <=1")
+    global DEFAULT_TAIL_FRACTION
+    DEFAULT_TAIL_FRACTION = float(args.tail_fraction)
     regions = parse_list(args.regions)
     if regions == ["all"]:
         regions = ["all"]
@@ -1162,6 +1312,7 @@ def main():
         "calibration_params": os.path.abspath(args.calibration_params) if os.path.exists(args.calibration_params) else None,
         "land_mask_file": land_source,
         "leads": leads,
+        "tail_fraction": float(DEFAULT_TAIL_FRACTION),
         "timeseries_window_days": args.timeseries_window_days,
         "event_tolerance_days": args.event_tolerance_days,
         "event_count": int(len(catalog)),
