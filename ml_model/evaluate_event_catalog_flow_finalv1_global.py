@@ -483,6 +483,12 @@ def parse_args():
     parser.add_argument("--variables", type=str, default="pr,t2m")
     parser.add_argument("--leads", type=str, default="3,4")
     parser.add_argument(
+        "--regional_weighting",
+        choices=("uniform", "area"),
+        default="uniform",
+        help="Regional/event aggregation weights. Uniform is usually easier to interpret for local event diagnostics.",
+    )
+    parser.add_argument(
         "--tail_fraction",
         type=float,
         default=DEFAULT_TAIL_FRACTION,
@@ -580,6 +586,15 @@ def area_weights(lats):
     return np.clip(np.cos(np.deg2rad(np.asarray(lats, dtype=np.float64))), 0.0, None)[:, None]
 
 
+def region_weights(lats, mask, mode="uniform"):
+    mask = np.asarray(mask, dtype=bool)
+    if mode == "area":
+        return area_weights(lats) * mask.astype(np.float64)
+    if mode == "uniform":
+        return mask.astype(np.float64)
+    raise ValueError(f"Unknown regional weighting mode: {mode}")
+
+
 def weighted_mean(field, weights):
     field = np.asarray(field, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
@@ -647,12 +662,40 @@ def valid_times_for_dataset(ds, init_idx, init_time, lead_values):
     ).normalize()
 
 
+def target_window_for_valid_time(valid_time):
+    """Treat saved weekly targets as 7-day windows ending on valid_time."""
+    valid_time = pd.Timestamp(valid_time).normalize()
+    return valid_time - pd.Timedelta(days=6), valid_time
+
+
+def inclusive_overlap_days(start_a, end_a, start_b, end_b):
+    start = max(pd.Timestamp(start_a).normalize(), pd.Timestamp(start_b).normalize())
+    end = min(pd.Timestamp(end_a).normalize(), pd.Timestamp(end_b).normalize())
+    if end < start:
+        return 0
+    return int((end - start).days) + 1
+
+
+def interval_distance_days(start_a, end_a, start_b, end_b):
+    start_a = pd.Timestamp(start_a).normalize()
+    end_a = pd.Timestamp(end_a).normalize()
+    start_b = pd.Timestamp(start_b).normalize()
+    end_b = pd.Timestamp(end_b).normalize()
+    if end_a < start_b:
+        return int((start_b - end_a).days)
+    if end_b < start_a:
+        return int((start_a - end_b).days)
+    return 0
+
+
 def find_candidate_samples(forecast_dir, event, leads, timeseries_window_days, event_tolerance_days):
     center = pd.Timestamp(event["event_center"]).normalize()
     ts_start = center - pd.Timedelta(days=int(timeseries_window_days))
     ts_end = center + pd.Timedelta(days=int(timeseries_window_days))
-    event_start = pd.Timestamp(event["event_start"]).normalize() - pd.Timedelta(days=int(event_tolerance_days))
-    event_end = pd.Timestamp(event["event_end"]).normalize() + pd.Timedelta(days=int(event_tolerance_days))
+    event_start_core = pd.Timestamp(event["event_start"]).normalize()
+    event_end_core = pd.Timestamp(event["event_end"]).normalize()
+    event_start_tol = event_start_core - pd.Timedelta(days=int(event_tolerance_days))
+    event_end_tol = event_end_core + pd.Timedelta(days=int(event_tolerance_days))
     year_candidates = sorted(set([center.year - 1, center.year, center.year + 1]))
     samples = []
     for year in year_candidates:
@@ -670,7 +713,10 @@ def find_candidate_samples(forecast_dir, event, leads, timeseries_window_days, e
                     if lead_value not in leads:
                         continue
                     valid_time = pd.Timestamp(valid_values[lead_idx]).normalize()
-                    if ts_start <= valid_time <= ts_end:
+                    target_start, target_end = target_window_for_valid_time(valid_time)
+                    if target_end >= ts_start and target_start <= ts_end:
+                        event_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_core, event_end_core)
+                        tolerance_overlap_days = inclusive_overlap_days(target_start, target_end, event_start_tol, event_end_tol)
                         samples.append(
                             {
                                 "zarr_path": path,
@@ -680,8 +726,14 @@ def find_candidate_samples(forecast_dir, event, leads, timeseries_window_days, e
                                 "lead": int(lead_value),
                                 "init_time": pd.Timestamp(init_time).normalize(),
                                 "valid_time": valid_time,
-                                "event_distance_days": abs((valid_time - center).days),
-                                "in_event_window": bool(event_start <= valid_time <= event_end),
+                                "target_window_start": target_start,
+                                "target_window_end": target_end,
+                                "event_overlap_days": int(event_overlap_days),
+                                "event_overlap_fraction": float(event_overlap_days / 7.0),
+                                "tolerance_overlap_days": int(tolerance_overlap_days),
+                                "event_distance_days": interval_distance_days(target_start, target_end, event_start_core, event_end_core),
+                                "in_event_window": bool(event_overlap_days > 0),
+                                "in_event_tolerance_window": bool(tolerance_overlap_days > 0),
                             }
                         )
         finally:
@@ -697,13 +749,25 @@ def choose_event_samples(samples, leads):
     for lead in leads:
         lead_samples = by_lead.get(int(lead), [])
         event_window = [sample for sample in lead_samples if sample["in_event_window"]]
-        pool = event_window if event_window else lead_samples
+        tolerance_window = [sample for sample in lead_samples if sample.get("in_event_tolerance_window")]
+        if event_window:
+            pool = event_window
+            selection_mode = "event_window_overlap"
+        elif tolerance_window:
+            pool = tolerance_window
+            selection_mode = "event_tolerance_overlap"
+        else:
+            pool = lead_samples
+            selection_mode = "closest"
         if not pool:
             continue
-        pool = sorted(pool, key=lambda item: (item["event_distance_days"], item["valid_time"]))
+        pool = sorted(
+            pool,
+            key=lambda item: (-int(item.get("event_overlap_days", 0)), item["event_distance_days"], item["valid_time"]),
+        )
         closest = dict(pool[0])
         closest["selected_for_event_metrics"] = True
-        closest["selection_mode"] = "event_window" if event_window else "closest"
+        closest["selection_mode"] = selection_mode
         selected.append(closest)
     return selected
 
@@ -870,9 +934,13 @@ def evaluate_sample(sample, event, thresholds, obs_clim, calibrators, weights):
         "event_end": str(pd.Timestamp(event["event_end"]).date()),
         "init_time": str(pd.Timestamp(sample["init_time"]).date()),
         "valid_time": str(valid_time.date()),
+        "target_window_start": str(pd.Timestamp(sample["target_window_start"]).date()),
+        "target_window_end": str(pd.Timestamp(sample["target_window_end"]).date()),
         "lead": int(sample["lead"]),
         "lead_label": f"week{int(sample['lead'])}",
         "event_distance_days": int(sample["event_distance_days"]),
+        "event_overlap_days": int(sample.get("event_overlap_days", 0)),
+        "event_overlap_fraction": float(sample.get("event_overlap_fraction", 0.0)),
         "in_event_window": bool(sample["in_event_window"]),
         "selection_mode": sample.get("selection_mode", "timeseries"),
         "obs_mean": obs_mean,
@@ -1334,7 +1402,6 @@ def main():
     timeseries_rows = []
     event_metric_rows = []
     plot_records = []
-    base_area = area_weights(lats)
     for _, event_row in catalog.iterrows():
         event = event_row.to_dict()
         event["bbox"] = parse_bbox(event["bbox"])
@@ -1342,7 +1409,7 @@ def main():
         if not mask.any():
             print(f"⚠️ {event['event_id']}: empty land mask; skipping.")
             continue
-        weights = base_area * mask.astype(np.float64)
+        weights = region_weights(lats, mask, args.regional_weighting)
         samples = find_candidate_samples(
             args.forecast_dir,
             event,
@@ -1426,11 +1493,13 @@ def main():
         "land_mask_file": land_source,
         "leads": leads,
         "tail_fraction": float(DEFAULT_TAIL_FRACTION),
+        "regional_weighting": args.regional_weighting,
         "timeseries_window_days": args.timeseries_window_days,
         "event_tolerance_days": args.event_tolerance_days,
         "event_count": int(len(catalog)),
         "note": (
-            "Forecast data are weekly lead targets. Time series show weekly valid times around each event. "
+            "Forecast data are weekly lead targets. Each valid date is treated as a 7-day target window ending "
+            "on that date for event-overlap selection. Time series show weekly valid times around each event. "
             "Spread bands are p10-p90 of regional ensemble-mean values."
         ),
     }
