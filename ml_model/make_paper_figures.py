@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, TwoSlopeNorm
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
@@ -774,6 +774,28 @@ def spatial_limits(fields: list[np.ndarray | None], fallback: float = 30.0) -> t
     return -lim, lim
 
 
+def discrete_skill_boundaries(vmin: float, vmax: float) -> np.ndarray:
+    lim = max(abs(float(vmin)), abs(float(vmax)))
+    if not np.isfinite(lim) or lim <= 0:
+        lim = 25.0
+    if lim <= 10:
+        values = [-10, -5, -2, 0, 2, 5, 10]
+    elif lim <= 25:
+        values = [-25, -10, -5, 0, 5, 10, 25]
+    elif lim <= 50:
+        values = [-50, -25, -10, -5, 0, 5, 10, 25, 50]
+    else:
+        values = [-100, -50, -25, -10, -5, 0, 5, 10, 25, 50, 100]
+    return np.asarray(values, dtype=float)
+
+
+def colorbar_ticks_for_boundaries(boundaries: np.ndarray) -> list[float]:
+    values = [float(value) for value in np.asarray(boundaries, dtype=float)]
+    if len(values) <= 9:
+        return values
+    return [value for value in values if value in {-100.0, -50.0, -25.0, -10.0, 0.0, 10.0, 25.0, 50.0, 100.0}]
+
+
 def plot_plain_map(
     ax: plt.Axes,
     lons: np.ndarray | None,
@@ -784,12 +806,18 @@ def plot_plain_map(
     vmax: float,
     cmap: str = "RdYlGn",
     center_zero: bool = True,
+    boundaries: np.ndarray | None = None,
 ):
     if lons is None or lats is None or field is None or not np.isfinite(field).any():
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax) if center_zero else None
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, norm=norm, vmin=None if norm else vmin, vmax=None if norm else vmax)
+    if boundaries is not None:
+        cmap_obj = plt.get_cmap(cmap, max(1, len(boundaries) - 1))
+        norm = BoundaryNorm(boundaries, cmap_obj.N, clip=True)
+        mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap_obj, norm=norm)
+    else:
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax) if center_zero else None
+        mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, norm=norm, vmin=None if norm else vmin, vmax=None if norm else vmax)
     ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=7)
     ax.set_ylabel("Latitude", fontsize=7)
@@ -826,6 +854,7 @@ def figure_5_spatial_skill(
     ]
     fields = [field for _, _, field in maps]
     vmin, vmax = spatial_limits(fields)
+    skill_boundaries = discrete_skill_boundaries(vmin, vmax)
 
     nrows = len(row_specs)
     ncols = len(spatial_leads)
@@ -853,11 +882,28 @@ def figure_5_spatial_skill(
     )
     mesh = None
     for ax, (lons, lats, field), (_, _, title, _) in zip(np.asarray(axes).ravel(), maps, specs):
-        maybe_mesh = plot_plain_map(ax, lons, lats, field, title, vmin, vmax, cmap="RdYlGn", center_zero=True)
+        maybe_mesh = plot_plain_map(
+            ax,
+            lons,
+            lats,
+            field,
+            title,
+            float(skill_boundaries[0]),
+            float(skill_boundaries[-1]),
+            cmap="RdYlGn",
+            center_zero=True,
+            boundaries=skill_boundaries,
+        )
         if maybe_mesh is not None:
             mesh = maybe_mesh
     if mesh is not None:
-        cbar = fig.colorbar(mesh, cax=cax)
+        cbar = fig.colorbar(
+            mesh,
+            cax=cax,
+            boundaries=skill_boundaries,
+            ticks=colorbar_ticks_for_boundaries(skill_boundaries),
+            spacing="proportional",
+        )
         cbar.set_label("Skill vs GEOS (%)", fontsize=8.5)
         cbar.ax.tick_params(labelsize=8)
     else:
