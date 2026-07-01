@@ -147,7 +147,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--format",
         choices=("pdf", "png", "both"),
-        default="pdf",
+        default="png",
         help="Figure file format to write.",
     )
     parser.add_argument("--dpi", type=int, default=300)
@@ -155,8 +155,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument(
         "--spatial-leads",
-        default="2,3,4",
-        help="Comma-separated lead weeks for the main spatial atlas. Default follows the manuscript text.",
+        default="1,2,3,4",
+        help="Comma-separated lead weeks for the main spatial atlas.",
     )
     parser.add_argument("--event-limit", type=int, default=8, help="Maximum event rows shown in Figure 7.")
     parser.add_argument(
@@ -816,7 +816,22 @@ def figure_5_spatial_skill(
     fields = [field for _, _, field in maps]
     vmin, vmax = spatial_limits(fields)
 
-    fig, axes = plt.subplots(len(row_specs), len(spatial_leads), figsize=(3.6 * len(spatial_leads), 9.6))
+    nrows = len(row_specs)
+    ncols = len(spatial_leads)
+    fig = plt.figure(figsize=(3.35 * ncols + 0.75, 9.7))
+    gs = fig.add_gridspec(
+        nrows,
+        ncols + 1,
+        width_ratios=[1.0] * ncols + [0.045],
+        left=0.055,
+        right=0.965,
+        bottom=0.060,
+        top=0.875,
+        wspace=0.28,
+        hspace=0.42,
+    )
+    axes = np.asarray([[fig.add_subplot(gs[row, col]) for col in range(ncols)] for row in range(nrows)])
+    cax = fig.add_subplot(gs[:, -1])
     style_figure(
         fig,
         "Figure 5. Spatial skill maps",
@@ -831,10 +846,11 @@ def figure_5_spatial_skill(
         if maybe_mesh is not None:
             mesh = maybe_mesh
     if mesh is not None:
-        cbar = fig.colorbar(mesh, ax=np.asarray(axes).ravel().tolist(), shrink=0.80, pad=0.02)
+        cbar = fig.colorbar(mesh, cax=cax)
         cbar.set_label("Skill vs GEOS (%)", fontsize=8.5)
         cbar.ax.tick_params(labelsize=8)
-    fig.tight_layout(rect=[0, 0, 0.94, 0.91])
+    else:
+        cax.set_visible(False)
     written = save_figure(fig, output_dir, "fig5_spatial_skill_maps", formats, dpi)
 
     written.extend(figure_5b_spatial_bias_event(output_dir, formats, dpi, ds, spatial_leads))
@@ -865,32 +881,50 @@ def figure_5b_spatial_bias_event(
         spatial_metric_map(ds, variable, metric, subset, lead_values=[lead])
         for variable, metric, _, subset, _, _, lead in specs
     ]
-    fields_by_label: dict[str, list[np.ndarray | None]] = {}
-    for (_, _, _, _, _, label, _), (_, _, field) in zip(specs, maps):
-        fields_by_label.setdefault(label, []).append(field)
-    limits_by_label = {
-        label: spatial_limits(fields, fallback=1.0 if "bias" in label.lower() else 30.0)
-        for label, fields in fields_by_label.items()
-    }
+    row_limits = []
+    for row_idx, (_, _, _, _, _, label) in enumerate(row_specs):
+        start = row_idx * len(spatial_leads)
+        row_fields = [field for _, _, field in maps[start : start + len(spatial_leads)]]
+        row_limits.append(spatial_limits(row_fields, fallback=1.0 if "bias" in label.lower() else 30.0))
 
-    fig, axes = plt.subplots(len(row_specs), len(spatial_leads), figsize=(3.6 * len(spatial_leads), 9.6))
+    nrows = len(row_specs)
+    ncols = len(spatial_leads)
+    fig = plt.figure(figsize=(3.35 * ncols + 0.75, 9.7))
+    gs = fig.add_gridspec(
+        nrows,
+        ncols + 1,
+        width_ratios=[1.0] * ncols + [0.045],
+        left=0.055,
+        right=0.965,
+        bottom=0.060,
+        top=0.875,
+        wspace=0.28,
+        hspace=0.42,
+    )
+    axes = np.asarray([[fig.add_subplot(gs[row, col]) for col in range(ncols)] for row in range(nrows)])
+    caxes = [fig.add_subplot(gs[row, -1]) for row in range(nrows)]
     style_figure(
         fig,
         "Figure 5b. Bias and event-subset spatial diagnostics",
         "Companion atlas for bias changes and observed-extreme verification maps requested in the manuscript.",
     )
-    meshes = {}
-    for ax, (lons, lats, field), (_, _, title, _, cmap, label, _) in zip(np.asarray(axes).ravel(), maps, specs):
-        vmin, vmax = limits_by_label[label]
+    row_meshes: dict[int, object] = {}
+    for panel_idx, (ax, (lons, lats, field), (_, _, title, _, cmap, label, _)) in enumerate(
+        zip(np.asarray(axes).ravel(), maps, specs)
+    ):
+        row_idx = panel_idx // ncols
+        vmin, vmax = row_limits[row_idx]
         maybe_mesh = plot_plain_map(ax, lons, lats, field, title, vmin, vmax, cmap=cmap, center_zero=True)
-        if maybe_mesh is not None and label not in meshes:
-            meshes[label] = maybe_mesh
-    if meshes:
-        first_mesh = next(iter(meshes.values()))
-        cbar = fig.colorbar(first_mesh, ax=np.asarray(axes).ravel().tolist(), shrink=0.80, pad=0.02)
-        cbar.set_label("Centered diagnostic value", fontsize=8.5)
-        cbar.ax.tick_params(labelsize=8)
-    fig.tight_layout(rect=[0, 0, 0.94, 0.91])
+        if maybe_mesh is not None and row_idx not in row_meshes:
+            row_meshes[row_idx] = maybe_mesh
+    for row_idx, cax in enumerate(caxes):
+        if row_idx in row_meshes:
+            label = row_specs[row_idx][5]
+            cbar = fig.colorbar(row_meshes[row_idx], cax=cax)
+            cbar.set_label(label, fontsize=7.5)
+            cbar.ax.tick_params(labelsize=7)
+        else:
+            cax.set_visible(False)
     return save_figure(fig, output_dir, "fig5b_spatial_bias_event_maps", formats, dpi)
 
 
@@ -1724,7 +1758,7 @@ def main() -> None:
     args = parse_args()
     formats = output_formats(args.format)
     output_dir = Path(args.output_dir)
-    spatial_leads = parse_int_list(args.spatial_leads, default=[2, 3, 4])
+    spatial_leads = parse_int_list(args.spatial_leads, default=[1, 2, 3, 4])
     primary_event_ids = parse_str_list(args.primary_event_ids, default=PRIMARY_EVENT_IDS[:2])
     matrix_dir = first_existing_dir(args.matrix_dir, DEFAULT_MATRIX_DIR_CANDIDATES)
     event_dir = first_existing_dir(args.event_dir, DEFAULT_EVENT_DIR_CANDIDATES)
