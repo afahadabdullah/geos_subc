@@ -8,6 +8,7 @@ the CSV/NetCDF products written by:
   - ml_model/compare_noise_flow_finalv1_global.py
   - ml_model/compare_checkpoints_flow_finalv1_global.py
   - ml_model/evaluate_event_catalog_flow_finalv1_global.py
+  - ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py
 
 When an expected evaluation artifact is missing, the relevant panel is rendered
 as a clear missing-data note so the full figure set can still be regenerated
@@ -47,6 +48,17 @@ METRIC_LABELS = {
     "crps_skill_pct": "CRPS skill (%)",
     "rmse_skill_pct": "RMSE skill (%)",
     "calibrated_bss_diff": "Calibrated BSS gain",
+}
+
+PRIMARY_EVENT_IDS = [
+    "europe_t2m_202207_uk_heatwave",
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours",
+    "bangladesh_pr_202206_sylhet_floods",
+]
+PRIMARY_EVENT_LABELS = {
+    "europe_t2m_202207_uk_heatwave": "UK July 2022 heatwave (T2M)",
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours": "Bangladesh/Sylhet June 2022 flood (PR)",
+    "bangladesh_pr_202206_sylhet_floods": "Bangladesh/Sylhet June 2022 flood (PR)",
 }
 
 COLOR_GEOS = "#b43c30"
@@ -98,7 +110,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--matrix-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
+    parser.add_argument(
+        "--spatial-leads",
+        default="2,3,4",
+        help="Comma-separated lead weeks for the main spatial atlas. Default follows the manuscript text.",
+    )
     parser.add_argument("--event-limit", type=int, default=8, help="Maximum event rows shown in Figure 7.")
+    parser.add_argument(
+        "--primary-event-ids",
+        default="europe_t2m_202207_uk_heatwave,bangladesh_pr_202206_meghalaya_sylhet_downpours",
+        help="Comma-separated event IDs for Figure 7 rows.",
+    )
     parser.add_argument(
         "--write-legacy-aliases",
         action="store_true",
@@ -150,6 +172,24 @@ def save_figure(fig: plt.Figure, output_dir: Path, stem: str, formats: list[str]
 
 def output_formats(fmt: str) -> list[str]:
     return ["pdf", "png"] if fmt == "both" else [fmt]
+
+
+def parse_int_list(text: str | None, default: list[int]) -> list[int]:
+    if text is None or str(text).strip() == "":
+        return list(default)
+    values = []
+    for item in str(text).split(","):
+        item = item.strip()
+        if item:
+            values.append(int(item))
+    return values or list(default)
+
+
+def parse_str_list(text: str | None, default: list[str]) -> list[str]:
+    if text is None or str(text).strip() == "":
+        return list(default)
+    values = [item.strip() for item in str(text).split(",") if item.strip()]
+    return values or list(default)
 
 
 def wrap(text: str, width: int = 42) -> str:
@@ -620,29 +660,44 @@ def weighted_dataarray_mean(values, weights, dims: list[str]):
     return numerator / denominator
 
 
-def spatial_metric_map(ds, variable: str, metric_name: str, subset: str):
+def spatial_metric_map(
+    ds,
+    variable: str,
+    metric_name: str,
+    subset: str,
+    lead_values: list[int] | None = None,
+    group_values: list[str] | None = None,
+):
     if ds is None:
         return None, None, None
     needed_dims = {"subset", "variable", "group_type", "group_value", "lead", "lat", "lon"}
     if not needed_dims <= set(ds.dims):
         return None, None, None
+    lead_values = lead_values or LEADS
+    group_values = group_values or SEASONS
     selector = {
         "subset": coord_values_for(ds, "subset", [subset]),
         "variable": coord_values_for(ds, "variable", [variable]),
         "group_type": coord_values_for(ds, "group_type", ["valid_season_lead"]),
-        "group_value": coord_values_for(ds, "group_value", SEASONS),
-        "lead": coord_values_for(ds, "lead", LEADS),
+        "group_value": coord_values_for(ds, "group_value", group_values),
+        "lead": coord_values_for(ds, "lead", lead_values),
     }
     if any(not values for values in selector.values()):
         return None, None, None
     sel = {dim: values for dim, values in selector.items()}
     count = ds["sample_count"].sel(sel)
-    reduce_dims = ["group_value", "lead"]
+    reduce_dims = ["group_value"]
+    if len(selector["lead"]) > 1:
+        reduce_dims.append("lead")
     if metric_name in ("crps_skill_pct", "rmse_skill_pct", "mae_skill_pct"):
         metric = metric_name.replace("_skill_pct", "")
         model = weighted_dataarray_mean(ds[f"model_{metric}"].sel(sel), count, reduce_dims)
         geos = weighted_dataarray_mean(ds[f"geos_{metric}"].sel(sel), count, reduce_dims)
         field = 100.0 * (1.0 - model / geos)
+    elif metric_name == "bias_change":
+        model = weighted_dataarray_mean(ds["model_bias"].sel(sel), count, reduce_dims)
+        geos = weighted_dataarray_mean(ds["geos_bias"].sel(sel), count, reduce_dims)
+        field = model - geos
     elif metric_name == "calibrated_bss_diff":
         field = weighted_dataarray_mean(ds["calibrated_bss_diff"].sel(sel), count, reduce_dims)
     else:
@@ -673,15 +728,17 @@ def plot_plain_map(
     title: str,
     vmin: float,
     vmax: float,
+    cmap: str = "RdYlGn",
+    center_zero: bool = True,
 ):
     if lons is None or lats is None or field is None or not np.isfinite(field).any():
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap="RdYlGn", norm=norm)
+    norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax) if center_zero else None
+    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, norm=norm, vmin=None if norm else vmin, vmax=None if norm else vmax)
     ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
-    ax.set_xlabel("Longitude", fontsize=8)
-    ax.set_ylabel("Latitude", fontsize=8)
+    ax.set_xlabel("Longitude", fontsize=7)
+    ax.set_ylabel("Latitude", fontsize=7)
     ax.tick_params(labelsize=7)
     ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
     ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
@@ -695,37 +752,103 @@ def figure_5_spatial_skill(
     dpi: int,
     matrix_dir: Path,
     subset: str,
+    spatial_leads: list[int],
 ) -> list[Path]:
     ds = load_xarray_dataset(matrix_spatial_path(matrix_dir))
-    specs = [
+    row_specs = [
         ("pr", "crps_skill_pct", "PR CRPS skill"),
-        ("pr", "rmse_skill_pct", "PR RMSE skill"),
         ("t2m", "crps_skill_pct", "T2M CRPS skill"),
+        ("pr", "rmse_skill_pct", "PR RMSE skill"),
         ("t2m", "rmse_skill_pct", "T2M RMSE skill"),
     ]
-    maps = [spatial_metric_map(ds, variable, metric, subset) for variable, metric, _ in specs]
+    specs = [
+        (variable, metric, f"{title} W{lead}", lead)
+        for variable, metric, title in row_specs
+        for lead in spatial_leads
+    ]
+    maps = [
+        spatial_metric_map(ds, variable, metric, subset, lead_values=[lead])
+        for variable, metric, _, lead in specs
+    ]
     fields = [field for _, _, field in maps]
     vmin, vmax = spatial_limits(fields)
 
-    fig, axes = plt.subplots(2, 2, figsize=(11.2, 6.8))
+    fig, axes = plt.subplots(len(row_specs), len(spatial_leads), figsize=(3.6 * len(spatial_leads), 9.6))
     style_figure(
         fig,
         "Figure 5. Spatial skill maps",
-        "Season/lead pooled spatial skill from matrix_spatial_metrics.nc; positive means ML improves on GEOS.",
+        (
+            "Valid-season pooled, lead-specific spatial skill from matrix_spatial_metrics.nc. "
+            f"Positive means ML improves on GEOS; subset={subset}."
+        ),
     )
     mesh = None
-    for ax, (lons, lats, field), (_, _, title) in zip(axes.ravel(), maps, specs):
-        maybe_mesh = plot_plain_map(ax, lons, lats, field, title, vmin, vmax)
+    for ax, (lons, lats, field), (_, _, title, _) in zip(np.asarray(axes).ravel(), maps, specs):
+        maybe_mesh = plot_plain_map(ax, lons, lats, field, title, vmin, vmax, cmap="RdYlGn", center_zero=True)
         if maybe_mesh is not None:
             mesh = maybe_mesh
     if mesh is not None:
-        cbar = fig.colorbar(mesh, ax=axes.ravel().tolist(), shrink=0.80, pad=0.02)
+        cbar = fig.colorbar(mesh, ax=np.asarray(axes).ravel().tolist(), shrink=0.80, pad=0.02)
         cbar.set_label("Skill vs GEOS (%)", fontsize=8.5)
         cbar.ax.tick_params(labelsize=8)
     fig.tight_layout(rect=[0, 0, 0.94, 0.91])
+    written = save_figure(fig, output_dir, "fig5_spatial_skill_maps", formats, dpi)
+
+    written.extend(figure_5b_spatial_bias_event(output_dir, formats, dpi, ds, spatial_leads))
     if ds is not None:
         ds.close()
-    return save_figure(fig, output_dir, "fig5_spatial_skill_maps", formats, dpi)
+    return written
+
+
+def figure_5b_spatial_bias_event(
+    output_dir: Path,
+    formats: list[str],
+    dpi: int,
+    ds,
+    spatial_leads: list[int],
+) -> list[Path]:
+    row_specs = [
+        ("pr", "bias_change", "PR bias change", "all_data", "RdBu_r", "ML - GEOS bias"),
+        ("t2m", "bias_change", "T2M bias change", "all_data", "RdBu_r", "ML - GEOS bias"),
+        ("pr", "crps_skill_pct", "PR extreme CRPS skill", "extreme_events", "RdYlGn", "Skill vs GEOS (%)"),
+        ("t2m", "calibrated_bss_diff", "T2M extreme calibrated BSS gain", "extreme_events", "RdYlGn", "ML - GEOS"),
+    ]
+    specs = [
+        (variable, metric, f"{title} W{lead}", subset, cmap, label, lead)
+        for variable, metric, title, subset, cmap, label in row_specs
+        for lead in spatial_leads
+    ]
+    maps = [
+        spatial_metric_map(ds, variable, metric, subset, lead_values=[lead])
+        for variable, metric, _, subset, _, _, lead in specs
+    ]
+    fields_by_label: dict[str, list[np.ndarray | None]] = {}
+    for (_, _, _, _, _, label, _), (_, _, field) in zip(specs, maps):
+        fields_by_label.setdefault(label, []).append(field)
+    limits_by_label = {
+        label: spatial_limits(fields, fallback=1.0 if "bias" in label.lower() else 30.0)
+        for label, fields in fields_by_label.items()
+    }
+
+    fig, axes = plt.subplots(len(row_specs), len(spatial_leads), figsize=(3.6 * len(spatial_leads), 9.6))
+    style_figure(
+        fig,
+        "Figure 5b. Bias and event-subset spatial diagnostics",
+        "Companion atlas for bias changes and observed-extreme verification maps requested in the manuscript.",
+    )
+    meshes = {}
+    for ax, (lons, lats, field), (_, _, title, _, cmap, label, _) in zip(np.asarray(axes).ravel(), maps, specs):
+        vmin, vmax = limits_by_label[label]
+        maybe_mesh = plot_plain_map(ax, lons, lats, field, title, vmin, vmax, cmap=cmap, center_zero=True)
+        if maybe_mesh is not None and label not in meshes:
+            meshes[label] = maybe_mesh
+    if meshes:
+        first_mesh = next(iter(meshes.values()))
+        cbar = fig.colorbar(first_mesh, ax=np.asarray(axes).ravel().tolist(), shrink=0.80, pad=0.02)
+        cbar.set_label("Centered diagnostic value", fontsize=8.5)
+        cbar.ax.tick_params(labelsize=8)
+    fig.tight_layout(rect=[0, 0, 0.94, 0.91])
+    return save_figure(fig, output_dir, "fig5b_spatial_bias_event_maps", formats, dpi)
 
 
 def plot_noise_ablation(ax: plt.Axes, noise_df: pd.DataFrame | None) -> None:
@@ -957,37 +1080,209 @@ def plot_event_skill_scatter(ax: plt.Axes, rows: pd.DataFrame) -> None:
     ax.legend(frameon=False, fontsize=7)
 
 
+def resolve_recorded_plot_path(path_text: object, base_dir: Path) -> Path | None:
+    if path_text is None or (isinstance(path_text, float) and math.isnan(path_text)):
+        return None
+    path = Path(str(path_text))
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.append(base_dir / path)
+        candidates.append(base_dir / path.name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def event_plot_sort_key(path: Path) -> tuple[int, str]:
+    text = path.name
+    match = re.search(r"lead(\d+)", text)
+    lead = int(match.group(1)) if match else 99
+    lead_order = {3: 0, 4: 1, 2: 2, 1: 3}.get(lead, 9)
+    return lead_order, text
+
+
+def plot_index_candidates(
+    plot_index: pd.DataFrame | None,
+    event_id: str,
+    plot_types: list[str],
+    base_dir: Path,
+) -> list[Path]:
+    if plot_index is None or plot_index.empty or not {"event_id", "plot_type", "path"} <= set(plot_index.columns):
+        return []
+    subset = plot_index[
+        plot_index["event_id"].astype(str).eq(event_id)
+        & plot_index["plot_type"].astype(str).isin(plot_types)
+    ]
+    paths = []
+    for value in subset["path"]:
+        path = resolve_recorded_plot_path(value, base_dir)
+        if path is not None:
+            paths.append(path)
+    return sorted(paths, key=event_plot_sort_key)
+
+
+def find_primary_event_plot(
+    event_id: str,
+    event_dir: Path,
+    quantile_dir: Path,
+    event_plot_index: pd.DataFrame | None,
+    quantile_plot_index: pd.DataFrame | None,
+) -> Path | None:
+    candidates = []
+    candidates.extend(plot_index_candidates(quantile_plot_index, event_id, ["quantile_spatial"], quantile_dir))
+    candidates.extend(plot_index_candidates(event_plot_index, event_id, ["spatial_risk"], event_dir))
+    candidates.extend(plot_index_candidates(event_plot_index, event_id, ["spatial_verification"], event_dir))
+    candidates.extend(Path(path) for path in glob.glob(str(quantile_dir / "plots" / "quantile_spatial_maps" / f"{event_id}_*quantile_spatial.png")))
+    candidates.extend(Path(path) for path in glob.glob(str(event_dir / "plots" / "spatial_maps" / f"{event_id}_lead*_spatial_risk.png")))
+    candidates.extend(Path(path) for path in glob.glob(str(event_dir / "plots" / "spatial_maps" / f"{event_id}_lead*_spatial_verification.png")))
+    candidates = [path for path in candidates if path.exists()]
+    if not candidates:
+        return None
+    return sorted(candidates, key=event_plot_sort_key)[0]
+
+
+def event_rows_for_id(event_df: pd.DataFrame | None, event_id: str) -> pd.DataFrame:
+    if event_df is None or event_df.empty or "event_id" not in event_df:
+        return pd.DataFrame()
+    rows = event_df[event_df["event_id"].astype(str).eq(event_id)].copy()
+    if rows.empty and event_id.startswith("bangladesh_pr_202206"):
+        rows = event_df[event_df["event_id"].astype(str).str.startswith("bangladesh_pr_202206")].copy()
+    if rows.empty:
+        return rows
+    sort_cols = [col for col in ["init_time", "lead", "valid_time"] if col in rows]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols)
+    return rows.reset_index(drop=True)
+
+
+def mean_column(rows: pd.DataFrame, candidates: list[str]) -> tuple[str | None, float]:
+    for col in candidates:
+        if col in rows:
+            values = pd.to_numeric(rows[col], errors="coerce").to_numpy(dtype=float)
+            if np.isfinite(values).any():
+                return col, float(np.nanmean(values))
+    return None, float("nan")
+
+
+def format_pair_list(rows: pd.DataFrame, max_items: int = 5) -> str:
+    if rows.empty or not {"init_time", "lead"} <= set(rows.columns):
+        return "not available"
+    pairs = []
+    for _, row in rows.drop_duplicates(["init_time", "lead"]).iterrows():
+        pairs.append(f"{row['init_time']} W{int(row['lead'])}")
+    if len(pairs) > max_items:
+        pairs = pairs[:max_items] + [f"+{len(pairs) - max_items} more"]
+    return "\n".join(pairs) if pairs else "not available"
+
+
+def plot_primary_event_summary(ax: plt.Axes, event_id: str, event_df: pd.DataFrame | None) -> None:
+    rows = event_rows_for_id(event_df, event_id)
+    ax.set_axis_off()
+    ax.set_title("Selected init/lead summary", loc="left", fontsize=10, fontweight="bold")
+    if rows.empty:
+        missing_panel(ax, "Selected init/lead summary", "Missing event_selected_lead_metrics.csv rows for this primary event.")
+        return
+
+    _, crps_value = mean_column(rows, ["crps_on_obs_extreme_skill_pct", "crps_skill_pct"])
+    _, bss_value = mean_column(rows, ["calibrated_bss_diff", "bss_diff"])
+    _, prob_value = mean_column(
+        rows,
+        [
+            "event_probability_neighborhood_on_obs_extreme_diff",
+            "event_probability_on_obs_extreme_diff",
+            "event_probability_neighborhood_top_tail_diff",
+        ],
+    )
+    pair_cols = [col for col in ["init_time", "lead"] if col in rows]
+    n_pairs = int(len(rows.drop_duplicates(pair_cols))) if pair_cols else int(len(rows))
+    event_name = clean_label(rows.iloc[0].get("event_name", event_id))
+    variable = VARIABLE_SHORT.get(str(rows.iloc[0].get("variable", "")).lower(), str(rows.iloc[0].get("variable", "")).upper())
+    text = (
+        f"{event_name}\n"
+        f"Variable: {variable}\n"
+        f"Selected pairs: {n_pairs}\n\n"
+        f"Mean event-mask CRPS skill: {crps_value:+.2f}%\n"
+        f"Mean calibrated BSS gain: {bss_value:+.3f}\n"
+        f"Mean event-probability gain: {prob_value:+.3f}\n\n"
+        f"Init/lead pairs:\n{format_pair_list(rows)}"
+    )
+    box = FancyBboxPatch(
+        (0.03, 0.05),
+        0.94,
+        0.86,
+        transform=ax.transAxes,
+        boxstyle="round,pad=0.025,rounding_size=0.025",
+        facecolor="#f7f8fa",
+        edgecolor="#a9b4bf",
+        linewidth=1.0,
+    )
+    ax.add_patch(box)
+    ax.text(0.08, 0.84, text, transform=ax.transAxes, ha="left", va="top", fontsize=8.3, color=TEXT_DARK)
+
+
+def plot_event_image(ax: plt.Axes, image_path: Path | None, event_id: str) -> None:
+    ax.set_axis_off()
+    label = PRIMARY_EVENT_LABELS.get(event_id, event_id)
+    ax.set_title(label, loc="left", fontsize=10, fontweight="bold")
+    if image_path is None:
+        missing_panel(
+            ax,
+            label,
+            (
+                "Missing spatial event map. Run evaluate_event_catalog_flow_finalv1_global.py "
+                "or evaluate_event_quantile_forecast_flow_finalv1_global.py with --make_plots."
+            ),
+        )
+        return
+    try:
+        image = plt.imread(image_path)
+    except Exception as exc:
+        missing_panel(ax, label, f"Could not read event map {image_path}: {exc}")
+        return
+    ax.imshow(image)
+    ax.text(
+        0.01,
+        0.01,
+        str(image_path),
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=5.5,
+        color="white",
+        bbox={"facecolor": "black", "alpha": 0.45, "edgecolor": "none", "pad": 2},
+    )
+
+
 def figure_7_extremes(
     output_dir: Path,
     formats: list[str],
     dpi: int,
     event_df: pd.DataFrame | None,
-    limit: int,
+    event_dir: Path,
+    quantile_dir: Path,
+    event_plot_index: pd.DataFrame | None,
+    quantile_plot_index: pd.DataFrame | None,
+    primary_event_ids: list[str],
 ) -> list[Path]:
-    rows = choose_event_rows(event_df, limit)
-    fig, axes = plt.subplots(2, 2, figsize=(12.2, 7.2))
+    primary_event_ids = primary_event_ids[:2] if primary_event_ids else PRIMARY_EVENT_IDS[:2]
+    fig, axes = plt.subplots(
+        len(primary_event_ids),
+        2,
+        figsize=(15.0, 5.3 * max(1, len(primary_event_ids))),
+        gridspec_kw={"width_ratios": [3.4, 1.0]},
+    )
+    axes = np.asarray(axes).reshape(len(primary_event_ids), 2)
     style_figure(
         fig,
         "Figure 7. Extreme-event tail-risk diagnostics",
-        "Selected event-lead rows from event_selected_lead_metrics.csv; positive gains favor ML.",
+        "Primary spatial case studies requested in main.tex: UK July 2022 T2M heatwave and Bangladesh/Sylhet June 2022 PR flood.",
     )
-    plot_event_probability(axes[0, 0], rows)
-    plot_event_gain_bars(
-        axes[0, 1],
-        rows,
-        "event_probability_neighborhood_on_obs_extreme_diff",
-        "Neighborhood probability gain",
-        "ML - GEOS",
-    )
-    plot_event_gain_bars(
-        axes[1, 0],
-        rows,
-        "upper_quantile_tail_closeness_gain",
-        "Upper-tail closeness gain",
-        "GEOS abs error - ML abs error",
-    )
-    plot_event_skill_scatter(axes[1, 1], rows)
-    fig.tight_layout(rect=[0, 0, 1, 0.91])
+    for row_idx, event_id in enumerate(primary_event_ids):
+        image_path = find_primary_event_plot(event_id, event_dir, quantile_dir, event_plot_index, quantile_plot_index)
+        plot_event_image(axes[row_idx, 0], image_path, event_id)
+        plot_primary_event_summary(axes[row_idx, 1], event_id, event_df)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
     return save_figure(fig, output_dir, "fig7_extreme_tail_risk", formats, dpi)
 
 
@@ -1011,6 +1306,8 @@ def main() -> None:
     args = parse_args()
     formats = output_formats(args.format)
     output_dir = Path(args.output_dir)
+    spatial_leads = parse_int_list(args.spatial_leads, default=[2, 3, 4])
+    primary_event_ids = parse_str_list(args.primary_event_ids, default=PRIMARY_EVENT_IDS[:2])
     matrix_dir = first_existing_dir(args.matrix_dir, DEFAULT_MATRIX_DIR_CANDIDATES)
     event_dir = first_existing_dir(args.event_dir, DEFAULT_EVENT_DIR_CANDIDATES)
     quantile_dir = first_existing_dir(args.quantile_dir, DEFAULT_QUANTILE_DIR_CANDIDATES)
@@ -1023,6 +1320,8 @@ def main() -> None:
     print(f"  quantile_dir   : {quantile_dir}")
     print(f"  noise_csv      : {noise_csv or 'not found'}")
     print(f"  checkpoint_csv : {checkpoint_csv or 'not found'}")
+    print(f"  spatial_leads  : {spatial_leads}")
+    print(f"  primary_events : {primary_event_ids}")
     print(f"  output_dir     : {output_dir}")
 
     summary = read_csv_or_none(matrix_summary_path(matrix_dir))
@@ -1030,13 +1329,15 @@ def main() -> None:
     checkpoint_df = read_csv_or_none(checkpoint_csv)
     calibration_df = read_csv_or_none(calibration_path(matrix_dir))
     event_df = read_csv_or_none(event_dir / "event_selected_lead_metrics.csv")
+    event_plot_index = read_csv_or_none(event_dir / "event_plot_index.csv")
+    quantile_plot_index = read_csv_or_none(quantile_dir / "event_quantile_plot_index.csv")
 
     written: list[Path] = []
     written.extend(figure_1_system_overview(output_dir, formats, args.dpi))
     written.extend(figure_2_architecture(output_dir, formats, args.dpi))
     written.extend(figure_3_lead_skill(output_dir, formats, args.dpi, summary, args.matrix_subset))
     written.extend(figure_4_season_lead(output_dir, formats, args.dpi, summary, args.matrix_subset))
-    written.extend(figure_5_spatial_skill(output_dir, formats, args.dpi, matrix_dir, args.spatial_subset))
+    written.extend(figure_5_spatial_skill(output_dir, formats, args.dpi, matrix_dir, args.spatial_subset, spatial_leads))
     written.extend(
         figure_6_probabilistic(
             output_dir,
@@ -1049,7 +1350,19 @@ def main() -> None:
             calibration_df,
         )
     )
-    written.extend(figure_7_extremes(output_dir, formats, args.dpi, event_df, args.event_limit))
+    written.extend(
+        figure_7_extremes(
+            output_dir,
+            formats,
+            args.dpi,
+            event_df,
+            event_dir,
+            quantile_dir,
+            event_plot_index,
+            quantile_plot_index,
+            primary_event_ids,
+        )
+    )
 
     if args.write_legacy_aliases:
         write_legacy_aliases(output_dir, formats, args.dpi)
