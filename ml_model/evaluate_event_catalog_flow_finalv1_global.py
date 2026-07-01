@@ -1880,15 +1880,18 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         center_zero=True,
     )
     crps_vmin, crps_vmax = robust_limits([masked_for_limits(crps_skill)], center_zero=True)
-    raw_prob_diff_vmin, raw_prob_diff_vmax = robust_limits(
-        [masked_for_limits(raw_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
+    prob_diff_vmin, prob_diff_vmax = robust_limits(
+        [
+            masked_for_limits(raw_prob_diff),
+            masked_for_limits(cal_prob_diff),
+            masked_for_limits(neighborhood_prob_diff),
+        ],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
     )
-    cal_prob_diff_vmin, cal_prob_diff_vmax = robust_limits(
-        [masked_for_limits(cal_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
-    )
-    neighborhood_prob_diff_vmin, neighborhood_prob_diff_vmax = robust_limits(
-        [masked_for_limits(neighborhood_prob_diff)], center_zero=True, fallback=(-1.0, 1.0)
-    )
+    raw_prob_diff_vmin, raw_prob_diff_vmax = prob_diff_vmin, prob_diff_vmax
+    cal_prob_diff_vmin, cal_prob_diff_vmax = prob_diff_vmin, prob_diff_vmax
+    neighborhood_prob_diff_vmin, neighborhood_prob_diff_vmax = prob_diff_vmin, prob_diff_vmax
     bss_diff_vmin, bss_diff_vmax = robust_limits(
         [masked_for_limits(bss_diff), masked_for_limits(cal_bss_diff)],
         center_zero=True,

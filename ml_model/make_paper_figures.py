@@ -78,25 +78,30 @@ PRIMARY_EVENT_CONTEXT = {
     },
 }
 
-QUANTILE_SPATIAL_PANEL_SPECS = [
-    ("Observed", 0),
-    ("Extreme mask", 2),
-    ("GEOS q95", 4),
-    (f"{METHOD} q95", 5),
-    ("GEOS P >= threshold", 8),
-    (f"{METHOD} P >= threshold", 9),
-    ("Probability gain", 10),
-    ("Observed-percentile gain", 7),
+EVENT_PLOT_LAYOUTS = {
+    "spatial_risk": (3, 4),
+    "spatial_verification": (4, 4),
+    "quantile_spatial": (4, 4),
+}
+CATALOG_MAIN_PANEL_SPECS = [
+    ("Observed", "spatial_risk", 0),
+    ("Extreme mask", "spatial_risk", 2),
+    ("GEOS event probability", "spatial_risk", 6),
+    (f"{METHOD} event probability", "spatial_risk", 7),
+    ("Probability gain", "spatial_risk", 8),
+    ("Calibrated probability gain", "spatial_verification", 11),
+    ("BSS gain", "spatial_verification", 8),
+    ("Calibrated BSS gain", "spatial_verification", 12),
 ]
-CATALOG_SPATIAL_PANEL_SPECS = [
-    ("Observed", 0),
-    ("Extreme mask", 2),
-    ("GEOS q95", 3),
-    (f"{METHOD} q95", 4),
-    ("GEOS event probability", 6),
-    (f"{METHOD} event probability", 7),
-    ("Probability gain", 8),
-    ("Neighborhood gain", 11),
+QUANTILE_FALLBACK_PANEL_SPECS = [
+    ("Observed", "quantile_spatial", 0),
+    ("Extreme mask", "quantile_spatial", 2),
+    ("GEOS q95", "quantile_spatial", 4),
+    (f"{METHOD} q95", "quantile_spatial", 5),
+    ("GEOS P >= threshold", "quantile_spatial", 8),
+    (f"{METHOD} P >= threshold", "quantile_spatial", 9),
+    ("Probability gain", "quantile_spatial", 10),
+    ("Observed-percentile gain", "quantile_spatial", 7),
 ]
 
 COLOR_GEOS = "#b43c30"
@@ -1148,10 +1153,11 @@ def plot_index_candidates(
 ) -> list[Path]:
     if plot_index is None or plot_index.empty or not {"event_id", "plot_type", "path"} <= set(plot_index.columns):
         return []
-    subset = plot_index[
-        plot_index["event_id"].astype(str).eq(event_id)
-        & plot_index["plot_type"].astype(str).isin(plot_types)
-    ]
+    event_ids = plot_index["event_id"].astype(str)
+    event_mask = event_ids.eq(event_id)
+    if not event_mask.any() and event_id.startswith("bangladesh_pr_202206"):
+        event_mask = event_ids.str.startswith("bangladesh_pr_202206")
+    subset = plot_index[event_mask & plot_index["plot_type"].astype(str).isin(plot_types)]
     paths = []
     for value in subset["path"]:
         path = resolve_recorded_plot_path(value, base_dir)
@@ -1160,24 +1166,68 @@ def plot_index_candidates(
     return sorted(paths, key=event_plot_sort_key)
 
 
-def find_primary_event_plot(
+def event_glob_ids(event_id: str) -> list[str]:
+    if event_id.startswith("bangladesh_pr_202206"):
+        return [event_id, "bangladesh_pr_202206*"]
+    return [event_id]
+
+
+def first_event_plot(
+    event_id: str,
+    plot_type: str,
+    base_dir: Path,
+    plot_index: pd.DataFrame | None,
+    glob_dir: Path,
+    glob_suffix: str,
+) -> Path | None:
+    candidates = plot_index_candidates(plot_index, event_id, [plot_type], base_dir)
+    for glob_id in event_glob_ids(event_id):
+        candidates.extend(Path(path) for path in glob.glob(str(glob_dir / f"{glob_id}{glob_suffix}")))
+    candidates = [path for path in candidates if path.exists()]
+    if not candidates:
+        return None
+    return sorted(candidates, key=event_plot_sort_key)[0]
+
+
+def find_primary_event_plots(
     event_id: str,
     event_dir: Path,
     quantile_dir: Path,
     event_plot_index: pd.DataFrame | None,
     quantile_plot_index: pd.DataFrame | None,
-) -> Path | None:
-    candidates = []
-    candidates.extend(plot_index_candidates(quantile_plot_index, event_id, ["quantile_spatial"], quantile_dir))
-    candidates.extend(plot_index_candidates(event_plot_index, event_id, ["spatial_risk"], event_dir))
-    candidates.extend(plot_index_candidates(event_plot_index, event_id, ["spatial_verification"], event_dir))
-    candidates.extend(Path(path) for path in glob.glob(str(quantile_dir / "plots" / "quantile_spatial_maps" / f"{event_id}_*quantile_spatial.png")))
-    candidates.extend(Path(path) for path in glob.glob(str(event_dir / "plots" / "spatial_maps" / f"{event_id}_lead*_spatial_risk.png")))
-    candidates.extend(Path(path) for path in glob.glob(str(event_dir / "plots" / "spatial_maps" / f"{event_id}_lead*_spatial_verification.png")))
-    candidates = [path for path in candidates if path.exists()]
-    if not candidates:
-        return None
-    return sorted(candidates, key=event_plot_sort_key)[0]
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    risk = first_event_plot(
+        event_id,
+        "spatial_risk",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_risk.png",
+    )
+    verification = first_event_plot(
+        event_id,
+        "spatial_verification",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_verification.png",
+    )
+    quantile = first_event_plot(
+        event_id,
+        "quantile_spatial",
+        quantile_dir,
+        quantile_plot_index,
+        quantile_dir / "plots" / "quantile_spatial_maps",
+        "_*quantile_spatial.png",
+    )
+    if risk is not None:
+        paths["spatial_risk"] = risk
+    if verification is not None:
+        paths["spatial_verification"] = verification
+    if quantile is not None:
+        paths["quantile_spatial"] = quantile
+    return paths
 
 
 def event_rows_for_id(event_df: pd.DataFrame | None, event_id: str) -> pd.DataFrame:
@@ -1293,15 +1343,19 @@ def plot_primary_event_summary_strip(
     ax.add_patch(box)
 
     _, crps_value = mean_column(event_rows, ["crps_on_obs_extreme_skill_pct", "crps_skill_pct"])
+    _, raw_bss_value = mean_column(event_rows, ["bss_diff"])
     _, bss_value = mean_column(event_rows, ["calibrated_bss_diff", "bss_diff"])
-    _, event_prob_value = mean_column(
-        event_rows,
-        [
-            "event_probability_neighborhood_on_obs_extreme_diff",
-            "event_probability_on_obs_extreme_diff",
-            "event_probability_neighborhood_top_tail_diff",
-        ],
-    )
+    _, raw_prob_value = mean_column(event_rows, ["event_probability_on_obs_extreme_diff", "event_probability_top_tail_diff"])
+    _, neighborhood_prob_value = mean_column(event_rows, [
+        "event_probability_neighborhood_on_obs_extreme_diff",
+        "event_probability_neighborhood_top_tail_diff",
+        "event_probability_neighborhood_diff",
+    ])
+    _, calibrated_prob_value = mean_column(event_rows, [
+        "cal_event_probability_on_obs_extreme_diff",
+        "event_probability_calibrated_top_tail_diff",
+        "event_probability_calibrated_diff",
+    ])
     _, q95_skill = mean_column(quantile_rows, ["q95_error_skill"])
     _, qprob_value = mean_column(quantile_rows, ["prob_threshold_or_more_diff_model_minus_geos"])
     _, percentile_value = mean_column(quantile_rows, ["obs_percentile_diff_model_minus_geos"])
@@ -1383,28 +1437,29 @@ def plot_primary_event_summary_strip(
     x0 = 0.42
     x1 = 0.61
     x2 = 0.80
-    draw_summary_value(ax, x0, 0.66, "event-mask CRPS skill", signed_metric_text(crps_value, 1, "%"),
-                       COLOR_POS if crps_value >= 0 else COLOR_NEG)
-    draw_summary_value(ax, x1, 0.66, "cal. BSS gain", signed_metric_text(bss_value, 3),
-                       COLOR_POS if bss_value >= 0 else COLOR_NEG)
-    draw_summary_value(ax, x2, 0.66, "event-prob gain", signed_metric_text(event_prob_value, 3),
-                       COLOR_POS if event_prob_value >= 0 else COLOR_NEG)
-    draw_summary_value(ax, x0, 0.27, "q95 error skill", signed_metric_text(q95_skill, 2),
-                       COLOR_POS if q95_skill >= 0 else COLOR_NEG)
-    draw_summary_value(ax, x1, 0.27, "P(threshold) gain", signed_metric_text(qprob_value, 3),
-                       COLOR_POS if qprob_value >= 0 else COLOR_NEG)
-    draw_summary_value(ax, x2, 0.27, "obs-percentile gain", signed_metric_text(percentile_value, 3),
-                       COLOR_POS if percentile_value >= 0 else COLOR_NEG)
+    if not event_rows.empty:
+        draw_summary_value(ax, x0, 0.66, "event-mask CRPS skill", signed_metric_text(crps_value, 1, "%"),
+                           COLOR_POS if crps_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.66, "BSS gain", signed_metric_text(raw_bss_value, 3),
+                           COLOR_POS if raw_bss_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.66, "cal. BSS gain", signed_metric_text(bss_value, 3),
+                           COLOR_POS if bss_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x0, 0.27, "event-prob gain", signed_metric_text(raw_prob_value, 3),
+                           COLOR_POS if raw_prob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.27, "neighborhood-prob gain", signed_metric_text(neighborhood_prob_value, 3),
+                           COLOR_POS if neighborhood_prob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.27, "cal. event-prob gain", signed_metric_text(calibrated_prob_value, 3),
+                           COLOR_POS if calibrated_prob_value >= 0 else COLOR_NEG)
+    else:
+        draw_summary_value(ax, x0, 0.66, "q95 error skill", signed_metric_text(q95_skill, 2),
+                           COLOR_POS if q95_skill >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.66, "P(threshold) gain", signed_metric_text(qprob_value, 3),
+                           COLOR_POS if qprob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.66, "obs-percentile gain", signed_metric_text(percentile_value, 3),
+                           COLOR_POS if percentile_value >= 0 else COLOR_NEG)
     if n_pairs is not None:
         ax.text(0.985, 0.18, f"n={n_pairs}", transform=ax.transAxes, ha="right", va="center",
                 fontsize=7.3, color=TEXT_MUTED)
-
-
-def event_image_layout(image_path: Path) -> tuple[int, int, list[tuple[str, int]], str]:
-    path_text = str(image_path).lower()
-    if "quantile_spatial" in path_text:
-        return 4, 4, QUANTILE_SPATIAL_PANEL_SPECS, "quantile spatial diagnostics"
-    return 3, 4, CATALOG_SPATIAL_PANEL_SPECS, "catalog spatial diagnostics"
 
 
 def crop_event_panel(image: np.ndarray, nrows: int, ncols: int, panel_index: int) -> np.ndarray:
@@ -1451,6 +1506,72 @@ def plot_cropped_event_panel(ax: plt.Axes, panel: np.ndarray, title: str) -> Non
     )
 
 
+def plot_small_missing_panel(ax: plt.Axes, title: str, message: str) -> None:
+    ax.set_axis_off()
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.45)
+        spine.set_color("#c8d1d9")
+    ax.text(
+        0.03,
+        0.92,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=7.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+    )
+    ax.text(
+        0.50,
+        0.48,
+        wrap(message, 32),
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=7.4,
+        color=TEXT_MUTED,
+    )
+
+
+def choose_event_panel_specs(plot_paths: dict[str, Path]) -> list[tuple[str, str, int]]:
+    if "spatial_risk" in plot_paths:
+        return CATALOG_MAIN_PANEL_SPECS
+    return QUANTILE_FALLBACK_PANEL_SPECS
+
+
+def first_spatial_path(plot_paths: dict[str, Path]) -> Path | None:
+    for key in ("spatial_risk", "spatial_verification", "quantile_spatial"):
+        if key in plot_paths:
+            return plot_paths[key]
+    return None
+
+
+def plot_event_source_panels(
+    fig: plt.Figure,
+    case,
+    event_id: str,
+    plot_paths: dict[str, Path],
+) -> None:
+    specs = choose_event_panel_specs(plot_paths)
+    image_cache: dict[str, np.ndarray] = {}
+    for panel_idx, (panel_title, plot_type, source_index) in enumerate(specs[:8]):
+        ax = fig.add_subplot(case[1 + panel_idx // 4, panel_idx % 4])
+        image_path = plot_paths.get(plot_type)
+        if image_path is None:
+            plot_small_missing_panel(ax, panel_title, f"Missing {plot_type} map for this event.")
+            continue
+        try:
+            if plot_type not in image_cache:
+                image_cache[plot_type] = plt.imread(image_path)
+            nrows, ncols = EVENT_PLOT_LAYOUTS[plot_type]
+            crop = crop_event_panel(image_cache[plot_type], nrows, ncols, source_index)
+            plot_cropped_event_panel(ax, crop, panel_title)
+        except Exception as exc:
+            plot_small_missing_panel(ax, panel_title, f"Could not read source map: {exc}")
+
+
 def figure_7_extremes(
     output_dir: Path,
     formats: list[str],
@@ -1477,7 +1598,8 @@ def figure_7_extremes(
         hspace=0.215,
     )
     for row_idx, event_id in enumerate(primary_event_ids):
-        image_path = find_primary_event_plot(event_id, event_dir, quantile_dir, event_plot_index, quantile_plot_index)
+        plot_paths = find_primary_event_plots(event_id, event_dir, quantile_dir, event_plot_index, quantile_plot_index)
+        image_path = first_spatial_path(plot_paths)
         case = outer[row_idx].subgridspec(
             4,
             4,
@@ -1523,19 +1645,7 @@ def figure_7_extremes(
                 ),
             )
         else:
-            try:
-                image = plt.imread(image_path)
-                nrows, ncols, specs, _ = event_image_layout(image_path)
-            except Exception as exc:
-                image = None
-                nrows, ncols, specs = 0, 0, []
-                map_ax = fig.add_subplot(case[1:3, :])
-                missing_panel(map_ax, "Spatial tail-risk maps pending", f"Could not read event map: {exc}")
-            if image is not None:
-                for panel_idx, (panel_title, source_index) in enumerate(specs[:8]):
-                    ax = fig.add_subplot(case[1 + panel_idx // 4, panel_idx % 4])
-                    crop = crop_event_panel(image, nrows, ncols, source_index)
-                    plot_cropped_event_panel(ax, crop, panel_title)
+            plot_event_source_panels(fig, case, event_id, plot_paths)
         summary_ax = fig.add_subplot(case[3, :])
         plot_primary_event_summary_strip(summary_ax, event_id, event_df, quantile_df, image_path)
     return save_figure(fig, output_dir, "fig7_extreme_tail_risk", formats, dpi)

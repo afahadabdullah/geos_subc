@@ -653,16 +653,13 @@ def plot_quantile_spatial(event, sample, thresholds, lons, lats, mask, out_dir, 
     )
     q_diff_vmin, q_diff_vmax = robust_limits([masked_for_limits(q_diff)], center_zero=True)
     q_close_vmin, q_close_vmax = robust_limits([masked_for_limits(q_closeness_gain)], center_zero=True)
-    prob_threshold_diff_vmin, prob_threshold_diff_vmax = robust_limits(
-        [masked_for_limits(prob_threshold_diff)],
+    prob_diff_vmin, prob_diff_vmax = robust_limits(
+        [masked_for_limits(prob_threshold_diff), masked_for_limits(prob_obs_diff)],
         center_zero=True,
         fallback=(-1.0, 1.0),
     )
-    prob_obs_diff_vmin, prob_obs_diff_vmax = robust_limits(
-        [masked_for_limits(prob_obs_diff)],
-        center_zero=True,
-        fallback=(-1.0, 1.0),
-    )
+    prob_threshold_diff_vmin, prob_threshold_diff_vmax = prob_diff_vmin, prob_diff_vmax
+    prob_obs_diff_vmin, prob_obs_diff_vmax = prob_diff_vmin, prob_diff_vmax
     percentile_diff_vmin, percentile_diff_vmax = robust_limits(
         [masked_for_limits(obs_percentile_diff)],
         center_zero=True,
