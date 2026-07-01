@@ -1583,6 +1583,8 @@ def figure_7_extremes(
     quantile_plot_index: pd.DataFrame | None,
     quantile_df: pd.DataFrame | None,
     primary_event_ids: list[str],
+    stem: str = "fig7_extreme_tail_risk",
+    panel_letters: bool = True,
 ) -> list[Path]:
     primary_event_ids = primary_event_ids[:2] if primary_event_ids else PRIMARY_EVENT_IDS[:2]
     n_events = len(primary_event_ids)
@@ -1611,11 +1613,12 @@ def figure_7_extremes(
         header_ax.set_axis_off()
         label = PRIMARY_EVENT_LABELS.get(event_id, event_id)
         panel_letter = chr(ord("a") + row_idx)
+        label_prefix = f"{panel_letter}. " if panel_letters else ""
         context = PRIMARY_EVENT_CONTEXT.get(event_id, {})
         header_ax.text(
             0.000,
             0.62,
-            f"{panel_letter}. {label}",
+            f"{label_prefix}{label}",
             transform=header_ax.transAxes,
             ha="left",
             va="center",
@@ -1648,7 +1651,57 @@ def figure_7_extremes(
             plot_event_source_panels(fig, case, event_id, plot_paths)
         summary_ax = fig.add_subplot(case[3, :])
         plot_primary_event_summary_strip(summary_ax, event_id, event_df, quantile_df, image_path)
-    return save_figure(fig, output_dir, "fig7_extreme_tail_risk", formats, dpi)
+    return save_figure(fig, output_dir, stem, formats, dpi)
+
+
+def primary_event_id_for_variable(primary_event_ids: list[str], variable: str) -> str | None:
+    token = f"_{variable.lower()}_"
+    for event_id in primary_event_ids:
+        if token in event_id.lower():
+            return event_id
+    for event_id in PRIMARY_EVENT_IDS:
+        if token in event_id.lower():
+            return event_id
+    return None
+
+
+def figure_7_separate_event_cases(
+    output_dir: Path,
+    formats: list[str],
+    dpi: int,
+    event_df: pd.DataFrame | None,
+    event_dir: Path,
+    quantile_dir: Path,
+    event_plot_index: pd.DataFrame | None,
+    quantile_plot_index: pd.DataFrame | None,
+    quantile_df: pd.DataFrame | None,
+    primary_event_ids: list[str],
+) -> list[Path]:
+    written: list[Path] = []
+    for variable, stem in [
+        ("t2m", "fig7a_t2m_case_event_diagnostics"),
+        ("pr", "fig7b_pr_case_event_diagnostics"),
+    ]:
+        event_id = primary_event_id_for_variable(primary_event_ids, variable)
+        if event_id is None:
+            continue
+        written.extend(
+            figure_7_extremes(
+                output_dir,
+                formats,
+                dpi,
+                event_df,
+                event_dir,
+                quantile_dir,
+                event_plot_index,
+                quantile_plot_index,
+                quantile_df,
+                [event_id],
+                stem=stem,
+                panel_letters=False,
+            )
+        )
+    return written
 
 
 def write_legacy_aliases(output_dir: Path, formats: list[str], dpi: int) -> None:
@@ -1718,6 +1771,20 @@ def main() -> None:
     )
     written.extend(
         figure_7_extremes(
+            output_dir,
+            formats,
+            args.dpi,
+            event_df,
+            event_dir,
+            quantile_dir,
+            event_plot_index,
+            quantile_plot_index,
+            quantile_df,
+            primary_event_ids,
+        )
+    )
+    written.extend(
+        figure_7_separate_event_cases(
             output_dir,
             formats,
             args.dpi,
