@@ -60,6 +60,44 @@ PRIMARY_EVENT_LABELS = {
     "bangladesh_pr_202206_meghalaya_sylhet_downpours": "Bangladesh/Sylhet June 2022 flood (PR)",
     "bangladesh_pr_202206_sylhet_floods": "Bangladesh/Sylhet June 2022 flood (PR)",
 }
+PRIMARY_EVENT_CONTEXT = {
+    "europe_t2m_202207_uk_heatwave": {
+        "event_window": "18-19 Jul 2022 target week",
+        "domain": "United Kingdom / western Europe",
+        "diagnostic": "hot-tail T2M exceedance",
+    },
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours": {
+        "event_window": "17-23 Jun 2022 target week",
+        "domain": "NE Bangladesh / Meghalaya-Assam",
+        "diagnostic": "heavy-rain PR exceedance",
+    },
+    "bangladesh_pr_202206_sylhet_floods": {
+        "event_window": "17-23 Jun 2022 target week",
+        "domain": "NE Bangladesh / Meghalaya-Assam",
+        "diagnostic": "heavy-rain PR exceedance",
+    },
+}
+
+QUANTILE_SPATIAL_PANEL_SPECS = [
+    ("Observed", 0),
+    ("Extreme mask", 2),
+    ("GEOS q95", 4),
+    (f"{METHOD} q95", 5),
+    ("GEOS P >= threshold", 8),
+    (f"{METHOD} P >= threshold", 9),
+    ("Probability gain", 10),
+    ("Observed-percentile gain", 7),
+]
+CATALOG_SPATIAL_PANEL_SPECS = [
+    ("Observed", 0),
+    ("Extreme mask", 2),
+    ("GEOS q95", 3),
+    (f"{METHOD} q95", 4),
+    ("GEOS event probability", 6),
+    (f"{METHOD} event probability", 7),
+    ("Probability gain", 8),
+    ("Neighborhood gain", 11),
+]
 
 COLOR_GEOS = "#b43c30"
 COLOR_MODEL = "#202124"
@@ -1156,6 +1194,20 @@ def event_rows_for_id(event_df: pd.DataFrame | None, event_id: str) -> pd.DataFr
     return rows.reset_index(drop=True)
 
 
+def quantile_rows_for_id(quantile_df: pd.DataFrame | None, event_id: str) -> pd.DataFrame:
+    if quantile_df is None or quantile_df.empty or "event_id" not in quantile_df:
+        return pd.DataFrame()
+    rows = quantile_df[quantile_df["event_id"].astype(str).eq(event_id)].copy()
+    if rows.empty and event_id.startswith("bangladesh_pr_202206"):
+        rows = quantile_df[quantile_df["event_id"].astype(str).str.startswith("bangladesh_pr_202206")].copy()
+    if rows.empty:
+        return rows
+    sort_cols = [col for col in ["sample_kind", "init_time", "lead", "metric"] if col in rows]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols)
+    return rows.reset_index(drop=True)
+
+
 def mean_column(rows: pd.DataFrame, candidates: list[str]) -> tuple[str | None, float]:
     for col in candidates:
         if col in rows:
@@ -1176,81 +1228,226 @@ def format_pair_list(rows: pd.DataFrame, max_items: int = 5) -> str:
     return "\n".join(pairs) if pairs else "not available"
 
 
-def plot_primary_event_summary(ax: plt.Axes, event_id: str, event_df: pd.DataFrame | None) -> None:
-    rows = event_rows_for_id(event_df, event_id)
-    ax.set_axis_off()
-    ax.set_title("Selected init/lead summary", loc="left", fontsize=10, fontweight="bold")
-    if rows.empty:
-        missing_panel(ax, "Selected init/lead summary", "Missing event_selected_lead_metrics.csv rows for this primary event.")
-        return
+def signed_metric_text(value: float, digits: int = 2, suffix: str = "") -> str:
+    if not np.isfinite(value):
+        return "pending"
+    return f"{value:+.{digits}f}{suffix}"
 
-    _, crps_value = mean_column(rows, ["crps_on_obs_extreme_skill_pct", "crps_skill_pct"])
-    _, bss_value = mean_column(rows, ["calibrated_bss_diff", "bss_diff"])
-    _, prob_value = mean_column(
-        rows,
+
+def unique_pair_count(rows: pd.DataFrame) -> int | None:
+    if rows.empty:
+        return None
+    pair_cols = [col for col in ["init_time", "lead"] if col in rows]
+    if pair_cols:
+        return int(len(rows.drop_duplicates(pair_cols)))
+    return int(len(rows))
+
+
+def compact_pair_text(rows: pd.DataFrame) -> str:
+    if rows.empty or not {"init_time", "lead"} <= set(rows.columns):
+        return "pending"
+    pairs = []
+    for _, row in rows.drop_duplicates(["init_time", "lead"]).head(3).iterrows():
+        try:
+            init = pd.Timestamp(row["init_time"]).strftime("%Y-%m-%d")
+        except Exception:
+            init = str(row["init_time"])
+        try:
+            lead = int(row["lead"])
+            pairs.append(f"{init} W{lead}")
+        except Exception:
+            pairs.append(init)
+    more = len(rows.drop_duplicates(["init_time", "lead"])) - len(pairs)
+    if more > 0:
+        pairs.append(f"+{more} more")
+    return ", ".join(pairs) if pairs else "pending"
+
+
+def draw_summary_value(ax: plt.Axes, x: float, y: float, label: str, value: str, color: str = TEXT_DARK) -> None:
+    ax.text(x, y + 0.12, label, transform=ax.transAxes, ha="left", va="center", fontsize=6.9, color=TEXT_MUTED)
+    ax.text(x, y - 0.05, value, transform=ax.transAxes, ha="left", va="center", fontsize=8.2,
+            fontweight="bold", color=color)
+
+
+def plot_primary_event_summary_strip(
+    ax: plt.Axes,
+    event_id: str,
+    event_df: pd.DataFrame | None,
+    quantile_df: pd.DataFrame | None,
+    image_path: Path | None,
+) -> None:
+    event_rows = event_rows_for_id(event_df, event_id)
+    quantile_rows = quantile_rows_for_id(quantile_df, event_id)
+    context = PRIMARY_EVENT_CONTEXT.get(event_id, {})
+    ax.set_axis_off()
+    box = FancyBboxPatch(
+        (0.002, 0.04),
+        0.996,
+        0.88,
+        transform=ax.transAxes,
+        boxstyle="round,pad=0.012,rounding_size=0.018",
+        facecolor="#f7f9fb",
+        edgecolor="#c8d1d9",
+        linewidth=0.8,
+    )
+    ax.add_patch(box)
+
+    _, crps_value = mean_column(event_rows, ["crps_on_obs_extreme_skill_pct", "crps_skill_pct"])
+    _, bss_value = mean_column(event_rows, ["calibrated_bss_diff", "bss_diff"])
+    _, event_prob_value = mean_column(
+        event_rows,
         [
             "event_probability_neighborhood_on_obs_extreme_diff",
             "event_probability_on_obs_extreme_diff",
             "event_probability_neighborhood_top_tail_diff",
         ],
     )
-    pair_cols = [col for col in ["init_time", "lead"] if col in rows]
-    n_pairs = int(len(rows.drop_duplicates(pair_cols))) if pair_cols else int(len(rows))
-    event_name = clean_label(rows.iloc[0].get("event_name", event_id))
-    variable = VARIABLE_SHORT.get(str(rows.iloc[0].get("variable", "")).lower(), str(rows.iloc[0].get("variable", "")).upper())
-    text = (
-        f"{event_name}\n"
-        f"Variable: {variable}\n"
-        f"Selected pairs: {n_pairs}\n\n"
-        f"Mean event-mask CRPS skill: {crps_value:+.2f}%\n"
-        f"Mean calibrated BSS gain: {bss_value:+.3f}\n"
-        f"Mean event-probability gain: {prob_value:+.3f}\n\n"
-        f"Init/lead pairs:\n{format_pair_list(rows)}"
-    )
-    box = FancyBboxPatch(
-        (0.03, 0.05),
-        0.94,
-        0.86,
-        transform=ax.transAxes,
-        boxstyle="round,pad=0.025,rounding_size=0.025",
-        facecolor="#f7f8fa",
-        edgecolor="#a9b4bf",
-        linewidth=1.0,
-    )
-    ax.add_patch(box)
-    ax.text(0.08, 0.84, text, transform=ax.transAxes, ha="left", va="top", fontsize=8.3, color=TEXT_DARK)
+    _, q95_skill = mean_column(quantile_rows, ["q95_error_skill"])
+    _, qprob_value = mean_column(quantile_rows, ["prob_threshold_or_more_diff_model_minus_geos"])
+    _, percentile_value = mean_column(quantile_rows, ["obs_percentile_diff_model_minus_geos"])
 
+    n_pairs = unique_pair_count(event_rows)
+    if n_pairs is None:
+        n_pairs = unique_pair_count(quantile_rows)
 
-def plot_event_image(ax: plt.Axes, image_path: Path | None, event_id: str) -> None:
-    ax.set_axis_off()
-    label = PRIMARY_EVENT_LABELS.get(event_id, event_id)
-    ax.set_title(label, loc="left", fontsize=10, fontweight="bold")
-    if image_path is None:
-        missing_panel(
-            ax,
-            label,
-            (
-                "Missing spatial event map. Run evaluate_event_catalog_flow_finalv1_global.py "
-                "or evaluate_event_quantile_forecast_flow_finalv1_global.py with --make_plots."
-            ),
-        )
-        return
-    try:
-        image = plt.imread(image_path)
-    except Exception as exc:
-        missing_panel(ax, label, f"Could not read event map {image_path}: {exc}")
-        return
-    ax.imshow(image)
+    source_status = "spatial maps loaded" if image_path is not None else "spatial maps pending"
+    metrics_status = "metrics loaded" if not event_rows.empty or not quantile_rows.empty else "metrics pending"
+    if not event_rows.empty:
+        row0 = event_rows.iloc[0]
+    elif not quantile_rows.empty:
+        row0 = quantile_rows.iloc[0]
+    else:
+        row0 = {}
+    event_name = clean_label(row0.get("event_name", PRIMARY_EVENT_LABELS.get(event_id, event_id)))
+    variable = VARIABLE_SHORT.get(str(row0.get("variable", "")).lower(), "")
+    variable_text = f"{variable} | " if variable else ""
+    pair_text = compact_pair_text(event_rows if not event_rows.empty else quantile_rows)
     ax.text(
-        0.01,
-        0.01,
-        str(image_path),
+        0.018,
+        0.72,
+        event_name,
         transform=ax.transAxes,
         ha="left",
-        va="bottom",
-        fontsize=5.5,
-        color="white",
-        bbox={"facecolor": "black", "alpha": 0.45, "edgecolor": "none", "pad": 2},
+        va="center",
+        fontsize=8.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+    )
+    ax.text(
+        0.018,
+        0.39,
+        (
+            f"{variable_text}{context.get('diagnostic', 'tail-risk diagnostic')} | "
+            f"{context.get('event_window', 'event window pending')} | "
+            f"{context.get('domain', 'domain pending')}"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=7.6,
+        color=TEXT_MUTED,
+    )
+    ax.text(
+        0.018,
+        0.16,
+        f"{source_status}; {metrics_status}. Init/lead: {pair_text}",
+        transform=ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=7.1,
+        color=TEXT_MUTED,
+    )
+    if event_rows.empty and quantile_rows.empty:
+        ax.text(
+            0.42,
+            0.62,
+            "Metric summary pending",
+            transform=ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=8.8,
+            fontweight="bold",
+            color=TEXT_DARK,
+        )
+        ax.text(
+            0.42,
+            0.31,
+            "Run the catalog and quantile event evaluators to fill CRPS, BSS, probability, and quantile summaries.",
+            transform=ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=7.3,
+            color=TEXT_MUTED,
+        )
+        return
+    x0 = 0.42
+    x1 = 0.61
+    x2 = 0.80
+    draw_summary_value(ax, x0, 0.66, "event-mask CRPS skill", signed_metric_text(crps_value, 1, "%"),
+                       COLOR_POS if crps_value >= 0 else COLOR_NEG)
+    draw_summary_value(ax, x1, 0.66, "cal. BSS gain", signed_metric_text(bss_value, 3),
+                       COLOR_POS if bss_value >= 0 else COLOR_NEG)
+    draw_summary_value(ax, x2, 0.66, "event-prob gain", signed_metric_text(event_prob_value, 3),
+                       COLOR_POS if event_prob_value >= 0 else COLOR_NEG)
+    draw_summary_value(ax, x0, 0.27, "q95 error skill", signed_metric_text(q95_skill, 2),
+                       COLOR_POS if q95_skill >= 0 else COLOR_NEG)
+    draw_summary_value(ax, x1, 0.27, "P(threshold) gain", signed_metric_text(qprob_value, 3),
+                       COLOR_POS if qprob_value >= 0 else COLOR_NEG)
+    draw_summary_value(ax, x2, 0.27, "obs-percentile gain", signed_metric_text(percentile_value, 3),
+                       COLOR_POS if percentile_value >= 0 else COLOR_NEG)
+    if n_pairs is not None:
+        ax.text(0.985, 0.18, f"n={n_pairs}", transform=ax.transAxes, ha="right", va="center",
+                fontsize=7.3, color=TEXT_MUTED)
+
+
+def event_image_layout(image_path: Path) -> tuple[int, int, list[tuple[str, int]], str]:
+    path_text = str(image_path).lower()
+    if "quantile_spatial" in path_text:
+        return 4, 4, QUANTILE_SPATIAL_PANEL_SPECS, "quantile spatial diagnostics"
+    return 3, 4, CATALOG_SPATIAL_PANEL_SPECS, "catalog spatial diagnostics"
+
+
+def crop_event_panel(image: np.ndarray, nrows: int, ncols: int, panel_index: int) -> np.ndarray:
+    image = np.asarray(image)
+    h, w = image.shape[:2]
+    top = int(round(h * 0.080))
+    bottom = int(round(h * 0.018))
+    left = int(round(w * 0.020))
+    right = int(round(w * 0.012))
+    usable_w = max(1, w - left - right)
+    usable_h = max(1, h - top - bottom)
+    row = int(panel_index) // ncols
+    col = int(panel_index) % ncols
+    cell_w = usable_w / float(ncols)
+    cell_h = usable_h / float(nrows)
+    x0 = int(round(left + col * cell_w + 0.020 * cell_w))
+    x1 = int(round(left + (col + 1) * cell_w - 0.075 * cell_w))
+    y0 = int(round(top + row * cell_h + 0.060 * cell_h))
+    y1 = int(round(top + (row + 1) * cell_h - 0.180 * cell_h))
+    x0, x1 = max(0, x0), min(w, max(x0 + 1, x1))
+    y0, y1 = max(0, y0), min(h, max(y0 + 1, y1))
+    return image[y0:y1, x0:x1]
+
+
+def plot_cropped_event_panel(ax: plt.Axes, panel: np.ndarray, title: str) -> None:
+    ax.imshow(panel)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.45)
+        spine.set_color("#c8d1d9")
+    ax.text(
+        0.015,
+        0.965,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=7.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+        bbox={"facecolor": "white", "alpha": 0.84, "edgecolor": "none", "pad": 1.8},
     )
 
 
@@ -1263,26 +1460,84 @@ def figure_7_extremes(
     quantile_dir: Path,
     event_plot_index: pd.DataFrame | None,
     quantile_plot_index: pd.DataFrame | None,
+    quantile_df: pd.DataFrame | None,
     primary_event_ids: list[str],
 ) -> list[Path]:
     primary_event_ids = primary_event_ids[:2] if primary_event_ids else PRIMARY_EVENT_IDS[:2]
-    fig, axes = plt.subplots(
-        len(primary_event_ids),
-        2,
-        figsize=(15.0, 5.3 * max(1, len(primary_event_ids))),
-        gridspec_kw={"width_ratios": [3.4, 1.0]},
-    )
-    axes = np.asarray(axes).reshape(len(primary_event_ids), 2)
-    style_figure(
-        fig,
-        "Figure 7. Extreme-event tail-risk diagnostics",
-        "Primary spatial case studies requested in main.tex: UK July 2022 T2M heatwave and Bangladesh/Sylhet June 2022 PR flood.",
+    n_events = len(primary_event_ids)
+    fig = plt.figure(figsize=(14.2, 5.6 * max(1, n_events)))
+    fig.patch.set_facecolor("white")
+    outer = fig.add_gridspec(
+        n_events,
+        1,
+        left=0.022,
+        right=0.990,
+        bottom=0.030,
+        top=0.975,
+        hspace=0.215,
     )
     for row_idx, event_id in enumerate(primary_event_ids):
         image_path = find_primary_event_plot(event_id, event_dir, quantile_dir, event_plot_index, quantile_plot_index)
-        plot_event_image(axes[row_idx, 0], image_path, event_id)
-        plot_primary_event_summary(axes[row_idx, 1], event_id, event_df)
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+        case = outer[row_idx].subgridspec(
+            4,
+            4,
+            height_ratios=[0.18, 1.0, 1.0, 0.44],
+            hspace=0.070,
+            wspace=0.045,
+        )
+        header_ax = fig.add_subplot(case[0, :])
+        header_ax.set_axis_off()
+        label = PRIMARY_EVENT_LABELS.get(event_id, event_id)
+        panel_letter = chr(ord("a") + row_idx)
+        context = PRIMARY_EVENT_CONTEXT.get(event_id, {})
+        header_ax.text(
+            0.000,
+            0.62,
+            f"{panel_letter}. {label}",
+            transform=header_ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=12.0,
+            fontweight="bold",
+            color=TEXT_DARK,
+        )
+        header_ax.text(
+            0.995,
+            0.62,
+            f"{context.get('event_window', '')}   |   {context.get('domain', '')}",
+            transform=header_ax.transAxes,
+            ha="right",
+            va="center",
+            fontsize=8.4,
+            color=TEXT_MUTED,
+        )
+
+        if image_path is None:
+            map_ax = fig.add_subplot(case[1:3, :])
+            missing_panel(
+                map_ax,
+                "Spatial tail-risk maps pending",
+                (
+                    "Run evaluate_event_catalog_flow_finalv1_global.py or "
+                    "evaluate_event_quantile_forecast_flow_finalv1_global.py with --make_plots."
+                ),
+            )
+        else:
+            try:
+                image = plt.imread(image_path)
+                nrows, ncols, specs, _ = event_image_layout(image_path)
+            except Exception as exc:
+                image = None
+                nrows, ncols, specs = 0, 0, []
+                map_ax = fig.add_subplot(case[1:3, :])
+                missing_panel(map_ax, "Spatial tail-risk maps pending", f"Could not read event map: {exc}")
+            if image is not None:
+                for panel_idx, (panel_title, source_index) in enumerate(specs[:8]):
+                    ax = fig.add_subplot(case[1 + panel_idx // 4, panel_idx % 4])
+                    crop = crop_event_panel(image, nrows, ncols, source_index)
+                    plot_cropped_event_panel(ax, crop, panel_title)
+        summary_ax = fig.add_subplot(case[3, :])
+        plot_primary_event_summary_strip(summary_ax, event_id, event_df, quantile_df, image_path)
     return save_figure(fig, output_dir, "fig7_extreme_tail_risk", formats, dpi)
 
 
@@ -1331,6 +1586,7 @@ def main() -> None:
     event_df = read_csv_or_none(event_dir / "event_selected_lead_metrics.csv")
     event_plot_index = read_csv_or_none(event_dir / "event_plot_index.csv")
     quantile_plot_index = read_csv_or_none(quantile_dir / "event_quantile_plot_index.csv")
+    quantile_df = read_csv_or_none(quantile_dir / "event_quantile_selected_comparison.csv")
 
     written: list[Path] = []
     written.extend(figure_1_system_overview(output_dir, formats, args.dpi))
@@ -1360,6 +1616,7 @@ def main() -> None:
             quantile_dir,
             event_plot_index,
             quantile_plot_index,
+            quantile_df,
             primary_event_ids,
         )
     )
