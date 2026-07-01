@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import BoundaryNorm, TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap, TwoSlopeNorm
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
 
@@ -789,6 +789,24 @@ def discrete_skill_boundaries(vmin: float, vmax: float) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
+def discrete_skill_cmap(n_bins: int) -> ListedColormap:
+    base = LinearSegmentedColormap.from_list(
+        "skill_orange_blue_base",
+        [
+            "#7f3b08",
+            "#b35806",
+            "#e08214",
+            "#fdb863",
+            "#f2f2f2",
+            "#c7eae5",
+            "#80cdc1",
+            "#3597c4",
+            "#08589e",
+        ],
+    )
+    return ListedColormap(base(np.linspace(0.0, 1.0, max(1, n_bins))), name="skill_orange_blue")
+
+
 def colorbar_ticks_for_boundaries(boundaries: np.ndarray) -> list[float]:
     values = [float(value) for value in np.asarray(boundaries, dtype=float)]
     if len(values) <= 9:
@@ -804,7 +822,7 @@ def plot_plain_map(
     title: str,
     vmin: float,
     vmax: float,
-    cmap: str = "RdYlGn",
+    cmap="RdYlGn",
     center_zero: bool = True,
     boundaries: np.ndarray | None = None,
 ):
@@ -812,7 +830,7 @@ def plot_plain_map(
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
     if boundaries is not None:
-        cmap_obj = plt.get_cmap(cmap, max(1, len(boundaries) - 1))
+        cmap_obj = plt.get_cmap(cmap, max(1, len(boundaries) - 1)) if isinstance(cmap, str) else cmap
         norm = BoundaryNorm(boundaries, cmap_obj.N, clip=True)
         mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap_obj, norm=norm)
     else:
@@ -855,6 +873,7 @@ def figure_5_spatial_skill(
     fields = [field for _, _, field in maps]
     vmin, vmax = spatial_limits(fields)
     skill_boundaries = discrete_skill_boundaries(vmin, vmax)
+    skill_cmap = discrete_skill_cmap(len(skill_boundaries) - 1)
 
     nrows = len(row_specs)
     ncols = len(spatial_leads)
@@ -890,7 +909,7 @@ def figure_5_spatial_skill(
             title,
             float(skill_boundaries[0]),
             float(skill_boundaries[-1]),
-            cmap="RdYlGn",
+            cmap=skill_cmap,
             center_zero=True,
             boundaries=skill_boundaries,
         )
@@ -902,10 +921,13 @@ def figure_5_spatial_skill(
             cax=cax,
             boundaries=skill_boundaries,
             ticks=colorbar_ticks_for_boundaries(skill_boundaries),
-            spacing="proportional",
+            spacing="uniform",
+            drawedges=True,
         )
         cbar.set_label("Skill vs GEOS (%)", fontsize=8.5)
         cbar.ax.tick_params(labelsize=8)
+        cbar.dividers.set_color("#ffffff")
+        cbar.dividers.set_linewidth(0.45)
     else:
         cax.set_visible(False)
     written = save_figure(fig, output_dir, "fig5_spatial_skill_maps", formats, dpi)
