@@ -79,28 +79,39 @@ PRIMARY_EVENT_CONTEXT = {
 }
 
 EVENT_PLOT_LAYOUTS = {
+    "spatial_event_focus": (2, 4),
     "spatial_risk": (3, 4),
     "spatial_verification": (4, 4),
     "quantile_spatial": (4, 4),
 }
 CATALOG_MAIN_PANEL_SPECS = [
+    ("Observed", "spatial_event_focus", 0),
+    ("GEOS event probability", "spatial_event_focus", 1),
+    (f"{METHOD} event probability", "spatial_event_focus", 2),
+    ("Probability gain", "spatial_event_focus", 3),
+    ("Calibrated probability gain", "spatial_event_focus", 4),
+    ("Neighborhood gain", "spatial_event_focus", 5),
+    ("BSS gain", "spatial_event_focus", 6),
+    ("Calibrated BSS gain", "spatial_event_focus", 7),
+]
+CATALOG_LEGACY_PANEL_SPECS = [
     ("Observed", "spatial_risk", 0),
-    ("Extreme mask", "spatial_risk", 2),
     ("GEOS event probability", "spatial_risk", 6),
     (f"{METHOD} event probability", "spatial_risk", 7),
     ("Probability gain", "spatial_risk", 8),
     ("Calibrated probability gain", "spatial_verification", 11),
+    ("Neighborhood gain", "spatial_risk", 11),
     ("BSS gain", "spatial_verification", 8),
     ("Calibrated BSS gain", "spatial_verification", 12),
 ]
 QUANTILE_FALLBACK_PANEL_SPECS = [
     ("Observed", "quantile_spatial", 0),
-    ("Extreme mask", "quantile_spatial", 2),
     ("GEOS q95", "quantile_spatial", 4),
     (f"{METHOD} q95", "quantile_spatial", 5),
     ("GEOS P >= threshold", "quantile_spatial", 8),
     (f"{METHOD} P >= threshold", "quantile_spatial", 9),
     ("Probability gain", "quantile_spatial", 10),
+    ("P(obs+) gain", "quantile_spatial", 14),
     ("Observed-percentile gain", "quantile_spatial", 7),
 ]
 
@@ -1231,6 +1242,14 @@ def find_primary_event_plots(
     quantile_plot_index: pd.DataFrame | None,
 ) -> dict[str, Path]:
     paths: dict[str, Path] = {}
+    focus = first_event_plot(
+        event_id,
+        "spatial_event_focus",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_event_focus.png",
+    )
     risk = first_event_plot(
         event_id,
         "spatial_risk",
@@ -1257,6 +1276,8 @@ def find_primary_event_plots(
     )
     if risk is not None:
         paths["spatial_risk"] = risk
+    if focus is not None:
+        paths["spatial_event_focus"] = focus
     if verification is not None:
         paths["spatial_verification"] = verification
     if quantile is not None:
@@ -1570,13 +1591,15 @@ def plot_small_missing_panel(ax: plt.Axes, title: str, message: str) -> None:
 
 
 def choose_event_panel_specs(plot_paths: dict[str, Path]) -> list[tuple[str, str, int]]:
-    if "spatial_risk" in plot_paths:
+    if "spatial_event_focus" in plot_paths:
         return CATALOG_MAIN_PANEL_SPECS
+    if "spatial_risk" in plot_paths:
+        return CATALOG_LEGACY_PANEL_SPECS
     return QUANTILE_FALLBACK_PANEL_SPECS
 
 
 def first_spatial_path(plot_paths: dict[str, Path]) -> Path | None:
-    for key in ("spatial_risk", "spatial_verification", "quantile_spatial"):
+    for key in ("spatial_event_focus", "spatial_risk", "spatial_verification", "quantile_spatial"):
         if key in plot_paths:
             return plot_paths[key]
     return None

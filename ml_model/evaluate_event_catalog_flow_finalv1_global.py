@@ -1833,6 +1833,11 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
     def masked_for_limits(field):
         return np.where(mask, field, np.nan)
 
+    event_mask = mask & (maps["obs_event"] > 0)
+
+    def observed_event_only(field):
+        return np.where(event_mask, field, np.nan)
+
     obs_plot = maps["obs"] + offset
     threshold_plot = maps["threshold"] + offset
     geos_plot = maps["geos_mean"] + offset
@@ -1897,7 +1902,21 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         center_zero=True,
         fallback=(-1.0, 1.0),
     )
-    def save_spatial_panel_grid(panels, nrows, ncols, figsize, suffix, title_extra):
+    focus_prob_diff_vmin, focus_prob_diff_vmax = robust_limits(
+        [
+            observed_event_only(raw_prob_diff),
+            observed_event_only(cal_prob_diff),
+            observed_event_only(neighborhood_prob_diff),
+        ],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
+    focus_bss_vmin, focus_bss_vmax = robust_limits(
+        [observed_event_only(bss_diff), observed_event_only(cal_bss_diff)],
+        center_zero=True,
+        fallback=(-1.0, 1.0),
+    )
+    def save_spatial_panel_grid(panels, nrows, ncols, figsize, suffix, title_extra, show_panel_titles=True):
         fig, axes = make_map_subplots(nrows, ncols, figsize=figsize, squeeze=False, constrained_layout=True)
         from evaluate_matrix_suite_flow_finalv1_global import MAP_CONTEXT
 
@@ -1929,7 +1948,8 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
                 **kwargs,
             )
             add_map_overlays(ax, plot_lons, plot_lats)
-            ax.set_title(title, fontsize=9)
+            if show_panel_titles:
+                ax.set_title(title, fontsize=9)
             ax.set_xlabel("lon", fontsize=8)
             ax.set_ylabel("lat", fontsize=8)
             fig.colorbar(mesh, ax=ax, shrink=0.75)
@@ -1974,7 +1994,26 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         ("Cal event prob ML-GEOS", cal_prob_diff, "RdBu", True, cal_prob_diff_vmin, cal_prob_diff_vmax),
         ("Cal BSS ML-GEOS", cal_bss_diff, "RdBu", True, bss_diff_vmin, bss_diff_vmax),
     ]
+    focus_panels = [
+        ("Observed", obs_plot, intensity_cmap, False, intensity_vmin, intensity_vmax),
+        ("GEOS event prob\non observed extremes", observed_event_only(maps["geos_prob"]), "viridis", False, 0.0, 1.0),
+        ("ML event prob\non observed extremes", observed_event_only(maps["model_prob"]), "viridis", False, 0.0, 1.0),
+        ("Raw probability gain\non observed extremes", observed_event_only(raw_prob_diff), "RdBu", True, focus_prob_diff_vmin, focus_prob_diff_vmax),
+        ("Cal probability gain\non observed extremes", observed_event_only(cal_prob_diff), "RdBu", True, focus_prob_diff_vmin, focus_prob_diff_vmax),
+        (f"Neighborhood gain\nr={DEFAULT_NEIGHBORHOOD_RADIUS}", observed_event_only(neighborhood_prob_diff), "RdBu", True, focus_prob_diff_vmin, focus_prob_diff_vmax),
+        ("BSS gain\non observed extremes", observed_event_only(bss_diff), "RdBu", True, focus_bss_vmin, focus_bss_vmax),
+        ("Cal BSS gain\non observed extremes", observed_event_only(cal_bss_diff), "RdBu", True, focus_bss_vmin, focus_bss_vmax),
+    ]
     return {
+        "spatial_event_focus": save_spatial_panel_grid(
+            focus_panels,
+            2,
+            4,
+            (19, 8),
+            "spatial_event_focus",
+            "paper event-focus diagnostics",
+            show_panel_titles=False,
+        ),
         "spatial_risk": save_spatial_panel_grid(
             risk_panels,
             3,
