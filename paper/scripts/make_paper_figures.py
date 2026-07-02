@@ -890,9 +890,9 @@ def figure_variable_skill(
     s_rmse_vmin, s_rmse_vmax = spatial_limits([map_rmse_change[2]])
 
     im_c_map_g = plot_plain_map(ax_crps_geos_map, *map_geos_crps, f"(e) {var_short} {BASELINE} CRPS map", g_crps_vmin, g_crps_vmax, cmap="viridis", is_change=False)
-    im_c_map_c = plot_plain_map(ax_crps_change_map, *map_crps_change, f"(f) {var_short} CRPS Skill map", s_crps_vmin, s_crps_vmax, cmap="RdYlGn", is_change=True)
+    im_c_map_c = plot_plain_map(ax_crps_change_map, *map_crps_change, f"(f) {var_short} ML CRPS skill improvement (%)", s_crps_vmin, s_crps_vmax, cmap="RdYlGn", is_change=True)
     im_r_map_g = plot_plain_map(ax_rmse_geos_map, *map_geos_rmse, f"(g) {var_short} {BASELINE} RMSE map", g_rmse_vmin, g_rmse_vmax, cmap="viridis", is_change=False)
-    im_r_map_c = plot_plain_map(ax_rmse_change_map, *map_rmse_change, f"(h) {var_short} RMSE Skill map", s_rmse_vmin, s_rmse_vmax, cmap="RdYlGn", is_change=True)
+    im_r_map_c = plot_plain_map(ax_rmse_change_map, *map_rmse_change, f"(h) {var_short} ML RMSE skill improvement (%)", s_rmse_vmin, s_rmse_vmax, cmap="RdYlGn", is_change=True)
 
     if ds is not None:
         ds.close()
