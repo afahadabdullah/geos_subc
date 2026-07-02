@@ -1549,6 +1549,10 @@ def figure_event_cropped(
             model_crps = np.where(ocean_mask, np.nan, model_crps)
             geos_bss = np.where(ocean_mask, np.nan, geos_bss)
             model_bss = np.where(ocean_mask, np.nan, model_bss)
+            
+            # Mask out BSS values outside [0.0, 0.6] range (keep only 0.0 to 0.6, else NaN)
+            geos_bss = np.where((geos_bss >= 0.0) & (geos_bss <= 0.6), geos_bss, np.nan)
+            model_bss = np.where((model_bss >= 0.0) & (model_bss <= 0.6), model_bss, np.nan)
 
             # Compute percentage CRPS skill improvement instead of raw diff
             denom = np.where(geos_crps == 0.0, 1e-5, geos_crps)
@@ -1579,10 +1583,8 @@ def figure_event_cropped(
             fd_vmin, fd_vmax = -fd_lim, fd_lim
 
             # Shared limits for the bottom row (BSS maps)
-            bss_vals = np.concatenate([geos_bss.ravel(), model_bss.ravel()])
-            finite_bss = bss_vals[np.isfinite(bss_vals)]
             bvmin = 0.0
-            bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
+            bvmax = 0.6
 
             # Labels for colorbars
             phys_label = "Temperature (K)" if is_t2m else "Precipitation (mm/day)"
