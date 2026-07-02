@@ -1398,6 +1398,7 @@ def plot_contoured_panel(
     norm=None,
     vmin: float | None = None,
     vmax: float | None = None,
+    extend: str = "both",
 ):
     from matplotlib.colors import TwoSlopeNorm
     finite = field[np.isfinite(field)]
@@ -1426,7 +1427,7 @@ def plot_contoured_panel(
     else:
         levels = np.linspace(norm.vmin, norm.vmax, 21)
 
-    mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both", transform=ccrs.PlateCarree())
+    mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend=extend, transform=ccrs.PlateCarree())
     
     ax.add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="#222222", zorder=2)
     ax.add_feature(cfeature.BORDERS, linewidth=0.4, edgecolor="#444444", linestyle=":", zorder=2)
@@ -1457,8 +1458,9 @@ def plot_contoured_panel_with_colorbar(
     vmax: float | None = None,
     cbar_label: str = "",
     is_change: bool = False,
+    extend: str = "both",
 ):
-    im = plot_contoured_panel(ax, lons, lats, field, title, cmap, norm=norm, vmin=vmin, vmax=vmax)
+    im = plot_contoured_panel(ax, lons, lats, field, title, cmap, norm=norm, vmin=vmin, vmax=vmax, extend=extend)
     if im is not None:
         from matplotlib import ticker
         cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03, spacing="proportional")
@@ -1518,10 +1520,9 @@ def figure_event_cropped(
             lons = ds["lon"].values
             lats = ds["lat"].values
             
-            offset = 0.0
-            obs = ds["obs_plot"].values
-            geos_q95 = ds["geos_upper_quantile"].values + offset
-            model_q95 = ds["model_upper_quantile"].values + offset
+            obs = ds["obs_plot"].values + (273.15 if is_t2m else 0.0)
+            geos_q95 = ds["geos_upper_quantile"].values
+            model_q95 = ds["model_upper_quantile"].values
             
             geos_crps = ds["geos_crps"].values
             model_crps = ds["model_crps"].values
@@ -1578,41 +1579,42 @@ def figure_event_cropped(
 
             # Plot top row (Observed, Baseline q95, ML q95)
             ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
+            plot_contoured_panel_with_colorbar(fig, ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label, extend="both")
             
             ax_b = fig.add_subplot(gs[0, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_b, lons, lats, geos_q95, f"(b) {BASELINE} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
+            plot_contoured_panel_with_colorbar(fig, ax_b, lons, lats, geos_q95, f"(b) {BASELINE} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label, extend="both")
             
             ax_c = fig.add_subplot(gs[0, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_c, lons, lats, model_q95, f"(c) {METHOD} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
+            plot_contoured_panel_with_colorbar(fig, ax_c, lons, lats, model_q95, f"(c) {METHOD} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label, extend="both")
 
             # Plot middle row (Baseline CRPS, ML CRPS, CRPS Skill Improvement %)
             ax_d = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_d, lons, lats, geos_crps, f"(d) {BASELINE} CRPS", "Purples", vmin=cvmin, vmax=cvmax, cbar_label="CRPS")
+            plot_contoured_panel_with_colorbar(fig, ax_d, lons, lats, geos_crps, f"(d) {BASELINE} CRPS", "Purples", vmin=cvmin, vmax=cvmax, cbar_label="CRPS", extend="max")
             
             ax_e = fig.add_subplot(gs[1, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_e, lons, lats, model_crps, f"(e) {METHOD} CRPS", "Purples", vmin=cvmin, vmax=cvmax, cbar_label="CRPS")
+            plot_contoured_panel_with_colorbar(fig, ax_e, lons, lats, model_crps, f"(e) {METHOD} CRPS", "Purples", vmin=cvmin, vmax=cvmax, cbar_label="CRPS", extend="max")
             
             ax_f = fig.add_subplot(gs[1, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_f, lons, lats, crps_diff, "(f) CRPS Skill Improvement (%)", "RdYlGn", vmin=fd_vmin, vmax=fd_vmax, cbar_label="Improvement (%)", is_change=True)
-            # Add stippling where ML CRPS improvement is robust (> 10%)
+            plot_contoured_panel_with_colorbar(fig, ax_f, lons, lats, crps_diff, "(f) CRPS Skill Improvement (%)", "RdYlGn", vmin=fd_vmin, vmax=fd_vmax, cbar_label="Improvement (%)", is_change=True, extend="both")
+            # Subtle scatter stippling where ML CRPS improvement is robust (> 10%)
+            lon2d, lat2d = np.meshgrid(lons, lats)
             crps_sig = crps_diff > 10.0
             if crps_sig.any():
-                ax_f.contourf(lons, lats, crps_sig.astype(float), levels=[0.5, 1.5], hatches=[".."], colors="none", transform=ccrs.PlateCarree())
+                ax_f.scatter(lon2d[crps_sig], lat2d[crps_sig], color="black", s=1.0, alpha=0.6, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Skill Improvement %)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS")
+            plot_contoured_panel_with_colorbar(fig, ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="neither")
             
             ax_h = fig.add_subplot(gs[2, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS")
+            plot_contoured_panel_with_colorbar(fig, ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="neither")
             
             ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS Skill Improvement (%)", "RdBu", vmin=-30.0, vmax=30.0, cbar_label="Improvement (%)", is_change=True)
-            # Add stippling where ML BSS improvement is robust (> 5%)
+            plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS Skill Improvement (%)", "RdBu", vmin=-30.0, vmax=30.0, cbar_label="Improvement (%)", is_change=True, extend="both")
+            # Subtle scatter stippling where ML BSS improvement is robust (> 5%)
             bss_sig = bss_diff > 5.0
             if bss_sig.any():
-                ax_i.contourf(lons, lats, bss_sig.astype(float), levels=[0.5, 1.5], hatches=[".."], colors="none", transform=ccrs.PlateCarree())
+                ax_i.scatter(lon2d[bss_sig], lat2d[bss_sig], color="black", s=1.0, alpha=0.6, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
         except Exception as exc:
             ax_big = fig.add_subplot(gs[:, :])
