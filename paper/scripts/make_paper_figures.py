@@ -1600,7 +1600,7 @@ def figure_event_cropped(
             lon2d, lat2d = np.meshgrid(lons, lats)
             crps_sig = crps_diff > 10.0
             if crps_sig.any():
-                ax_f.scatter(lon2d[crps_sig], lat2d[crps_sig], color="black", s=1.0, alpha=0.6, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+                ax_f.scatter(lon2d[crps_sig], lat2d[crps_sig], color="#555555", s=0.8, alpha=0.4, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Skill Improvement %)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
@@ -1614,7 +1614,7 @@ def figure_event_cropped(
             # Subtle scatter stippling where ML BSS improvement is robust (> 5%)
             bss_sig = bss_diff > 5.0
             if bss_sig.any():
-                ax_i.scatter(lon2d[bss_sig], lat2d[bss_sig], color="black", s=1.0, alpha=0.6, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+                ax_i.scatter(lon2d[bss_sig], lat2d[bss_sig], color="#555555", s=0.8, alpha=0.4, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
         except Exception as exc:
             ax_big = fig.add_subplot(gs[:, :])
