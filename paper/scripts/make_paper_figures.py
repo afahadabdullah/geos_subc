@@ -7,6 +7,7 @@ the CSV/NetCDF products written by:
   - ml_model/evaluate_matrix_suite_flow_finalv1_global.py
   - ml_model/compare_noise_flow_finalv1_global.py
   - ml_model/evaluate_event_catalog_flow_finalv1_global.py
+  - ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py
 
 When an expected evaluation artifact is missing, the relevant panel is rendered
 as a clear missing-data note so the full figure set can still be regenerated
@@ -18,8 +19,8 @@ Figure layout (approved):
   3  Global PR skill: lead bars + season-lead heatmaps + spatial maps (3x2)
   4  Global T2M skill: same structure as Fig 3 (3x2)
   5  Extreme-event subset: PR + T2M CRPS/RMSE skill bars (2x2)
-  6  California AR flood PR case study (2x3)
-  7  UK heat event T2M case study (2x3)
+  6  California AR flood PR case study (2x3 cropped panels)
+  7  UK heat event T2M case study (2x3 cropped panels)
 """
 
 from __future__ import annotations
@@ -62,6 +63,41 @@ METRIC_LABELS = {
     "bss_diff": "Raw BSS gain",
 }
 
+PRIMARY_EVENT_IDS = [
+    "europe_t2m_202207_uk_heatwave",
+    "conus_pr_202301_california_atmospheric_rivers",
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours",
+]
+PRIMARY_EVENT_LABELS = {
+    "europe_t2m_202207_uk_heatwave": "UK July 2022 heatwave (T2M)",
+    "conus_pr_202301_california_atmospheric_rivers": "California Jan 2023 Atmospheric Rivers (PR)",
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours": "Bangladesh/Sylhet June 2022 flood (PR)",
+}
+PRIMARY_EVENT_CONTEXT = {
+    "europe_t2m_202207_uk_heatwave": {
+        "event_window": "18-19 Jul 2022 target week",
+        "domain": "United Kingdom / western Europe",
+        "diagnostic": "hot-tail T2M exceedance",
+    },
+    "conus_pr_202301_california_atmospheric_rivers": {
+        "event_window": "Jan 2023 target week",
+        "domain": "California / West Coast",
+        "diagnostic": "heavy-rain PR exceedance",
+    },
+    "bangladesh_pr_202206_meghalaya_sylhet_downpours": {
+        "event_window": "17-23 Jun 2022 target week",
+        "domain": "NE Bangladesh / Meghalaya-Assam",
+        "diagnostic": "heavy-rain PR exceedance",
+    },
+}
+
+EVENT_PLOT_LAYOUTS = {
+    "spatial_event_focus": (2, 4),
+    "spatial_risk": (3, 4),
+    "spatial_verification": (4, 4),
+    "quantile_spatial": (4, 4),
+}
+
 COLOR_FIM = "#b43c30"
 COLOR_MODEL = "#202124"
 COLOR_PR = "#2a6fbb"
@@ -101,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="paper/figures")
     parser.add_argument("--matrix-dir", default=None, help="Directory containing matrix_summary_metrics.csv.")
     parser.add_argument("--event-dir", default=None, help="Directory containing event_selected_lead_metrics.csv.")
-    parser.add_argument("--quantile-dir", default=None, help="Directory containing event quantile NetCDF products.")
+    parser.add_argument("--quantile-dir", default=None, help="Directory containing event quantile CSV products.")
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
     parser.add_argument(
         "--format",
@@ -112,7 +148,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--matrix-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
-    parser.add_argument("--event-limit", type=int, default=8, help="Maximum event rows shown in Figure 5.")
     return parser.parse_args()
 
 
@@ -637,7 +672,7 @@ def figure_2_architecture(output_dir: Path, formats: list[str], dpi: int) -> lis
 
 
 # ===================================================================
-# New panel helpers
+# Plot panel helpers
 # ===================================================================
 
 def plot_skill_bars(
@@ -710,37 +745,6 @@ def plot_skill_bars(
         loc="left", fontsize=10, fontweight="bold",
     )
     ax.set_ylim(bottom=0)
-
-
-def plot_closeness_map(
-    ax: plt.Axes,
-    lons: np.ndarray | None,
-    lats: np.ndarray | None,
-    obs: np.ndarray | None,
-    baseline_mean: np.ndarray | None,
-    model_mean: np.ndarray | None,
-    title: str,
-) -> None:
-    """Plot |obs - baseline| - |obs - model|. Positive = ML closer to reality."""
-    if any(arr is None for arr in (lons, lats, obs, baseline_mean, model_mean)):
-        missing_panel(ax, title, "Missing event spatial data for closeness map.")
-        return None
-    closeness = np.abs(obs - baseline_mean) - np.abs(obs - model_mean)
-    if not np.isfinite(closeness).any():
-        missing_panel(ax, title, "All closeness values are NaN.")
-        return None
-    finite = closeness[np.isfinite(closeness)]
-    lim = max(float(np.nanpercentile(np.abs(finite), 95)), 0.1)
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=-lim, vmax=lim)
-    mesh = ax.pcolormesh(lons, lats, closeness, shading="auto", cmap="RdYlGn", norm=norm)
-    ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
-    ax.set_xlabel("Longitude", fontsize=8)
-    ax.set_ylabel("Latitude", fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
-    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
-    ax.grid(True, color="#d9dee3", linewidth=0.25, alpha=0.7)
-    return mesh
 
 
 # ===================================================================
@@ -880,209 +884,548 @@ def figure_5_extreme_subset(
 
 
 # ===================================================================
-# Figures 6 & 7 — Event case studies (2x3)
+# Figure 6 & 7 — Event case studies (Cropped PNG Embeddings)
 # ===================================================================
 
-def load_event_spatial_data(
-    quantile_dir: Path,
-    event_name: str,
-    variable: str,
-) -> dict[str, tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]]:
-    """Try to load event spatial products from NetCDF files in quantile_dir.
-
-    Returns a dict mapping field names to (lons, lats, field) tuples.
-    Falls back to (None, None, None) when data is unavailable.
-    """
-    empty = (None, None, None)
-    result = {
-        "observed": empty,
-        "geos_mean": empty,
-        "model_mean": empty,
-        "geos_exceedance": empty,
-        "model_exceedance": empty,
-    }
-
-    if not quantile_dir.exists():
-        return result
-
-    # Search for matching NetCDF files
-    candidates = list(quantile_dir.glob(f"*{event_name}*{variable}*.nc"))
-    if not candidates:
-        candidates = list(quantile_dir.glob(f"*{variable}*event*.nc"))
-    if not candidates:
-        candidates = list(quantile_dir.glob("*.nc"))
-    if not candidates:
-        return result
-
-    try:
-        import xarray as xr
-    except ImportError:
-        return result
-
-    for nc_path in candidates:
-        try:
-            ds = xr.open_dataset(nc_path)
-        except Exception:
-            continue
-
-        lons = np.asarray(ds["lon"].values) if "lon" in ds else None
-        lats = np.asarray(ds["lat"].values) if "lat" in ds else None
-        if lons is None or lats is None:
-            ds.close()
-            continue
-
-        # Map expected variable names to result keys
-        field_map = {
-            "observed": ["observed", "obs", f"obs_{variable}", "target"],
-            "geos_mean": ["geos_mean", "geos_ensemble_mean", f"geos_{variable}_mean", "baseline_mean"],
-            "model_mean": ["model_mean", "model_ensemble_mean", f"model_{variable}_mean", "ml_mean"],
-            "geos_exceedance": ["geos_exceedance_prob", "geos_exceed_p95", f"geos_{variable}_exceed"],
-            "model_exceedance": ["model_exceedance_prob", "model_exceed_p95", f"model_{variable}_exceed"],
-        }
-
-        for key, name_options in field_map.items():
-            for name in name_options:
-                if name in ds:
-                    field = ds[name].squeeze(drop=True)
-                    result[key] = (lons, lats, np.asarray(field.values, dtype=float))
-                    break
-
-        ds.close()
-        # If we found at least an observed field, stop searching
-        if result["observed"][0] is not None:
-            break
-
-    return result
+def event_glob_ids(event_id: str) -> list[str]:
+    if event_id.startswith("bangladesh_pr_202206"):
+        return [event_id, "bangladesh_pr_202206*"]
+    return [event_id]
 
 
-def plot_field_map(
-    ax: plt.Axes,
-    lons: np.ndarray | None,
-    lats: np.ndarray | None,
-    field: np.ndarray | None,
-    title: str,
-    cmap: str = "YlGnBu",
-    vmin: float | None = None,
-    vmax: float | None = None,
-) -> None:
-    """Plot a non-diverging spatial field (observed values, ensemble means, probabilities)."""
-    if lons is None or lats is None or field is None or not np.isfinite(field).any():
-        missing_panel(ax, title, "Missing event spatial data.")
+def event_plot_sort_key(path: Path) -> tuple[int, str]:
+    text = path.name
+    match = re.search(r"lead(\d+)", text)
+    lead = int(match.group(1)) if match else 99
+    lead_order = {3: 0, 4: 1, 2: 2, 1: 3}.get(lead, 9)
+    return lead_order, text
+
+
+def resolve_recorded_plot_path(path_text: object, base_dir: Path) -> Path | None:
+    if path_text is None or (isinstance(path_text, float) and math.isnan(path_text)):
         return None
-    if vmin is None:
-        vmin = float(np.nanpercentile(field[np.isfinite(field)], 2))
-    if vmax is None:
-        vmax = float(np.nanpercentile(field[np.isfinite(field)], 98))
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
-    ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
-    ax.set_xlabel("Longitude", fontsize=8)
-    ax.set_ylabel("Latitude", fontsize=8)
-    ax.tick_params(labelsize=7)
-    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
-    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
-    ax.grid(True, color="#d9dee3", linewidth=0.25, alpha=0.7)
-    return mesh
+    path = Path(str(path_text))
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.append(base_dir / path)
+        candidates.append(base_dir / path.name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
-def figure_event_case_study(
+def plot_index_candidates(
+    plot_index: pd.DataFrame | None,
+    event_id: str,
+    plot_types: list[str],
+    base_dir: Path,
+) -> list[Path]:
+    if plot_index is None or plot_index.empty or not {"event_id", "plot_type", "path"} <= set(plot_index.columns):
+        return []
+    event_ids = plot_index["event_id"].astype(str)
+    event_mask = event_ids.eq(event_id)
+    if not event_mask.any() and event_id.startswith("bangladesh_pr_202206"):
+        event_mask = event_ids.str.startswith("bangladesh_pr_202206")
+    subset = plot_index[event_mask & plot_index["plot_type"].astype(str).isin(plot_types)]
+    paths = []
+    for value in subset["path"]:
+        path = resolve_recorded_plot_path(value, base_dir)
+        if path is not None:
+            paths.append(path)
+    return sorted(paths, key=event_plot_sort_key)
+
+
+def first_event_plot(
+    event_id: str,
+    plot_type: str,
+    base_dir: Path,
+    plot_index: pd.DataFrame | None,
+    glob_dir: Path,
+    glob_suffix: str,
+) -> Path | None:
+    candidates = plot_index_candidates(plot_index, event_id, [plot_type], base_dir)
+    for glob_id in event_glob_ids(event_id):
+        candidates.extend(Path(path) for path in glob.glob(str(glob_dir / f"{glob_id}{glob_suffix}")))
+    candidates = [path for path in candidates if path.exists()]
+    if not candidates:
+        return None
+    return sorted(candidates, key=event_plot_sort_key)[0]
+
+
+def find_primary_event_plots(
+    event_id: str,
+    event_dir: Path,
+    quantile_dir: Path,
+    event_plot_index: pd.DataFrame | None,
+    quantile_plot_index: pd.DataFrame | None,
+) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    focus = first_event_plot(
+        event_id,
+        "spatial_event_focus",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_event_focus.png",
+    )
+    risk = first_event_plot(
+        event_id,
+        "spatial_risk",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_risk.png",
+    )
+    verification = first_event_plot(
+        event_id,
+        "spatial_verification",
+        event_dir,
+        event_plot_index,
+        event_dir / "plots" / "spatial_maps",
+        "_lead*_spatial_verification.png",
+    )
+    quantile = first_event_plot(
+        event_id,
+        "quantile_spatial",
+        quantile_dir,
+        quantile_plot_index,
+        quantile_dir / "plots" / "quantile_spatial_maps",
+        "_*quantile_spatial.png",
+    )
+    if risk is not None:
+        paths["spatial_risk"] = risk
+    if focus is not None:
+        paths["spatial_event_focus"] = focus
+    if verification is not None:
+        paths["spatial_verification"] = verification
+    if quantile is not None:
+        paths["quantile_spatial"] = quantile
+    return paths
+
+
+def crop_event_panel(image: np.ndarray, nrows: int, ncols: int, panel_index: int) -> np.ndarray:
+    image = np.asarray(image)
+    h, w = image.shape[:2]
+    top = int(round(h * 0.080))
+    bottom = int(round(h * 0.018))
+    left = int(round(w * 0.020))
+    right = int(round(w * 0.012))
+    usable_w = max(1, w - left - right)
+    usable_h = max(1, h - top - bottom)
+    row = int(panel_index) // ncols
+    col = int(panel_index) % ncols
+    cell_w = usable_w / float(ncols)
+    cell_h = usable_h / float(nrows)
+    x0 = int(round(left + col * cell_w + 0.020 * cell_w))
+    x1 = int(round(left + (col + 1) * cell_w - 0.075 * cell_w))
+    y0 = int(round(top + row * cell_h + 0.060 * cell_h))
+    y1 = int(round(top + (row + 1) * cell_h - 0.180 * cell_h))
+    x0, x1 = max(0, x0), min(w, max(x0 + 1, x1))
+    y0, y1 = max(0, y0), min(h, max(y0 + 1, y1))
+    return image[y0:y1, x0:x1]
+
+
+def plot_cropped_event_panel(ax: plt.Axes, panel: np.ndarray, title: str) -> None:
+    ax.imshow(panel)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.45)
+        spine.set_color("#c8d1d9")
+    ax.text(
+        0.015,
+        0.965,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=7.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+        bbox={"facecolor": "white", "alpha": 0.84, "edgecolor": "none", "pad": 1.8},
+    )
+
+
+def plot_small_missing_panel(ax: plt.Axes, title: str, message: str) -> None:
+    ax.set_axis_off()
+    ax.text(
+        0.03,
+        0.92,
+        title,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=7.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+    )
+    ax.text(
+        0.50,
+        0.48,
+        wrap(message, 32),
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=7.4,
+        color=TEXT_MUTED,
+    )
+
+
+def mean_column(rows: pd.DataFrame, candidates: list[str]) -> tuple[str | None, float]:
+    for col in candidates:
+        if col in rows:
+            values = pd.to_numeric(rows[col], errors="coerce").to_numpy(dtype=float)
+            if np.isfinite(values).any():
+                return col, float(np.nanmean(values))
+    return None, float("nan")
+
+
+def signed_metric_text(value: float, digits: int = 2, suffix: str = "") -> str:
+    if not np.isfinite(value):
+        return "pending"
+    return f"{value:+.{digits}f}{suffix}"
+
+
+def unique_pair_count(rows: pd.DataFrame) -> int | None:
+    if rows.empty:
+        return None
+    pair_cols = [col for col in ["init_time", "lead"] if col in rows]
+    if pair_cols:
+        return int(len(rows.drop_duplicates(pair_cols)))
+    return int(len(rows))
+
+
+def compact_pair_text(rows: pd.DataFrame) -> str:
+    if rows.empty or not {"init_time", "lead"} <= set(rows.columns):
+        return "pending"
+    pairs = []
+    for _, row in rows.drop_duplicates(["init_time", "lead"]).head(3).iterrows():
+        try:
+            init = pd.Timestamp(row["init_time"]).strftime("%Y-%m-%d")
+        except Exception:
+            init = str(row["init_time"])
+        try:
+            lead = int(row["lead"])
+            pairs.append(f"{init} W{lead}")
+        except Exception:
+            pairs.append(init)
+    more = len(rows.drop_duplicates(["init_time", "lead"])) - len(pairs)
+    if more > 0:
+        pairs.append(f"+{more} more")
+    return ", ".join(pairs) if pairs else "pending"
+
+
+def draw_summary_value(ax: plt.Axes, x: float, y: float, label: str, value: str, color: str = TEXT_DARK) -> None:
+    ax.text(x, y + 0.12, label, transform=ax.transAxes, ha="left", va="center", fontsize=6.9, color=TEXT_MUTED)
+    ax.text(x, y - 0.05, value, transform=ax.transAxes, ha="left", va="center", fontsize=8.2,
+            fontweight="bold", color=color)
+
+
+def event_rows_for_id(event_df: pd.DataFrame | None, event_id: str) -> pd.DataFrame:
+    if event_df is None or event_df.empty or "event_id" not in event_df:
+        return pd.DataFrame()
+    rows = event_df[event_df["event_id"].astype(str).eq(event_id)].copy()
+    if rows.empty and event_id.startswith("bangladesh_pr_202206"):
+        rows = event_df[event_df["event_id"].astype(str).str.startswith("bangladesh_pr_202206")].copy()
+    if rows.empty:
+        return rows
+    sort_cols = [col for col in ["init_time", "lead", "valid_time"] if col in rows]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols)
+    return rows.reset_index(drop=True)
+
+
+def quantile_rows_for_id(quantile_df: pd.DataFrame | None, event_id: str) -> pd.DataFrame:
+    if quantile_df is None or quantile_df.empty or "event_id" not in quantile_df:
+        return pd.DataFrame()
+    rows = quantile_df[quantile_df["event_id"].astype(str).eq(event_id)].copy()
+    if rows.empty and event_id.startswith("bangladesh_pr_202206"):
+        rows = quantile_df[quantile_df["event_id"].astype(str).str.startswith("bangladesh_pr_202206")].copy()
+    if rows.empty:
+        return rows
+    sort_cols = [col for col in ["sample_kind", "init_time", "lead", "metric"] if col in rows]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols)
+    return rows.reset_index(drop=True)
+
+
+def plot_primary_event_summary_strip(
+    ax: plt.Axes,
+    event_id: str,
+    event_df: pd.DataFrame | None,
+    quantile_df: pd.DataFrame | None,
+    image_path: Path | None,
+) -> None:
+    event_rows = event_rows_for_id(event_df, event_id)
+    quantile_rows = quantile_rows_for_id(quantile_df, event_id)
+    context = PRIMARY_EVENT_CONTEXT.get(event_id, {})
+    ax.set_axis_off()
+    box = FancyBboxPatch(
+        (0.002, 0.04),
+        0.996,
+        0.88,
+        transform=ax.transAxes,
+        boxstyle="round,pad=0.012,rounding_size=0.018",
+        facecolor="#f7f9fb",
+        edgecolor="#c8d1d9",
+        linewidth=0.8,
+    )
+    ax.add_patch(box)
+
+    _, crps_value = mean_column(event_rows, ["crps_on_obs_extreme_skill_pct", "crps_skill_pct"])
+    _, raw_bss_value = mean_column(event_rows, ["bss_diff"])
+    _, bss_value = mean_column(event_rows, ["calibrated_bss_diff", "bss_diff"])
+    _, raw_prob_value = mean_column(event_rows, ["event_probability_on_obs_extreme_diff", "event_probability_top_tail_diff"])
+    _, neighborhood_prob_value = mean_column(event_rows, [
+        "event_probability_neighborhood_on_obs_extreme_diff",
+        "event_probability_neighborhood_top_tail_diff",
+        "event_probability_neighborhood_diff",
+    ])
+    _, calibrated_prob_value = mean_column(event_rows, [
+        "cal_event_probability_on_obs_extreme_diff",
+        "event_probability_calibrated_top_tail_diff",
+        "event_probability_calibrated_diff",
+    ])
+    _, q95_skill = mean_column(quantile_rows, ["q95_error_skill"])
+    _, qprob_value = mean_column(quantile_rows, ["prob_threshold_or_more_diff_model_minus_geos"])
+    _, percentile_value = mean_column(quantile_rows, ["obs_percentile_diff_model_minus_geos"])
+
+    n_pairs = unique_pair_count(event_rows)
+    if n_pairs is None:
+        n_pairs = unique_pair_count(quantile_rows)
+
+    source_status = "spatial maps loaded" if image_path is not None else "spatial maps pending"
+    metrics_status = "metrics loaded" if not event_rows.empty or not quantile_rows.empty else "metrics pending"
+    if not event_rows.empty:
+        row0 = event_rows.iloc[0]
+    elif not quantile_rows.empty:
+        row0 = quantile_rows.iloc[0]
+    else:
+        row0 = {}
+    event_name = clean_label(row0.get("event_name", PRIMARY_EVENT_LABELS.get(event_id, event_id)))
+    variable = VARIABLE_SHORT.get(str(row0.get("variable", "")).lower(), "")
+    variable_text = f"{variable} | " if variable else ""
+    pair_text = compact_pair_text(event_rows if not event_rows.empty else quantile_rows)
+    ax.text(
+        0.018,
+        0.72,
+        event_name,
+        transform=ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=8.8,
+        fontweight="bold",
+        color=TEXT_DARK,
+    )
+    ax.text(
+        0.018,
+        0.39,
+        (
+            f"{variable_text}{context.get('diagnostic', 'tail-risk diagnostic')} | "
+            f"{context.get('event_window', 'event window pending')} | "
+            f"{context.get('domain', 'domain pending')}"
+        ),
+        transform=ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=7.6,
+        color=TEXT_MUTED,
+    )
+    ax.text(
+        0.018,
+        0.16,
+        f"{source_status}; {metrics_status}. Init/lead: {pair_text}",
+        transform=ax.transAxes,
+        ha="left",
+        va="center",
+        fontsize=7.1,
+        color=TEXT_MUTED,
+    )
+    if event_rows.empty and quantile_rows.empty:
+        ax.text(
+            0.42,
+            0.62,
+            "Metric summary pending",
+            transform=ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=8.8,
+            fontweight="bold",
+            color=TEXT_DARK,
+        )
+        ax.text(
+            0.42,
+            0.31,
+            "Run the catalog and quantile event evaluators to fill CRPS, BSS, probability, and quantile summaries.",
+            transform=ax.transAxes,
+            ha="left",
+            va="center",
+            fontsize=7.3,
+            color=TEXT_MUTED,
+        )
+        return
+    x0 = 0.42
+    x1 = 0.61
+    x2 = 0.80
+    if not event_rows.empty:
+        draw_summary_value(ax, x0, 0.66, "event-mask CRPS skill", signed_metric_text(crps_value, 1, "%"),
+                           COLOR_POS if crps_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.66, "BSS gain", signed_metric_text(raw_bss_value, 3),
+                           COLOR_POS if raw_bss_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.66, "cal. BSS gain", signed_metric_text(bss_value, 3),
+                           COLOR_POS if bss_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x0, 0.27, "event-prob gain", signed_metric_text(raw_prob_value, 3),
+                           COLOR_POS if raw_prob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.27, "neighborhood-prob gain", signed_metric_text(neighborhood_prob_value, 3),
+                           COLOR_POS if neighborhood_prob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.27, "cal. event-prob gain", signed_metric_text(calibrated_prob_value, 3),
+                           COLOR_POS if calibrated_prob_value >= 0 else COLOR_NEG)
+    else:
+        draw_summary_value(ax, x0, 0.66, "q95 error skill", signed_metric_text(q95_skill, 2),
+                           COLOR_POS if q95_skill >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x1, 0.66, "P(threshold) gain", signed_metric_text(qprob_value, 3),
+                           COLOR_POS if qprob_value >= 0 else COLOR_NEG)
+        draw_summary_value(ax, x2, 0.66, "obs-percentile gain", signed_metric_text(percentile_value, 3),
+                           COLOR_POS if percentile_value >= 0 else COLOR_NEG)
+    if n_pairs is not None:
+        ax.text(0.985, 0.18, f"n={n_pairs}", transform=ax.transAxes, ha="right", va="center",
+                fontsize=7.3, color=TEXT_MUTED)
+
+
+def first_spatial_path(plot_paths: dict[str, Path]) -> Path | None:
+    for key in ("spatial_event_focus", "spatial_risk", "spatial_verification", "quantile_spatial"):
+        if key in plot_paths:
+            return plot_paths[key]
+    return None
+
+
+def figure_event_cropped(
     output_dir: Path,
     formats: list[str],
     dpi: int,
+    event_dir: Path,
     quantile_dir: Path,
-    event_name: str,
-    variable: str,
+    event_df: pd.DataFrame | None,
+    quantile_df: pd.DataFrame | None,
+    event_id: str,
     fig_num: int,
     stem: str,
     fig_title: str,
     fig_subtitle: str,
-    field_cmap: str = "YlGnBu",
-    prob_cmap: str = "YlOrRd",
 ) -> list[Path]:
-    """Shared builder for event case-study figures (2x3).
+    """Figure 6 & 7: 2x3 grid of cropped panels from event evaluator output plots."""
+    plot_paths = find_primary_event_plots(event_id, event_dir, quantile_dir, None, None)
+    image_path = first_spatial_path(plot_paths)
 
-    Panel layout:
-      (a) Observed field         (b) FIMr1p1 ensemble mean   (c) ML ensemble mean
-      (d) FIMr1p1 exceedance     (e) ML exceedance prob      (f) Closeness map
-    """
-    var_short = VARIABLE_SHORT.get(variable, variable.upper())
-    data = load_event_spatial_data(quantile_dir, event_name, variable)
-
-    fig, axes = plt.subplots(2, 3, figsize=(13.0, 7.5))
+    fig = plt.figure(figsize=(12.0, 7.5))
+    fig.patch.set_facecolor("white")
     style_figure(fig, fig_title, fig_subtitle)
 
-    # Determine shared color limits for the field panels (obs + means)
-    field_arrays = [data["observed"][2], data["geos_mean"][2], data["model_mean"][2]]
-    finite_vals = []
-    for arr in field_arrays:
-        if arr is not None:
-            finite_vals.extend(arr[np.isfinite(arr)].ravel().tolist())
-    if finite_vals:
-        fvmin = float(np.nanpercentile(finite_vals, 2))
-        fvmax = float(np.nanpercentile(finite_vals, 98))
+    # 2x3 layout grid for plots, and 1 row for summary strip at bottom
+    gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.0, 0.18], hspace=0.18, left=0.03, right=0.97, bottom=0.02, top=0.92)
+    
+    sub_plots = gs[0:2].subgridspec(2, 3, hspace=0.12, wspace=0.08)
+
+    # We map our 2x3 panels to panels in quantile_spatial.png (4x4) or spatial_event_focus.png (2x4)
+    # If spatial_event_focus is present, we show that (event probs). If quantile_spatial is present, we show that.
+    is_quantile = "quantile_spatial" in plot_paths
+    plot_type = "quantile_spatial" if is_quantile else "spatial_event_focus"
+    img_path = plot_paths.get(plot_type)
+
+    # Panels:
+    # 0 = Observed, 1 = Baseline q95/mean, 2 = ML q95/mean
+    # 3 = Baseline prob, 4 = ML prob, 5 = closeness / gain
+    if is_quantile:
+        # Quantile fallback indexes (4x4 grid):
+        # 0: Obs, 4: GEOS q95, 5: ML q95, 8: GEOS P>=thresh, 9: ML P>=thresh, 10: Prob gain
+        panel_specs = [
+            ("(a) Observed", 0),
+            (f"(b) {BASELINE} q95", 4),
+            (f"(c) {METHOD} q95", 5),
+            (f"(d) {BASELINE} P(exceed p95)", 8),
+            (f"(e) {METHOD} P(exceed p95)", 9),
+            ("(f) Probability gain (ML - baseline)", 10),
+        ]
+        nrows, ncols = 4, 4
     else:
-        fvmin, fvmax = None, None
+        # Spatial focus indexes (2x4 grid):
+        # 0: Obs, 1: GEOS prob, 2: ML prob, 3: Prob gain, 5: Neighborhood gain, 6: BSS gain
+        panel_specs = [
+            ("(a) Observed", 0),
+            (f"(b) {BASELINE} event probability", 1),
+            (f"(c) {METHOD} event probability", 2),
+            ("(d) Probability gain", 3),
+            ("(e) Neighborhood probability gain", 5),
+            ("(f) BSS gain", 6),
+        ]
+        nrows, ncols = 2, 4
 
-    # Row 1: Observed, baseline mean, ML mean
-    plot_field_map(axes[0, 0], *data["observed"], f"(a) Observed {var_short}", cmap=field_cmap, vmin=fvmin, vmax=fvmax)
-    plot_field_map(axes[0, 1], *data["geos_mean"], f"(b) {BASELINE} ensemble mean", cmap=field_cmap, vmin=fvmin, vmax=fvmax)
-    plot_field_map(axes[0, 2], *data["model_mean"], f"(c) {METHOD} ensemble mean", cmap=field_cmap, vmin=fvmin, vmax=fvmax)
+    if img_path is None or not img_path.exists():
+        ax_big = fig.add_subplot(gs[0:2])
+        missing_panel(
+            ax_big,
+            "Spatial tail-risk maps pending",
+            (
+                f"Evaluation PNG plot for {event_id} not found in remote directories.\n"
+                f"Please run evaluate_event_catalog_flow_finalv1_global.py or "
+                f"evaluate_event_quantile_forecast_flow_finalv1_global.py with --make_plots first."
+            ),
+        )
+    else:
+        try:
+            image = plt.imread(img_path)
+            for idx, (panel_title, src_index) in enumerate(panel_specs):
+                ax = fig.add_subplot(sub_plots[idx // 3, idx % 3])
+                crop = crop_event_panel(image, nrows, ncols, src_index)
+                plot_cropped_event_panel(ax, crop, panel_title)
+        except Exception as exc:
+            ax_big = fig.add_subplot(gs[0:2])
+            missing_panel(ax_big, "Error loading event map", f"Could not read source map: {exc}")
 
-    # Row 2: Exceedance probabilities and closeness
-    plot_field_map(axes[1, 0], *data["geos_exceedance"], f"(d) {BASELINE} P(exceed p95)", cmap=prob_cmap, vmin=0, vmax=1)
-    plot_field_map(axes[1, 1], *data["model_exceedance"], f"(e) {METHOD} P(exceed p95)", cmap=prob_cmap, vmin=0, vmax=1)
+    # Summary strip at the bottom
+    summary_ax = fig.add_subplot(gs[2])
+    plot_primary_event_summary_strip(summary_ax, event_id, event_df, quantile_df, image_path)
 
-    # Closeness map
-    obs_lons, obs_lats, obs_field = data["observed"]
-    _, _, geos_field = data["geos_mean"]
-    _, _, model_field = data["model_mean"]
-    plot_closeness_map(
-        axes[1, 2], obs_lons, obs_lats, obs_field, geos_field, model_field,
-        f"(f) Closeness (green = ML closer)",
-    )
-
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
     return save_figure(fig, output_dir, stem, formats, dpi)
 
 
 def figure_6_event_pr(
     output_dir: Path, formats: list[str], dpi: int,
-    quantile_dir: Path,
+    event_dir: Path, quantile_dir: Path,
+    event_df: pd.DataFrame | None, quantile_df: pd.DataFrame | None,
 ) -> list[Path]:
     """California atmospheric river flood — PR case study."""
-    return figure_event_case_study(
-        output_dir, formats, dpi, quantile_dir,
-        event_name="california_ar",
-        variable="pr",
+    return figure_event_cropped(
+        output_dir, formats, dpi, event_dir, quantile_dir, event_df, quantile_df,
+        event_id="conus_pr_202301_california_atmospheric_rivers",
         fig_num=6,
         stem="fig6_event_pr_california",
         fig_title="Figure 6. California atmospheric river flood — precipitation",
         fig_subtitle=(
-            f"Observed PR, {BASELINE} and {METHOD} ensemble means, exceedance probabilities, "
-            f"and closeness map. Positive closeness (green) = ML forecast closer to observations."
+            f"Observed PR, {BASELINE} and {METHOD} ensemble features, exceedance probabilities, "
+            f"and gain map. Positive gain = ML forecast closer to observations."
         ),
-        field_cmap="YlGnBu",
-        prob_cmap="YlOrRd",
     )
 
 
 def figure_7_event_t2m(
     output_dir: Path, formats: list[str], dpi: int,
-    quantile_dir: Path,
+    event_dir: Path, quantile_dir: Path,
+    event_df: pd.DataFrame | None, quantile_df: pd.DataFrame | None,
 ) -> list[Path]:
     """UK July 2022 heatwave — T2M case study."""
-    return figure_event_case_study(
-        output_dir, formats, dpi, quantile_dir,
-        event_name="uk_heatwave",
-        variable="t2m",
+    return figure_event_cropped(
+        output_dir, formats, dpi, event_dir, quantile_dir, event_df, quantile_df,
+        event_id="europe_t2m_202207_uk_heatwave",
         fig_num=7,
         stem="fig7_event_t2m_uk_heatwave",
         fig_title="Figure 7. UK heatwave July 2022 — 2 m temperature",
         fig_subtitle=(
-            f"Observed T2M, {BASELINE} and {METHOD} ensemble means, exceedance probabilities, "
-            f"and closeness map. Positive closeness (green) = ML forecast closer to observations."
+            f"Observed T2M, {BASELINE} and {METHOD} ensemble features, exceedance probabilities, "
+            f"and gain map. Positive gain = ML forecast closer to observations."
         ),
-        field_cmap="RdYlBu_r",
-        prob_cmap="YlOrRd",
     )
 
 
@@ -1105,6 +1448,8 @@ def main() -> None:
     print(f"  output_dir     : {output_dir}")
 
     summary = read_csv_or_none(matrix_summary_path(matrix_dir))
+    event_df = read_csv_or_none(event_dir / "event_selected_lead_metrics.csv")
+    quantile_df = read_csv_or_none(quantile_dir / "event_quantile_selected_comparison.csv")
 
     written: list[Path] = []
 
@@ -1129,11 +1474,11 @@ def main() -> None:
     # Fig 5 — Extreme-event subset skill (2x2)
     written.extend(figure_5_extreme_subset(output_dir, formats, args.dpi, summary))
 
-    # Fig 6 — California AR flood case study (2x3)
-    written.extend(figure_6_event_pr(output_dir, formats, args.dpi, quantile_dir))
+    # Fig 6 — California AR flood case study (2x3 cropped panels)
+    written.extend(figure_6_event_pr(output_dir, formats, args.dpi, event_dir, quantile_dir, event_df, quantile_df))
 
-    # Fig 7 — UK heat event case study (2x3)
-    written.extend(figure_7_event_t2m(output_dir, formats, args.dpi, quantile_dir))
+    # Fig 7 — UK heat event case study (2x3 cropped panels)
+    written.extend(figure_7_event_t2m(output_dir, formats, args.dpi, event_dir, quantile_dir, event_df, quantile_df))
 
     print(f"\nWrote {len(written)} figure files:")
     for path in written:
