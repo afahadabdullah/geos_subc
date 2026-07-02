@@ -518,27 +518,37 @@ def plot_plain_map(
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
         
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+
     if is_change:
         from matplotlib.colors import TwoSlopeNorm
         vlim = max(abs(vmin), abs(vmax))
         vlim = max(vlim, 0.1)
         norm = TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim)
         levels = np.linspace(-vlim, vlim, 21)
-        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both")
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both", transform=ccrs.PlateCarree())
     else:
         if vmin == vmax:
             vmin -= 0.1
             vmax += 0.1
         levels = np.linspace(vmin, vmax, 21)
-        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, extend="both")
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, extend="both", transform=ccrs.PlateCarree())
         
     ax.set_title(title, loc="left", fontsize=9.5, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=8)
     ax.set_ylabel("Latitude", fontsize=8)
     ax.tick_params(labelsize=7)
-    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
-    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
-    ax.grid(True, color="#d9dee3", linewidth=0.25, alpha=0.7)
+
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="#222222", zorder=2)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="#555555", linestyle=":", zorder=2)
+
+    if np.nanmax(lons) - np.nanmin(lons) > 340:
+        ax.set_global()
+    else:
+        ax.set_extent([float(np.nanmin(lons)), float(np.nanmax(lons)), float(np.nanmin(lats)), float(np.nanmax(lats))], crs=ccrs.PlateCarree())
+
+    ax.gridlines(draw_labels=False, dms=True, x_inline=False, y_inline=False, color="#d9dee3", linewidth=0.25, alpha=0.7)
     return mesh
 
 
