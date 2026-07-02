@@ -1934,6 +1934,9 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
             else:
                 vmin, vmax = (-1, 1) if center_zero else (0, 1)
 
+            kwargs = {}
+            if MAP_CONTEXT["enabled"]:
+                kwargs["transform"] = MAP_CONTEXT["data_crs"]
             from matplotlib.colors import TwoSlopeNorm
             norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax) if center_zero else None
             levels = np.linspace(vmin, vmax, 21)
