@@ -1427,9 +1427,18 @@ def plot_contoured_panel(
         return None
     
     if vmin is None:
-        vmin = float(np.nanpercentile(finite, 2))
+    	vmin = float(np.nanpercentile(finite, 2))
     if vmax is None:
-        vmax = float(np.nanpercentile(finite, 98))
+    	vmax = float(np.nanpercentile(finite, 98))
+        
+    import matplotlib.pyplot as plt
+    try:
+        cm = plt.get_cmap(cmap).copy()
+        cm.set_under("white")
+        cm.set_over("white")
+        cmap = cm
+    except Exception:
+        pass
         
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
@@ -1559,10 +1568,6 @@ def figure_event_cropped(
             model_crps = np.where(ocean_mask, np.nan, model_crps)
             geos_bss = np.where(ocean_mask, np.nan, geos_bss)
             model_bss = np.where(ocean_mask, np.nan, model_bss)
-            
-            # Mask out BSS values outside [0.0, 0.6] range (keep only 0.0 to 0.6, else NaN)
-            geos_bss = np.where((geos_bss >= 0.0) & (geos_bss <= 0.6), geos_bss, np.nan)
-            model_bss = np.where((model_bss >= 0.0) & (model_bss <= 0.6), model_bss, np.nan)
 
             # Compute percentage CRPS skill improvement instead of raw diff
             denom = np.where(geos_crps == 0.0, 1e-5, geos_crps)
@@ -1630,10 +1635,10 @@ def figure_event_cropped(
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Skill Improvement %)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="neither")
+            plot_contoured_panel_with_colorbar(fig, ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="both")
             
             ax_h = fig.add_subplot(gs[2, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel_with_colorbar(fig, ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="neither")
+            plot_contoured_panel_with_colorbar(fig, ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", "Blues", vmin=bvmin, vmax=bvmax, cbar_label="BSS", extend="both")
             
             ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
             plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS Skill Improvement (%)", "RdBu", vmin=-30.0, vmax=30.0, cbar_label="Improvement (%)", is_change=True, extend="both")
