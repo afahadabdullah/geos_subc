@@ -875,10 +875,11 @@ def figure_variable_skill(
     map_geos_rmse = spatial_metric_map(ds, variable, "geos_rmse", spatial_subset)
     map_rmse_change = spatial_metric_map(ds, variable, "rmse_skill_pct", spatial_subset)
 
-    ax_crps_geos_map = fig.add_subplot(gs[1, 0])
-    ax_crps_change_map = fig.add_subplot(gs[1, 1])
-    ax_rmse_geos_map = fig.add_subplot(gs[1, 2])
-    ax_rmse_change_map = fig.add_subplot(gs[1, 3])
+    import cartopy.crs as ccrs
+    ax_crps_geos_map = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
+    ax_crps_change_map = fig.add_subplot(gs[1, 1], projection=ccrs.PlateCarree())
+    ax_rmse_geos_map = fig.add_subplot(gs[1, 2], projection=ccrs.PlateCarree())
+    ax_rmse_change_map = fig.add_subplot(gs[1, 3], projection=ccrs.PlateCarree())
 
     if map_geos_crps[2] is not None:
         gc_map_finite = map_geos_crps[2][np.isfinite(map_geos_crps[2])]
