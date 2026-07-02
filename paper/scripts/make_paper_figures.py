@@ -398,9 +398,11 @@ def plot_heatmap_panel(
         im = ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
         
     ax.set_title(title, loc="left", fontsize=9.5, fontweight="bold")
-    ax.set_xticks(np.arange(len(LEADS)), [str(lead) for lead in LEADS], fontsize=8)
-    ax.set_yticks(np.arange(len(SEASONS)), SEASONS, fontsize=8)
-    ax.set_xlabel("Lead week", fontsize=8)
+    ax.set_xticks(np.arange(len(LEADS)))
+    ax.set_xticklabels([str(lead) for lead in LEADS], fontsize=8, fontweight="bold")
+    ax.set_yticks(np.arange(len(SEASONS)))
+    ax.set_yticklabels(SEASONS, fontsize=8, fontweight="bold")
+    ax.set_xlabel("Lead week", fontsize=8, fontweight="bold")
     
     for i in range(arr.shape[0]):
         for j in range(arr.shape[1]):
@@ -846,7 +848,7 @@ def figure_variable_skill(
         f"Season-lead matrices (top) and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
     )
     
-    gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.28, left=0.03, right=0.97, bottom=0.05, top=0.88)
+    gs = fig.add_gridspec(2, 4, height_ratios=[0.85, 1.15], hspace=0.22, wspace=0.22, left=0.03, right=0.97, bottom=0.04, top=0.96)
 
     # --- Row 1: Season-lead heatmaps ---
     geos_crps_arr = season_lead_values(summary, variable, "geos_crps", subset)
@@ -884,6 +886,14 @@ def figure_variable_skill(
     map_crps_change = spatial_metric_map(ds, variable, "crps_skill_pct", spatial_subset)
     map_geos_rmse = spatial_metric_map(ds, variable, "geos_rmse", spatial_subset)
     map_rmse_change = spatial_metric_map(ds, variable, "rmse_skill_pct", spatial_subset)
+
+    # Use geos_crps as mask to set ocean points to NaN across all maps
+    if map_geos_crps[2] is not None:
+        ocean_mask = np.isnan(map_geos_crps[2])
+        map_geos_crps = (map_geos_crps[0], map_geos_crps[1], np.where(ocean_mask, np.nan, map_geos_crps[2]))
+        map_crps_change = (map_crps_change[0], map_crps_change[1], np.where(ocean_mask, np.nan, map_crps_change[2]))
+        map_geos_rmse = (map_geos_rmse[0], map_geos_rmse[1], np.where(ocean_mask, np.nan, map_geos_rmse[2]))
+        map_rmse_change = (map_rmse_change[0], map_rmse_change[1], np.where(ocean_mask, np.nan, map_rmse_change[2]))
 
     import cartopy.crs as ccrs
     ax_crps_geos_map = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
