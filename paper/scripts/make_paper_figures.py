@@ -228,9 +228,6 @@ def clean_label(value: object) -> str:
 
 def style_figure(fig: plt.Figure, title: str, subtitle: str | None = None) -> None:
     fig.patch.set_facecolor("white")
-    fig.suptitle(title, x=0.015, y=0.995, ha="left", va="top", fontsize=15, fontweight="bold", color=TEXT_DARK)
-    if subtitle:
-        fig.text(0.015, 0.962, subtitle, ha="left", va="top", fontsize=9.5, color=TEXT_MUTED)
 
 
 def style_axis(ax: plt.Axes) -> None:
@@ -1464,16 +1461,15 @@ def figure_event_cropped(
     # Set figure size based on event to remove empty margins
     is_t2m = "t2m" in event_id.lower()
     if is_t2m:
-        fig = plt.figure(figsize=(12.0, 9.8))
+        fig = plt.figure(figsize=(12.0, 8.5))
     else:
-        fig = plt.figure(figsize=(11.0, 11.5))
+        fig = plt.figure(figsize=(11.0, 10.0))
         
     fig.patch.set_facecolor("white")
     style_figure(fig, fig_title, fig_subtitle)
 
-    # 3x3 grid for maps, and bottom row for summary strip
-    gs = fig.add_gridspec(4, 1, height_ratios=[1.0, 1.0, 1.0, 0.15], hspace=0.22, left=0.03, right=0.97, bottom=0.02, top=0.92)
-    sub_plots = gs[0:3].subgridspec(3, 3, hspace=0.15, wspace=0.08)
+    # 3x3 grid of maps filling the entire figure
+    gs = fig.add_gridspec(3, 3, hspace=0.15, wspace=0.08, left=0.03, right=0.97, bottom=0.03, top=0.97)
 
     field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
     bss_cmap = "viridis"
@@ -1517,27 +1513,27 @@ def figure_event_cropped(
             bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
 
             # Plot top row (Observed, Baseline Mean, ML Mean)
-            ax_a = fig.add_subplot(sub_plots[0, 0], projection=ccrs.PlateCarree())
+            ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
             im_a = plot_contoured_panel(ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax)
-            ax_b = fig.add_subplot(sub_plots[0, 1], projection=ccrs.PlateCarree())
+            ax_b = fig.add_subplot(gs[0, 1], projection=ccrs.PlateCarree())
             plot_contoured_panel(ax_b, lons, lats, geos_mean, f"(b) {BASELINE} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
-            ax_c = fig.add_subplot(sub_plots[0, 2], projection=ccrs.PlateCarree())
+            ax_c = fig.add_subplot(gs[0, 2], projection=ccrs.PlateCarree())
             plot_contoured_panel(ax_c, lons, lats, model_mean, f"(c) {METHOD} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
 
             # Plot middle row (Baseline CRPS, ML CRPS, CRPS Gain)
-            ax_d = fig.add_subplot(sub_plots[1, 0], projection=ccrs.PlateCarree())
+            ax_d = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
             im_d = plot_contoured_panel(ax_d, lons, lats, geos_crps, f"(d) {BASELINE} CRPS", "plasma", vmin=cvmin, vmax=cvmax)
-            ax_e = fig.add_subplot(sub_plots[1, 1], projection=ccrs.PlateCarree())
+            ax_e = fig.add_subplot(gs[1, 1], projection=ccrs.PlateCarree())
             plot_contoured_panel(ax_e, lons, lats, model_crps, f"(e) {METHOD} CRPS", "plasma", vmin=cvmin, vmax=cvmax)
-            ax_f = fig.add_subplot(sub_plots[1, 2], projection=ccrs.PlateCarree())
+            ax_f = fig.add_subplot(gs[1, 2], projection=ccrs.PlateCarree())
             im_f = plot_contoured_panel(ax_f, lons, lats, crps_diff, "(f) CRPS Improvement", "RdBu_r")
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Gain)
-            ax_g = fig.add_subplot(sub_plots[2, 0], projection=ccrs.PlateCarree())
+            ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
             im_g = plot_contoured_panel(ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
-            ax_h = fig.add_subplot(sub_plots[2, 1], projection=ccrs.PlateCarree())
+            ax_h = fig.add_subplot(gs[2, 1], projection=ccrs.PlateCarree())
             plot_contoured_panel(ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
-            ax_i = fig.add_subplot(sub_plots[2, 2], projection=ccrs.PlateCarree())
+            ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
             im_i = plot_contoured_panel(ax_i, lons, lats, bss_diff, "(i) BSS gain (ML - baseline)", "RdBu")
 
             # Add Colorbars
@@ -1563,10 +1559,10 @@ def figure_event_cropped(
                 cbar_gain.ax.tick_params(labelsize=6)
 
         except Exception as exc:
-            ax_big = fig.add_subplot(gs[0:3])
+            ax_big = fig.add_subplot(gs[:, :])
             missing_panel(ax_big, "Error loading NetCDF event data", f"Could not load data from {nc_path.name}: {exc}")
     else:
-        ax_big = fig.add_subplot(gs[0:3])
+        ax_big = fig.add_subplot(gs[:, :])
         missing_panel(
             ax_big,
             "Spatial maps pending",
@@ -1575,10 +1571,6 @@ def figure_event_cropped(
                 f"Please run paper/scripts/make_contoured_event_plots.py first."
             ),
         )
-
-    # Summary strip at the bottom
-    summary_ax = fig.add_subplot(gs[3])
-    plot_primary_event_summary_strip(summary_ax, event_id, event_df, quantile_df, image_path)
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
