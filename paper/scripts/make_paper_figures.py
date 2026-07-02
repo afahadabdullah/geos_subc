@@ -377,21 +377,53 @@ def heatmap_limits(arrays: list[np.ndarray | None], fallback: float = 20.0) -> t
     return -lim, lim
 
 
-def plot_skill_heatmap(ax: plt.Axes, arr: np.ndarray | None, title: str, vmin: float, vmax: float):
+def plot_heatmap_panel(
+    ax: plt.Axes,
+    arr: np.ndarray | None,
+    raw_model_arr: np.ndarray | None,
+    title: str,
+    vmin: float,
+    vmax: float,
+    cmap: str = "RdYlGn",
+    is_change: bool = True,
+):
     if arr is None or not np.isfinite(arr).any():
         missing_panel(ax, title, "Missing valid_season_lead matrix rows.")
         return None
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
-    im = ax.imshow(arr, cmap="RdYlGn", norm=norm, aspect="auto")
-    ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
+        
+    if is_change:
+        from matplotlib.colors import TwoSlopeNorm
+        vlim = max(abs(vmin), abs(vmax))
+        vlim = max(vlim, 0.1)
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim)
+        im = ax.imshow(arr, cmap=cmap, norm=norm, aspect="auto")
+    else:
+        im = ax.imshow(arr, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+        
+    ax.set_title(title, loc="left", fontsize=9.5, fontweight="bold")
     ax.set_xticks(np.arange(len(LEADS)), [str(lead) for lead in LEADS], fontsize=8)
     ax.set_yticks(np.arange(len(SEASONS)), SEASONS, fontsize=8)
-    ax.set_xlabel("Lead week", fontsize=8.5)
+    ax.set_xlabel("Lead week", fontsize=8)
+    
     for i in range(arr.shape[0]):
         for j in range(arr.shape[1]):
-            value = arr[i, j]
-            if np.isfinite(value):
-                ax.text(j, i, f"{value:+.0f}", ha="center", va="center", fontsize=7, color="#101820")
+            val = arr[i, j]
+            if np.isfinite(val):
+                if is_change:
+                    raw_val = raw_model_arr[i, j] if raw_model_arr is not None else np.nan
+                    if np.isfinite(raw_val):
+                        if raw_val > 10.0:
+                            label = f"{val:+.0f}%\n({raw_val:.1f})"
+                        else:
+                            label = f"{val:+.0f}%\n({raw_val:.2f})"
+                    else:
+                        label = f"{val:+.0f}%"
+                else:
+                    if val > 10.0:
+                        label = f"{val:.1f}"
+                    else:
+                        label = f"{val:.2f}"
+                ax.text(j, i, label, ha="center", va="center", fontsize=7.0, color="#101820", fontweight="bold")
     return im
 
 
@@ -482,14 +514,28 @@ def plot_plain_map(
     title: str,
     vmin: float,
     vmax: float,
+    cmap: str = "RdYlGn",
+    is_change: bool = True,
 ):
     if lons is None or lats is None or field is None or not np.isfinite(field).any():
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
-    norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
-    levels = np.linspace(vmin, vmax, 21)
-    mesh = ax.contourf(lons, lats, field, levels=levels, cmap="RdYlGn", norm=norm, extend="both")
-    ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
+        
+    if is_change:
+        from matplotlib.colors import TwoSlopeNorm
+        vlim = max(abs(vmin), abs(vmax))
+        vlim = max(vlim, 0.1)
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim)
+        levels = np.linspace(-vlim, vlim, 21)
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both")
+    else:
+        if vmin == vmax:
+            vmin -= 0.1
+            vmax += 0.1
+        levels = np.linspace(vmin, vmax, 21)
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, extend="both")
+        
+    ax.set_title(title, loc="left", fontsize=9.5, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=8)
     ax.set_ylabel("Latitude", fontsize=8)
     ax.tick_params(labelsize=7)
@@ -764,67 +810,111 @@ def figure_variable_skill(
     subset: str,
     spatial_subset: str,
 ) -> list[Path]:
-    """Shared builder for the per-variable multi-panel skill figure (3x2).
+    """Shared builder for the per-variable multi-panel skill figure (3x4).
 
     Row 1: Lead-dependent skill bars (CRPS, RMSE)
-    Row 2: Season-lead skill heatmaps (CRPS, RMSE)
-    Row 3: Spatial skill maps (CRPS, RMSE)
+    Row 2: Season-lead skill heatmaps (GEOS, Skill Change)
+    Row 3: Spatial skill maps (GEOS, Skill Change)
     """
     var_label = VARIABLE_LABELS.get(variable, variable)
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
 
-    fig, axes = plt.subplots(3, 2, figsize=(10.5, 11.5))
+    fig = plt.figure(figsize=(18.0, 12.0))
     style_figure(
         fig,
         f"Figure {fig_num}. {var_label} forecast skill vs {BASELINE}",
         f"Lead bars (top), season-lead matrices (middle), and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
     )
+    
+    gs = fig.add_gridspec(3, 4, hspace=0.35, wspace=0.28, left=0.03, right=0.97, bottom=0.04, top=0.91)
 
     # --- Row 1: Lead-dependent skill bars ---
+    ax_crps_bar = fig.add_subplot(gs[0, 0:2])
+    ax_rmse_bar = fig.add_subplot(gs[0, 2:4])
     agg = aggregate_matrix_by_lead(summary, subset=subset)
-    plot_skill_bars(axes[0, 0], agg, variable, "crps")
-    plot_skill_bars(axes[0, 1], agg, variable, "rmse")
+    plot_skill_bars(ax_crps_bar, agg, variable, "crps")
+    plot_skill_bars(ax_rmse_bar, agg, variable, "rmse")
 
     # --- Row 2: Season-lead heatmaps ---
-    crps_arr = season_lead_values(summary, variable, "crps_skill_pct", subset)
-    rmse_arr = season_lead_values(summary, variable, "rmse_skill_pct", subset)
-    vmin, vmax = heatmap_limits([crps_arr, rmse_arr])
-    im = None
-    maybe_im = plot_skill_heatmap(axes[1, 0], crps_arr, f"{var_short} CRPS skill by season & lead", vmin, vmax)
-    if maybe_im is not None:
-        im = maybe_im
-    maybe_im = plot_skill_heatmap(axes[1, 1], rmse_arr, f"{var_short} RMSE skill by season & lead", vmin, vmax)
-    if maybe_im is not None:
-        im = maybe_im
+    geos_crps_arr = season_lead_values(summary, variable, "geos_crps", subset)
+    model_crps_arr = season_lead_values(summary, variable, "model_crps", subset)
+    crps_change_arr = season_lead_values(summary, variable, "crps_skill_pct", subset)
+    
+    geos_rmse_arr = season_lead_values(summary, variable, "geos_rmse", subset)
+    model_rmse_arr = season_lead_values(summary, variable, "model_rmse", subset)
+    rmse_change_arr = season_lead_values(summary, variable, "rmse_skill_pct", subset)
+
+    ax_crps_geos_hm = fig.add_subplot(gs[1, 0])
+    ax_crps_change_hm = fig.add_subplot(gs[1, 1])
+    ax_rmse_geos_hm = fig.add_subplot(gs[1, 2])
+    ax_rmse_change_hm = fig.add_subplot(gs[1, 3])
+
+    gc_vmin, gc_vmax = (np.nanmin(geos_crps_arr), np.nanmax(geos_crps_arr)) if geos_crps_arr is not None else (0.0, 1.0)
+    gr_vmin, gr_vmax = (np.nanmin(geos_rmse_arr), np.nanmax(geos_rmse_arr)) if geos_rmse_arr is not None else (0.0, 1.0)
+    
+    c_vmin, c_vmax = heatmap_limits([crps_change_arr])
+    r_vmin, r_vmax = heatmap_limits([rmse_change_arr])
+
+    im_c_g = plot_heatmap_panel(ax_crps_geos_hm, geos_crps_arr, None, f"{var_short} {BASELINE} CRPS", gc_vmin, gc_vmax, cmap="viridis", is_change=False)
+    im_c_c = plot_heatmap_panel(ax_crps_change_hm, crps_change_arr, model_crps_arr, f"{var_short} CRPS Skill vs {BASELINE}", c_vmin, c_vmax, cmap="RdYlGn", is_change=True)
+    im_r_g = plot_heatmap_panel(ax_rmse_geos_hm, geos_rmse_arr, None, f"{var_short} {BASELINE} RMSE", gr_vmin, gr_vmax, cmap="viridis", is_change=False)
+    im_r_c = plot_heatmap_panel(ax_rmse_change_hm, rmse_change_arr, model_rmse_arr, f"{var_short} RMSE Skill vs {BASELINE}", r_vmin, r_vmax, cmap="RdYlGn", is_change=True)
+
+    if im_c_g is not None:
+        fig.colorbar(im_c_g, ax=ax_crps_geos_hm, shrink=0.8, pad=0.03)
+    if im_c_c is not None:
+        fig.colorbar(im_c_c, ax=ax_crps_change_hm, shrink=0.8, pad=0.03)
+    if im_r_g is not None:
+        fig.colorbar(im_r_g, ax=ax_rmse_geos_hm, shrink=0.8, pad=0.03)
+    if im_r_c is not None:
+        fig.colorbar(im_r_c, ax=ax_rmse_change_hm, shrink=0.8, pad=0.03)
 
     # --- Row 3: Spatial maps ---
     ds = load_xarray_dataset(matrix_spatial_path(matrix_dir))
-    map_crps = spatial_metric_map(ds, variable, "crps_skill_pct", spatial_subset)
-    map_rmse = spatial_metric_map(ds, variable, "rmse_skill_pct", spatial_subset)
-    fields = [map_crps[2], map_rmse[2]]
-    svmin, svmax = spatial_limits(fields)
-    mesh = None
-    maybe_mesh = plot_plain_map(axes[2, 0], *map_crps, f"{var_short} CRPS skill map", svmin, svmax)
-    if maybe_mesh is not None:
-        mesh = maybe_mesh
-    maybe_mesh = plot_plain_map(axes[2, 1], *map_rmse, f"{var_short} RMSE skill map", svmin, svmax)
-    if maybe_mesh is not None:
-        mesh = maybe_mesh
+    map_geos_crps = spatial_metric_map(ds, variable, "geos_crps", spatial_subset)
+    map_crps_change = spatial_metric_map(ds, variable, "crps_skill_pct", spatial_subset)
+    map_geos_rmse = spatial_metric_map(ds, variable, "geos_rmse", spatial_subset)
+    map_rmse_change = spatial_metric_map(ds, variable, "rmse_skill_pct", spatial_subset)
+
+    ax_crps_geos_map = fig.add_subplot(gs[2, 0])
+    ax_crps_change_map = fig.add_subplot(gs[2, 1])
+    ax_rmse_geos_map = fig.add_subplot(gs[2, 2])
+    ax_rmse_change_map = fig.add_subplot(gs[2, 3])
+
+    if map_geos_crps[2] is not None:
+        gc_map_finite = map_geos_crps[2][np.isfinite(map_geos_crps[2])]
+        g_crps_vmin = float(np.nanpercentile(gc_map_finite, 2)) if gc_map_finite.size else 0.0
+        g_crps_vmax = float(np.nanpercentile(gc_map_finite, 98)) if gc_map_finite.size else 1.0
+    else:
+        g_crps_vmin, g_crps_vmax = 0.0, 1.0
+
+    if map_geos_rmse[2] is not None:
+        gr_map_finite = map_geos_rmse[2][np.isfinite(map_geos_rmse[2])]
+        g_rmse_vmin = float(np.nanpercentile(gr_map_finite, 2)) if gr_map_finite.size else 0.0
+        g_rmse_vmax = float(np.nanpercentile(gr_map_finite, 98)) if gr_map_finite.size else 1.0
+    else:
+        g_rmse_vmin, g_rmse_vmax = 0.0, 1.0
+
+    s_crps_vmin, s_crps_vmax = spatial_limits([map_crps_change[2]])
+    s_rmse_vmin, s_rmse_vmax = spatial_limits([map_rmse_change[2]])
+
+    im_c_map_g = plot_plain_map(ax_crps_geos_map, *map_geos_crps, f"{var_short} {BASELINE} CRPS map", g_crps_vmin, g_crps_vmax, cmap="viridis", is_change=False)
+    im_c_map_c = plot_plain_map(ax_crps_change_map, *map_crps_change, f"{var_short} CRPS Skill map", s_crps_vmin, s_crps_vmax, cmap="RdYlGn", is_change=True)
+    im_r_map_g = plot_plain_map(ax_rmse_geos_map, *map_geos_rmse, f"{var_short} {BASELINE} RMSE map", g_rmse_vmin, g_rmse_vmax, cmap="viridis", is_change=False)
+    im_r_map_c = plot_plain_map(ax_rmse_change_map, *map_rmse_change, f"{var_short} RMSE Skill map", s_rmse_vmin, s_rmse_vmax, cmap="RdYlGn", is_change=True)
 
     if ds is not None:
         ds.close()
 
-    # Colorbars
-    if im is not None:
-        cbar_hm = fig.colorbar(im, ax=axes[1, :].ravel().tolist(), shrink=0.82, pad=0.03)
-        cbar_hm.set_label("Skill vs " + BASELINE + " (%)", fontsize=8)
-        cbar_hm.ax.tick_params(labelsize=7)
-    if mesh is not None:
-        cbar_sp = fig.colorbar(mesh, ax=axes[2, :].ravel().tolist(), shrink=0.82, pad=0.03)
-        cbar_sp.set_label("Skill vs " + BASELINE + " (%)", fontsize=8)
-        cbar_sp.ax.tick_params(labelsize=7)
+    if im_c_map_g is not None:
+        fig.colorbar(im_c_map_g, ax=ax_crps_geos_map, shrink=0.8, pad=0.03)
+    if im_c_map_c is not None:
+        fig.colorbar(im_c_map_c, ax=ax_crps_change_map, shrink=0.8, pad=0.03)
+    if im_r_map_g is not None:
+        fig.colorbar(im_r_map_g, ax=ax_rmse_geos_map, shrink=0.8, pad=0.03)
+    if im_r_map_c is not None:
+        fig.colorbar(im_r_map_c, ax=ax_rmse_change_map, shrink=0.8, pad=0.03)
 
-    fig.tight_layout(rect=[0, 0, 0.93, 0.93], h_pad=3.0)
     return save_figure(fig, output_dir, stem, formats, dpi)
 
 
