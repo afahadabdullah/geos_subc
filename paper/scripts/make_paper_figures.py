@@ -1432,15 +1432,6 @@ def plot_contoured_panel(
     if vmax is None:
     	vmax = float(np.nanpercentile(finite, 98))
         
-    import matplotlib.pyplot as plt
-    try:
-        cm = plt.get_cmap(cmap).copy()
-        cm.set_under("white")
-        cm.set_over("white")
-        cmap = cm
-    except Exception:
-        pass
-        
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     
