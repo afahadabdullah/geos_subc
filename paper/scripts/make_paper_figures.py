@@ -1302,6 +1302,53 @@ def first_spatial_path(plot_paths: dict[str, Path]) -> Path | None:
     return None
 
 
+def plot_contoured_panel(
+    ax: plt.Axes,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    field: np.ndarray,
+    title: str,
+    cmap: str,
+    norm=None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+):
+    from matplotlib.colors import TwoSlopeNorm
+    finite = field[np.isfinite(field)]
+    if not finite.size:
+        missing_panel(ax, title, "All values are NaN.")
+        return None
+    
+    if vmin is None:
+        vmin = float(np.nanpercentile(finite, 2))
+    if vmax is None:
+        vmax = float(np.nanpercentile(finite, 98))
+        
+    if norm is None and vmin < 0 and vmax > 0 and ("diff" in title.lower() or "gain" in title.lower() or "closeness" in title.lower()):
+        vlim = max(abs(vmin), abs(vmax))
+        # Ensure vlim is positive and not tiny
+        vlim = max(vlim, 0.01)
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim)
+        levels = np.linspace(-vlim, vlim, 21)
+    elif norm is None:
+        if vmin == vmax:
+            vmin -= 0.1
+            vmax += 0.1
+        levels = np.linspace(vmin, vmax, 21)
+    else:
+        levels = np.linspace(norm.vmin, norm.vmax, 21)
+
+    mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both")
+    ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
+    ax.set_xlabel("Longitude", fontsize=8)
+    ax.set_ylabel("Latitude", fontsize=8)
+    ax.tick_params(labelsize=7)
+    ax.set_xlim(float(np.nanmin(lons)), float(np.nanmax(lons)))
+    ax.set_ylim(float(np.nanmin(lats)), float(np.nanmax(lats)))
+    ax.grid(True, color="#d9dee3", linewidth=0.25, alpha=0.7)
+    return mesh
+
+
 def figure_event_cropped(
     output_dir: Path,
     formats: list[str],
@@ -1316,7 +1363,8 @@ def figure_event_cropped(
     fig_title: str,
     fig_subtitle: str,
 ) -> list[Path]:
-    """Figure 6 & 7: 2x3 grid of cropped panels from event evaluator output plots."""
+    """Figure 6 & 7: 2x3 grid of contoured panels from NetCDF data, or cropped PNG fallback."""
+    nc_path = event_dir / "plots" / "spatial_maps" / f"{event_id}_lead4_spatial_data.nc"
     plot_paths = find_primary_event_plots(event_id, event_dir, quantile_dir, None, None)
     image_path = first_spatial_path(plot_paths)
 
@@ -1326,64 +1374,120 @@ def figure_event_cropped(
 
     # 2x3 layout grid for plots, and 1 row for summary strip at bottom
     gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.0, 0.18], hspace=0.18, left=0.03, right=0.97, bottom=0.02, top=0.92)
-    
     sub_plots = gs[0:2].subgridspec(2, 3, hspace=0.12, wspace=0.08)
 
-    # We map our 2x3 panels to panels in quantile_spatial.png (4x4) or spatial_event_focus.png (2x4)
-    # If spatial_event_focus is present, we show that (event probs). If quantile_spatial is present, we show that.
-    is_quantile = "quantile_spatial" in plot_paths
-    plot_type = "quantile_spatial" if is_quantile else "spatial_event_focus"
-    img_path = plot_paths.get(plot_type)
+    # Determine variable colormaps
+    is_t2m = "t2m" in event_id.lower()
+    field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
+    bss_cmap = "viridis"
 
-    # Panels:
-    # 0 = Observed, 1 = Baseline q95/mean, 2 = ML q95/mean
-    # 3 = Baseline prob, 4 = ML prob, 5 = closeness / gain
-    if is_quantile:
-        # Quantile fallback indexes (4x4 grid):
-        # 0: Obs, 4: GEOS q95, 5: ML q95, 8: GEOS P>=thresh, 9: ML P>=thresh, 10: Prob gain
-        panel_specs = [
-            ("(a) Observed", 0),
-            (f"(b) {BASELINE} q95", 4),
-            (f"(c) {METHOD} q95", 5),
-            (f"(d) {BASELINE} P(exceed p95)", 8),
-            (f"(e) {METHOD} P(exceed p95)", 9),
-            ("(f) Probability gain (ML - baseline)", 10),
-        ]
-        nrows, ncols = 4, 4
-    else:
-        # Spatial focus indexes (2x4 grid):
-        # 0: Obs, 1: GEOS prob, 2: ML prob, 3: Prob gain, 5: Neighborhood gain, 6: BSS gain
-        panel_specs = [
-            ("(a) Observed", 0),
-            (f"(b) {BASELINE} event probability", 1),
-            (f"(c) {METHOD} event probability", 2),
-            ("(d) Probability gain", 3),
-            ("(e) Neighborhood probability gain", 5),
-            ("(f) BSS gain", 6),
-        ]
-        nrows, ncols = 2, 4
-
-    if img_path is None or not img_path.exists():
-        ax_big = fig.add_subplot(gs[0:2])
-        missing_panel(
-            ax_big,
-            "Spatial tail-risk maps pending",
-            (
-                f"Evaluation PNG plot for {event_id} not found in remote directories.\n"
-                f"Please run evaluate_event_catalog_flow_finalv1_global.py or "
-                f"evaluate_event_quantile_forecast_flow_finalv1_global.py with --make_plots first."
-            ),
-        )
-    else:
+    if nc_path.exists():
         try:
-            image = plt.imread(img_path)
-            for idx, (panel_title, src_index) in enumerate(panel_specs):
-                ax = fig.add_subplot(sub_plots[idx // 3, idx % 3])
-                crop = crop_event_panel(image, nrows, ncols, src_index)
-                plot_cropped_event_panel(ax, crop, panel_title)
+            import xarray as xr
+            ds = xr.open_dataset(nc_path)
+            lons = ds["lon"].values
+            lats = ds["lat"].values
+            
+            obs = ds["obs_plot"].values
+            geos_mean = ds["geos_plot"].values
+            model_mean = ds["model_plot"].values
+            geos_bss = ds["geos_bss"].values
+            model_bss = ds["model_bss"].values
+            bss_diff = ds["bss_diff"].values
+            ds.close()
+
+            # Shared limits for the top row (obs & means)
+            field_vals = np.concatenate([obs.ravel(), geos_mean.ravel(), model_mean.ravel()])
+            finite_field = field_vals[np.isfinite(field_vals)]
+            fvmin = float(np.nanpercentile(finite_field, 2)) if finite_field.size else 0.0
+            fvmax = float(np.nanpercentile(finite_field, 98)) if finite_field.size else 1.0
+
+            # Shared limits for bottom row (BSS maps)
+            bss_vals = np.concatenate([geos_bss.ravel(), model_bss.ravel()])
+            finite_bss = bss_vals[np.isfinite(bss_vals)]
+            bvmin = 0.0
+            bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
+
+            # Plot top row (Observed, Baseline Mean, ML Mean)
+            ax_a = fig.add_subplot(sub_plots[0, 0])
+            im_a = plot_contoured_panel(ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax)
+            ax_b = fig.add_subplot(sub_plots[0, 1])
+            plot_contoured_panel(ax_b, lons, lats, geos_mean, f"(b) {BASELINE} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
+            ax_c = fig.add_subplot(sub_plots[0, 2])
+            plot_contoured_panel(ax_c, lons, lats, model_mean, f"(c) {METHOD} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
+
+            # Plot bottom row (Baseline BSS, ML BSS, BSS Gain)
+            ax_d = fig.add_subplot(sub_plots[1, 0])
+            im_d = plot_contoured_panel(ax_d, lons, lats, geos_bss, f"(d) {BASELINE} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
+            ax_e = fig.add_subplot(sub_plots[1, 1])
+            plot_contoured_panel(ax_e, lons, lats, model_bss, f"(e) {METHOD} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
+            ax_f = fig.add_subplot(sub_plots[1, 2])
+            im_f = plot_contoured_panel(ax_f, lons, lats, bss_diff, "(f) BSS gain (ML - baseline)", "RdBu")
+
+            # Add Colorbars
+            if im_a is not None:
+                cbar_field = fig.colorbar(im_a, ax=[ax_a, ax_b, ax_c], orientation="vertical", shrink=0.8, pad=0.015)
+                cbar_field.set_label("Temperature (°C)" if is_t2m else "Precipitation (mm/day)", fontsize=7)
+                cbar_field.ax.tick_params(labelsize=6)
+            if im_d is not None:
+                cbar_bss = fig.colorbar(im_d, ax=[ax_d, ax_e], orientation="vertical", shrink=0.8, pad=0.015)
+                cbar_bss.set_label("Brier Skill Score (BSS)", fontsize=7)
+                cbar_bss.ax.tick_params(labelsize=6)
+            if im_f is not None:
+                cbar_gain = fig.colorbar(im_f, ax=ax_f, orientation="vertical", shrink=0.8, pad=0.04)
+                cbar_gain.set_label("BSS Gain", fontsize=7)
+                cbar_gain.ax.tick_params(labelsize=6)
+
         except Exception as exc:
             ax_big = fig.add_subplot(gs[0:2])
-            missing_panel(ax_big, "Error loading event map", f"Could not read source map: {exc}")
+            missing_panel(ax_big, "Error loading NetCDF event data", f"Could not load data from {nc_path.name}: {exc}")
+    else:
+        # Fallback to cropping from pre-rendered PNG
+        is_quantile = "quantile_spatial" in plot_paths
+        plot_type = "quantile_spatial" if is_quantile else "spatial_event_focus"
+        img_path = plot_paths.get(plot_type)
+
+        if is_quantile:
+            panel_specs = [
+                ("(a) Observed", 0),
+                (f"(b) {BASELINE} q95", 4),
+                (f"(c) {METHOD} q95", 5),
+                (f"(d) {BASELINE} P(exceed p95)", 8),
+                (f"(e) {METHOD} P(exceed p95)", 9),
+                ("(f) Probability gain (ML - baseline)", 10),
+            ]
+            nrows, ncols = 4, 4
+        else:
+            panel_specs = [
+                ("(a) Observed", 0),
+                (f"(b) {BASELINE} event probability", 1),
+                (f"(c) {METHOD} event probability", 2),
+                ("(d) Probability gain", 3),
+                ("(e) Neighborhood probability gain", 5),
+                ("(f) BSS gain", 6),
+            ]
+            nrows, ncols = 2, 4
+
+        if img_path is None or not img_path.exists():
+            ax_big = fig.add_subplot(gs[0:2])
+            missing_panel(
+                ax_big,
+                "Spatial tail-risk maps pending",
+                (
+                    f"NetCDF data {nc_path.name} not found, and fallback PNG for {event_id} is also missing.\n"
+                    f"Please run paper/scripts/make_contoured_event_plots.py first."
+                ),
+            )
+        else:
+            try:
+                image = plt.imread(img_path)
+                for idx, (panel_title, src_index) in enumerate(panel_specs):
+                    ax = fig.add_subplot(sub_plots[idx // 3, idx % 3])
+                    crop = crop_event_panel(image, nrows, ncols, src_index)
+                    plot_cropped_event_panel(ax, crop, panel_title)
+            except Exception as exc:
+                ax_big = fig.add_subplot(gs[0:2])
+                missing_panel(ax_big, "Error loading event map", f"Could not read source map: {exc}")
 
     # Summary strip at the bottom
     summary_ax = fig.add_subplot(gs[2])

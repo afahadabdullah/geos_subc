@@ -2007,6 +2007,39 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         ("BSS gain\non observed extremes", observed_event_only(bss_diff), "RdBu", True, focus_bss_vmin, focus_bss_vmax),
         ("Cal BSS gain\non observed extremes", observed_event_only(cal_bss_diff), "RdBu", True, focus_bss_vmin, focus_bss_vmax),
     ]
+    # Save raw spatial data to NetCDF for direct plotting in the paper figures script
+    nc_path = os.path.join(out_dir, "plots", "spatial_maps", f"{event['event_id']}_lead{sample_row['lead']}_spatial_data.nc")
+    try:
+        import xarray as xr
+        ds_vars = {}
+        for k, field in maps.items():
+            plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
+            ds_vars[k] = (["lat", "lon"], plot_field)
+        plot_lons, plot_lats, obs_plot_val = prepare_region_plot(lons, lats, obs_plot, event["bbox"], mask)
+        ds_vars["obs_plot"] = (["lat", "lon"], obs_plot_val)
+        plot_lons, plot_lats, geos_plot_val = prepare_region_plot(lons, lats, geos_plot, event["bbox"], mask)
+        ds_vars["geos_plot"] = (["lat", "lon"], geos_plot_val)
+        plot_lons, plot_lats, model_plot_val = prepare_region_plot(lons, lats, model_plot, event["bbox"], mask)
+        ds_vars["model_plot"] = (["lat", "lon"], model_plot_val)
+        plot_lons, plot_lats, closeness_gain_val = prepare_region_plot(lons, lats, closeness_gain, event["bbox"], mask)
+        ds_vars["closeness_gain"] = (["lat", "lon"], closeness_gain_val)
+        plot_lons, plot_lats, bss_diff_val = prepare_region_plot(lons, lats, bss_diff, event["bbox"], mask)
+        ds_vars["bss_diff"] = (["lat", "lon"], bss_diff_val)
+        plot_lons, plot_lats, cal_bss_diff_val = prepare_region_plot(lons, lats, cal_bss_diff, event["bbox"], mask)
+        ds_vars["cal_bss_diff"] = (["lat", "lon"], cal_bss_diff_val)
+
+        ds = xr.Dataset(
+            data_vars=ds_vars,
+            coords={
+                "lat": (["lat"], plot_lats),
+                "lon": (["lon"], plot_lons),
+            }
+        )
+        ds.to_netcdf(nc_path)
+        print(f"💾 Wrote raw spatial NetCDF: {nc_path}")
+    except Exception as exc:
+        print(f"⚠️ Could not write NetCDF: {exc}")
+
     return {
         "spatial_event_focus": save_spatial_panel_grid(
             focus_panels,
