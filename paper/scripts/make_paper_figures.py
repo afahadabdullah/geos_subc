@@ -790,6 +790,21 @@ def plot_skill_bars(
     ax.set_ylim(bottom=0)
 
 
+def add_colorbar(fig: plt.Figure, im, ax, label: str, is_change: bool = True, shrink: float = 0.8, pad: float = 0.03):
+    from matplotlib import ticker
+    if im is None:
+        return None
+    cbar = fig.colorbar(im, ax=ax, shrink=shrink, pad=pad)
+    cbar.set_label(label, fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
+    if is_change:
+        cbar.locator = ticker.MaxNLocator(nbins=7, symmetric=True)
+    else:
+        cbar.locator = ticker.MaxNLocator(nbins=6)
+    cbar.update_ticks()
+    return cbar
+
+
 # ===================================================================
 # Figure 3 — Global PR skill (3x2)
 # ===================================================================
@@ -848,14 +863,10 @@ def figure_variable_skill(
     im_r_g = plot_heatmap_panel(ax_rmse_geos_hm, geos_rmse_arr, None, f"(c) {var_short} {BASELINE} RMSE", gr_vmin, gr_vmax, cmap="viridis", is_change=False)
     im_r_c = plot_heatmap_panel(ax_rmse_change_hm, rmse_change_arr, model_rmse_arr, f"(d) {var_short} RMSE Skill vs {BASELINE}", r_vmin, r_vmax, cmap="RdYlGn", is_change=True)
 
-    if im_c_g is not None:
-        fig.colorbar(im_c_g, ax=ax_crps_geos_hm, shrink=0.8, pad=0.03)
-    if im_c_c is not None:
-        fig.colorbar(im_c_c, ax=ax_crps_change_hm, shrink=0.8, pad=0.03)
-    if im_r_g is not None:
-        fig.colorbar(im_r_g, ax=ax_rmse_geos_hm, shrink=0.8, pad=0.03)
-    if im_r_c is not None:
-        fig.colorbar(im_r_c, ax=ax_rmse_change_hm, shrink=0.8, pad=0.03)
+    add_colorbar(fig, im_c_g, ax_crps_geos_hm, "CRPS", is_change=False)
+    add_colorbar(fig, im_c_c, ax_crps_change_hm, "Skill (%)", is_change=True)
+    add_colorbar(fig, im_r_g, ax_rmse_geos_hm, "RMSE", is_change=False)
+    add_colorbar(fig, im_r_c, ax_rmse_change_hm, "Skill (%)", is_change=True)
 
     # --- Row 2: Spatial maps ---
     ds = load_xarray_dataset(matrix_spatial_path(matrix_dir))
@@ -894,14 +905,10 @@ def figure_variable_skill(
     if ds is not None:
         ds.close()
 
-    if im_c_map_g is not None:
-        fig.colorbar(im_c_map_g, ax=ax_crps_geos_map, shrink=0.8, pad=0.03)
-    if im_c_map_c is not None:
-        fig.colorbar(im_c_map_c, ax=ax_crps_change_map, shrink=0.8, pad=0.03)
-    if im_r_map_g is not None:
-        fig.colorbar(im_r_map_g, ax=ax_rmse_geos_map, shrink=0.8, pad=0.03)
-    if im_r_map_c is not None:
-        fig.colorbar(im_r_map_c, ax=ax_rmse_change_map, shrink=0.8, pad=0.03)
+    add_colorbar(fig, im_c_map_g, ax_crps_geos_map, "CRPS", is_change=False)
+    add_colorbar(fig, im_c_map_c, ax_crps_change_map, "Skill Improvement (%)", is_change=True)
+    add_colorbar(fig, im_r_map_g, ax_rmse_geos_map, "RMSE", is_change=False)
+    add_colorbar(fig, im_r_map_c, ax_rmse_change_map, "Skill Improvement (%)", is_change=True)
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
