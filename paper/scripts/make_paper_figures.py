@@ -529,13 +529,13 @@ def plot_plain_map(
         vlim = max(vlim, 0.1)
         norm = TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim)
         levels = np.linspace(-vlim, vlim, 21)
-        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="both", transform=ccrs.PlateCarree())
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm, extend="neither", transform=ccrs.PlateCarree())
     else:
         if vmin == vmax:
             vmin -= 0.1
             vmax += 0.1
         levels = np.linspace(vmin, vmax, 21)
-        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, extend="both", transform=ccrs.PlateCarree())
+        mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, extend="neither", transform=ccrs.PlateCarree())
         
     ax.set_title(title, loc="left", fontsize=9.5, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=8)
@@ -842,14 +842,14 @@ def figure_variable_skill(
     var_label = VARIABLE_LABELS.get(variable, variable)
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
 
-    fig = plt.figure(figsize=(18.0, 8.5))
+    fig = plt.figure(figsize=(18.0, 7.8))
     style_figure(
         fig,
         f"Figure {fig_num}. {var_label} forecast skill vs {BASELINE}",
         f"Season-lead matrices (top) and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
     )
     
-    gs = fig.add_gridspec(2, 4, height_ratios=[0.75, 1.25], hspace=0.22, wspace=0.22, left=0.03, right=0.97, bottom=0.04, top=0.96)
+    gs = fig.add_gridspec(2, 4, height_ratios=[0.70, 1.30], hspace=0.15, wspace=0.12, left=0.02, right=0.98, bottom=0.03, top=0.97)
 
     # --- Row 1: Season-lead heatmaps ---
     geos_crps_arr = season_lead_values(summary, variable, "geos_crps", subset)
