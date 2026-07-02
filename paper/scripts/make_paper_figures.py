@@ -1599,8 +1599,12 @@ def figure_event_cropped(
             # Subtle scatter stippling where ML CRPS improvement is robust (> 10%)
             lon2d, lat2d = np.meshgrid(lons, lats)
             crps_sig = crps_diff > 10.0
-            if crps_sig.any():
-                ax_f.scatter(lon2d[crps_sig], lat2d[crps_sig], color="#555555", s=0.8, alpha=0.4, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+            # Thin the mask to plot clean grid stippling (every 2nd point)
+            thin_mask = np.zeros_like(crps_sig, dtype=bool)
+            thin_mask[::2, ::2] = True
+            crps_sig_plot = crps_sig & thin_mask
+            if crps_sig_plot.any():
+                ax_f.scatter(lon2d[crps_sig_plot], lat2d[crps_sig_plot], color="black", s=3.0, alpha=0.7, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Skill Improvement %)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
@@ -1613,8 +1617,9 @@ def figure_event_cropped(
             plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS Skill Improvement (%)", "RdBu", vmin=-30.0, vmax=30.0, cbar_label="Improvement (%)", is_change=True, extend="both")
             # Subtle scatter stippling where ML BSS improvement is robust (> 5%)
             bss_sig = bss_diff > 5.0
-            if bss_sig.any():
-                ax_i.scatter(lon2d[bss_sig], lat2d[bss_sig], color="#555555", s=0.8, alpha=0.4, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+            bss_sig_plot = bss_sig & thin_mask
+            if bss_sig_plot.any():
+                ax_i.scatter(lon2d[bss_sig_plot], lat2d[bss_sig_plot], color="black", s=3.0, alpha=0.7, marker="o", edgecolors="none", transform=ccrs.PlateCarree())
 
         except Exception as exc:
             ax_big = fig.add_subplot(gs[:, :])
