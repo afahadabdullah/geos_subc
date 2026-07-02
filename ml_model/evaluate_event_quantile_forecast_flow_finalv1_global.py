@@ -700,17 +700,17 @@ def plot_quantile_spatial(event, sample, thresholds, lons, lats, mask, out_dir, 
                 vmin, vmax = np.nanpercentile(finite, [5, 95])
         else:
             vmin, vmax = (-1.0, 1.0) if center_zero else (0.0, 1.0)
-        kwargs = {}
-        if MAP_CONTEXT["enabled"]:
-            kwargs["transform"] = MAP_CONTEXT["data_crs"]
-        mesh = ax.pcolormesh(
+        from matplotlib.colors import TwoSlopeNorm
+        norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax) if center_zero else None
+        levels = np.linspace(vmin, vmax, 21)
+        mesh = ax.contourf(
             plot_lons,
             plot_lats,
             plot_field,
+            levels=levels,
             cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            shading="auto",
+            norm=norm,
+            extend="both",
             **kwargs,
         )
         add_map_overlays(ax, plot_lons, plot_lats)

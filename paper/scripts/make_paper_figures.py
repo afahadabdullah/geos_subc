@@ -487,7 +487,8 @@ def plot_plain_map(
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return None
     norm = TwoSlopeNorm(vcenter=0.0, vmin=vmin, vmax=vmax)
-    mesh = ax.pcolormesh(lons, lats, field, shading="auto", cmap="RdYlGn", norm=norm)
+    levels = np.linspace(vmin, vmax, 21)
+    mesh = ax.contourf(lons, lats, field, levels=levels, cmap="RdYlGn", norm=norm, extend="both")
     ax.set_title(title, loc="left", fontsize=10, fontweight="bold")
     ax.set_xlabel("Longitude", fontsize=8)
     ax.set_ylabel("Latitude", fontsize=8)
@@ -897,7 +898,7 @@ def event_plot_sort_key(path: Path) -> tuple[int, str]:
     text = path.name
     match = re.search(r"lead(\d+)", text)
     lead = int(match.group(1)) if match else 99
-    lead_order = {3: 0, 4: 1, 2: 2, 1: 3}.get(lead, 9)
+    lead_order = {4: 0, 3: 1, 2: 2, 1: 3}.get(lead, 9)
     return lead_order, text
 
 
