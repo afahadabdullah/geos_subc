@@ -1461,7 +1461,7 @@ def plot_contoured_panel_with_colorbar(
     im = plot_contoured_panel(ax, lons, lats, field, title, cmap, norm=norm, vmin=vmin, vmax=vmax)
     if im is not None:
         from matplotlib import ticker
-        cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03)
+        cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03, spacing="proportional")
         cbar.ax.tick_params(labelsize=6)
         if cbar_label:
             cbar.set_label(cbar_label, fontsize=7)
@@ -1518,23 +1518,36 @@ def figure_event_cropped(
             lons = ds["lon"].values
             lats = ds["lat"].values
             
-            offset = -273.15 if is_t2m else 0.0
+            offset = 0.0
             obs = ds["obs_plot"].values
             geos_q95 = ds["geos_upper_quantile"].values + offset
             model_q95 = ds["model_upper_quantile"].values + offset
             
             geos_crps = ds["geos_crps"].values
             model_crps = ds["model_crps"].values
-            # Compute percentage CRPS skill improvement instead of raw diff
-            denom = np.where(geos_crps == 0.0, 1e-5, geos_crps)
-            crps_diff = 100.0 * (1.0 - model_crps / denom)
             
             geos_bss = ds["geos_bss"].values
             model_bss = ds["model_bss"].values
+            ds.close()
+
+            # Clean up ocean points using obs mask to ensure perfectly white oceans on all panels
+            ocean_mask = np.isnan(obs)
+            geos_q95 = np.where(ocean_mask, np.nan, geos_q95)
+            model_q95 = np.where(ocean_mask, np.nan, model_q95)
+            geos_crps = np.where(ocean_mask, np.nan, geos_crps)
+            model_crps = np.where(ocean_mask, np.nan, model_crps)
+            geos_bss = np.where(ocean_mask, np.nan, geos_bss)
+            model_bss = np.where(ocean_mask, np.nan, model_bss)
+
+            # Compute percentage CRPS skill improvement instead of raw diff
+            denom = np.where(geos_crps == 0.0, 1e-5, geos_crps)
+            crps_diff = 100.0 * (1.0 - model_crps / denom)
+            crps_diff = np.where(ocean_mask, np.nan, crps_diff)
+
             # Compute percentage BSS skill improvement and mask out values outside [-30%, 30%]
             bss_diff_pct = 100.0 * (model_bss - geos_bss)
             bss_diff = np.where((bss_diff_pct >= -30.0) & (bss_diff_pct <= 30.0), bss_diff_pct, np.nan)
-            ds.close()
+            bss_diff = np.where(ocean_mask, np.nan, bss_diff)
 
             # Shared limits for the top row (obs & q95)
             field_vals = np.concatenate([obs.ravel(), geos_q95.ravel(), model_q95.ravel()])
@@ -1561,7 +1574,7 @@ def figure_event_cropped(
             bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
 
             # Labels for colorbars
-            phys_label = "Temperature (°C)" if is_t2m else "Precipitation (mm/day)"
+            phys_label = "Temperature (K)" if is_t2m else "Precipitation (mm/day)"
 
             # Plot top row (Observed, Baseline q95, ML q95)
             ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
@@ -1582,6 +1595,10 @@ def figure_event_cropped(
             
             ax_f = fig.add_subplot(gs[1, 2], projection=ccrs.PlateCarree())
             plot_contoured_panel_with_colorbar(fig, ax_f, lons, lats, crps_diff, "(f) CRPS Skill Improvement (%)", "RdYlGn", vmin=fd_vmin, vmax=fd_vmax, cbar_label="Improvement (%)", is_change=True)
+            # Add stippling where ML CRPS improvement is robust (> 10%)
+            crps_sig = crps_diff > 10.0
+            if crps_sig.any():
+                ax_f.contourf(lons, lats, crps_sig.astype(float), levels=[0.5, 1.5], hatches=[".."], colors="none", transform=ccrs.PlateCarree())
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Skill Improvement %)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
@@ -1592,6 +1609,10 @@ def figure_event_cropped(
             
             ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
             plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS Skill Improvement (%)", "RdBu", vmin=-30.0, vmax=30.0, cbar_label="Improvement (%)", is_change=True)
+            # Add stippling where ML BSS improvement is robust (> 5%)
+            bss_sig = bss_diff > 5.0
+            if bss_sig.any():
+                ax_i.contourf(lons, lats, bss_sig.astype(float), levels=[0.5, 1.5], hatches=[".."], colors="none", transform=ccrs.PlateCarree())
 
         except Exception as exc:
             ax_big = fig.add_subplot(gs[:, :])
