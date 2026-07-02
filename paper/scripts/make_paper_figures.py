@@ -1461,15 +1461,15 @@ def figure_event_cropped(
     # Set figure size based on event to remove empty margins
     is_t2m = "t2m" in event_id.lower()
     if is_t2m:
-        fig = plt.figure(figsize=(12.0, 8.5))
+        fig = plt.figure(figsize=(13.0, 8.5))
     else:
-        fig = plt.figure(figsize=(11.0, 10.0))
+        fig = plt.figure(figsize=(12.0, 10.0))
         
     fig.patch.set_facecolor("white")
     style_figure(fig, fig_title, fig_subtitle)
 
-    # 3x3 grid of maps filling the entire figure
-    gs = fig.add_gridspec(3, 3, hspace=0.15, wspace=0.08, left=0.03, right=0.97, bottom=0.03, top=0.97)
+    # 3x5 grid of maps (cols 0,1,2) and colorbars (cols 3,4) to guarantee perfect column alignment
+    gs = fig.add_gridspec(3, 5, width_ratios=[1.0, 1.0, 1.0, 0.04, 0.04], hspace=0.18, wspace=0.08, left=0.03, right=0.97, bottom=0.03, top=0.97)
 
     field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
     bss_cmap = "viridis"
@@ -1481,9 +1481,10 @@ def figure_event_cropped(
             lons = ds["lon"].values
             lats = ds["lat"].values
             
+            offset = -273.15 if is_t2m else 0.0
             obs = ds["obs_plot"].values
-            geos_q95 = ds["geos_upper_quantile"].values
-            model_q95 = ds["model_upper_quantile"].values
+            geos_q95 = ds["geos_upper_quantile"].values + offset
+            model_q95 = ds["model_upper_quantile"].values + offset
             
             geos_crps = ds["geos_crps"].values
             model_crps = ds["model_crps"].values
@@ -1512,13 +1513,13 @@ def figure_event_cropped(
             bvmin = 0.0
             bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
 
-            # Plot top row (Observed, Baseline 95th Percentile, ML 95th Percentile)
+            # Plot top row (Observed, Baseline q95, ML q95)
             ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
             im_a = plot_contoured_panel(ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax)
             ax_b = fig.add_subplot(gs[0, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_b, lons, lats, geos_q95, f"(b) {BASELINE} 95th Percentile", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel(ax_b, lons, lats, geos_q95, f"(b) {BASELINE} q95", field_cmap, vmin=fvmin, vmax=fvmax)
             ax_c = fig.add_subplot(gs[0, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_c, lons, lats, model_q95, f"(c) {METHOD} 95th Percentile", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel(ax_c, lons, lats, model_q95, f"(c) {METHOD} q95", field_cmap, vmin=fvmin, vmax=fvmax)
 
             # Plot middle row (Baseline CRPS, ML CRPS, CRPS Gain)
             ax_d = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
@@ -1536,30 +1537,35 @@ def figure_event_cropped(
             ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
             im_i = plot_contoured_panel(ax_i, lons, lats, bss_diff, "(i) BSS gain (ML - baseline)", "RdBu")
 
-            # Add Colorbars
-            if im_a is not None:
-                cbar_field = fig.colorbar(im_a, ax=[ax_a, ax_b, ax_c], orientation="vertical", shrink=0.8, pad=0.015)
-                cbar_field.set_label("Temperature (°C)" if is_t2m else "Precipitation (mm/day)", fontsize=7)
-                cbar_field.ax.tick_params(labelsize=6)
-            if im_d is not None:
-                cbar_crps = fig.colorbar(im_d, ax=[ax_d, ax_e], orientation="vertical", shrink=0.8, pad=0.015)
-                cbar_crps.set_label("CRPS", fontsize=7)
-                cbar_crps.ax.tick_params(labelsize=6)
-            if im_f is not None:
-                cbar_crps_diff = fig.colorbar(im_f, ax=ax_f, orientation="vertical", shrink=0.8, pad=0.04)
-                cbar_crps_diff.set_label("CRPS Gain (baseline - ML)", fontsize=7)
-                cbar_crps_diff.ax.tick_params(labelsize=6)
-            if im_g is not None:
-                cbar_bss = fig.colorbar(im_g, ax=[ax_g, ax_h], orientation="vertical", shrink=0.8, pad=0.015)
-                cbar_bss.set_label("Brier Skill Score (BSS)", fontsize=7)
-                cbar_bss.ax.tick_params(labelsize=6)
-            if im_i is not None:
-                cbar_gain = fig.colorbar(im_i, ax=ax_i, orientation="vertical", shrink=0.8, pad=0.04)
-                cbar_gain.set_label("BSS Gain", fontsize=7)
-                cbar_gain.ax.tick_params(labelsize=6)
+            # Add Colorbars in dedicated colorbar axes
+            ax_cbar_field = fig.add_subplot(gs[0, 3:])
+            ax_cbar_field.set_axis_off()
+            cbar_field = fig.colorbar(im_a, cax=ax_cbar_field, orientation="vertical")
+            cbar_field.set_label("Temperature (°C)" if is_t2m else "Precipitation (mm/day)", fontsize=7)
+            cbar_field.ax.tick_params(labelsize=6)
+
+            ax_cbar_crps = fig.add_subplot(gs[1, 3])
+            cbar_crps = fig.colorbar(im_d, cax=ax_cbar_crps, orientation="vertical")
+            cbar_crps.set_label("CRPS", fontsize=7)
+            cbar_crps.ax.tick_params(labelsize=6)
+
+            ax_cbar_crps_diff = fig.add_subplot(gs[1, 4])
+            cbar_crps_diff = fig.colorbar(im_f, cax=ax_cbar_crps_diff, orientation="vertical")
+            cbar_crps_diff.set_label("CRPS Gain", fontsize=7)
+            cbar_crps_diff.ax.tick_params(labelsize=6)
+
+            ax_cbar_bss = fig.add_subplot(gs[2, 3])
+            cbar_bss = fig.colorbar(im_g, cax=ax_cbar_bss, orientation="vertical")
+            cbar_bss.set_label("BSS", fontsize=7)
+            cbar_bss.ax.tick_params(labelsize=6)
+
+            ax_cbar_bss_diff = fig.add_subplot(gs[2, 4])
+            cbar_bss_diff = fig.colorbar(im_i, cax=ax_cbar_bss_diff, orientation="vertical")
+            cbar_bss_diff.set_label("BSS Gain", fontsize=7)
+            cbar_bss_diff.ax.tick_params(labelsize=6)
 
         except Exception as exc:
-            ax_big = fig.add_subplot(gs[:, :])
+            ax_big = fig.add_subplot(gs[:, 0:3])
             missing_panel(ax_big, "Error loading NetCDF event data", f"Could not load data from {nc_path.name}: {exc}")
     else:
         ax_big = fig.add_subplot(gs[:, :])

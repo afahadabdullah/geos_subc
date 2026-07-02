@@ -1809,8 +1809,9 @@ def prepare_region_plot(lons, lats, field, bbox, mask):
     order = np.argsort(lon180)
     lon_sorted = lon180[order]
     field_sorted = np.asarray(field)[:, order]
-    mask_sorted = np.asarray(mask)[:, order]
-    field_sorted = np.where(mask_sorted, field_sorted, np.nan)
+    if mask is not None:
+        mask_sorted = np.asarray(mask)[:, order]
+        field_sorted = np.where(mask_sorted, field_sorted, np.nan)
     lon_min, lon_max, lat_min, lat_max = [float(x) for x in bbox]
     lon_keep = (lon_sorted >= lon_min - 2.0) & (lon_sorted <= lon_max + 2.0)
     lat_values = np.asarray(lats, dtype=np.float64)
@@ -2013,19 +2014,19 @@ def plot_event_spatial(event, sample_row, maps, lons, lats, mask, out_dir):
         import xarray as xr
         ds_vars = {}
         for k, field in maps.items():
-            plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], mask)
+            plot_lons, plot_lats, plot_field = prepare_region_plot(lons, lats, field, event["bbox"], None)
             ds_vars[k] = (["lat", "lon"], plot_field)
-        plot_lons, plot_lats, obs_plot_val = prepare_region_plot(lons, lats, obs_plot, event["bbox"], mask)
+        plot_lons, plot_lats, obs_plot_val = prepare_region_plot(lons, lats, obs_plot, event["bbox"], None)
         ds_vars["obs_plot"] = (["lat", "lon"], obs_plot_val)
-        plot_lons, plot_lats, geos_plot_val = prepare_region_plot(lons, lats, geos_plot, event["bbox"], mask)
+        plot_lons, plot_lats, geos_plot_val = prepare_region_plot(lons, lats, geos_plot, event["bbox"], None)
         ds_vars["geos_plot"] = (["lat", "lon"], geos_plot_val)
-        plot_lons, plot_lats, model_plot_val = prepare_region_plot(lons, lats, model_plot, event["bbox"], mask)
+        plot_lons, plot_lats, model_plot_val = prepare_region_plot(lons, lats, model_plot, event["bbox"], None)
         ds_vars["model_plot"] = (["lat", "lon"], model_plot_val)
-        plot_lons, plot_lats, closeness_gain_val = prepare_region_plot(lons, lats, closeness_gain, event["bbox"], mask)
+        plot_lons, plot_lats, closeness_gain_val = prepare_region_plot(lons, lats, closeness_gain, event["bbox"], None)
         ds_vars["closeness_gain"] = (["lat", "lon"], closeness_gain_val)
-        plot_lons, plot_lats, bss_diff_val = prepare_region_plot(lons, lats, bss_diff, event["bbox"], mask)
+        plot_lons, plot_lats, bss_diff_val = prepare_region_plot(lons, lats, bss_diff, event["bbox"], None)
         ds_vars["bss_diff"] = (["lat", "lon"], bss_diff_val)
-        plot_lons, plot_lats, cal_bss_diff_val = prepare_region_plot(lons, lats, cal_bss_diff, event["bbox"], mask)
+        plot_lons, plot_lats, cal_bss_diff_val = prepare_region_plot(lons, lats, cal_bss_diff, event["bbox"], None)
         ds_vars["cal_bss_diff"] = (["lat", "lon"], cal_bss_diff_val)
 
         ds = xr.Dataset(
