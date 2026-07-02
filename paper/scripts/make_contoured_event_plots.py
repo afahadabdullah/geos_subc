@@ -39,39 +39,23 @@ def main() -> None:
 
     print(f"Working directory set to: {project_dir}")
 
-    # 1. Regenerate Event Catalog spatial maps for both target events (conus/pr, europe/t2m) at lead 4
+    # 1. Regenerate Event Catalog spatial maps for target events at lead 4
     print("\n--- 🗺️ Generating Event Catalog Spatial Maps (Lead 4) ---")
     run_command([
         "python3", "ml_model/evaluate_event_catalog_flow_finalv1_global.py",
-        "--regions", "conus",
-        "--variables", "pr",
-        "--leads", "4",
-        "--make_plots",
-        "--overwrite"
-    ])
-    run_command([
-        "python3", "ml_model/evaluate_event_catalog_flow_finalv1_global.py",
-        "--regions", "europe",
-        "--variables", "t2m",
+        "--regions", "conus,europe",
+        "--variables", "pr,t2m",
         "--leads", "4",
         "--make_plots",
         "--overwrite"
     ])
 
-    # 2. Regenerate Event Quantile spatial maps for both target events at lead 4
+    # 2. Regenerate Event Quantile spatial maps for target events at lead 4
     print("\n--- 📈 Generating Event Quantile Spatial Maps (Lead 4) ---")
     run_command([
         "python3", "ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py",
-        "--regions", "conus",
-        "--variables", "pr",
-        "--leads", "4",
-        "--make_plots",
-        "--overwrite"
-    ])
-    run_command([
-        "python3", "ml_model/evaluate_event_quantile_forecast_flow_finalv1_global.py",
-        "--regions", "europe",
-        "--variables", "t2m",
+        "--regions", "conus,europe",
+        "--variables", "pr,t2m",
         "--leads", "4",
         "--make_plots",
         "--overwrite"
