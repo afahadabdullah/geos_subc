@@ -542,6 +542,7 @@ def plot_plain_map(
     ax.set_ylabel("Latitude", fontsize=8)
     ax.tick_params(labelsize=7)
 
+    ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=1.5)
     ax.add_feature(cfeature.COASTLINE, linewidth=0.5, edgecolor="#222222", zorder=2)
     ax.add_feature(cfeature.BORDERS, linewidth=0.3, edgecolor="#555555", linestyle=":", zorder=2)
 
@@ -806,7 +807,7 @@ def add_colorbar(fig: plt.Figure, im, ax, label: str, is_change: bool = True, sh
     from matplotlib import ticker
     if im is None:
         return None
-    cbar = fig.colorbar(im, ax=ax, shrink=shrink, pad=pad)
+    cbar = fig.colorbar(im, ax=ax, shrink=shrink, pad=pad, extend="neither")
     cbar.set_label(label, fontsize=8)
     cbar.ax.tick_params(labelsize=7)
     if is_change:
@@ -848,7 +849,7 @@ def figure_variable_skill(
         f"Season-lead matrices (top) and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
     )
     
-    gs = fig.add_gridspec(2, 4, height_ratios=[0.85, 1.15], hspace=0.22, wspace=0.22, left=0.03, right=0.97, bottom=0.04, top=0.96)
+    gs = fig.add_gridspec(2, 4, height_ratios=[0.75, 1.25], hspace=0.22, wspace=0.22, left=0.03, right=0.97, bottom=0.04, top=0.96)
 
     # --- Row 1: Season-lead heatmaps ---
     geos_crps_arr = season_lead_values(summary, variable, "geos_crps", subset)
@@ -1492,7 +1493,8 @@ def plot_contoured_panel_with_colorbar(
     im = plot_contoured_panel(ax, lons, lats, field, title, cmap, norm=norm, vmin=vmin, vmax=vmax, extend=extend)
     if im is not None:
         from matplotlib import ticker
-        cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03, spacing="proportional")
+        cbar_extend = "neither" if ("bss" in title.lower() and not "improvement" in title.lower()) else extend
+        cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03, spacing="proportional", extend=cbar_extend)
         cbar.ax.tick_params(labelsize=6)
         if cbar_label:
             cbar.set_label(cbar_label, fontsize=7)
