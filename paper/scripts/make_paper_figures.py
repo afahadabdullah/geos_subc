@@ -728,6 +728,7 @@ def plot_skill_bars(
     variable: str,
     metric: str,
     color: str | None = None,
+    title: str | None = None,
 ) -> None:
     """Grouped bar chart of skill (%) by lead week for a single variable."""
     skill_col = f"{metric}_skill_pct"
@@ -787,10 +788,8 @@ def plot_skill_bars(
     ax.set_xticklabels([f"W{l}" for l in LEADS])
     ax.set_xlabel("Lead week", fontsize=8.5)
     ax.set_ylabel(f"{metric.upper()} skill (%)", fontsize=8.5)
-    ax.set_title(
-        f"{VARIABLE_SHORT.get(variable, variable)} {metric.upper()} skill vs {BASELINE}",
-        loc="left", fontsize=10, fontweight="bold",
-    )
+    bar_title = title or f"{VARIABLE_SHORT.get(variable, variable)} {metric.upper()} skill vs {BASELINE}"
+    ax.set_title(bar_title, loc="left", fontsize=10, fontweight="bold")
     ax.set_ylim(bottom=0)
 
 
@@ -847,10 +846,10 @@ def figure_variable_skill(
     c_vmin, c_vmax = heatmap_limits([crps_change_arr])
     r_vmin, r_vmax = heatmap_limits([rmse_change_arr])
 
-    im_c_g = plot_heatmap_panel(ax_crps_geos_hm, geos_crps_arr, None, f"{var_short} {BASELINE} CRPS", gc_vmin, gc_vmax, cmap="viridis", is_change=False)
-    im_c_c = plot_heatmap_panel(ax_crps_change_hm, crps_change_arr, model_crps_arr, f"{var_short} CRPS Skill vs {BASELINE}", c_vmin, c_vmax, cmap="RdYlGn", is_change=True)
-    im_r_g = plot_heatmap_panel(ax_rmse_geos_hm, geos_rmse_arr, None, f"{var_short} {BASELINE} RMSE", gr_vmin, gr_vmax, cmap="viridis", is_change=False)
-    im_r_c = plot_heatmap_panel(ax_rmse_change_hm, rmse_change_arr, model_rmse_arr, f"{var_short} RMSE Skill vs {BASELINE}", r_vmin, r_vmax, cmap="RdYlGn", is_change=True)
+    im_c_g = plot_heatmap_panel(ax_crps_geos_hm, geos_crps_arr, None, f"(a) {var_short} {BASELINE} CRPS", gc_vmin, gc_vmax, cmap="viridis", is_change=False)
+    im_c_c = plot_heatmap_panel(ax_crps_change_hm, crps_change_arr, model_crps_arr, f"(b) {var_short} CRPS Skill vs {BASELINE}", c_vmin, c_vmax, cmap="RdYlGn", is_change=True)
+    im_r_g = plot_heatmap_panel(ax_rmse_geos_hm, geos_rmse_arr, None, f"(c) {var_short} {BASELINE} RMSE", gr_vmin, gr_vmax, cmap="viridis", is_change=False)
+    im_r_c = plot_heatmap_panel(ax_rmse_change_hm, rmse_change_arr, model_rmse_arr, f"(d) {var_short} RMSE Skill vs {BASELINE}", r_vmin, r_vmax, cmap="RdYlGn", is_change=True)
 
     if im_c_g is not None:
         fig.colorbar(im_c_g, ax=ax_crps_geos_hm, shrink=0.8, pad=0.03)
@@ -890,10 +889,10 @@ def figure_variable_skill(
     s_crps_vmin, s_crps_vmax = spatial_limits([map_crps_change[2]])
     s_rmse_vmin, s_rmse_vmax = spatial_limits([map_rmse_change[2]])
 
-    im_c_map_g = plot_plain_map(ax_crps_geos_map, *map_geos_crps, f"{var_short} {BASELINE} CRPS map", g_crps_vmin, g_crps_vmax, cmap="viridis", is_change=False)
-    im_c_map_c = plot_plain_map(ax_crps_change_map, *map_crps_change, f"{var_short} CRPS Skill map", s_crps_vmin, s_crps_vmax, cmap="RdYlGn", is_change=True)
-    im_r_map_g = plot_plain_map(ax_rmse_geos_map, *map_geos_rmse, f"{var_short} {BASELINE} RMSE map", g_rmse_vmin, g_rmse_vmax, cmap="viridis", is_change=False)
-    im_r_map_c = plot_plain_map(ax_rmse_change_map, *map_rmse_change, f"{var_short} RMSE Skill map", s_rmse_vmin, s_rmse_vmax, cmap="RdYlGn", is_change=True)
+    im_c_map_g = plot_plain_map(ax_crps_geos_map, *map_geos_crps, f"(e) {var_short} {BASELINE} CRPS map", g_crps_vmin, g_crps_vmax, cmap="viridis", is_change=False)
+    im_c_map_c = plot_plain_map(ax_crps_change_map, *map_crps_change, f"(f) {var_short} CRPS Skill map", s_crps_vmin, s_crps_vmax, cmap="RdYlGn", is_change=True)
+    im_r_map_g = plot_plain_map(ax_rmse_geos_map, *map_geos_rmse, f"(g) {var_short} {BASELINE} RMSE map", g_rmse_vmin, g_rmse_vmax, cmap="viridis", is_change=False)
+    im_r_map_c = plot_plain_map(ax_rmse_change_map, *map_rmse_change, f"(h) {var_short} RMSE Skill map", s_rmse_vmin, s_rmse_vmax, cmap="RdYlGn", is_change=True)
 
     if ds is not None:
         ds.close()
@@ -957,10 +956,10 @@ def figure_5_extreme_subset(
         f"CRPS and RMSE skill (%) vs {BASELINE} on the extreme-event subset. Positive = ML improves.",
     )
 
-    plot_skill_bars(axes[0, 0], agg, "pr", "crps")
-    plot_skill_bars(axes[0, 1], agg, "pr", "rmse")
-    plot_skill_bars(axes[1, 0], agg, "t2m", "crps")
-    plot_skill_bars(axes[1, 1], agg, "t2m", "rmse")
+    plot_skill_bars(axes[0, 0], agg, "pr", "crps", title=f"(a) PR CRPS skill vs {BASELINE}")
+    plot_skill_bars(axes[0, 1], agg, "pr", "rmse", title=f"(b) PR RMSE skill vs {BASELINE}")
+    plot_skill_bars(axes[1, 0], agg, "t2m", "crps", title=f"(c) T2M CRPS skill vs {BASELINE}")
+    plot_skill_bars(axes[1, 1], agg, "t2m", "rmse", title=f"(d) T2M RMSE skill vs {BASELINE}")
 
     fig.tight_layout(rect=[0, 0, 1, 0.91])
     return save_figure(fig, output_dir, "fig5_extreme_subset_skill", formats, dpi)
