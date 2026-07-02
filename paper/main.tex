@@ -12,7 +12,7 @@
 %\usepackage{placeins}
 \newcommand{\FloatBarrier}{}
 
-\graphicspath{{figures/}}
+%\graphicspath{{figures/}}
 
 \hypersetup{
   colorlinks=true,
@@ -157,15 +157,15 @@ The model includes variance heads that estimate a relative spread multiplier. Th
 The configured validation values are $\beta_{\mathrm{PR}}=0.45$ and $\beta_{\mathrm{T2M}}=0.03$, with an 8-grid-cell coarse variance kernel. This design lets the ensemble express heteroscedastic uncertainty without allowing the variance head to dominate the full flow trajectory.
 
 \begin{figure}[t]
-\figureplaceholder{Figure 1. Forecast-system overview}
-{Replace with a schematic showing \modelshort{} ensemble summaries, observed predictor histories, static geography, seasonal/lead encodings, the conditional flow-matching model, stochastic ensemble generation, and verification outputs.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig1_system_overview}
 \caption{Overview of the \methodname{} forecast-refinement framework. \modelshort{} provides dynamical ensemble guidance, recent observations provide land-ocean-atmosphere context, static geography supplies persistent spatial information, and the flow-matching model generates probabilistic weekly forecasts for precipitation and 2 m temperature.}
 \label{fig:overview}
 \end{figure}
 
 \begin{figure}[t]
-\figureplaceholder{Figure 2. Architecture and sampling detail}
-{Replace with a panel figure showing the U-Net backbone, global-context token encoder, bottleneck cross-attention, lead-specific PR/T2M heads, EOF-noise initialization, and variance-tempered spread adjustment.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig2_architecture_sampling}
 \caption{Architecture and probabilistic sampling pathway. The final figure should distinguish the deterministic velocity pathway from the stochastic initial-state and variance-tempering components, and should show that PR and T2M have separate lead-specific heads.}
 \label{fig:architecture}
 \end{figure}
@@ -319,15 +319,15 @@ The noise ablation supports the ensemble-generation claim. Pure Gaussian samplin
 Lead dependence is central to S2S prediction because the mechanisms controlling useful skill change between week 1 and week 4. Figure~\ref{fig:lead-skill} should show CRPS and RMSE by lead for precipitation and temperature. Figure~\ref{fig:season-lead} should then show valid-season by lead matrices, making it possible to diagnose whether gains are concentrated in particular seasons or persist across the full annual cycle. In the provided matrix results, all 16 season-lead cells for each variable have positive CRPS and RMSE skill in both the all-grid and land-mask evaluations. All-grid PR CRPS skill ranges from 27.7\% to 40.3\%, and land PR ranges from 27.3\% to 39.7\%. All-grid T2M CRPS skill ranges from 23.7\% to 48.1\%, and land T2M ranges from 26.6\% to 43.8\%.
 
 \begin{figure}[t]
-\figureplaceholder{Figure 3. Lead-dependent skill}
-{Replace with four panels: PR CRPS skill by lead, PR RMSE skill by lead, T2M CRPS skill by lead, and T2M RMSE skill by lead. Include uncertainty bars across initialization cases if practical.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig3_pr_skill}
 \caption{Lead-dependent all-case forecast skill. The final figure should compare \modelshort{} and \methodname{} across forecast weeks 1--4, separately for precipitation and 2 m temperature, using both probabilistic and ensemble-mean metrics.}
 \label{fig:lead-skill}
 \end{figure}
 
 \begin{figure}[t]
-\figureplaceholder{Figure 4. Season-by-lead skill matrices}
-{Replace with heatmaps of CRPS skill, RMSE skill, and calibrated BSS gain by valid season and lead. Suggested panels: PR CRPS, PR RMSE, T2M CRPS, T2M RMSE.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig4_t2m_skill}
 \caption{Season-by-lead skill structure. This figure should show whether improvements are robust across DJF, MAM, JJA, and SON, and whether week-3/week-4 behavior differs from short-lead correction.}
 \label{fig:season-lead}
 \end{figure}
@@ -362,8 +362,8 @@ Land & T2M & Cal. BSS gain & 0.047 & 0.012 & 0.009 & -0.005 \\
 Global averages can hide spatially organized behavior. The matrix evaluation suite writes spatial NetCDF products for model and \modelshort{} RMSE, MAE, CRPS, spread, BSS, calibrated BSS, and correlation. Figure~\ref{fig:spatial-skill} should therefore be a spatial skill atlas, not a single global-average companion plot. At minimum, it should show PR and T2M CRPS skill maps by lead, RMSE skill maps by lead, bias-change maps, and event-subset CRPS or calibrated-BSS maps for observed extremes. If space is limited, the main paper should show weeks 2--4 and land-focused maps, with the full variable-by-lead-by-season atlas moved to the supplement. Table~\ref{tab:lead-mask-results} summarizes the all-grid and land-mask lead dependence available from the supplied matrix outputs; named-region summaries require the regional post-processing CSVs.
 
 \begin{figure}[t]
-\figureplaceholder{Figure 5. Spatial skill maps}
-{Replace with a map atlas: PR CRPS skill by lead, T2M CRPS skill by lead, PR/T2M RMSE skill by lead, bias-change maps, and observed-extreme event-subset maps such as calibrated BSS or event-mask CRPS skill.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig5_extreme_subset_skill}
 \caption{Spatial distribution of forecast improvement. The final maps should emphasize where \methodname{} improves or degrades relative to \modelshort{}, show whether gains are spatially coherent, and identify regions where mean line plots hide important degradation or event-specific behavior.}
 \label{fig:spatial-skill}
 \end{figure}
@@ -375,8 +375,8 @@ Because \methodname{} is stochastic, it should be judged as a forecast distribut
 The observed-threshold extreme-event subset shows smaller but still positive CRPS gains. On the all-grid mask, extreme-subset CRPS skill is 13.8\% for PR and 26.8\% for T2M; on the land mask it is 18.0\% for PR and 27.1\% for T2M. Calibrated BSS gains on the same extreme subset are positive for both variables and both masks: +0.031 for all-grid PR, +0.032 for all-grid T2M, +0.044 for land PR, and +0.041 for land T2M. The logistic calibration fits have slopes below one, indicating overconfident raw event probabilities, but the fitted slopes are consistently larger for \methodname{} than for \modelshort{} (for example, all-grid PR mean slope 0.39 versus 0.10 and land PR mean slope 0.44 versus 0.10).
 
 \begin{figure}[t]
-\figureplaceholder{Figure 6. Probabilistic diagnostics and ablations}
-{Replace with panels for pure-Gaussian vs EOF-LHS vs EOF-LHS+variance CRPS, structured-prior CRPS gain by lead, spread-error or spread-skill ratio diagnostics, rank/PIT histogram, BSS by lead, calibrated BSS by lead, and checkpoint sweep.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig6_event_pr_california}
 \caption{Probabilistic quality and sampling ablations. This figure should test whether the ensemble distribution improves relative to \modelshort{} and whether physically informed stochastic initialization contributes beyond pure Gaussian sampling.}
 \label{fig:prob-calibration}
 \end{figure}
@@ -391,8 +391,8 @@ For selected high-impact cases, the relevant question is whether the observed ev
 For each case, include all available initialization-lead pairs whose target week overlaps the event window. This gives a cleaner subseasonal framing than choosing only one visually favorable initialization.
 
 \begin{figure}[t]
-\figureplaceholder{Figure 7. Extreme-event tail-risk diagnostics}
-{Replace with two spatial case-study rows: UK July 2022 T2M heatwave and Bangladesh June 2022 PR flood. Suggested columns: observed field, observed threshold, observed extreme mask, \modelshort{} q95/q99, ML q95/q99, \modelshort{} exceedance probability, ML exceedance probability, ML-minus-\modelshort{} BSS or event-mask CRPS skill, and observed percentile maps.}
+\centering
+\includegraphics[width=0.98\linewidth]{fig7_event_t2m_uk_heatwave}
 \caption{Spatial tail-risk diagnostics for the primary T2M and PR extreme cases. The final figure should evaluate extremes through maps of ensemble quantiles, exceedance probabilities, observed percentiles, event-mask CRPS skill, and BSS or calibrated-BSS skill rather than ensemble-mean maps alone.}
 \label{fig:extreme-cases}
 \end{figure}
