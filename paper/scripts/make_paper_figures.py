@@ -1444,6 +1444,35 @@ def plot_contoured_panel(
     return mesh
 
 
+def plot_contoured_panel_with_colorbar(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    lons: np.ndarray,
+    lats: np.ndarray,
+    field: np.ndarray,
+    title: str,
+    cmap: str,
+    norm=None,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    cbar_label: str = "",
+    is_change: bool = False,
+):
+    im = plot_contoured_panel(ax, lons, lats, field, title, cmap, norm=norm, vmin=vmin, vmax=vmax)
+    if im is not None:
+        from matplotlib import ticker
+        cbar = fig.colorbar(im, ax=ax, orientation="vertical", shrink=0.8, pad=0.03)
+        cbar.ax.tick_params(labelsize=6)
+        if cbar_label:
+            cbar.set_label(cbar_label, fontsize=7)
+        if is_change:
+            cbar.locator = ticker.MaxNLocator(nbins=6, symmetric=True)
+        else:
+            cbar.locator = ticker.MaxNLocator(nbins=6)
+        cbar.update_ticks()
+    return im
+
+
 def figure_event_cropped(
     output_dir: Path,
     formats: list[str],
@@ -1469,15 +1498,15 @@ def figure_event_cropped(
     # Set figure size based on event to remove empty margins
     is_t2m = "t2m" in event_id.lower()
     if is_t2m:
-        fig = plt.figure(figsize=(13.0, 8.5))
+        fig = plt.figure(figsize=(15.0, 9.8))
     else:
-        fig = plt.figure(figsize=(12.0, 10.0))
+        fig = plt.figure(figsize=(14.0, 11.5))
         
     fig.patch.set_facecolor("white")
     style_figure(fig, fig_title, fig_subtitle)
 
-    # 3x5 grid of maps (cols 0,1,2) and colorbars (cols 3,4) to guarantee perfect column alignment
-    gs = fig.add_gridspec(3, 5, width_ratios=[1.0, 1.0, 1.0, 0.04, 0.04], hspace=0.18, wspace=0.08, left=0.03, right=0.97, bottom=0.03, top=0.97)
+    # 3x3 grid of maps filling the entire figure
+    gs = fig.add_gridspec(3, 3, hspace=0.18, wspace=0.18, left=0.03, right=0.97, bottom=0.03, top=0.97)
 
     field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
     bss_cmap = "viridis"
@@ -1496,7 +1525,9 @@ def figure_event_cropped(
             
             geos_crps = ds["geos_crps"].values
             model_crps = ds["model_crps"].values
-            crps_diff = geos_crps - model_crps # Positive means model is better (lower CRPS)
+            # Compute percentage CRPS skill improvement instead of raw diff
+            denom = np.where(geos_crps == 0.0, 1e-5, geos_crps)
+            crps_diff = 100.0 * (1.0 - model_crps / denom)
             
             geos_bss = ds["geos_bss"].values
             model_bss = ds["model_bss"].values
@@ -1515,65 +1546,53 @@ def figure_event_cropped(
             cvmin = 0.0
             cvmax = float(np.nanpercentile(finite_crps, 98)) if finite_crps.size else 1.0
 
+            # Diverging limits for CRPS percentage improvement
+            finite_diff = crps_diff[np.isfinite(crps_diff)]
+            fd_lim = float(np.nanpercentile(np.abs(finite_diff), 95)) if finite_diff.size else 30.0
+            fd_lim = min(max(fd_lim, 10.0), 100.0)
+            fd_vmin, fd_vmax = -fd_lim, fd_lim
+
             # Shared limits for the bottom row (BSS maps)
             bss_vals = np.concatenate([geos_bss.ravel(), model_bss.ravel()])
             finite_bss = bss_vals[np.isfinite(bss_vals)]
             bvmin = 0.0
             bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
 
+            # Labels for colorbars
+            phys_label = "Temperature (°C)" if is_t2m else "Precipitation (mm/day)"
+
             # Plot top row (Observed, Baseline q95, ML q95)
             ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
-            im_a = plot_contoured_panel(ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
+            
             ax_b = fig.add_subplot(gs[0, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_b, lons, lats, geos_q95, f"(b) {BASELINE} q95", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_b, lons, lats, geos_q95, f"(b) {BASELINE} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
+            
             ax_c = fig.add_subplot(gs[0, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_c, lons, lats, model_q95, f"(c) {METHOD} q95", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_c, lons, lats, model_q95, f"(c) {METHOD} q95", field_cmap, vmin=fvmin, vmax=fvmax, cbar_label=phys_label)
 
-            # Plot middle row (Baseline CRPS, ML CRPS, CRPS Gain)
+            # Plot middle row (Baseline CRPS, ML CRPS, CRPS Skill Improvement %)
             ax_d = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
-            im_d = plot_contoured_panel(ax_d, lons, lats, geos_crps, f"(d) {BASELINE} CRPS", "plasma", vmin=cvmin, vmax=cvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_d, lons, lats, geos_crps, f"(d) {BASELINE} CRPS", "viridis", vmin=cvmin, vmax=cvmax, cbar_label="CRPS")
+            
             ax_e = fig.add_subplot(gs[1, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_e, lons, lats, model_crps, f"(e) {METHOD} CRPS", "plasma", vmin=cvmin, vmax=cvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_e, lons, lats, model_crps, f"(e) {METHOD} CRPS", "viridis", vmin=cvmin, vmax=cvmax, cbar_label="CRPS")
+            
             ax_f = fig.add_subplot(gs[1, 2], projection=ccrs.PlateCarree())
-            im_f = plot_contoured_panel(ax_f, lons, lats, crps_diff, "(f) CRPS Improvement", "RdBu_r")
+            plot_contoured_panel_with_colorbar(fig, ax_f, lons, lats, crps_diff, "(f) CRPS Skill Improvement (%)", "RdYlGn", vmin=fd_vmin, vmax=fd_vmax, cbar_label="Improvement (%)", is_change=True)
 
             # Plot bottom row (Baseline BSS, ML BSS, BSS Gain)
             ax_g = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
-            im_g = plot_contoured_panel(ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_g, lons, lats, geos_bss, f"(g) {BASELINE} BSS", bss_cmap, vmin=bvmin, vmax=bvmax, cbar_label="BSS")
+            
             ax_h = fig.add_subplot(gs[2, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", bss_cmap, vmin=bvmin, vmax=bvmax)
+            plot_contoured_panel_with_colorbar(fig, ax_h, lons, lats, model_bss, f"(h) {METHOD} BSS", bss_cmap, vmin=bvmin, vmax=bvmax, cbar_label="BSS")
+            
             ax_i = fig.add_subplot(gs[2, 2], projection=ccrs.PlateCarree())
-            im_i = plot_contoured_panel(ax_i, lons, lats, bss_diff, "(i) BSS gain (ML - baseline)", "RdBu")
-
-            # Add Colorbars in dedicated colorbar axes
-            ax_cbar_field = fig.add_subplot(gs[0, 3:])
-            ax_cbar_field.set_axis_off()
-            cbar_field = fig.colorbar(im_a, cax=ax_cbar_field, orientation="vertical")
-            cbar_field.set_label("Temperature (°C)" if is_t2m else "Precipitation (mm/day)", fontsize=7)
-            cbar_field.ax.tick_params(labelsize=6)
-
-            ax_cbar_crps = fig.add_subplot(gs[1, 3])
-            cbar_crps = fig.colorbar(im_d, cax=ax_cbar_crps, orientation="vertical")
-            cbar_crps.set_label("CRPS", fontsize=7)
-            cbar_crps.ax.tick_params(labelsize=6)
-
-            ax_cbar_crps_diff = fig.add_subplot(gs[1, 4])
-            cbar_crps_diff = fig.colorbar(im_f, cax=ax_cbar_crps_diff, orientation="vertical")
-            cbar_crps_diff.set_label("CRPS Gain", fontsize=7)
-            cbar_crps_diff.ax.tick_params(labelsize=6)
-
-            ax_cbar_bss = fig.add_subplot(gs[2, 3])
-            cbar_bss = fig.colorbar(im_g, cax=ax_cbar_bss, orientation="vertical")
-            cbar_bss.set_label("BSS", fontsize=7)
-            cbar_bss.ax.tick_params(labelsize=6)
-
-            ax_cbar_bss_diff = fig.add_subplot(gs[2, 4])
-            cbar_bss_diff = fig.colorbar(im_i, cax=ax_cbar_bss_diff, orientation="vertical")
-            cbar_bss_diff.set_label("BSS Gain", fontsize=7)
-            cbar_bss_diff.ax.tick_params(labelsize=6)
+            plot_contoured_panel_with_colorbar(fig, ax_i, lons, lats, bss_diff, "(i) BSS gain (ML - baseline)", "RdBu", cbar_label="BSS Gain", is_change=True)
 
         except Exception as exc:
-            ax_big = fig.add_subplot(gs[:, 0:3])
+            ax_big = fig.add_subplot(gs[:, :])
             missing_panel(ax_big, "Error loading NetCDF event data", f"Could not load data from {nc_path.name}: {exc}")
     else:
         ax_big = fig.add_subplot(gs[:, :])
