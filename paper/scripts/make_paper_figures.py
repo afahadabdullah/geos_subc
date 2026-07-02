@@ -1482,8 +1482,8 @@ def figure_event_cropped(
             lats = ds["lat"].values
             
             obs = ds["obs_plot"].values
-            geos_mean = ds["geos_plot"].values
-            model_mean = ds["model_plot"].values
+            geos_q95 = ds["geos_upper_quantile"].values
+            model_q95 = ds["model_upper_quantile"].values
             
             geos_crps = ds["geos_crps"].values
             model_crps = ds["model_crps"].values
@@ -1494,8 +1494,8 @@ def figure_event_cropped(
             bss_diff = ds["bss_diff"].values
             ds.close()
 
-            # Shared limits for the top row (obs & means)
-            field_vals = np.concatenate([obs.ravel(), geos_mean.ravel(), model_mean.ravel()])
+            # Shared limits for the top row (obs & q95)
+            field_vals = np.concatenate([obs.ravel(), geos_q95.ravel(), model_q95.ravel()])
             finite_field = field_vals[np.isfinite(field_vals)]
             fvmin = float(np.nanpercentile(finite_field, 2)) if finite_field.size else 0.0
             fvmax = float(np.nanpercentile(finite_field, 98)) if finite_field.size else 1.0
@@ -1512,13 +1512,13 @@ def figure_event_cropped(
             bvmin = 0.0
             bvmax = max(float(np.nanpercentile(finite_bss, 98)), 0.5) if finite_bss.size else 1.0
 
-            # Plot top row (Observed, Baseline Mean, ML Mean)
+            # Plot top row (Observed, Baseline 95th Percentile, ML 95th Percentile)
             ax_a = fig.add_subplot(gs[0, 0], projection=ccrs.PlateCarree())
             im_a = plot_contoured_panel(ax_a, lons, lats, obs, "(a) Observed", field_cmap, vmin=fvmin, vmax=fvmax)
             ax_b = fig.add_subplot(gs[0, 1], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_b, lons, lats, geos_mean, f"(b) {BASELINE} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel(ax_b, lons, lats, geos_q95, f"(b) {BASELINE} 95th Percentile", field_cmap, vmin=fvmin, vmax=fvmax)
             ax_c = fig.add_subplot(gs[0, 2], projection=ccrs.PlateCarree())
-            plot_contoured_panel(ax_c, lons, lats, model_mean, f"(c) {METHOD} Mean", field_cmap, vmin=fvmin, vmax=fvmax)
+            plot_contoured_panel(ax_c, lons, lats, model_q95, f"(c) {METHOD} 95th Percentile", field_cmap, vmin=fvmin, vmax=fvmax)
 
             # Plot middle row (Baseline CRPS, ML CRPS, CRPS Gain)
             ax_d = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
