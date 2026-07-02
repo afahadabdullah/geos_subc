@@ -810,32 +810,24 @@ def figure_variable_skill(
     subset: str,
     spatial_subset: str,
 ) -> list[Path]:
-    """Shared builder for the per-variable multi-panel skill figure (3x4).
+    """Shared builder for the per-variable multi-panel skill figure (2x4).
 
-    Row 1: Lead-dependent skill bars (CRPS, RMSE)
-    Row 2: Season-lead skill heatmaps (GEOS, Skill Change)
-    Row 3: Spatial skill maps (GEOS, Skill Change)
+    Row 1: Season-lead skill heatmaps (GEOS, Skill Change)
+    Row 2: Spatial skill maps (GEOS, Skill Change)
     """
     var_label = VARIABLE_LABELS.get(variable, variable)
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
 
-    fig = plt.figure(figsize=(18.0, 12.0))
+    fig = plt.figure(figsize=(18.0, 8.5))
     style_figure(
         fig,
         f"Figure {fig_num}. {var_label} forecast skill vs {BASELINE}",
-        f"Lead bars (top), season-lead matrices (middle), and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
+        f"Season-lead matrices (top) and spatial maps (bottom). Positive = ML improves on {BASELINE}.",
     )
     
-    gs = fig.add_gridspec(3, 4, hspace=0.35, wspace=0.28, left=0.03, right=0.97, bottom=0.04, top=0.91)
+    gs = fig.add_gridspec(2, 4, hspace=0.35, wspace=0.28, left=0.03, right=0.97, bottom=0.05, top=0.88)
 
-    # --- Row 1: Lead-dependent skill bars ---
-    ax_crps_bar = fig.add_subplot(gs[0, 0:2])
-    ax_rmse_bar = fig.add_subplot(gs[0, 2:4])
-    agg = aggregate_matrix_by_lead(summary, subset=subset)
-    plot_skill_bars(ax_crps_bar, agg, variable, "crps")
-    plot_skill_bars(ax_rmse_bar, agg, variable, "rmse")
-
-    # --- Row 2: Season-lead heatmaps ---
+    # --- Row 1: Season-lead heatmaps ---
     geos_crps_arr = season_lead_values(summary, variable, "geos_crps", subset)
     model_crps_arr = season_lead_values(summary, variable, "model_crps", subset)
     crps_change_arr = season_lead_values(summary, variable, "crps_skill_pct", subset)
@@ -844,10 +836,10 @@ def figure_variable_skill(
     model_rmse_arr = season_lead_values(summary, variable, "model_rmse", subset)
     rmse_change_arr = season_lead_values(summary, variable, "rmse_skill_pct", subset)
 
-    ax_crps_geos_hm = fig.add_subplot(gs[1, 0])
-    ax_crps_change_hm = fig.add_subplot(gs[1, 1])
-    ax_rmse_geos_hm = fig.add_subplot(gs[1, 2])
-    ax_rmse_change_hm = fig.add_subplot(gs[1, 3])
+    ax_crps_geos_hm = fig.add_subplot(gs[0, 0])
+    ax_crps_change_hm = fig.add_subplot(gs[0, 1])
+    ax_rmse_geos_hm = fig.add_subplot(gs[0, 2])
+    ax_rmse_change_hm = fig.add_subplot(gs[0, 3])
 
     gc_vmin, gc_vmax = (np.nanmin(geos_crps_arr), np.nanmax(geos_crps_arr)) if geos_crps_arr is not None else (0.0, 1.0)
     gr_vmin, gr_vmax = (np.nanmin(geos_rmse_arr), np.nanmax(geos_rmse_arr)) if geos_rmse_arr is not None else (0.0, 1.0)
@@ -869,17 +861,17 @@ def figure_variable_skill(
     if im_r_c is not None:
         fig.colorbar(im_r_c, ax=ax_rmse_change_hm, shrink=0.8, pad=0.03)
 
-    # --- Row 3: Spatial maps ---
+    # --- Row 2: Spatial maps ---
     ds = load_xarray_dataset(matrix_spatial_path(matrix_dir))
     map_geos_crps = spatial_metric_map(ds, variable, "geos_crps", spatial_subset)
     map_crps_change = spatial_metric_map(ds, variable, "crps_skill_pct", spatial_subset)
     map_geos_rmse = spatial_metric_map(ds, variable, "geos_rmse", spatial_subset)
     map_rmse_change = spatial_metric_map(ds, variable, "rmse_skill_pct", spatial_subset)
 
-    ax_crps_geos_map = fig.add_subplot(gs[2, 0])
-    ax_crps_change_map = fig.add_subplot(gs[2, 1])
-    ax_rmse_geos_map = fig.add_subplot(gs[2, 2])
-    ax_rmse_change_map = fig.add_subplot(gs[2, 3])
+    ax_crps_geos_map = fig.add_subplot(gs[1, 0])
+    ax_crps_change_map = fig.add_subplot(gs[1, 1])
+    ax_rmse_geos_map = fig.add_subplot(gs[1, 2])
+    ax_rmse_change_map = fig.add_subplot(gs[1, 3])
 
     if map_geos_crps[2] is not None:
         gc_map_finite = map_geos_crps[2][np.isfinite(map_geos_crps[2])]
