@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+"""Ensemble dispersion and member-count tests for generated global forecast Zarrs.
+
+The script reads the yearly Zarr stores produced by
+generate_forecast_zarr_flow_finalv1_global.py and evaluates the saved ensemble
+members directly. It is intentionally downstream of model inference so member
+count, dispersion, and bootstrap diagnostics can be iterated without generating
+new forecasts.
+
+Outputs:
+  - dispersion_summary.csv: spread/error, variance/error, and CRPS diagnostics.
+  - dispersion_rank_histogram.csv: weighted rank histogram counts.
+  - ensemble_size_member_repeat_summary.csv: aggregate scores for each random
+    member subset repeat.
+  - ensemble_size_summary.csv: mean and member-resampling quantiles by ensemble
+    size.
+  - ensemble_size_bootstrap_ci.csv: case-bootstrap confidence intervals for
+    ensemble-size skill.
+  - case_member_metrics.csv: optional per-case weighted metric sums.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+
+VARIABLES = {
+    "pr": {
+        "model": "model_pr",
+        "geos": "geos_pr",
+        "obs": "obs_pr",
+        "units": "mm/day",
+    },
+    "t2m": {
+        "model": "model_t2m",
+        "geos": "geos_t2m",
+        "obs": "obs_t2m",
+        "units": "K",
+    },
+}
+
+SEASONS = {
+    1: "DJF",
+    2: "DJF",
+    3: "MAM",
+    4: "MAM",
+    5: "MAM",
+    6: "JJA",
+    7: "JJA",
+    8: "JJA",
+    9: "SON",
+    10: "SON",
+    11: "SON",
+    12: "DJF",
+}
+
+SUM_COLUMNS = [
+    "model_weight_sum",
+    "model_crps_sum",
+    "model_sse_sum",
+    "model_spread_sum",
+    "model_variance_sum",
+    "geos_weight_sum",
+    "geos_crps_sum",
+    "geos_sse_sum",
+    "geos_spread_sum",
+    "geos_variance_sum",
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run ensemble dispersion and member-count bootstrap tests on generated global Zarr forecasts."
+    )
+    parser.add_argument(
+        "--forecast_dir",
+        default="dataprocess/gen_flow_finalv1_global_fullyear_2021_2025_e90_s50",
+        help="Directory containing YEAR.zarr stores.",
+    )
+    parser.add_argument("--start_year", type=int, default=2021)
+    parser.add_argument("--end_year", type=int, default=2025)
+    parser.add_argument("--skip_years", default="", help="Comma-separated years to skip.")
+    parser.add_argument(
+        "--out_dir",
+        default="ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2025_e90_s50",
+    )
+    parser.add_argument("--variables", default="pr,t2m", help="Comma-separated subset of pr,t2m.")
+    parser.add_argument(
+        "--sample_sizes",
+        default="1,2,5,10,20,30,50,70,90",
+        help="Comma-separated generated-ensemble sizes to test. Values above the available member count are skipped.",
+    )
+    parser.add_argument(
+        "--member_bootstrap_repeats",
+        type=int,
+        default=50,
+        help="Random member-subset repeats for each ensemble size; full-member evaluations are done once.",
+    )
+    parser.add_argument(
+        "--case_bootstrap_repeats",
+        type=int,
+        default=500,
+        help="Bootstrap repeats over initialization/lead cases for confidence intervals; <=0 disables.",
+    )
+    parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--eval_mask", choices=("all", "land", "ocean"), default="all")
+    parser.add_argument(
+        "--land_mask_file",
+        default=None,
+        help="Optional .pt land mask with is_land or land_mask. Required for land/ocean masks.",
+    )
+    parser.add_argument("--lead_values", default="", help="Optional comma-separated lead values to keep.")
+    parser.add_argument("--max_inits_per_year", type=int, default=None)
+    parser.add_argument(
+        "--allow_missing_years",
+        action="store_true",
+        help="Skip missing YEAR.zarr stores instead of failing.",
+    )
+    parser.add_argument(
+        "--skip_rank_histogram",
+        action="store_true",
+        help="Disable weighted rank histogram accumulation.",
+    )
+    parser.add_argument(
+        "--rank_bins",
+        type=int,
+        default=0,
+        help="If >0, coarsen ranks to this many bins; default writes exact ranks 0..M.",
+    )
+    parser.add_argument(
+        "--write_case_metrics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write per-case member-subset metric sums.",
+    )
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
+
+
+def parse_int_set(text: str) -> set[int]:
+    return {int(item.strip()) for item in str(text or "").split(",") if item.strip()}
+
+
+def parse_int_list(text: str) -> list[int]:
+    values = [int(item.strip()) for item in str(text or "").split(",") if item.strip()]
+    if not values:
+        raise ValueError("Expected at least one integer value.")
+    return sorted(dict.fromkeys(values))
+
+
+def parse_variables(text: str) -> list[str]:
+    variables = [item.strip().lower() for item in str(text or "").split(",") if item.strip()]
+    bad = [v for v in variables if v not in VARIABLES]
+    if bad:
+        raise ValueError(f"Unknown variables {bad}; valid options are {sorted(VARIABLES)}")
+    if not variables:
+        raise ValueError("--variables cannot be empty.")
+    return variables
+
+
+def store_path(forecast_dir: str, year: int) -> Path:
+    base = Path(forecast_dir)
+    candidates = [base / f"{year}.zarr", base / str(year)]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def find_dim(dims: tuple[str, ...], candidates: tuple[str, ...], label: str) -> str:
+    for candidate in candidates:
+        if candidate in dims:
+            return candidate
+    lower = {dim.lower(): dim for dim in dims}
+    for candidate in candidates:
+        if candidate.lower() in lower:
+            return lower[candidate.lower()]
+    raise ValueError(f"Could not find {label} dimension among {dims}")
+
+
+def find_coord(ds: xr.Dataset, candidates: tuple[str, ...], size: int | None = None) -> tuple[str | None, np.ndarray]:
+    for candidate in candidates:
+        if candidate in ds.coords:
+            return candidate, np.asarray(ds[candidate].values)
+        if candidate in ds:
+            arr = np.asarray(ds[candidate].values)
+            if arr.ndim == 1:
+                return candidate, arr
+    if size is None:
+        raise ValueError(f"Could not find coordinate among {candidates}")
+    return None, np.arange(size)
+
+
+def get_lat_lon(ds: xr.Dataset, sample_var: str) -> tuple[np.ndarray, np.ndarray]:
+    da = ds[sample_var]
+    lat_dim = find_dim(da.dims, ("lat", "latitude", "y"), "latitude")
+    lon_dim = find_dim(da.dims, ("lon", "longitude", "x"), "longitude")
+    _, lats = find_coord(ds, (lat_dim, "lat", "latitude"), size=da.sizes[lat_dim])
+    _, lons = find_coord(ds, (lon_dim, "lon", "longitude"), size=da.sizes[lon_dim])
+    return lats.astype(np.float64), lons.astype(np.float64)
+
+
+def lead_index_values(ds: xr.Dataset, sample_var: str) -> list[tuple[int, int]]:
+    da = ds[sample_var]
+    lead_dim = find_dim(da.dims, ("lead", "lead_week", "week"), "lead")
+    if lead_dim in ds.coords:
+        values = np.asarray(ds[lead_dim].values)
+    elif "lead" in ds:
+        values = np.asarray(ds["lead"].values)
+    else:
+        values = np.arange(1, da.sizes[lead_dim] + 1)
+    out = []
+    for idx, value in enumerate(values):
+        try:
+            lead_value = int(value)
+        except Exception:
+            lead_value = idx + 1
+        out.append((idx, lead_value))
+    return out
+
+
+def init_count(ds: xr.Dataset, sample_var: str) -> int:
+    init_dim = find_dim(ds[sample_var].dims, ("init", "initialization", "time"), "init")
+    return int(ds[sample_var].sizes[init_dim])
+
+
+def timestamp_or_nat(value) -> pd.Timestamp:
+    try:
+        ts = pd.Timestamp(value)
+        return ts if not pd.isna(ts) else pd.NaT
+    except Exception:
+        return pd.NaT
+
+
+def dataset_time_value(ds: xr.Dataset, names: tuple[str, ...], init_idx: int, lead_idx: int | None = None) -> pd.Timestamp:
+    for name in names:
+        if name not in ds:
+            continue
+        arr = ds[name]
+        indexers = {}
+        for dim in arr.dims:
+            lower = dim.lower()
+            if "init" in lower or lower == "time":
+                indexers[dim] = init_idx
+            elif lead_idx is not None and "lead" in lower:
+                indexers[dim] = lead_idx
+        try:
+            return timestamp_or_nat(arr.isel(indexers).values)
+        except Exception:
+            continue
+    return pd.NaT
+
+
+def case_times(ds: xr.Dataset, init_idx: int, lead_idx: int, lead_value: int) -> tuple[pd.Timestamp, pd.Timestamp]:
+    init_time = dataset_time_value(ds, ("init_time", "init", "time"), init_idx)
+    valid_time = dataset_time_value(ds, ("valid_time", "target_time"), init_idx, lead_idx)
+    if pd.isna(valid_time) and not pd.isna(init_time):
+        valid_time = init_time + pd.to_timedelta(int(lead_value) * 7, unit="D")
+    return init_time, valid_time
+
+
+def valid_month_season(valid_time: pd.Timestamp) -> tuple[int | float, str]:
+    if pd.isna(valid_time):
+        return np.nan, ""
+    month = int(valid_time.month)
+    return month, SEASONS[month]
+
+
+def load_forecast_array(ds: xr.Dataset, var_name: str, init_idx: int, lead_idx: int) -> np.ndarray:
+    da = ds[var_name]
+    init_dim = find_dim(da.dims, ("init", "initialization", "time"), "init")
+    lead_dim = find_dim(da.dims, ("lead", "lead_week", "week"), "lead")
+    member_dim = find_dim(da.dims, ("ensemble", "geos_member", "member"), "member")
+    lat_dim = find_dim(da.dims, ("lat", "latitude", "y"), "latitude")
+    lon_dim = find_dim(da.dims, ("lon", "longitude", "x"), "longitude")
+    selected = da.isel({init_dim: init_idx, lead_dim: lead_idx}).transpose(member_dim, lat_dim, lon_dim)
+    return np.asarray(selected.values, dtype=np.float32)
+
+
+def load_obs_array(ds: xr.Dataset, var_name: str, init_idx: int, lead_idx: int) -> np.ndarray:
+    da = ds[var_name]
+    init_dim = find_dim(da.dims, ("init", "initialization", "time"), "init")
+    lead_dim = find_dim(da.dims, ("lead", "lead_week", "week"), "lead")
+    lat_dim = find_dim(da.dims, ("lat", "latitude", "y"), "latitude")
+    lon_dim = find_dim(da.dims, ("lon", "longitude", "x"), "longitude")
+    selected = da.isel({init_dim: init_idx, lead_dim: lead_idx}).transpose(lat_dim, lon_dim)
+    return np.asarray(selected.values, dtype=np.float32)
+
+
+def area_weights_from_lats(lats: np.ndarray, lon_count: int) -> np.ndarray:
+    weights = np.cos(np.deg2rad(np.asarray(lats, dtype=np.float64)))
+    weights = np.clip(weights, 0.0, None)
+    return np.broadcast_to(weights[:, None], (weights.size, lon_count)).astype(np.float64, copy=False)
+
+
+def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int]) -> np.ndarray:
+    if args.eval_mask == "all":
+        return np.ones(shape, dtype=bool)
+    if not args.land_mask_file:
+        raise ValueError("--land_mask_file is required when --eval_mask is land or ocean.")
+
+    import torch
+
+    cached = torch.load(args.land_mask_file, map_location="cpu", weights_only=True)
+    if "is_land" in cached:
+        land_mask = np.asarray(cached["is_land"], dtype=bool).squeeze()
+    elif "land_mask" in cached:
+        land_mask = np.asarray(cached["land_mask"], dtype=bool).squeeze()
+    else:
+        raise KeyError(f"{args.land_mask_file} is missing 'is_land' or 'land_mask'.")
+    if land_mask.shape != shape:
+        raise ValueError(f"Land mask shape {land_mask.shape} does not match forecast grid {shape}.")
+    return land_mask if args.eval_mask == "land" else ~land_mask
+
+
+def crps_map(ensemble: np.ndarray, obs: np.ndarray) -> np.ndarray:
+    ensemble = np.asarray(ensemble, dtype=np.float32)
+    obs = np.asarray(obs, dtype=np.float32)
+    ens64 = ensemble.astype(np.float64, copy=False)
+    obs64 = obs.astype(np.float64, copy=False)
+    with np.errstate(invalid="ignore"):
+        mae_term = np.nanmean(np.abs(ens64 - obs64[None, :, :]), axis=0)
+    ens_sorted = np.sort(ens64, axis=0)
+    member_count = ens_sorted.shape[0]
+    coeff = ((2.0 * np.arange(1, member_count + 1, dtype=np.float64)) - member_count - 1.0)
+    coeff /= float(member_count * member_count)
+    spread_term = np.sum(coeff[:, None, None] * ens_sorted, axis=0)
+    return mae_term - spread_term
+
+
+def metric_fields(ensemble: np.ndarray, obs: np.ndarray) -> dict[str, np.ndarray]:
+    ens64 = np.asarray(ensemble, dtype=np.float64)
+    obs64 = np.asarray(obs, dtype=np.float64)
+    with np.errstate(invalid="ignore"):
+        mean = np.nanmean(ens64, axis=0)
+        spread = np.nanstd(ens64, axis=0)
+    err = mean - obs64
+    crps = crps_map(ens64, obs64)
+    finite = np.isfinite(obs64) & np.isfinite(mean) & np.isfinite(spread) & np.isfinite(crps)
+    return {
+        "finite": finite,
+        "sse": err * err,
+        "crps": crps,
+        "spread": spread,
+        "variance": spread * spread,
+    }
+
+
+def reduce_fields(fields: dict[str, np.ndarray], weights: np.ndarray, finite: np.ndarray, prefix: str) -> dict[str, float]:
+    finite = np.asarray(finite, dtype=bool)
+    wm = np.where(finite, weights, 0.0)
+    weight_sum = float(np.sum(wm))
+    if weight_sum <= 0.0:
+        return {
+            f"{prefix}_weight_sum": 0.0,
+            f"{prefix}_crps_sum": 0.0,
+            f"{prefix}_sse_sum": 0.0,
+            f"{prefix}_spread_sum": 0.0,
+            f"{prefix}_variance_sum": 0.0,
+        }
+    return {
+        f"{prefix}_weight_sum": weight_sum,
+        f"{prefix}_crps_sum": float(np.sum(np.where(finite, fields["crps"], 0.0) * wm)),
+        f"{prefix}_sse_sum": float(np.sum(np.where(finite, fields["sse"], 0.0) * wm)),
+        f"{prefix}_spread_sum": float(np.sum(np.where(finite, fields["spread"], 0.0) * wm)),
+        f"{prefix}_variance_sum": float(np.sum(np.where(finite, fields["variance"], 0.0) * wm)),
+    }
+
+
+def row_metrics_from_sums(row: dict[str, float] | pd.Series) -> dict[str, float]:
+    model_w = float(row.get("model_weight_sum", 0.0))
+    geos_w = float(row.get("geos_weight_sum", 0.0))
+    out = {}
+    if model_w > 0.0:
+        out["model_crps"] = float(row["model_crps_sum"] / model_w)
+        out["model_rmse"] = float(np.sqrt(row["model_sse_sum"] / model_w))
+        out["model_spread"] = float(row["model_spread_sum"] / model_w)
+        out["model_variance"] = float(row["model_variance_sum"] / model_w)
+    else:
+        out.update({k: np.nan for k in ("model_crps", "model_rmse", "model_spread", "model_variance")})
+    if geos_w > 0.0:
+        out["geos_crps"] = float(row["geos_crps_sum"] / geos_w)
+        out["geos_rmse"] = float(np.sqrt(row["geos_sse_sum"] / geos_w))
+        out["geos_spread"] = float(row["geos_spread_sum"] / geos_w)
+        out["geos_variance"] = float(row["geos_variance_sum"] / geos_w)
+    else:
+        out.update({k: np.nan for k in ("geos_crps", "geos_rmse", "geos_spread", "geos_variance")})
+    out["crps_skill_pct"] = (
+        100.0 * (1.0 - out["model_crps"] / out["geos_crps"])
+        if np.isfinite(out["model_crps"]) and np.isfinite(out["geos_crps"]) and out["geos_crps"] > 1e-12
+        else np.nan
+    )
+    out["rmse_skill_pct"] = (
+        100.0 * (1.0 - out["model_rmse"] / out["geos_rmse"])
+        if np.isfinite(out["model_rmse"]) and np.isfinite(out["geos_rmse"]) and out["geos_rmse"] > 1e-12
+        else np.nan
+    )
+    out["model_spread_rmse_ratio"] = (
+        out["model_spread"] / out["model_rmse"]
+        if np.isfinite(out["model_spread"]) and np.isfinite(out["model_rmse"]) and out["model_rmse"] > 1e-12
+        else np.nan
+    )
+    out["geos_spread_rmse_ratio"] = (
+        out["geos_spread"] / out["geos_rmse"]
+        if np.isfinite(out["geos_spread"]) and np.isfinite(out["geos_rmse"]) and out["geos_rmse"] > 1e-12
+        else np.nan
+    )
+    return out
+
+
+def rank_counts(
+    ensemble: np.ndarray,
+    obs: np.ndarray,
+    weights: np.ndarray,
+    finite_mask: np.ndarray,
+    rng: np.random.Generator,
+    rank_bins: int,
+) -> tuple[np.ndarray, int]:
+    member_count = int(ensemble.shape[0])
+    finite_members = np.all(np.isfinite(ensemble), axis=0)
+    finite = finite_mask & finite_members & np.isfinite(obs)
+    if not finite.any():
+        bins = rank_bins if rank_bins > 0 else member_count + 1
+        return np.zeros(bins, dtype=np.float64), bins
+
+    less = np.sum(ensemble < obs[None, :, :], axis=0).astype(np.int32)
+    equal = np.sum(ensemble == obs[None, :, :], axis=0).astype(np.int32)
+    ranks = less
+    tie_mask = finite & (equal > 0)
+    if tie_mask.any():
+        offsets = np.zeros_like(ranks)
+        offsets[tie_mask] = rng.integers(0, equal[tie_mask] + 1)
+        ranks = ranks + offsets
+
+    flat_ranks = ranks[finite]
+    flat_weights = weights[finite].astype(np.float64, copy=False)
+    if rank_bins > 0:
+        bin_idx = np.floor(flat_ranks * rank_bins / float(member_count + 1)).astype(np.int64)
+        bin_idx = np.clip(bin_idx, 0, rank_bins - 1)
+        return np.bincount(bin_idx, weights=flat_weights, minlength=rank_bins), rank_bins
+    return np.bincount(flat_ranks, weights=flat_weights, minlength=member_count + 1), member_count + 1
+
+
+def update_dispersion_state(
+    state: dict[tuple[str, str, int], dict[str, float]],
+    source: str,
+    variable: str,
+    lead: int,
+    reduced: dict[str, float],
+    prefix: str,
+) -> None:
+    key = (source, variable, int(lead))
+    item = state.setdefault(
+        key,
+        {
+            "n_cases": 0,
+            "weight_sum": 0.0,
+            "crps_sum": 0.0,
+            "sse_sum": 0.0,
+            "spread_sum": 0.0,
+            "variance_sum": 0.0,
+        },
+    )
+    if reduced[f"{prefix}_weight_sum"] <= 0.0:
+        return
+    item["n_cases"] += 1
+    item["weight_sum"] += float(reduced[f"{prefix}_weight_sum"])
+    item["crps_sum"] += float(reduced[f"{prefix}_crps_sum"])
+    item["sse_sum"] += float(reduced[f"{prefix}_sse_sum"])
+    item["spread_sum"] += float(reduced[f"{prefix}_spread_sum"])
+    item["variance_sum"] += float(reduced[f"{prefix}_variance_sum"])
+
+
+def update_rank_state(
+    state: dict[tuple[str, str, int, int], np.ndarray],
+    source: str,
+    variable: str,
+    lead: int,
+    ensemble: np.ndarray,
+    obs: np.ndarray,
+    weights: np.ndarray,
+    finite_mask: np.ndarray,
+    rng: np.random.Generator,
+    rank_bins: int,
+) -> None:
+    counts, bin_count = rank_counts(ensemble, obs, weights, finite_mask, rng, rank_bins)
+    key = (source, variable, int(lead), int(bin_count))
+    if key not in state:
+        state[key] = np.zeros(bin_count, dtype=np.float64)
+    state[key] += counts
+
+
+def dispersion_summary_rows(
+    dispersion_state: dict[tuple[str, str, int], dict[str, float]],
+    rank_state: dict[tuple[str, str, int, int], np.ndarray],
+) -> list[dict[str, float | int | str]]:
+    rows = []
+    for (source, variable, lead), state in sorted(dispersion_state.items()):
+        w = float(state["weight_sum"])
+        if w <= 0.0:
+            continue
+        mse = float(state["sse_sum"] / w)
+        rmse = float(np.sqrt(mse))
+        mean_spread = float(state["spread_sum"] / w)
+        mean_variance = float(state["variance_sum"] / w)
+        row = {
+            "source": source,
+            "variable": variable,
+            "lead": lead,
+            "n_cases": int(state["n_cases"]),
+            "weight_sum": w,
+            "crps": float(state["crps_sum"] / w),
+            "rmse": rmse,
+            "mean_spread": mean_spread,
+            "mean_variance": mean_variance,
+            "spread_rmse_ratio": mean_spread / rmse if rmse > 1e-12 else np.nan,
+            "variance_mse_ratio": mean_variance / mse if mse > 1e-12 else np.nan,
+        }
+        rank_items = [
+            counts for (src, var, ld, _), counts in rank_state.items()
+            if src == source and var == variable and ld == lead
+        ]
+        if rank_items:
+            counts = rank_items[0]
+            total = float(np.sum(counts))
+            expected = total / counts.size if counts.size else np.nan
+            if expected > 0.0 and counts.size > 1:
+                row["rank_chi2_per_bin"] = float(np.sum((counts - expected) ** 2 / expected) / (counts.size - 1))
+                edge_mass = float(counts[0] + counts[-1])
+                row["rank_edge_mass_ratio"] = edge_mass / (2.0 * expected)
+            else:
+                row["rank_chi2_per_bin"] = np.nan
+                row["rank_edge_mass_ratio"] = np.nan
+        rows.append(row)
+    return rows
+
+
+def rank_histogram_rows(rank_state: dict[tuple[str, str, int, int], np.ndarray]) -> list[dict[str, float | int | str]]:
+    rows = []
+    for (source, variable, lead, bin_count), counts in sorted(rank_state.items()):
+        total = float(np.sum(counts))
+        expected = total / bin_count if bin_count else np.nan
+        for idx, count in enumerate(counts):
+            rows.append(
+                {
+                    "source": source,
+                    "variable": variable,
+                    "lead": lead,
+                    "rank_bin": idx,
+                    "rank_bin_count": bin_count,
+                    "weighted_count": float(count),
+                    "relative_frequency": float(count / total) if total > 0.0 else np.nan,
+                    "expected_uniform_count": expected,
+                    "expected_relative_frequency": 1.0 / bin_count if bin_count else np.nan,
+                }
+            )
+    return rows
+
+
+def aggregate_case_rows(case_df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    grouped = case_df.groupby(group_cols, dropna=False)
+    summed = grouped[SUM_COLUMNS].sum().reset_index()
+    counts = grouped.size().rename("n_case_rows").reset_index()
+    out = summed.merge(counts, on=group_cols, how="left")
+    metrics = [row_metrics_from_sums(row) for _, row in out.iterrows()]
+    return pd.concat([out, pd.DataFrame(metrics)], axis=1)
+
+
+def summarize_member_repeats(repeat_summary: pd.DataFrame) -> pd.DataFrame:
+    metrics = [
+        "model_crps",
+        "geos_crps",
+        "crps_skill_pct",
+        "model_rmse",
+        "geos_rmse",
+        "rmse_skill_pct",
+        "model_spread",
+        "geos_spread",
+        "model_spread_rmse_ratio",
+    ]
+    rows = []
+    group_cols = ["variable", "lead", "member_count"]
+    for key, group in repeat_summary.groupby(group_cols, dropna=False):
+        row = dict(zip(group_cols, key))
+        row["n_member_repeats"] = int(group["member_repeat"].nunique())
+        row["n_case_rows"] = int(group["n_case_rows"].sum())
+        for metric in metrics:
+            values = group[metric].to_numpy(dtype=np.float64)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                row[f"{metric}_mean"] = np.nan
+                row[f"{metric}_std"] = np.nan
+                row[f"{metric}_p05"] = np.nan
+                row[f"{metric}_p50"] = np.nan
+                row[f"{metric}_p95"] = np.nan
+                continue
+            row[f"{metric}_mean"] = float(np.mean(values))
+            row[f"{metric}_std"] = float(np.std(values, ddof=1)) if values.size > 1 else 0.0
+            row[f"{metric}_p05"] = float(np.quantile(values, 0.05))
+            row[f"{metric}_p50"] = float(np.quantile(values, 0.50))
+            row[f"{metric}_p95"] = float(np.quantile(values, 0.95))
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(group_cols).reset_index(drop=True)
+
+
+def bootstrap_case_intervals(
+    case_df: pd.DataFrame,
+    repeats: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if repeats <= 0 or case_df.empty:
+        return pd.DataFrame()
+    metrics = ["model_crps", "crps_skill_pct", "model_rmse", "rmse_skill_pct", "model_spread_rmse_ratio"]
+    rows = []
+    group_cols = ["variable", "lead", "member_count"]
+    for key, group in case_df.groupby(group_cols, dropna=False):
+        repeat_values = np.asarray(sorted(group["member_repeat"].unique()), dtype=np.int64)
+        case_values = np.asarray(sorted(group["case_id"].unique()))
+        if repeat_values.size == 0 or case_values.size == 0:
+            continue
+        by_repeat = {
+            int(rep): group[group["member_repeat"] == rep].set_index("case_id", drop=False)
+            for rep in repeat_values
+        }
+        boot_values = {metric: [] for metric in metrics}
+        for _ in range(repeats):
+            rep = int(rng.choice(repeat_values))
+            frame = by_repeat[rep]
+            sample_ids = rng.choice(case_values, size=case_values.size, replace=True)
+            sampled = frame.loc[sample_ids]
+            sums = {column: float(sampled[column].sum()) for column in SUM_COLUMNS}
+            metric_values = row_metrics_from_sums(sums)
+            for metric in metrics:
+                boot_values[metric].append(metric_values[metric])
+        row = dict(zip(group_cols, key))
+        row["n_cases"] = int(case_values.size)
+        row["n_bootstrap_repeats"] = int(repeats)
+        row["n_member_repeats"] = int(repeat_values.size)
+        for metric in metrics:
+            values = np.asarray(boot_values[metric], dtype=np.float64)
+            values = values[np.isfinite(values)]
+            if values.size == 0:
+                row[f"{metric}_mean"] = np.nan
+                row[f"{metric}_p025"] = np.nan
+                row[f"{metric}_p50"] = np.nan
+                row[f"{metric}_p975"] = np.nan
+                continue
+            row[f"{metric}_mean"] = float(np.mean(values))
+            row[f"{metric}_p025"] = float(np.quantile(values, 0.025))
+            row[f"{metric}_p50"] = float(np.quantile(values, 0.50))
+            row[f"{metric}_p975"] = float(np.quantile(values, 0.975))
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(group_cols).reset_index(drop=True)
+
+
+def write_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    print(f"Wrote {path}")
+
+
+def main() -> None:
+    args = parse_args()
+    variables = parse_variables(args.variables)
+    sample_sizes = parse_int_list(args.sample_sizes)
+    skip_years = parse_int_set(args.skip_years)
+    lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
+    years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
+    rng = np.random.default_rng(args.seed)
+    out_dir = Path(args.out_dir)
+    if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
+        raise FileExistsError(f"{out_dir} already exists and is not empty. Use --overwrite to replace files.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    case_rows: list[dict[str, object]] = []
+    dispersion_state: dict[tuple[str, str, int], dict[str, float]] = {}
+    rank_state: dict[tuple[str, str, int, int], np.ndarray] = {}
+    metadata = {
+        "forecast_dir": os.path.abspath(args.forecast_dir),
+        "out_dir": os.path.abspath(args.out_dir),
+        "start_year": args.start_year,
+        "end_year": args.end_year,
+        "skip_years": sorted(skip_years),
+        "variables": variables,
+        "sample_sizes_requested": sample_sizes,
+        "member_bootstrap_repeats": args.member_bootstrap_repeats,
+        "case_bootstrap_repeats": args.case_bootstrap_repeats,
+        "seed": args.seed,
+        "eval_mask": args.eval_mask,
+        "land_mask_file": os.path.abspath(args.land_mask_file) if args.land_mask_file else None,
+        "rank_bins": args.rank_bins,
+        "rank_histogram": not args.skip_rank_histogram,
+        "started_at": pd.Timestamp.utcnow().isoformat(),
+    }
+
+    eval_mask = None
+    weights = None
+    processed_cases = 0
+    start_time = time.time()
+
+    for year in years:
+        path = store_path(args.forecast_dir, year)
+        if not path.exists():
+            message = f"Missing forecast store for {year}: {path}"
+            if args.allow_missing_years:
+                print(f"Skipping: {message}")
+                continue
+            raise FileNotFoundError(message)
+
+        print(f"Opening {path}")
+        ds = xr.open_zarr(path, consolidated=False, chunks=None)
+        try:
+            lats, lons = get_lat_lon(ds, VARIABLES[variables[0]]["model"])
+            if eval_mask is None:
+                eval_mask = load_eval_mask(args, (len(lats), len(lons)))
+                weights = area_weights_from_lats(lats, len(lons))
+                kept = int(np.sum(eval_mask))
+                print(f"Evaluation mask: {args.eval_mask}; kept {kept}/{eval_mask.size} grid cells")
+            lead_pairs = lead_index_values(ds, VARIABLES[variables[0]]["model"])
+            if lead_filter is not None:
+                lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
+            n_init = init_count(ds, VARIABLES[variables[0]]["model"])
+            if args.max_inits_per_year is not None:
+                n_init = min(n_init, int(args.max_inits_per_year))
+
+            for init_idx in range(n_init):
+                for lead_idx, lead_value in lead_pairs:
+                    init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                    valid_month, valid_season = valid_month_season(valid_time)
+                    case_id = f"{year}_{init_idx:04d}_lead{lead_value}"
+                    for variable in variables:
+                        spec = VARIABLES[variable]
+                        obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
+                        model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
+                        geos = load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
+                        model_members = int(model.shape[0])
+                        geos_members = int(geos.shape[0])
+                        usable_sizes = [size for size in sample_sizes if size <= model_members]
+                        if not usable_sizes:
+                            usable_sizes = [model_members]
+
+                        geos_fields = metric_fields(geos, obs)
+                        model_full_fields = metric_fields(model, obs)
+                        common_full = eval_mask & geos_fields["finite"] & model_full_fields["finite"]
+                        geos_reduced = reduce_fields(geos_fields, weights, common_full, "geos")
+                        model_full_reduced = reduce_fields(model_full_fields, weights, common_full, "model")
+                        update_dispersion_state(dispersion_state, "geos", variable, lead_value, geos_reduced, "geos")
+                        update_dispersion_state(
+                            dispersion_state, "model", variable, lead_value, model_full_reduced, "model"
+                        )
+                        if not args.skip_rank_histogram:
+                            update_rank_state(
+                                rank_state,
+                                "geos",
+                                variable,
+                                lead_value,
+                                geos,
+                                obs,
+                                weights,
+                                eval_mask,
+                                rng,
+                                args.rank_bins,
+                            )
+                            update_rank_state(
+                                rank_state,
+                                "model",
+                                variable,
+                                lead_value,
+                                model,
+                                obs,
+                                weights,
+                                eval_mask,
+                                rng,
+                                args.rank_bins,
+                            )
+
+                        for size in usable_sizes:
+                            repeats = 1 if size >= model_members else max(1, int(args.member_bootstrap_repeats))
+                            for member_repeat in range(repeats):
+                                if size >= model_members:
+                                    member_idx = np.arange(model_members)
+                                else:
+                                    member_idx = rng.choice(model_members, size=size, replace=False)
+                                sample = model[member_idx, :, :]
+                                sample_fields = metric_fields(sample, obs)
+                                common = eval_mask & geos_fields["finite"] & sample_fields["finite"]
+                                model_reduced = reduce_fields(sample_fields, weights, common, "model")
+                                geos_for_sample = reduce_fields(geos_fields, weights, common, "geos")
+                                row = {
+                                    "case_id": case_id,
+                                    "year": year,
+                                    "init_index": init_idx,
+                                    "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                    "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
+                                    "valid_month": valid_month,
+                                    "valid_season": valid_season,
+                                    "lead": int(lead_value),
+                                    "variable": variable,
+                                    "member_count": int(size),
+                                    "member_repeat": int(member_repeat),
+                                    "model_members_available": model_members,
+                                    "geos_members_available": geos_members,
+                                }
+                                row.update(model_reduced)
+                                row.update(geos_for_sample)
+                                row.update(row_metrics_from_sums(row))
+                                case_rows.append(row)
+                    processed_cases += 1
+                    if processed_cases % 20 == 0:
+                        elapsed = (time.time() - start_time) / 60.0
+                        print(f"Processed {processed_cases} init/lead cases in {elapsed:.1f} min")
+        finally:
+            ds.close()
+
+    if not case_rows:
+        raise RuntimeError("No forecast cases were processed. Check --forecast_dir, years, variables, and filters.")
+
+    case_df = pd.DataFrame(case_rows)
+    if args.write_case_metrics:
+        write_csv(case_df, out_dir / "case_member_metrics.csv")
+
+    repeat_summary = aggregate_case_rows(case_df, ["variable", "lead", "member_count", "member_repeat"])
+    write_csv(repeat_summary, out_dir / "ensemble_size_member_repeat_summary.csv")
+
+    ensemble_summary = summarize_member_repeats(repeat_summary)
+    write_csv(ensemble_summary, out_dir / "ensemble_size_summary.csv")
+
+    bootstrap_ci = bootstrap_case_intervals(case_df, int(args.case_bootstrap_repeats), rng)
+    if not bootstrap_ci.empty:
+        write_csv(bootstrap_ci, out_dir / "ensemble_size_bootstrap_ci.csv")
+
+    dispersion_df = pd.DataFrame(dispersion_summary_rows(dispersion_state, rank_state))
+    write_csv(dispersion_df, out_dir / "dispersion_summary.csv")
+
+    rank_df = pd.DataFrame(rank_histogram_rows(rank_state))
+    if not rank_df.empty:
+        write_csv(rank_df, out_dir / "dispersion_rank_histogram.csv")
+
+    metadata.update(
+        {
+            "processed_init_lead_cases": processed_cases,
+            "case_member_rows": int(len(case_df)),
+            "completed_at": pd.Timestamp.utcnow().isoformat(),
+            "elapsed_seconds": float(time.time() - start_time),
+            "outputs": {
+                "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
+                "ensemble_size_member_repeat_summary": str(out_dir / "ensemble_size_member_repeat_summary.csv"),
+                "ensemble_size_summary": str(out_dir / "ensemble_size_summary.csv"),
+                "ensemble_size_bootstrap_ci": str(out_dir / "ensemble_size_bootstrap_ci.csv")
+                if not bootstrap_ci.empty
+                else None,
+                "dispersion_summary": str(out_dir / "dispersion_summary.csv"),
+                "dispersion_rank_histogram": str(out_dir / "dispersion_rank_histogram.csv")
+                if not rank_df.empty
+                else None,
+            },
+        }
+    )
+    with open(out_dir / "ensemble_test_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Wrote {out_dir / 'ensemble_test_metadata.json'}")
+
+
+if __name__ == "__main__":
+    main()
