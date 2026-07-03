@@ -63,12 +63,27 @@ SEASONS = {
     12: "DJF",
 }
 
+SEASON_MONTHS = {
+    "DJF": {12, 1, 2},
+    "MAM": {3, 4, 5},
+    "JJA": {6, 7, 8},
+    "SON": {9, 10, 11},
+}
+
 MONTH_ALIASES = {
-    "djf": {12, 1, 2},
-    "mam": {3, 4, 5},
-    "jja": {6, 7, 8},
-    "summer": {6, 7, 8},
-    "son": {9, 10, 11},
+    "djf": SEASON_MONTHS["DJF"],
+    "mam": SEASON_MONTHS["MAM"],
+    "jja": SEASON_MONTHS["JJA"],
+    "summer": SEASON_MONTHS["JJA"],
+    "son": SEASON_MONTHS["SON"],
+}
+
+SEASON_ALIASES = {
+    "djf": "DJF",
+    "mam": "MAM",
+    "jja": "JJA",
+    "summer": "JJA",
+    "son": "SON",
 }
 
 REGIONS = {
@@ -172,6 +187,14 @@ def parse_args() -> argparse.Namespace:
             "Season aliases DJF,MAM,JJA/ summer,SON are also accepted."
         ),
     )
+    parser.add_argument(
+        "--init_season_counts",
+        default="",
+        help=(
+            "Optional balanced init selector as SEASON:COUNT pairs, e.g. JJA:5,DJF:5. "
+            "Cannot be combined with --init_months or --max_inits_per_year."
+        ),
+    )
     parser.add_argument("--max_inits_per_year", type=int, default=None)
     parser.add_argument(
         "--allow_missing_years",
@@ -236,6 +259,30 @@ def parse_month_filter(text: str) -> set[int]:
             raise ValueError(f"Invalid month {month}; expected values from 1 to 12.")
         months.add(month)
     return months
+
+
+def parse_init_season_counts(text: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in str(text or "").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if ":" in token:
+            name, count_text = token.split(":", 1)
+        elif "=" in token:
+            name, count_text = token.split("=", 1)
+        else:
+            raise ValueError("--init_season_counts entries must look like JJA:5,DJF:5.")
+        season = SEASON_ALIASES.get(name.strip().lower())
+        if season is None:
+            raise ValueError(f"Unknown init season {name!r}; valid options are {sorted(SEASON_MONTHS)}.")
+        if season in counts:
+            raise ValueError(f"Duplicate init season {season!r} in --init_season_counts.")
+        count = int(count_text.strip())
+        if count <= 0:
+            raise ValueError("--init_season_counts values must be positive.")
+        counts[season] = count
+    return counts
 
 
 def parse_variables(text: str) -> list[str]:
@@ -471,6 +518,36 @@ def filtered_init_indices(ds: xr.Dataset, sample_var: str, months: set[int], max
     if max_inits is not None:
         indices = indices[: int(max_inits)]
     return indices
+
+
+def filtered_init_indices_by_season_counts(
+    ds: xr.Dataset,
+    sample_var: str,
+    season_counts: dict[str, int],
+) -> tuple[list[int], dict[str, int], dict[str, int]]:
+    available = {season: [] for season in season_counts}
+    for init_idx in range(init_count(ds, sample_var)):
+        init_time = dataset_time_value(ds, ("init_time", "init", "time"), init_idx)
+        if pd.isna(init_time):
+            continue
+        init_month = int(init_time.month)
+        for season in season_counts:
+            if init_month in SEASON_MONTHS[season]:
+                available[season].append(init_idx)
+                break
+
+    selected = []
+    selected_counts = {}
+    available_counts = {}
+    for season, requested in season_counts.items():
+        available_counts[season] = len(available[season])
+        if len(available[season]) < requested:
+            raise ValueError(
+                f"Requested {requested} {season} init dates, but only found {len(available[season])}."
+            )
+        selected.extend(available[season][:requested])
+        selected_counts[season] = requested
+    return sorted(selected), selected_counts, available_counts
 
 
 def load_forecast_array(ds: xr.Dataset, var_name: str, init_idx: int, lead_idx: int) -> np.ndarray:
@@ -1251,6 +1328,9 @@ def main() -> None:
     skip_years = parse_int_set(args.skip_years)
     lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
     init_months = parse_month_filter(args.init_months)
+    init_season_counts = parse_init_season_counts(args.init_season_counts)
+    if init_season_counts and (init_months or args.max_inits_per_year is not None):
+        raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
@@ -1280,6 +1360,7 @@ def main() -> None:
         "region": active_region if args.spatial_reduction == "regional_mean" else None,
         "region_bounds": region_bounds if args.spatial_reduction == "regional_mean" else None,
         "init_months": sorted(init_months),
+        "init_season_counts_requested": init_season_counts,
         "max_inits_per_year": args.max_inits_per_year,
         "started_at": timestamp_now_utc(),
     }
@@ -1290,6 +1371,8 @@ def main() -> None:
     metric_weights = None
     processed_cases = 0
     selected_init_counts_by_year: dict[str, int] = {}
+    selected_init_season_counts_by_year: dict[str, dict[str, int]] = {}
+    available_init_season_counts_by_year: dict[str, dict[str, int]] = {}
     start_time = time.time()
 
     for year in years:
@@ -1328,9 +1411,25 @@ def main() -> None:
                 lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
             sample_var = VARIABLES[variables[0]]["model"]
             total_inits = init_count(ds, sample_var)
-            init_indices = filtered_init_indices(ds, sample_var, init_months, args.max_inits_per_year)
+            if init_season_counts:
+                init_indices, selected_by_season, available_by_season = filtered_init_indices_by_season_counts(
+                    ds, sample_var, init_season_counts
+                )
+                selected_init_season_counts_by_year[str(year)] = selected_by_season
+                available_init_season_counts_by_year[str(year)] = available_by_season
+            else:
+                init_indices = filtered_init_indices(ds, sample_var, init_months, args.max_inits_per_year)
+                selected_by_season = {}
+                available_by_season = {}
             selected_init_counts_by_year[str(year)] = len(init_indices)
-            if init_months or args.max_inits_per_year is not None:
+            if init_season_counts:
+                selected_text = ",".join(f"{season}={selected_by_season[season]}" for season in init_season_counts)
+                available_text = ",".join(f"{season}={available_by_season[season]}" for season in init_season_counts)
+                print(
+                    f"Init season-count filter for {year}: selected {selected_text}; "
+                    f"available {available_text}; total selected {len(init_indices)}/{total_inits}"
+                )
+            elif init_months or args.max_inits_per_year is not None:
                 month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
                 print(
                     f"Init filter for {year}: months={month_text}; "
@@ -1468,6 +1567,8 @@ def main() -> None:
         {
             "processed_init_lead_cases": processed_cases,
             "selected_init_counts_by_year": selected_init_counts_by_year,
+            "selected_init_season_counts_by_year": selected_init_season_counts_by_year,
+            "available_init_season_counts_by_year": available_init_season_counts_by_year,
             "case_member_rows": int(len(case_df)),
             "completed_at": timestamp_now_utc(),
             "elapsed_seconds": float(time.time() - start_time),
