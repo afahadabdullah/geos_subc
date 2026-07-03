@@ -17,6 +17,7 @@ Outputs:
   - ensemble_size_bootstrap_ci.csv: case-bootstrap confidence intervals for
     ensemble-size skill.
   - case_member_metrics.csv: optional per-case weighted metric sums.
+  - plots/*.png: ensemble-size, dispersion, and rank-histogram diagnostics.
 """
 
 from __future__ import annotations
@@ -140,6 +141,17 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Write per-case member-subset metric sums.",
+    )
+    parser.add_argument(
+        "--make_plots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write PNG diagnostic plots from the output CSVs.",
+    )
+    parser.add_argument(
+        "--plot_only",
+        action="store_true",
+        help="Skip evaluation and create plots from existing CSVs in --out_dir.",
     )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -749,8 +761,250 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
     print(f"Wrote {path}")
 
 
+def _import_matplotlib():
+    if not os.environ.get("MPLCONFIGDIR"):
+        mpl_cache = Path(os.environ.get("TMPDIR") or "/tmp") / "geos_subc_matplotlib"
+        mpl_cache.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(mpl_cache)
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def read_existing_csv(path: Path, required: bool = False) -> pd.DataFrame:
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(f"Missing required CSV for plotting: {path}")
+        return pd.DataFrame()
+    return pd.read_csv(path)
+
+
+def variable_title(variable: str) -> str:
+    return {"pr": "Precipitation", "t2m": "2 m temperature"}.get(str(variable), str(variable).upper())
+
+
+def source_title(source: str) -> str:
+    return {"model": "FlowMatch", "geos": "GEOS"}.get(str(source), str(source))
+
+
+def available_variables(*frames: pd.DataFrame) -> list[str]:
+    values = []
+    for frame in frames:
+        if not frame.empty and "variable" in frame:
+            values.extend(str(v) for v in frame["variable"].dropna().unique())
+    return sorted(dict.fromkeys(values))
+
+
+def plot_ensemble_size_metric(
+    summary: pd.DataFrame,
+    bootstrap: pd.DataFrame,
+    metric: str,
+    ylabel: str,
+    title: str,
+    path: Path,
+    zero_line: bool = False,
+) -> Path | None:
+    mean_col = f"{metric}_mean"
+    if summary.empty or mean_col not in summary:
+        return None
+
+    plt = _import_matplotlib()
+    variables = available_variables(summary)
+    if not variables:
+        return None
+    fig, axes = plt.subplots(1, len(variables), figsize=(6.0 * len(variables), 4.0), squeeze=False)
+    colors = plt.cm.viridis(np.linspace(0.12, 0.88, max(1, int(summary["lead"].nunique()))))
+
+    for ax, variable in zip(axes[0], variables):
+        sub = summary[summary["variable"] == variable].copy()
+        leads = sorted(sub["lead"].dropna().unique())
+        for color, lead in zip(colors, leads):
+            line = sub[sub["lead"] == lead].sort_values("member_count")
+            x = line["member_count"].to_numpy(dtype=float)
+            y = line[mean_col].to_numpy(dtype=float)
+            ax.plot(x, y, marker="o", linewidth=1.7, label=f"Week {int(lead)}", color=color)
+
+            ci = pd.DataFrame()
+            if not bootstrap.empty and mean_col in bootstrap:
+                ci = bootstrap[(bootstrap["variable"] == variable) & (bootstrap["lead"] == lead)].sort_values(
+                    "member_count"
+                )
+                low_col = f"{metric}_p025"
+                high_col = f"{metric}_p975"
+            else:
+                low_col = f"{metric}_p05"
+                high_col = f"{metric}_p95"
+                ci = line
+            if low_col in ci and high_col in ci and not ci.empty:
+                ax.fill_between(
+                    ci["member_count"].to_numpy(dtype=float),
+                    ci[low_col].to_numpy(dtype=float),
+                    ci[high_col].to_numpy(dtype=float),
+                    color=color,
+                    alpha=0.16,
+                    linewidth=0,
+                )
+        if zero_line:
+            ax.axhline(0.0, color="0.35", linewidth=0.8, linestyle="--")
+        ax.set_title(variable_title(variable))
+        ax.set_xlabel("Generated ensemble members")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.25)
+        ax.legend(frameon=False, fontsize=8)
+
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    print(f"Wrote {path}")
+    return path
+
+
+def plot_dispersion_summary(dispersion: pd.DataFrame, plot_dir: Path) -> list[Path]:
+    if dispersion.empty:
+        return []
+    needed = {"source", "variable", "lead", "spread_rmse_ratio", "variance_mse_ratio"}
+    if not needed.issubset(dispersion.columns):
+        return []
+
+    plt = _import_matplotlib()
+    variables = available_variables(dispersion)
+    outputs = []
+    metrics = [
+        ("spread_rmse_ratio", "Mean spread / RMSE", "dispersion_spread_rmse_ratio.png"),
+        ("variance_mse_ratio", "Mean ensemble variance / MSE", "dispersion_variance_mse_ratio.png"),
+    ]
+    for metric, ylabel, filename in metrics:
+        fig, axes = plt.subplots(1, len(variables), figsize=(5.6 * len(variables), 4.0), squeeze=False)
+        for ax, variable in zip(axes[0], variables):
+            sub = dispersion[dispersion["variable"] == variable]
+            for source, group in sub.groupby("source"):
+                group = group.sort_values("lead")
+                ax.plot(
+                    group["lead"].to_numpy(dtype=float),
+                    group[metric].to_numpy(dtype=float),
+                    marker="o",
+                    linewidth=1.8,
+                    label=source_title(source),
+                )
+            ax.axhline(1.0, color="0.35", linewidth=0.8, linestyle="--")
+            ax.set_title(variable_title(variable))
+            ax.set_xlabel("Lead week")
+            ax.set_ylabel(ylabel)
+            ax.set_xticks(sorted(sub["lead"].dropna().unique()))
+            ax.grid(True, alpha=0.25)
+            ax.legend(frameon=False, fontsize=8)
+        fig.suptitle(ylabel, fontsize=13)
+        fig.tight_layout()
+        path = plot_dir / filename
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        print(f"Wrote {path}")
+        outputs.append(path)
+    return outputs
+
+
+def plot_rank_histograms(rank_df: pd.DataFrame, plot_dir: Path) -> list[Path]:
+    if rank_df.empty:
+        return []
+    needed = {"source", "variable", "lead", "rank_bin", "rank_bin_count", "relative_frequency"}
+    if not needed.issubset(rank_df.columns):
+        return []
+
+    plt = _import_matplotlib()
+    outputs = []
+    for (source, variable), group in rank_df.groupby(["source", "variable"]):
+        leads = sorted(group["lead"].dropna().unique())
+        if not leads:
+            continue
+        fig, axes = plt.subplots(1, len(leads), figsize=(3.4 * len(leads), 3.2), squeeze=False, sharey=True)
+        for ax, lead in zip(axes[0], leads):
+            sub = group[group["lead"] == lead].sort_values("rank_bin")
+            x = sub["rank_bin"].to_numpy(dtype=float)
+            y = sub["relative_frequency"].to_numpy(dtype=float)
+            expected = sub["expected_relative_frequency"].to_numpy(dtype=float)
+            ax.bar(x, y, width=0.85, color="#4C78A8", alpha=0.82)
+            if expected.size:
+                ax.axhline(float(np.nanmean(expected)), color="0.25", linestyle="--", linewidth=1.0)
+            ax.set_title(f"Week {int(lead)}")
+            ax.set_xlabel("Rank bin")
+            ax.grid(True, axis="y", alpha=0.22)
+        axes[0][0].set_ylabel("Relative frequency")
+        fig.suptitle(f"{source_title(source)} rank histogram: {variable_title(variable)}", fontsize=12)
+        fig.tight_layout()
+        path = plot_dir / f"rank_histogram_{source}_{variable}.png"
+        fig.savefig(path, dpi=180)
+        plt.close(fig)
+        print(f"Wrote {path}")
+        outputs.append(path)
+    return outputs
+
+
+def make_diagnostic_plots(out_dir: Path) -> list[str]:
+    summary = read_existing_csv(out_dir / "ensemble_size_summary.csv", required=True)
+    bootstrap = read_existing_csv(out_dir / "ensemble_size_bootstrap_ci.csv")
+    dispersion = read_existing_csv(out_dir / "dispersion_summary.csv")
+    rank_df = read_existing_csv(out_dir / "dispersion_rank_histogram.csv")
+
+    plot_dir = out_dir / "plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    for metric, ylabel, title, filename, zero_line in [
+        (
+            "crps_skill_pct",
+            "CRPS skill vs GEOS (%)",
+            "Skill as generated ensemble size increases",
+            "ensemble_size_crps_skill.png",
+            True,
+        ),
+        (
+            "rmse_skill_pct",
+            "RMSE skill vs GEOS (%)",
+            "Ensemble-mean RMSE skill as generated ensemble size increases",
+            "ensemble_size_rmse_skill.png",
+            True,
+        ),
+        (
+            "model_spread_rmse_ratio",
+            "FlowMatch spread / RMSE",
+            "Dispersion as generated ensemble size increases",
+            "ensemble_size_spread_rmse_ratio.png",
+            False,
+        ),
+    ]:
+        path = plot_ensemble_size_metric(summary, bootstrap, metric, ylabel, title, plot_dir / filename, zero_line)
+        if path is not None:
+            outputs.append(path)
+    outputs.extend(plot_dispersion_summary(dispersion, plot_dir))
+    outputs.extend(plot_rank_histograms(rank_df, plot_dir))
+
+    manifest = {
+        "created_at": timestamp_now_utc(),
+        "plot_count": len(outputs),
+        "plots": [str(path) for path in outputs],
+    }
+    manifest_path = plot_dir / "plot_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Wrote {manifest_path}")
+    return [str(path) for path in outputs] + [str(manifest_path)]
+
+
 def main() -> None:
     args = parse_args()
+    out_dir = Path(args.out_dir)
+    if args.plot_only:
+        if not args.make_plots:
+            print("--plot_only requested with --no-make_plots; nothing to do.")
+            return
+        make_diagnostic_plots(out_dir)
+        return
+
     variables = parse_variables(args.variables)
     sample_sizes = parse_int_list(args.sample_sizes)
     skip_years = parse_int_set(args.skip_years)
@@ -758,7 +1012,6 @@ def main() -> None:
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
-    out_dir = Path(args.out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
         raise FileExistsError(f"{out_dir} already exists and is not empty. Use --overwrite to replace files.")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -920,6 +1173,8 @@ def main() -> None:
     if not rank_df.empty:
         write_csv(rank_df, out_dir / "dispersion_rank_histogram.csv")
 
+    plot_files = make_diagnostic_plots(out_dir) if args.make_plots else []
+
     metadata.update(
         {
             "processed_init_lead_cases": processed_cases,
@@ -937,6 +1192,7 @@ def main() -> None:
                 "dispersion_rank_histogram": str(out_dir / "dispersion_rank_histogram.csv")
                 if not rank_df.empty
                 else None,
+                "plots": plot_files,
             },
         }
     )
