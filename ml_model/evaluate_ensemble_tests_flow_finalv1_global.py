@@ -1543,19 +1543,20 @@ def plot_diagnostics_dashboard(summary: pd.DataFrame, dispersion: pd.DataFrame, 
         return None
 
     nrows = len(variables)
-    fig, axes = plt.subplots(nrows, 4, figsize=(18.5, 4.2 * nrows), squeeze=False)
-    lead_colors = plt.cm.viridis(np.linspace(0.12, 0.88, max(1, int(summary["lead"].nunique()))))
     columns = [
         ("crps_skill_pct_mean", "CRPS skill (%)", True),
         ("rmse_skill_pct_mean", "RMSE skill (%)", True),
         ("model_spread_rmse_ratio_mean", "FlowMatch spread / RMSE", False),
     ]
+    fig, axes = plt.subplots(nrows, len(columns), figsize=(13.5, 3.6 * nrows), squeeze=False)
+    lead_colors = plt.cm.viridis(np.linspace(0.12, 0.88, max(1, int(summary["lead"].nunique()))))
 
     for row_idx, variable in enumerate(variables):
         sub = summary[summary["variable"] == variable]
         leads = sorted(sub["lead"].dropna().unique())
         for col_idx, (metric, ylabel, zero_line) in enumerate(columns):
             ax = axes[row_idx, col_idx]
+            panel_label = f"({chr(ord('a') + row_idx * len(columns) + col_idx)})"
             metric_base = metric[:-5] if metric.endswith("_mean") else metric
             for color, lead in zip(lead_colors, leads):
                 line = sub[sub["lead"] == lead].sort_values("member_count")
@@ -1574,46 +1575,28 @@ def plot_diagnostics_dashboard(summary: pd.DataFrame, dispersion: pd.DataFrame, 
                     line["member_count"].to_numpy(dtype=float),
                     line[metric].to_numpy(dtype=float),
                     marker="o",
-                    linewidth=1.5,
+                    markersize=4.2,
+                    linewidth=1.8,
                     label=f"W{int(lead)}",
                     color=color,
                 )
             if zero_line:
-                ax.axhline(0.0, color="0.35", linewidth=0.8, linestyle="--")
+                ax.axhline(0.0, color="0.35", linewidth=0.9, linestyle="--")
             if "spread" in metric:
-                ax.axhline(1.0, color="0.35", linewidth=0.8, linestyle="--")
-            ax.set_title(ylabel)
+                ax.axhline(1.0, color="0.35", linewidth=0.9, linestyle="--")
+            ax.set_title(f"{panel_label} {ylabel}", fontsize=11, fontweight="bold", loc="left", pad=8)
             ax.set_xlabel("Generated members")
             ax.set_ylabel(variable_title(variable) if col_idx == 0 else ylabel)
-            ax.grid(True, alpha=0.25)
-            ax.legend(frameon=False, fontsize=7, ncol=2)
+            ax.grid(True, alpha=0.22, linewidth=0.7)
+            ax.set_axisbelow(True)
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.8)
+            ax.legend(frameon=False, fontsize=7.5, ncol=2, handlelength=1.6)
 
-        ax = axes[row_idx, 3]
-        disp = dispersion[dispersion["variable"] == variable] if not dispersion.empty else pd.DataFrame()
-        if not disp.empty and "rank_edge_mass_ratio" in disp:
-            for source, group in disp.groupby("source"):
-                group = group.sort_values("lead")
-                ax.plot(
-                    group["lead"].to_numpy(dtype=float),
-                    group["rank_edge_mass_ratio"].to_numpy(dtype=float),
-                    marker="o",
-                    linewidth=1.7,
-                    label=source_title(source),
-                )
-            ax.axhline(1.0, color="0.35", linewidth=0.8, linestyle="--")
-            ax.set_xticks(sorted(disp["lead"].dropna().unique()))
-        else:
-            ax.text(0.5, 0.5, "rank diagnostics unavailable", ha="center", va="center", transform=ax.transAxes)
-        ax.set_title("Rank edge-mass ratio")
-        ax.set_xlabel("Lead week")
-        ax.set_ylabel("Observed outside ensemble / uniform")
-        ax.grid(True, alpha=0.25)
-        ax.legend(frameon=False, fontsize=8)
-
-    fig.suptitle("Ensemble Diagnostics Dashboard", fontsize=15)
-    fig.tight_layout()
+    fig.suptitle("Extreme-event ensemble diagnostics", fontsize=14, y=0.995)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.965))
     path = plot_dir / "ensemble_diagnostics_dashboard.png"
-    fig.savefig(path, dpi=180)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"Wrote {path}")
     return path
