@@ -101,6 +101,13 @@ REGIONS = {
         "lon_min": 60.0,
         "lon_max": 100.0,
     },
+    "uk": {
+        "name": "United Kingdom",
+        "lat_min": 49.0,
+        "lat_max": 61.0,
+        "lon_min": -11.0,
+        "lon_max": 3.0,
+    },
 }
 
 SUM_COLUMNS = [
@@ -165,7 +172,7 @@ def parse_args() -> argparse.Namespace:
         "--region",
         choices=tuple(REGIONS),
         default="global",
-        help="Named region used when --spatial_reduction regional_mean.",
+        help="Named region used for regional filtering. In regional_mean mode, members are averaged over it first.",
     )
     parser.add_argument(
         "--region_bounds",
@@ -179,6 +186,8 @@ def parse_args() -> argparse.Namespace:
         help="Optional .pt land mask with is_land or land_mask. Required for land/ocean masks.",
     )
     parser.add_argument("--lead_values", default="", help="Optional comma-separated lead values to keep.")
+    parser.add_argument("--init_dates", default="", help="Optional comma-separated init date(s), YYYY-MM-DD.")
+    parser.add_argument("--valid_dates", default="", help="Optional comma-separated valid date(s), YYYY-MM-DD.")
     parser.add_argument(
         "--init_months",
         default="",
@@ -254,6 +263,19 @@ def parse_int_list(text: str) -> list[int]:
     if not values:
         raise ValueError("Expected at least one integer value.")
     return sorted(dict.fromkeys(values))
+
+
+def parse_date_filter(text: str) -> set[str]:
+    dates = set()
+    for item in str(text or "").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            dates.add(pd.Timestamp(token).strftime("%Y-%m-%d"))
+        except Exception as exc:
+            raise ValueError(f"Invalid date {token!r}; expected YYYY-MM-DD.") from exc
+    return dates
 
 
 def parse_month_filter(text: str) -> set[int]:
@@ -485,6 +507,12 @@ def timestamp_or_nat(value) -> pd.Timestamp:
         return pd.NaT
 
 
+def date_key(value: pd.Timestamp) -> str:
+    if pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%Y-%m-%d")
+
+
 def dataset_time_value(ds: xr.Dataset, names: tuple[str, ...], init_idx: int, lead_idx: int | None = None) -> pd.Timestamp:
     for name in names:
         if name not in ds:
@@ -534,6 +562,16 @@ def apply_init_stride(indices: list[int], stride: int, offset: int) -> list[int]
     if stride <= 1:
         return list(indices)
     return [idx for position, idx in enumerate(indices) if position % stride == offset]
+
+
+def filter_init_indices_by_dates(ds: xr.Dataset, indices: list[int], init_dates: set[str]) -> list[int]:
+    if not init_dates:
+        return list(indices)
+    return [
+        init_idx
+        for init_idx in indices
+        if date_key(dataset_time_value(ds, ("init_time", "init", "time"), init_idx)) in init_dates
+    ]
 
 
 def filtered_init_indices_by_season_counts(
@@ -1355,6 +1393,8 @@ def main() -> None:
     sample_sizes = parse_int_list(args.sample_sizes)
     skip_years = parse_int_set(args.skip_years)
     lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
+    init_date_filter = parse_date_filter(args.init_dates)
+    valid_date_filter = parse_date_filter(args.valid_dates)
     init_months = parse_month_filter(args.init_months)
     init_season_counts = parse_init_season_counts(args.init_season_counts)
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
@@ -1365,6 +1405,11 @@ def main() -> None:
         raise ValueError("--init_stride_offset must be in [0, --init_stride - 1].")
     if init_season_counts and int(args.init_stride) != 1:
         raise ValueError("--init_stride cannot be combined with --init_season_counts.")
+    use_region_mask = (
+        args.spatial_reduction == "regional_mean"
+        or active_region != "global"
+        or bool(str(args.region_bounds or "").strip())
+    )
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
@@ -1391,8 +1436,10 @@ def main() -> None:
         "rank_bins": args.rank_bins,
         "rank_histogram": not args.skip_rank_histogram,
         "spatial_reduction": args.spatial_reduction,
-        "region": active_region if args.spatial_reduction == "regional_mean" else None,
-        "region_bounds": region_bounds if args.spatial_reduction == "regional_mean" else None,
+        "region": active_region if use_region_mask else None,
+        "region_bounds": region_bounds if use_region_mask else None,
+        "init_dates": sorted(init_date_filter),
+        "valid_dates": sorted(valid_date_filter),
         "init_months": sorted(init_months),
         "init_season_counts_requested": init_season_counts,
         "init_stride": int(args.init_stride),
@@ -1420,21 +1467,23 @@ def main() -> None:
             if eval_mask is None:
                 eval_mask = load_eval_mask(args, (len(lats), len(lons)))
                 weights = area_weights_from_lats(lats, len(lons))
-                if args.spatial_reduction == "regional_mean":
+                if use_region_mask:
                     region_mask = region_mask_from_bounds(lats, lons, region_bounds)
                     eval_mask = eval_mask & region_mask
                     kept = int(np.sum(eval_mask))
                     if kept <= 0:
                         raise ValueError(
-                            f"Regional mask for {region_bounds['name']} kept zero grid cells. "
+                            f"Region mask for {region_bounds['name']} kept zero grid cells. "
                             f"Bounds={region_bounds}"
                         )
+                    mask_label = "Regional mean" if args.spatial_reduction == "regional_mean" else "Region filter"
                     print(
-                        f"Regional mean: {region_bounds['name']} "
+                        f"{mask_label}: {region_bounds['name']} "
                         f"lat={region_bounds['lat_min']}..{region_bounds['lat_max']} "
                         f"lon={region_bounds['lon_min']}..{region_bounds['lon_max']}; "
                         f"kept {kept}/{eval_mask.size} grid cells after eval_mask={args.eval_mask}"
                     )
+                if args.spatial_reduction == "regional_mean":
                     metric_weights = np.ones((1, 1), dtype=np.float64)
                     metric_mask = np.ones((1, 1), dtype=bool)
                 else:
@@ -1455,6 +1504,7 @@ def main() -> None:
                 available_init_season_counts_by_year[str(year)] = available_by_season
             else:
                 init_indices = filtered_init_indices(ds, sample_var, init_months)
+                init_indices = filter_init_indices_by_dates(ds, init_indices, init_date_filter)
                 init_indices = apply_init_stride(
                     init_indices, int(args.init_stride), int(args.init_stride_offset)
                 )
@@ -1470,10 +1520,17 @@ def main() -> None:
                     f"Init season-count filter for {year}: selected {selected_text}; "
                     f"available {available_text}; total selected {len(init_indices)}/{total_inits}"
                 )
-            elif init_months or args.max_inits_per_year is not None or int(args.init_stride) != 1:
+            elif (
+                init_months
+                or init_date_filter
+                or args.max_inits_per_year is not None
+                or int(args.init_stride) != 1
+            ):
                 month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
+                init_date_text = ",".join(sorted(init_date_filter)) if init_date_filter else "all"
                 print(
                     f"Init filter for {year}: months={month_text}; "
+                    f"init_dates={init_date_text}; "
                     f"stride={int(args.init_stride)} offset={int(args.init_stride_offset)}; "
                     f"selected {len(init_indices)}/{total_inits} init dates"
                 )
@@ -1481,6 +1538,10 @@ def main() -> None:
             for init_idx in init_indices:
                 for lead_idx, lead_value in lead_pairs:
                     init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                    if init_date_filter and date_key(init_time) not in init_date_filter:
+                        continue
+                    if valid_date_filter and date_key(valid_time) not in valid_date_filter:
+                        continue
                     init_month, init_season = valid_month_season(init_time)
                     valid_month, valid_season = valid_month_season(valid_time)
                     case_id = f"{year}_{init_idx:04d}_lead{lead_value}"
@@ -1566,7 +1627,7 @@ def main() -> None:
                                     "model_members_available": model_members,
                                     "geos_members_available": geos_members,
                                     "spatial_reduction": args.spatial_reduction,
-                                    "region": active_region if args.spatial_reduction == "regional_mean" else "",
+                                    "region": active_region if use_region_mask else "",
                                 }
                                 row.update(model_reduced)
                                 row.update(geos_for_sample)
