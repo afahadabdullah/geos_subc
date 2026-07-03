@@ -192,8 +192,20 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Optional balanced init selector as SEASON:COUNT pairs, e.g. JJA:5,DJF:5. "
-            "Cannot be combined with --init_months or --max_inits_per_year."
+            "Cannot be combined with --init_months, --max_inits_per_year, or --init_stride."
         ),
+    )
+    parser.add_argument(
+        "--init_stride",
+        type=int,
+        default=1,
+        help="Keep every Nth initialization after month filtering; use 4 for a one-quarter sample spread through the year.",
+    )
+    parser.add_argument(
+        "--init_stride_offset",
+        type=int,
+        default=0,
+        help="Zero-based offset for --init_stride. With --init_stride 4, offsets 0,1,2,3 give four interleaved samples.",
     )
     parser.add_argument("--max_inits_per_year", type=int, default=None)
     parser.add_argument(
@@ -507,7 +519,7 @@ def valid_month_season(valid_time: pd.Timestamp) -> tuple[int | float, str]:
     return month, SEASONS[month]
 
 
-def filtered_init_indices(ds: xr.Dataset, sample_var: str, months: set[int], max_inits: int | None) -> list[int]:
+def filtered_init_indices(ds: xr.Dataset, sample_var: str, months: set[int]) -> list[int]:
     indices = []
     for init_idx in range(init_count(ds, sample_var)):
         if months:
@@ -515,9 +527,13 @@ def filtered_init_indices(ds: xr.Dataset, sample_var: str, months: set[int], max
             if pd.isna(init_time) or int(init_time.month) not in months:
                 continue
         indices.append(init_idx)
-    if max_inits is not None:
-        indices = indices[: int(max_inits)]
     return indices
+
+
+def apply_init_stride(indices: list[int], stride: int, offset: int) -> list[int]:
+    if stride <= 1:
+        return list(indices)
+    return [idx for position, idx in enumerate(indices) if position % stride == offset]
 
 
 def filtered_init_indices_by_season_counts(
@@ -1207,8 +1223,20 @@ def plot_diagnostics_dashboard(summary: pd.DataFrame, dispersion: pd.DataFrame, 
         leads = sorted(sub["lead"].dropna().unique())
         for col_idx, (metric, ylabel, zero_line) in enumerate(columns):
             ax = axes[row_idx, col_idx]
+            metric_base = metric[:-5] if metric.endswith("_mean") else metric
             for color, lead in zip(lead_colors, leads):
                 line = sub[sub["lead"] == lead].sort_values("member_count")
+                low_col = f"{metric_base}_p05"
+                high_col = f"{metric_base}_p95"
+                if low_col in line and high_col in line:
+                    ax.fill_between(
+                        line["member_count"].to_numpy(dtype=float),
+                        line[low_col].to_numpy(dtype=float),
+                        line[high_col].to_numpy(dtype=float),
+                        color=color,
+                        alpha=0.14,
+                        linewidth=0,
+                    )
                 ax.plot(
                     line["member_count"].to_numpy(dtype=float),
                     line[metric].to_numpy(dtype=float),
@@ -1331,6 +1359,12 @@ def main() -> None:
     init_season_counts = parse_init_season_counts(args.init_season_counts)
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
         raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
+    if int(args.init_stride) < 1:
+        raise ValueError("--init_stride must be >= 1.")
+    if int(args.init_stride_offset) < 0 or int(args.init_stride_offset) >= int(args.init_stride):
+        raise ValueError("--init_stride_offset must be in [0, --init_stride - 1].")
+    if init_season_counts and int(args.init_stride) != 1:
+        raise ValueError("--init_stride cannot be combined with --init_season_counts.")
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
@@ -1361,6 +1395,8 @@ def main() -> None:
         "region_bounds": region_bounds if args.spatial_reduction == "regional_mean" else None,
         "init_months": sorted(init_months),
         "init_season_counts_requested": init_season_counts,
+        "init_stride": int(args.init_stride),
+        "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
         "started_at": timestamp_now_utc(),
     }
@@ -1418,7 +1454,12 @@ def main() -> None:
                 selected_init_season_counts_by_year[str(year)] = selected_by_season
                 available_init_season_counts_by_year[str(year)] = available_by_season
             else:
-                init_indices = filtered_init_indices(ds, sample_var, init_months, args.max_inits_per_year)
+                init_indices = filtered_init_indices(ds, sample_var, init_months)
+                init_indices = apply_init_stride(
+                    init_indices, int(args.init_stride), int(args.init_stride_offset)
+                )
+                if args.max_inits_per_year is not None:
+                    init_indices = init_indices[: int(args.max_inits_per_year)]
                 selected_by_season = {}
                 available_by_season = {}
             selected_init_counts_by_year[str(year)] = len(init_indices)
@@ -1429,10 +1470,11 @@ def main() -> None:
                     f"Init season-count filter for {year}: selected {selected_text}; "
                     f"available {available_text}; total selected {len(init_indices)}/{total_inits}"
                 )
-            elif init_months or args.max_inits_per_year is not None:
+            elif init_months or args.max_inits_per_year is not None or int(args.init_stride) != 1:
                 month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
                 print(
                     f"Init filter for {year}: months={month_text}; "
+                    f"stride={int(args.init_stride)} offset={int(args.init_stride_offset)}; "
                     f"selected {len(init_indices)}/{total_inits} init dates"
                 )
 
