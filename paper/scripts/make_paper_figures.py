@@ -419,10 +419,11 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
     return ax, mesh
 
 
-def slim_colorbar(fig: plt.Figure, mesh, ax, label: str, symmetric: bool = False):
+def slim_colorbar(fig: plt.Figure, mesh, ax, label: str, symmetric: bool = False,
+                  shrink: float = 0.85, pad: float = 0.02, aspect: float = 22):
     if mesh is None:
         return None
-    cbar = fig.colorbar(mesh, ax=ax, shrink=0.85, pad=0.02, aspect=22)
+    cbar = fig.colorbar(mesh, ax=ax, shrink=shrink, pad=pad, aspect=aspect)
     cbar.set_label(label, fontsize=8)
     cbar.ax.tick_params(labelsize=7)
     cbar.outline.set_linewidth(0.6)
@@ -610,12 +611,12 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
 
     # ODE trajectory inset
     ode_x, ode_y, ode_w, ode_h = 55.5, 3.5, 19.0, 21.5
-    _card(ax, (ode_x, ode_y), (ode_w, ode_h), "ODE sampling (10 Euler steps)", "#fdf8ee",
+    _card(ax, (ode_x, ode_y), (ode_w, ode_h), "ODE sampling (50 Euler steps)", "#fdf8ee",
           edge="#b08a2e")
     ins = ax.inset_axes([ode_x + 1.8, ode_y + 3.6, ode_w - 3.6, ode_h - 8.2],
                         transform=ax.transData)
     rng = np.random.default_rng(3)
-    t = np.linspace(0.0, 1.0, 11)
+    t = np.linspace(0.0, 1.0, 51)
     n_members = 7
     x0s = rng.standard_normal(n_members) * 1.05
     x1s = 0.55 * rng.standard_normal(n_members) + 0.15
@@ -625,7 +626,6 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
         path = (1 - t) * x0s[m] + t * x1s[m] + wiggle * (1 - t)
         color = member_cmap(0.15 + 0.7 * m / max(n_members - 1, 1))
         ins.plot(t, path, color=color, lw=1.3, alpha=0.9, zorder=3)
-        ins.scatter(t, path, s=4, color=color, alpha=0.7, zorder=4)
     ins.axvspan(-0.06, 0.02, color=C_ACCENT, alpha=0.12, lw=0)
     ins.axvspan(0.98, 1.06, color="#2c7a4b", alpha=0.10, lw=0)
     ins.set_xlim(-0.06, 1.06)
@@ -703,15 +703,7 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
     _arrow(ax, (out_x + out_w * 0.55, 29.9), (out_x + out_w * 0.62, ver_y + ver_h + 0.6),
            color="#5c6f80", lw=1.2)
 
-    # ---------------- Footer: headline numbers ----------------
-    ax.add_patch(FancyBboxPatch(
-        (2.0, 0.0), 96.0, 2.6, boxstyle="round,pad=0.2,rounding_size=0.5",
-        facecolor="#eef2f6", edgecolor="none", mutation_aspect=0.6, zorder=2))
-    ax.text(50.0, 1.35,
-            "2021-2023, all-case vs raw FIMr1p1:  PR CRPS  -32%,  T2M CRPS  -34%      |      "
-            "EOF-LHS prior vs Gaussian prior (2021):  PR CRPS skill 28.4% vs 24.9%,  T2M 43.2% vs 41.7%",
-            ha="center", va="center", fontsize=7.6, color=TEXT_DARK, zorder=3)
-
+    ax.set_ylim(2.8, 58)
     return save_figure(fig, output_dir, "fig1_framework_overview", formats, dpi)
 
 
@@ -726,9 +718,9 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
     unit = "mm day$^{-1}$" if variable == "pr" else "K"
 
-    fig = plt.figure(figsize=(15.5, 7.2))
-    gs = fig.add_gridspec(2, 4, height_ratios=[0.72, 1.28], hspace=0.28, wspace=0.18,
-                          left=0.035, right=0.965, bottom=0.03, top=0.95)
+    fig = plt.figure(figsize=(15.5, 8.2))
+    gs = fig.add_gridspec(2, 4, height_ratios=[0.58, 1.55], hspace=0.20, wspace=0.14,
+                          left=0.025, right=0.975, bottom=0.02, top=0.96)
 
     # Row 1 — season x lead heatmaps
     geos_crps = season_lead_values(summary, variable, "geos_crps", subset)
@@ -794,10 +786,11 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
                               CMAP_MAG, vmin=gr_lo, vmax=gr_hi)
     ax_h, im_h = robinson_map(fig, gs[1, 3], *map_rs, f"(h) {var_short} RMSE skill (%)",
                               CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_rs, vmax=slim_rs))
-    slim_colorbar(fig, im_e, ax_e, f"CRPS ({unit})")
-    slim_colorbar(fig, im_f, ax_f, "skill (%)", symmetric=True)
-    slim_colorbar(fig, im_g, ax_g, f"RMSE ({unit})")
-    slim_colorbar(fig, im_h, ax_h, "skill (%)", symmetric=True)
+    map_cbar = {"shrink": 0.62, "pad": 0.012, "aspect": 30}
+    slim_colorbar(fig, im_e, ax_e, f"CRPS ({unit})", **map_cbar)
+    slim_colorbar(fig, im_f, ax_f, "skill (%)", symmetric=True, **map_cbar)
+    slim_colorbar(fig, im_g, ax_g, f"RMSE ({unit})", **map_cbar)
+    slim_colorbar(fig, im_h, ax_h, "skill (%)", symmetric=True, **map_cbar)
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
@@ -911,9 +904,7 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
         missing_panel(ax_b, "(b) Added value of the physical prior",
                       "Only one sampling strategy found in the ablation CSV.")
 
-    fig.text(0.01, -0.02, f"Same checkpoint, ensemble size, ODE steps, and conditioning; "
-                          f"only the initial noise prior changes. Values {provenance}.",
-             fontsize=7.2, color=TEXT_MUTED)
+    print(f"fig4 noise-ablation values: {provenance}")
     fig.tight_layout()
     return save_figure(fig, output_dir, "fig4_noise_ablation", formats, dpi)
 
@@ -972,10 +963,6 @@ def figure_5_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
     if handles:
         fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.06),
                    ncols=4, fontsize=8)
-    fig.text(0.01, -0.03,
-             "Extreme subset: observed monthly local q95 exceedances (PR additionally >= 5 mm/day). "
-             "Open markers show the corresponding all-case skill.",
-             fontsize=7.2, color=TEXT_MUTED)
     fig.tight_layout()
     return save_figure(fig, output_dir, "fig5_extreme_skill", formats, dpi)
 
