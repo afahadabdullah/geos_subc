@@ -63,7 +63,22 @@ SEASONS = {
     12: "DJF",
 }
 
+MONTH_ALIASES = {
+    "djf": {12, 1, 2},
+    "mam": {3, 4, 5},
+    "jja": {6, 7, 8},
+    "summer": {6, 7, 8},
+    "son": {9, 10, 11},
+}
+
 REGIONS = {
+    "global": {
+        "name": "Global",
+        "lat_min": -90.0,
+        "lat_max": 90.0,
+        "lon_min": 0.0,
+        "lon_max": 360.0,
+    },
     "south_asia": {
         "name": "South Asia",
         "lat_min": 5.0,
@@ -134,7 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--region",
         choices=tuple(REGIONS),
-        default="south_asia",
+        default="global",
         help="Named region used when --spatial_reduction regional_mean.",
     )
     parser.add_argument(
@@ -149,6 +164,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional .pt land mask with is_land or land_mask. Required for land/ocean masks.",
     )
     parser.add_argument("--lead_values", default="", help="Optional comma-separated lead values to keep.")
+    parser.add_argument(
+        "--init_months",
+        default="",
+        help=(
+            "Optional initialization months to keep, e.g. 6,7,8. "
+            "Season aliases DJF,MAM,JJA/ summer,SON are also accepted."
+        ),
+    )
     parser.add_argument("--max_inits_per_year", type=int, default=None)
     parser.add_argument(
         "--allow_missing_years",
@@ -196,6 +219,23 @@ def parse_int_list(text: str) -> list[int]:
     if not values:
         raise ValueError("Expected at least one integer value.")
     return sorted(dict.fromkeys(values))
+
+
+def parse_month_filter(text: str) -> set[int]:
+    months: set[int] = set()
+    for item in str(text or "").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        alias = MONTH_ALIASES.get(token.lower())
+        if alias is not None:
+            months.update(alias)
+            continue
+        month = int(token)
+        if month < 1 or month > 12:
+            raise ValueError(f"Invalid month {month}; expected values from 1 to 12.")
+        months.add(month)
+    return months
 
 
 def parse_variables(text: str) -> list[str]:
@@ -420,6 +460,19 @@ def valid_month_season(valid_time: pd.Timestamp) -> tuple[int | float, str]:
     return month, SEASONS[month]
 
 
+def filtered_init_indices(ds: xr.Dataset, sample_var: str, months: set[int], max_inits: int | None) -> list[int]:
+    indices = []
+    for init_idx in range(init_count(ds, sample_var)):
+        if months:
+            init_time = dataset_time_value(ds, ("init_time", "init", "time"), init_idx)
+            if pd.isna(init_time) or int(init_time.month) not in months:
+                continue
+        indices.append(init_idx)
+    if max_inits is not None:
+        indices = indices[: int(max_inits)]
+    return indices
+
+
 def load_forecast_array(ds: xr.Dataset, var_name: str, init_idx: int, lead_idx: int) -> np.ndarray:
     da = ds[var_name]
     init_dim = find_dim(da.dims, ("init", "initialization", "time"), "init")
@@ -449,6 +502,8 @@ def area_weights_from_lats(lats: np.ndarray, lon_count: int) -> np.ndarray:
 
 def longitude_mask(lons: np.ndarray, lon_min: float, lon_max: float) -> np.ndarray:
     lons = np.asarray(lons, dtype=np.float64)
+    if abs(float(lon_max) - float(lon_min)) >= 360.0:
+        return np.ones(lons.shape, dtype=bool)
     if np.nanmax(lons) > 180.0:
         lon_min = lon_min % 360.0
         lon_max = lon_max % 360.0
@@ -1195,6 +1250,7 @@ def main() -> None:
     sample_sizes = parse_int_list(args.sample_sizes)
     skip_years = parse_int_set(args.skip_years)
     lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
+    init_months = parse_month_filter(args.init_months)
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
@@ -1223,6 +1279,8 @@ def main() -> None:
         "spatial_reduction": args.spatial_reduction,
         "region": active_region if args.spatial_reduction == "regional_mean" else None,
         "region_bounds": region_bounds if args.spatial_reduction == "regional_mean" else None,
+        "init_months": sorted(init_months),
+        "max_inits_per_year": args.max_inits_per_year,
         "started_at": timestamp_now_utc(),
     }
 
@@ -1231,6 +1289,7 @@ def main() -> None:
     metric_mask = None
     metric_weights = None
     processed_cases = 0
+    selected_init_counts_by_year: dict[str, int] = {}
     start_time = time.time()
 
     for year in years:
@@ -1267,13 +1326,21 @@ def main() -> None:
             lead_pairs = lead_index_values(ds, VARIABLES[variables[0]]["model"])
             if lead_filter is not None:
                 lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
-            n_init = init_count(ds, VARIABLES[variables[0]]["model"])
-            if args.max_inits_per_year is not None:
-                n_init = min(n_init, int(args.max_inits_per_year))
+            sample_var = VARIABLES[variables[0]]["model"]
+            total_inits = init_count(ds, sample_var)
+            init_indices = filtered_init_indices(ds, sample_var, init_months, args.max_inits_per_year)
+            selected_init_counts_by_year[str(year)] = len(init_indices)
+            if init_months or args.max_inits_per_year is not None:
+                month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
+                print(
+                    f"Init filter for {year}: months={month_text}; "
+                    f"selected {len(init_indices)}/{total_inits} init dates"
+                )
 
-            for init_idx in range(n_init):
+            for init_idx in init_indices:
                 for lead_idx, lead_value in lead_pairs:
                     init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                    init_month, init_season = valid_month_season(init_time)
                     valid_month, valid_season = valid_month_season(valid_time)
                     case_id = f"{year}_{init_idx:04d}_lead{lead_value}"
                     for variable in variables:
@@ -1346,6 +1413,8 @@ def main() -> None:
                                     "year": year,
                                     "init_index": init_idx,
                                     "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                    "init_month": init_month,
+                                    "init_season": init_season,
                                     "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
                                     "valid_month": valid_month,
                                     "valid_season": valid_season,
@@ -1398,6 +1467,7 @@ def main() -> None:
     metadata.update(
         {
             "processed_init_lead_cases": processed_cases,
+            "selected_init_counts_by_year": selected_init_counts_by_year,
             "case_member_rows": int(len(case_df)),
             "completed_at": timestamp_now_utc(),
             "elapsed_seconds": float(time.time() - start_time),
