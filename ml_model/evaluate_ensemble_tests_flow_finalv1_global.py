@@ -63,6 +63,16 @@ SEASONS = {
     12: "DJF",
 }
 
+REGIONS = {
+    "south_asia": {
+        "name": "South Asia",
+        "lat_min": 5.0,
+        "lat_max": 35.0,
+        "lon_min": 60.0,
+        "lon_max": 100.0,
+    },
+}
+
 SUM_COLUMNS = [
     "model_weight_sum",
     "model_crps_sum",
@@ -112,6 +122,26 @@ def parse_args() -> argparse.Namespace:
         help="Bootstrap repeats over initialization/lead cases for confidence intervals; <=0 disables.",
     )
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--spatial_reduction",
+        choices=("gridpoint", "regional_mean"),
+        default="gridpoint",
+        help=(
+            "gridpoint verifies each grid cell then area-averages scores; regional_mean first "
+            "area-averages each member/observation over --region, then verifies the regional mean."
+        ),
+    )
+    parser.add_argument(
+        "--region",
+        choices=tuple(REGIONS),
+        default="south_asia",
+        help="Named region used when --spatial_reduction regional_mean.",
+    )
+    parser.add_argument(
+        "--region_bounds",
+        default="",
+        help="Optional custom region bounds as lat_min,lat_max,lon_min,lon_max.",
+    )
     parser.add_argument("--eval_mask", choices=("all", "land", "ocean"), default="all")
     parser.add_argument(
         "--land_mask_file",
@@ -176,6 +206,28 @@ def parse_variables(text: str) -> list[str]:
     if not variables:
         raise ValueError("--variables cannot be empty.")
     return variables
+
+
+def parse_region_bounds(text: str, region: str) -> dict[str, float | str]:
+    if str(text or "").strip():
+        parts = [float(item.strip()) for item in str(text).split(",") if item.strip()]
+        if len(parts) != 4:
+            raise ValueError("--region_bounds must be lat_min,lat_max,lon_min,lon_max.")
+        lat_min, lat_max, lon_min, lon_max = parts
+        return {
+            "name": "Custom region",
+            "lat_min": min(lat_min, lat_max),
+            "lat_max": max(lat_min, lat_max),
+            "lon_min": lon_min,
+            "lon_max": lon_max,
+        }
+    if region not in REGIONS:
+        raise ValueError(f"Unknown region {region!r}; valid regions are {sorted(REGIONS)}")
+    return dict(REGIONS[region])
+
+
+def region_key(args: argparse.Namespace, region_bounds: dict[str, float | str]) -> str:
+    return "custom" if str(args.region_bounds or "").strip() else str(args.region)
 
 
 def store_path(forecast_dir: str, year: int) -> Path:
@@ -395,6 +447,31 @@ def area_weights_from_lats(lats: np.ndarray, lon_count: int) -> np.ndarray:
     return np.broadcast_to(weights[:, None], (weights.size, lon_count)).astype(np.float64, copy=False)
 
 
+def longitude_mask(lons: np.ndarray, lon_min: float, lon_max: float) -> np.ndarray:
+    lons = np.asarray(lons, dtype=np.float64)
+    if np.nanmax(lons) > 180.0:
+        lon_min = lon_min % 360.0
+        lon_max = lon_max % 360.0
+        lons_norm = lons % 360.0
+    else:
+        lon_min = ((lon_min + 180.0) % 360.0) - 180.0
+        lon_max = ((lon_max + 180.0) % 360.0) - 180.0
+        lons_norm = ((lons + 180.0) % 360.0) - 180.0
+    if lon_min <= lon_max:
+        return (lons_norm >= lon_min) & (lons_norm <= lon_max)
+    return (lons_norm >= lon_min) | (lons_norm <= lon_max)
+
+
+def region_mask_from_bounds(lats: np.ndarray, lons: np.ndarray, region_bounds: dict[str, float | str]) -> np.ndarray:
+    lat_min = float(region_bounds["lat_min"])
+    lat_max = float(region_bounds["lat_max"])
+    lon_min = float(region_bounds["lon_min"])
+    lon_max = float(region_bounds["lon_max"])
+    lat_mask = (np.asarray(lats, dtype=np.float64) >= lat_min) & (np.asarray(lats, dtype=np.float64) <= lat_max)
+    lon_mask = longitude_mask(lons, lon_min, lon_max)
+    return lat_mask[:, None] & lon_mask[None, :]
+
+
 def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int]) -> np.ndarray:
     if args.eval_mask == "all":
         return np.ones(shape, dtype=bool)
@@ -413,6 +490,37 @@ def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int]) -> np.ndarr
     if land_mask.shape != shape:
         raise ValueError(f"Land mask shape {land_mask.shape} does not match forecast grid {shape}.")
     return land_mask if args.eval_mask == "land" else ~land_mask
+
+
+def weighted_spatial_mean(field: np.ndarray, weights: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    field64 = np.asarray(field, dtype=np.float64)
+    weights64 = np.asarray(weights, dtype=np.float64)
+    mask_bool = np.asarray(mask, dtype=bool)
+    valid = np.isfinite(field64) & mask_bool
+    weighted = np.where(valid, field64 * weights64, 0.0)
+    denom = np.sum(np.where(valid, weights64, 0.0), axis=(-2, -1))
+    numer = np.sum(weighted, axis=(-2, -1))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = numer / denom
+    return np.where(denom > 0.0, out, np.nan)
+
+
+def regional_mean_metric_inputs(
+    model: np.ndarray,
+    geos: np.ndarray,
+    obs: np.ndarray,
+    weights: np.ndarray,
+    mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    obs_mean = weighted_spatial_mean(obs, weights, mask)
+    model_mean = weighted_spatial_mean(model, weights, mask)
+    geos_mean = weighted_spatial_mean(geos, weights, mask)
+    metric_obs = np.asarray([[obs_mean]], dtype=np.float32)
+    metric_model = np.asarray(model_mean[:, None, None], dtype=np.float32)
+    metric_geos = np.asarray(geos_mean[:, None, None], dtype=np.float32)
+    metric_weights = np.ones((1, 1), dtype=np.float64)
+    metric_mask = np.ones((1, 1), dtype=bool)
+    return metric_model, metric_geos, metric_obs, metric_weights, metric_mask
 
 
 def crps_map(ensemble: np.ndarray, obs: np.ndarray) -> np.ndarray:
@@ -945,6 +1053,79 @@ def plot_rank_histograms(rank_df: pd.DataFrame, plot_dir: Path) -> list[Path]:
     return outputs
 
 
+def plot_diagnostics_dashboard(summary: pd.DataFrame, dispersion: pd.DataFrame, plot_dir: Path) -> Path | None:
+    if summary.empty:
+        return None
+    plt = _import_matplotlib()
+    variables = available_variables(summary, dispersion)
+    if not variables:
+        return None
+
+    nrows = len(variables)
+    fig, axes = plt.subplots(nrows, 4, figsize=(18.5, 4.2 * nrows), squeeze=False)
+    lead_colors = plt.cm.viridis(np.linspace(0.12, 0.88, max(1, int(summary["lead"].nunique()))))
+    columns = [
+        ("crps_skill_pct_mean", "CRPS skill (%)", True),
+        ("rmse_skill_pct_mean", "RMSE skill (%)", True),
+        ("model_spread_rmse_ratio_mean", "FlowMatch spread / RMSE", False),
+    ]
+
+    for row_idx, variable in enumerate(variables):
+        sub = summary[summary["variable"] == variable]
+        leads = sorted(sub["lead"].dropna().unique())
+        for col_idx, (metric, ylabel, zero_line) in enumerate(columns):
+            ax = axes[row_idx, col_idx]
+            for color, lead in zip(lead_colors, leads):
+                line = sub[sub["lead"] == lead].sort_values("member_count")
+                ax.plot(
+                    line["member_count"].to_numpy(dtype=float),
+                    line[metric].to_numpy(dtype=float),
+                    marker="o",
+                    linewidth=1.5,
+                    label=f"W{int(lead)}",
+                    color=color,
+                )
+            if zero_line:
+                ax.axhline(0.0, color="0.35", linewidth=0.8, linestyle="--")
+            if "spread" in metric:
+                ax.axhline(1.0, color="0.35", linewidth=0.8, linestyle="--")
+            ax.set_title(ylabel)
+            ax.set_xlabel("Generated members")
+            ax.set_ylabel(variable_title(variable) if col_idx == 0 else ylabel)
+            ax.grid(True, alpha=0.25)
+            ax.legend(frameon=False, fontsize=7, ncol=2)
+
+        ax = axes[row_idx, 3]
+        disp = dispersion[dispersion["variable"] == variable] if not dispersion.empty else pd.DataFrame()
+        if not disp.empty and "rank_edge_mass_ratio" in disp:
+            for source, group in disp.groupby("source"):
+                group = group.sort_values("lead")
+                ax.plot(
+                    group["lead"].to_numpy(dtype=float),
+                    group["rank_edge_mass_ratio"].to_numpy(dtype=float),
+                    marker="o",
+                    linewidth=1.7,
+                    label=source_title(source),
+                )
+            ax.axhline(1.0, color="0.35", linewidth=0.8, linestyle="--")
+            ax.set_xticks(sorted(disp["lead"].dropna().unique()))
+        else:
+            ax.text(0.5, 0.5, "rank diagnostics unavailable", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("Rank edge-mass ratio")
+        ax.set_xlabel("Lead week")
+        ax.set_ylabel("Observed outside ensemble / uniform")
+        ax.grid(True, alpha=0.25)
+        ax.legend(frameon=False, fontsize=8)
+
+    fig.suptitle("Ensemble Diagnostics Dashboard", fontsize=15)
+    fig.tight_layout()
+    path = plot_dir / "ensemble_diagnostics_dashboard.png"
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+    print(f"Wrote {path}")
+    return path
+
+
 def make_diagnostic_plots(out_dir: Path) -> list[str]:
     summary = read_existing_csv(out_dir / "ensemble_size_summary.csv", required=True)
     bootstrap = read_existing_csv(out_dir / "ensemble_size_bootstrap_ci.csv")
@@ -954,6 +1135,9 @@ def make_diagnostic_plots(out_dir: Path) -> list[str]:
     plot_dir = out_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
+    dashboard = plot_diagnostics_dashboard(summary, dispersion, plot_dir)
+    if dashboard is not None:
+        outputs.append(dashboard)
     for metric, ylabel, title, filename, zero_line in [
         (
             "crps_skill_pct",
@@ -1005,6 +1189,8 @@ def main() -> None:
         make_diagnostic_plots(out_dir)
         return
 
+    region_bounds = parse_region_bounds(args.region_bounds, args.region)
+    active_region = region_key(args, region_bounds)
     variables = parse_variables(args.variables)
     sample_sizes = parse_int_list(args.sample_sizes)
     skip_years = parse_int_set(args.skip_years)
@@ -1034,11 +1220,16 @@ def main() -> None:
         "land_mask_file": os.path.abspath(args.land_mask_file) if args.land_mask_file else None,
         "rank_bins": args.rank_bins,
         "rank_histogram": not args.skip_rank_histogram,
+        "spatial_reduction": args.spatial_reduction,
+        "region": active_region if args.spatial_reduction == "regional_mean" else None,
+        "region_bounds": region_bounds if args.spatial_reduction == "regional_mean" else None,
         "started_at": timestamp_now_utc(),
     }
 
     eval_mask = None
     weights = None
+    metric_mask = None
+    metric_weights = None
     processed_cases = 0
     start_time = time.time()
 
@@ -1051,6 +1242,26 @@ def main() -> None:
             if eval_mask is None:
                 eval_mask = load_eval_mask(args, (len(lats), len(lons)))
                 weights = area_weights_from_lats(lats, len(lons))
+                if args.spatial_reduction == "regional_mean":
+                    region_mask = region_mask_from_bounds(lats, lons, region_bounds)
+                    eval_mask = eval_mask & region_mask
+                    kept = int(np.sum(eval_mask))
+                    if kept <= 0:
+                        raise ValueError(
+                            f"Regional mask for {region_bounds['name']} kept zero grid cells. "
+                            f"Bounds={region_bounds}"
+                        )
+                    print(
+                        f"Regional mean: {region_bounds['name']} "
+                        f"lat={region_bounds['lat_min']}..{region_bounds['lat_max']} "
+                        f"lon={region_bounds['lon_min']}..{region_bounds['lon_max']}; "
+                        f"kept {kept}/{eval_mask.size} grid cells after eval_mask={args.eval_mask}"
+                    )
+                    metric_weights = np.ones((1, 1), dtype=np.float64)
+                    metric_mask = np.ones((1, 1), dtype=bool)
+                else:
+                    metric_weights = weights
+                    metric_mask = eval_mask
                 kept = int(np.sum(eval_mask))
                 print(f"Evaluation mask: {args.eval_mask}; kept {kept}/{eval_mask.size} grid cells")
             lead_pairs = lead_index_values(ds, VARIABLES[variables[0]]["model"])
@@ -1070,17 +1281,24 @@ def main() -> None:
                         obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
                         model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
                         geos = load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
+                        if args.spatial_reduction == "regional_mean":
+                            model_eval, geos_eval, obs_eval, case_weights, case_mask = regional_mean_metric_inputs(
+                                model, geos, obs, weights, eval_mask
+                            )
+                        else:
+                            model_eval, geos_eval, obs_eval = model, geos, obs
+                            case_weights, case_mask = metric_weights, metric_mask
                         model_members = int(model.shape[0])
                         geos_members = int(geos.shape[0])
                         usable_sizes = [size for size in sample_sizes if size <= model_members]
                         if not usable_sizes:
                             usable_sizes = [model_members]
 
-                        geos_fields = metric_fields(geos, obs)
-                        model_full_fields = metric_fields(model, obs)
-                        common_full = eval_mask & geos_fields["finite"] & model_full_fields["finite"]
-                        geos_reduced = reduce_fields(geos_fields, weights, common_full, "geos")
-                        model_full_reduced = reduce_fields(model_full_fields, weights, common_full, "model")
+                        geos_fields = metric_fields(geos_eval, obs_eval)
+                        model_full_fields = metric_fields(model_eval, obs_eval)
+                        common_full = case_mask & geos_fields["finite"] & model_full_fields["finite"]
+                        geos_reduced = reduce_fields(geos_fields, case_weights, common_full, "geos")
+                        model_full_reduced = reduce_fields(model_full_fields, case_weights, common_full, "model")
                         update_dispersion_state(dispersion_state, "geos", variable, lead_value, geos_reduced, "geos")
                         update_dispersion_state(
                             dispersion_state, "model", variable, lead_value, model_full_reduced, "model"
@@ -1091,10 +1309,10 @@ def main() -> None:
                                 "geos",
                                 variable,
                                 lead_value,
-                                geos,
-                                obs,
-                                weights,
-                                eval_mask,
+                                geos_eval,
+                                obs_eval,
+                                case_weights,
+                                case_mask,
                                 rng,
                                 args.rank_bins,
                             )
@@ -1103,10 +1321,10 @@ def main() -> None:
                                 "model",
                                 variable,
                                 lead_value,
-                                model,
-                                obs,
-                                weights,
-                                eval_mask,
+                                model_eval,
+                                obs_eval,
+                                case_weights,
+                                case_mask,
                                 rng,
                                 args.rank_bins,
                             )
@@ -1118,11 +1336,11 @@ def main() -> None:
                                     member_idx = np.arange(model_members)
                                 else:
                                     member_idx = rng.choice(model_members, size=size, replace=False)
-                                sample = model[member_idx, :, :]
-                                sample_fields = metric_fields(sample, obs)
-                                common = eval_mask & geos_fields["finite"] & sample_fields["finite"]
-                                model_reduced = reduce_fields(sample_fields, weights, common, "model")
-                                geos_for_sample = reduce_fields(geos_fields, weights, common, "geos")
+                                sample = model_eval[member_idx, :, :]
+                                sample_fields = metric_fields(sample, obs_eval)
+                                common = case_mask & geos_fields["finite"] & sample_fields["finite"]
+                                model_reduced = reduce_fields(sample_fields, case_weights, common, "model")
+                                geos_for_sample = reduce_fields(geos_fields, case_weights, common, "geos")
                                 row = {
                                     "case_id": case_id,
                                     "year": year,
@@ -1137,6 +1355,8 @@ def main() -> None:
                                     "member_repeat": int(member_repeat),
                                     "model_members_available": model_members,
                                     "geos_members_available": geos_members,
+                                    "spatial_reduction": args.spatial_reduction,
+                                    "region": active_region if args.spatial_reduction == "regional_mean" else "",
                                 }
                                 row.update(model_reduced)
                                 row.update(geos_for_sample)
