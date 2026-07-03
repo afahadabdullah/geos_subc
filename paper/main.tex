@@ -158,16 +158,9 @@ The configured validation values are $\beta_{\mathrm{PR}}=0.45$ and $\beta_{\mat
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.98\linewidth]{fig1_system_overview}
-\caption{Overview of the \methodname{} forecast-refinement framework. \modelshort{} provides dynamical ensemble guidance, recent observations provide land-ocean-atmosphere context, static geography supplies persistent spatial information, and the flow-matching model generates probabilistic weekly forecasts for precipitation and 2 m temperature.}
+\includegraphics[width=0.98\linewidth]{figures/fig1_framework_overview}
+\caption{Combined overview of the \methodname{} forecast-refinement framework. \modelshort{} guidance, recent observations, static geography, season, and lead information condition a flow-matching ensemble generator. Gaussian or physically informed EOF-LHS perturbations define the initial ensemble prior, and the learned flow maps those states to weekly precipitation and 2 m temperature ensembles evaluated with all-case, spatial, calibration, and event-tail metrics.}
 \label{fig:overview}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.98\linewidth]{fig2_architecture_sampling}
-\caption{Architecture and probabilistic sampling pathway. The final figure should distinguish the deterministic velocity pathway from the stochastic initial-state and variance-tempering components, and should show that PR and T2M have separate lead-specific heads.}
-\label{fig:architecture}
 \end{figure}
 
 \FloatBarrier

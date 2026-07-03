@@ -14,13 +14,12 @@ as a clear missing-data note so the full figure set can still be regenerated
 while final runs are pending.
 
 Figure layout (approved):
-  1  System overview schematic
-  2  Architecture and sampling detail schematic
-  3  Global PR skill: lead bars + season-lead heatmaps + spatial maps (3x2)
-  4  Global T2M skill: same structure as Fig 3 (3x2)
-  5  Extreme-event subset: PR + T2M CRPS/RMSE skill bars (2x2)
-  6  California AR flood PR case study (2x3 cropped panels)
-  7  UK heat event T2M case study (2x3 cropped panels)
+  1  Combined framework, architecture, and sampling schematic
+  2  Global PR skill: lead bars + season-lead heatmaps + spatial maps (3x2)
+  3  Global T2M skill: same structure as Fig 2 (3x2)
+  4  Extreme-event subset: PR + T2M CRPS/RMSE skill bars (2x2)
+  5  California AR flood PR case study (2x3 cropped panels)
+  6  UK heat event T2M case study (2x3 cropped panels)
 """
 
 from __future__ import annotations
@@ -605,60 +604,96 @@ def draw_box(
 
 
 # ===================================================================
-# Figure 1 — System overview (schematic, unchanged)
+# Figure 1 — Combined framework overview
 # ===================================================================
 
-def figure_1_system_overview(output_dir: Path, formats: list[str], dpi: int) -> list[Path]:
-    fig, ax = plt.subplots(figsize=(11.0, 6.8))
+def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) -> list[Path]:
+    fig, ax = plt.subplots(figsize=(11.6, 5.4))
     style_figure(
         fig,
-        "Figure 1. Forecast-system overview",
-        "Dynamical guidance, observed context, stochastic flow sampling, and verification outputs.",
+        "Figure 1. Forecast-refinement framework",
+        "FIMr1p1 guidance and observed context condition a flow-matching ensemble generator.",
     )
     ax.set_axis_off()
 
-    draw_box(ax, (0.03, 0.66), (0.22, 0.18), "Recent observed context",
-             "SST, SSS, soil moisture, IVT, Z500 zonal deviation, U250, MJO wave; four pre-init weeks.",
-             "#eaf3f8")
-    draw_box(ax, (0.03, 0.42), (0.22, 0.17), f"{BASELINE} ensemble guidance",
-             "PR and T2M weekly lead summaries: mean, spread, q10, q90, member count.",
-             "#f8ece6")
-    draw_box(ax, (0.03, 0.20), (0.22, 0.15), "Static + calendar",
-             "Elevation, land mask, coordinates, season phase, and lead encoding.",
-             "#eef4ea")
+    col_x = [0.035, 0.285, 0.535, 0.785]
+    col_w = 0.185
+    top_y = 0.62
+    box_h = 0.24
 
-    draw_box(ax, (0.34, 0.57), (0.23, 0.20), "Conditioning builder",
-             "Local target-grid channels plus global context tokens for large-scale circulation.",
-             "#f7f7f7")
-    draw_box(ax, (0.34, 0.28), (0.23, 0.20), "Flow-matching model",
-             "Shared U-Net backbone with global-token cross-attention and PR/T2M lead-specific heads.",
-             "#edf1fb")
-    draw_box(ax, (0.34, 0.07), (0.23, 0.13), "Structured prior",
-             "EOF-conditioned perturbations blended with random noise.",
-             "#f3eefe")
+    draw_box(
+        ax,
+        (col_x[0], top_y),
+        (col_w, box_h),
+        "Forecast inputs",
+        f"{BASELINE} PR/T2M ensemble summaries, recent observed predictors, static geography, season, and lead week.",
+        "#eef6fb",
+        body_wrap=27,
+    )
+    draw_box(
+        ax,
+        (col_x[1], top_y),
+        (col_w, box_h),
+        "Physical ensemble prior",
+        "Gaussian baseline or EOF-LHS perturbations conditioned on MJO, NAO, ENSO, and lead.",
+        "#f3eefe",
+        body_wrap=27,
+    )
+    draw_box(
+        ax,
+        (col_x[2], top_y),
+        (col_w, box_h),
+        "Conditional flow model",
+        "Shared U-Net representation with global context tokens and separate PR/T2M lead heads.",
+        "#edf1fb",
+        body_wrap=27,
+    )
+    draw_box(
+        ax,
+        (col_x[3], top_y),
+        (col_w, box_h),
+        "Weekly ensemble outputs",
+        "90-member PR and T2M forecasts for weeks 1-4, evaluated with CRPS, RMSE, BSS, spatial maps, and event diagnostics.",
+        "#eaf5ef",
+        body_wrap=28,
+    )
 
-    draw_box(ax, (0.66, 0.51), (0.23, 0.20), "Probabilistic sampler",
-             "Euler ODE integration from x0 to x1 with variance-tempered spread control.",
-             "#fff6db")
-    draw_box(ax, (0.66, 0.26), (0.23, 0.16), "Weekly ensemble forecast",
-             "90-member PR and T2M forecasts for lead weeks 1-4.",
-             "#eaf5ef")
-    draw_box(ax, (0.66, 0.06), (0.23, 0.13), "Verification products",
-             "CRPS, RMSE, BSS, calibration, spatial maps, and event tail-risk metrics.",
-             "#f7eeee")
+    for i in range(3):
+        add_arrow(ax, (col_x[i] + col_w + 0.015, top_y + box_h / 2), (col_x[i + 1] - 0.015, top_y + box_h / 2))
 
-    for y in (0.75, 0.505, 0.275):
-        add_arrow(ax, (0.25, y), (0.34, 0.66 if y > 0.6 else 0.40))
-    add_arrow(ax, (0.57, 0.67), (0.66, 0.61))
-    add_arrow(ax, (0.57, 0.38), (0.66, 0.58))
-    add_arrow(ax, (0.57, 0.14), (0.66, 0.54), color="#8a69a6")
-    add_arrow(ax, (0.775, 0.51), (0.775, 0.42))
-    add_arrow(ax, (0.775, 0.26), (0.775, 0.19))
+    draw_box(
+        ax,
+        (0.13, 0.24),
+        (0.27, 0.20),
+        "Why the prior matters",
+        "Structured perturbations give the ODE coherent large-scale covariance at t=0 instead of asking the model to build it from white noise.",
+        "#fff6db",
+        body_wrap=39,
+    )
+    draw_box(
+        ax,
+        (0.47, 0.24),
+        (0.27, 0.20),
+        "Sampling",
+        "Euler integration maps x0 to forecast fields; variance tempering adjusts spread without changing the learned velocity path.",
+        "#fef1df",
+        body_wrap=39,
+    )
 
-    ax.text(0.08, 0.88, "Inputs", transform=ax.transAxes, fontsize=10, fontweight="bold", color=TEXT_MUTED)
-    ax.text(0.39, 0.88, "Conditional model", transform=ax.transAxes, fontsize=10, fontweight="bold", color=TEXT_MUTED)
-    ax.text(0.70, 0.88, "Outputs", transform=ax.transAxes, fontsize=10, fontweight="bold", color=TEXT_MUTED)
-    return save_figure(fig, output_dir, "fig1_system_overview", formats, dpi)
+    add_arrow(ax, (col_x[1] + col_w / 2, top_y), (0.265, 0.44), color="#8a69a6")
+    add_arrow(ax, (0.40, 0.34), (0.47, 0.34), color="#8a69a6")
+    add_arrow(ax, (0.605, 0.44), (col_x[2] + col_w / 2, top_y), color="#8a69a6")
+
+    ax.text(
+        0.13,
+        0.12,
+        "Noise ablation: EOF-LHS higher-spread prior improves mean CRPS over Gaussian "
+        "(PR 28.4% vs 24.9%; T2M 43.2% vs 41.7% relative to FIMr1p1).",
+        transform=ax.transAxes,
+        fontsize=9.2,
+        color=TEXT_MUTED,
+    )
+    return save_figure(fig, output_dir, "fig1_framework_overview", formats, dpi)
 
 
 # ===================================================================
@@ -1720,31 +1755,28 @@ def main() -> None:
 
     written: list[Path] = []
 
-    # Fig 1 — System overview (schematic)
-    written.extend(figure_1_system_overview(output_dir, formats, args.dpi))
+    # Fig 1 — Combined framework, architecture, and sampling schematic
+    written.extend(figure_1_framework_overview(output_dir, formats, args.dpi))
 
-    # Fig 2 — Architecture (schematic)
-    written.extend(figure_2_architecture(output_dir, formats, args.dpi))
-
-    # Fig 3 — Global PR skill (3x2)
+    # Fig 2 — Global PR skill (3x2)
     written.extend(figure_3_pr_skill(
         output_dir, formats, args.dpi, summary, matrix_dir,
         args.matrix_subset, args.spatial_subset,
     ))
 
-    # Fig 4 — Global T2M skill (3x2)
+    # Fig 3 — Global T2M skill (3x2)
     written.extend(figure_4_t2m_skill(
         output_dir, formats, args.dpi, summary, matrix_dir,
         args.matrix_subset, args.spatial_subset,
     ))
 
-    # Fig 5 — Extreme-event subset skill (2x2)
+    # Fig 4 — Extreme-event subset skill (2x2)
     written.extend(figure_5_extreme_subset(output_dir, formats, args.dpi, summary))
 
-    # Fig 6 — California AR flood case study (2x3 cropped panels)
+    # Fig 5 — California AR flood case study (2x3 cropped panels)
     written.extend(figure_6_event_pr(output_dir, formats, args.dpi, event_dir, quantile_dir, event_df, quantile_df))
 
-    # Fig 7 — UK heat event case study (2x3 cropped panels)
+    # Fig 6 — UK heat event case study (2x3 cropped panels)
     written.extend(figure_7_event_t2m(output_dir, formats, args.dpi, event_dir, quantile_dir, event_df, quantile_df))
 
     print(f"\nWrote {len(written)} figure files:")
