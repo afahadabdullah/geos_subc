@@ -108,6 +108,124 @@ REGIONS = {
         "lon_min": -11.0,
         "lon_max": 3.0,
     },
+    "western_north_america": {
+        "name": "Western North America",
+        "lat_min": 32.0,
+        "lat_max": 55.0,
+        "lon_min": -125.0,
+        "lon_max": -105.0,
+    },
+    "central_north_america": {
+        "name": "Central North America",
+        "lat_min": 30.0,
+        "lat_max": 50.0,
+        "lon_min": -105.0,
+        "lon_max": -85.0,
+    },
+    "eastern_north_america": {
+        "name": "Eastern North America",
+        "lat_min": 30.0,
+        "lat_max": 50.0,
+        "lon_min": -85.0,
+        "lon_max": -65.0,
+    },
+    "central_america": {
+        "name": "Central America",
+        "lat_min": 10.0,
+        "lat_max": 25.0,
+        "lon_min": -110.0,
+        "lon_max": -75.0,
+    },
+    "western_europe": {
+        "name": "Western Europe",
+        "lat_min": 36.0,
+        "lat_max": 60.0,
+        "lon_min": -10.0,
+        "lon_max": 15.0,
+    },
+    "eastern_europe": {
+        "name": "Eastern Europe",
+        "lat_min": 40.0,
+        "lat_max": 60.0,
+        "lon_min": 15.0,
+        "lon_max": 35.0,
+    },
+    "mediterranean": {
+        "name": "Mediterranean",
+        "lat_min": 30.0,
+        "lat_max": 45.0,
+        "lon_min": -10.0,
+        "lon_max": 40.0,
+    },
+    "middle_east": {
+        "name": "Middle East",
+        "lat_min": 20.0,
+        "lat_max": 40.0,
+        "lon_min": 35.0,
+        "lon_max": 65.0,
+    },
+    "central_asia": {
+        "name": "Central Asia",
+        "lat_min": 35.0,
+        "lat_max": 50.0,
+        "lon_min": 60.0,
+        "lon_max": 90.0,
+    },
+    "east_asia": {
+        "name": "East Asia",
+        "lat_min": 25.0,
+        "lat_max": 45.0,
+        "lon_min": 100.0,
+        "lon_max": 145.0,
+    },
+    "southeast_asia": {
+        "name": "Southeast Asia",
+        "lat_min": -10.0,
+        "lat_max": 25.0,
+        "lon_min": 95.0,
+        "lon_max": 125.0,
+    },
+    "australia": {
+        "name": "Australia",
+        "lat_min": -40.0,
+        "lat_max": -15.0,
+        "lon_min": 110.0,
+        "lon_max": 155.0,
+    },
+    "southern_africa": {
+        "name": "Southern Africa",
+        "lat_min": -35.0,
+        "lat_max": -15.0,
+        "lon_min": 10.0,
+        "lon_max": 40.0,
+    },
+    "south_america": {
+        "name": "South America",
+        "lat_min": -40.0,
+        "lat_max": -15.0,
+        "lon_min": -75.0,
+        "lon_max": -45.0,
+    },
+}
+
+REGION_SETS = {
+    "heatwave": [
+        "western_north_america",
+        "central_north_america",
+        "eastern_north_america",
+        "central_america",
+        "western_europe",
+        "eastern_europe",
+        "mediterranean",
+        "middle_east",
+        "central_asia",
+        "south_asia",
+        "east_asia",
+        "southeast_asia",
+        "australia",
+        "southern_africa",
+        "south_america",
+    ],
 }
 
 SUM_COLUMNS = [
@@ -188,6 +306,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lead_values", default="", help="Optional comma-separated lead values to keep.")
     parser.add_argument("--init_dates", default="", help="Optional comma-separated init date(s), YYYY-MM-DD.")
     parser.add_argument("--valid_dates", default="", help="Optional comma-separated valid date(s), YYYY-MM-DD.")
+    parser.add_argument(
+        "--extreme_event_count",
+        type=int,
+        default=0,
+        help="If >0, scan requested years and select this many observed regional extreme events.",
+    )
+    parser.add_argument(
+        "--extreme_event_variable",
+        choices=tuple(VARIABLES),
+        default="t2m",
+        help="Observed variable used to rank extreme events.",
+    )
+    parser.add_argument(
+        "--extreme_event_regions",
+        default="heatwave",
+        help="Comma-separated region names or a region set name such as heatwave.",
+    )
+    parser.add_argument(
+        "--extreme_event_max_per_region",
+        type=int,
+        default=2,
+        help="Maximum selected events per region; <=0 disables the cap.",
+    )
     parser.add_argument(
         "--init_months",
         default="",
@@ -317,6 +458,27 @@ def parse_init_season_counts(text: str) -> dict[str, int]:
             raise ValueError("--init_season_counts values must be positive.")
         counts[season] = count
     return counts
+
+
+def parse_region_list(text: str) -> list[str]:
+    regions = []
+    for item in str(text or "").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if token in REGION_SETS:
+            regions.extend(REGION_SETS[token])
+            continue
+        if token not in REGIONS:
+            raise ValueError(
+                f"Unknown region {token!r}; valid regions are {sorted(REGIONS)} "
+                f"or region sets {sorted(REGION_SETS)}."
+            )
+        regions.append(token)
+    regions = list(dict.fromkeys(regions))
+    if not regions:
+        raise ValueError("Expected at least one region.")
+    return regions
 
 
 def parse_variables(text: str) -> list[str]:
@@ -691,6 +853,14 @@ def weighted_spatial_mean(field: np.ndarray, weights: np.ndarray, mask: np.ndarr
     return np.where(denom > 0.0, out, np.nan)
 
 
+def scalar_weighted_spatial_mean(field: np.ndarray, weights: np.ndarray, mask: np.ndarray) -> float:
+    value = weighted_spatial_mean(field, weights, mask)
+    try:
+        return float(np.asarray(value))
+    except Exception:
+        return np.nan
+
+
 def regional_mean_metric_inputs(
     model: np.ndarray,
     geos: np.ndarray,
@@ -951,6 +1121,124 @@ def rank_histogram_rows(rank_state: dict[tuple[str, str, int, int], np.ndarray])
                 }
             )
     return rows
+
+
+def select_extreme_event_cases(
+    args: argparse.Namespace,
+    years: list[int],
+    lead_filter: set[int] | None,
+    init_months: set[int],
+    init_date_filter: set[str],
+    valid_date_filter: set[str],
+    event_regions: list[str],
+) -> list[dict[str, object]]:
+    event_count = int(args.extreme_event_count)
+    if event_count <= 0:
+        return []
+
+    variable = str(args.extreme_event_variable)
+    obs_name = VARIABLES[variable]["obs"]
+    max_per_region = int(args.extreme_event_max_per_region)
+    candidates_by_region: dict[str, list[dict[str, object]]] = {region: [] for region in event_regions}
+    region_cell_counts: dict[str, int] = {}
+
+    for year in years:
+        path = store_path(args.forecast_dir, year)
+        ds = xr.open_zarr(path, consolidated=False, chunks=None)
+        try:
+            lats, lons = get_lat_lon(ds, VARIABLES[variable]["model"])
+            weights = area_weights_from_lats(lats, len(lons))
+            base_mask = load_eval_mask(args, (len(lats), len(lons)))
+            lead_pairs = lead_index_values(ds, VARIABLES[variable]["model"])
+            if lead_filter is not None:
+                lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
+            init_indices = filter_init_indices_by_dates(
+                ds,
+                filtered_init_indices(ds, VARIABLES[variable]["model"], init_months),
+                init_date_filter,
+            )
+
+            region_masks = {}
+            for region in event_regions:
+                bounds = REGIONS[region]
+                mask = base_mask & region_mask_from_bounds(lats, lons, bounds)
+                kept = int(np.sum(mask))
+                if kept <= 0:
+                    raise ValueError(f"Extreme-event region {region!r} kept zero grid cells.")
+                region_masks[region] = mask
+                region_cell_counts[region] = kept
+
+            for init_idx in init_indices:
+                for lead_idx, lead_value in lead_pairs:
+                    init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                    if valid_date_filter and date_key(valid_time) not in valid_date_filter:
+                        continue
+                    obs = load_obs_array(ds, obs_name, init_idx, lead_idx)
+                    for region in event_regions:
+                        score = scalar_weighted_spatial_mean(obs, weights, region_masks[region])
+                        if not np.isfinite(score):
+                            continue
+                        candidates_by_region[region].append(
+                            {
+                                "year": int(year),
+                                "init_idx": int(init_idx),
+                                "lead_idx": int(lead_idx),
+                                "lead": int(lead_value),
+                                "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
+                                "region": region,
+                                "region_name": str(REGIONS[region]["name"]),
+                                "event_score": float(score),
+                                "event_score_variable": variable,
+                                "region_cell_count": int(region_cell_counts[region]),
+                            }
+                        )
+        finally:
+            ds.close()
+
+    for region in event_regions:
+        candidates_by_region[region].sort(key=lambda item: float(item["event_score"]), reverse=True)
+
+    selected = []
+    selected_counts = {region: 0 for region in event_regions}
+    rank_position = 0
+    while len(selected) < event_count:
+        progressed = False
+        for region in event_regions:
+            if max_per_region > 0 and selected_counts[region] >= max_per_region:
+                continue
+            candidates = candidates_by_region[region]
+            if rank_position >= len(candidates):
+                continue
+            selected.append(dict(candidates[rank_position]))
+            selected_counts[region] += 1
+            progressed = True
+            if len(selected) >= event_count:
+                break
+        if not progressed:
+            break
+        rank_position += 1
+
+    if len(selected) < event_count:
+        available = {region: len(candidates_by_region[region]) for region in event_regions}
+        raise ValueError(
+            f"Requested {event_count} extreme events, but only selected {len(selected)}. "
+            f"Available candidates by region: {available}"
+        )
+
+    selected.sort(key=lambda item: float(item["event_score"]), reverse=True)
+    for rank, item in enumerate(selected, start=1):
+        item["event_rank"] = rank
+    print(
+        f"Selected {len(selected)} extreme {variable.upper()} events across {len(event_regions)} regions "
+        f"using observed regional mean."
+    )
+    for item in selected[: min(10, len(selected))]:
+        print(
+            f"  #{item['event_rank']:02d} {item['region']} score={float(item['event_score']):.3f} "
+            f"init={item['init_time'][:10]} valid={item['valid_time'][:10]} lead={item['lead']}"
+        )
+    return selected
 
 
 def aggregate_case_rows(case_df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
@@ -1397,6 +1685,8 @@ def main() -> None:
     valid_date_filter = parse_date_filter(args.valid_dates)
     init_months = parse_month_filter(args.init_months)
     init_season_counts = parse_init_season_counts(args.init_season_counts)
+    extreme_event_count = int(args.extreme_event_count)
+    event_regions = parse_region_list(args.extreme_event_regions) if extreme_event_count > 0 else []
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
         raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
     if int(args.init_stride) < 1:
@@ -1405,10 +1695,12 @@ def main() -> None:
         raise ValueError("--init_stride_offset must be in [0, --init_stride - 1].")
     if init_season_counts and int(args.init_stride) != 1:
         raise ValueError("--init_stride cannot be combined with --init_season_counts.")
-    use_region_mask = (
-        args.spatial_reduction == "regional_mean"
+    use_event_regions = extreme_event_count > 0
+    use_static_region_mask = (
+        not use_event_regions
+        and (args.spatial_reduction == "regional_mean"
         or active_region != "global"
-        or bool(str(args.region_bounds or "").strip())
+        or bool(str(args.region_bounds or "").strip()))
     )
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
@@ -1416,6 +1708,19 @@ def main() -> None:
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
         raise FileExistsError(f"{out_dir} already exists and is not empty. Use --overwrite to replace files.")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_event_cases = select_extreme_event_cases(
+        args,
+        years,
+        lead_filter,
+        init_months,
+        init_date_filter,
+        valid_date_filter,
+        event_regions,
+    )
+    selected_event_cases_by_year: dict[int, list[dict[str, object]]] = {}
+    for event in selected_event_cases:
+        selected_event_cases_by_year.setdefault(int(event["year"]), []).append(event)
 
     case_rows: list[dict[str, object]] = []
     dispersion_state: dict[tuple[str, str, int], dict[str, float]] = {}
@@ -1436,8 +1741,8 @@ def main() -> None:
         "rank_bins": args.rank_bins,
         "rank_histogram": not args.skip_rank_histogram,
         "spatial_reduction": args.spatial_reduction,
-        "region": active_region if use_region_mask else None,
-        "region_bounds": region_bounds if use_region_mask else None,
+        "region": active_region if use_static_region_mask else None,
+        "region_bounds": region_bounds if use_static_region_mask else None,
         "init_dates": sorted(init_date_filter),
         "valid_dates": sorted(valid_date_filter),
         "init_months": sorted(init_months),
@@ -1445,6 +1750,11 @@ def main() -> None:
         "init_stride": int(args.init_stride),
         "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
+        "extreme_event_count_requested": extreme_event_count,
+        "extreme_event_variable": args.extreme_event_variable if use_event_regions else None,
+        "extreme_event_regions": event_regions,
+        "extreme_event_max_per_region": args.extreme_event_max_per_region if use_event_regions else None,
+        "selected_extreme_events": selected_event_cases,
         "started_at": timestamp_now_utc(),
     }
 
@@ -1467,7 +1777,7 @@ def main() -> None:
             if eval_mask is None:
                 eval_mask = load_eval_mask(args, (len(lats), len(lons)))
                 weights = area_weights_from_lats(lats, len(lons))
-                if use_region_mask:
+                if use_static_region_mask:
                     region_mask = region_mask_from_bounds(lats, lons, region_bounds)
                     eval_mask = eval_mask & region_mask
                     kept = int(np.sum(eval_mask))
@@ -1496,147 +1806,189 @@ def main() -> None:
                 lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
             sample_var = VARIABLES[variables[0]]["model"]
             total_inits = init_count(ds, sample_var)
-            if init_season_counts:
-                init_indices, selected_by_season, available_by_season = filtered_init_indices_by_season_counts(
-                    ds, sample_var, init_season_counts
-                )
-                selected_init_season_counts_by_year[str(year)] = selected_by_season
-                available_init_season_counts_by_year[str(year)] = available_by_season
+            case_specs: list[dict[str, object]] = []
+            if use_event_regions:
+                year_events = selected_event_cases_by_year.get(int(year), [])
+                selected_init_counts_by_year[str(year)] = len({int(event["init_idx"]) for event in year_events})
+                if year_events:
+                    print(f"Extreme-event cases for {year}: {len(year_events)} region/init/lead cases")
+                case_specs = [dict(event) for event in year_events]
             else:
-                init_indices = filtered_init_indices(ds, sample_var, init_months)
-                init_indices = filter_init_indices_by_dates(ds, init_indices, init_date_filter)
-                init_indices = apply_init_stride(
-                    init_indices, int(args.init_stride), int(args.init_stride_offset)
-                )
-                if args.max_inits_per_year is not None:
-                    init_indices = init_indices[: int(args.max_inits_per_year)]
-                selected_by_season = {}
-                available_by_season = {}
-            selected_init_counts_by_year[str(year)] = len(init_indices)
-            if init_season_counts:
-                selected_text = ",".join(f"{season}={selected_by_season[season]}" for season in init_season_counts)
-                available_text = ",".join(f"{season}={available_by_season[season]}" for season in init_season_counts)
-                print(
-                    f"Init season-count filter for {year}: selected {selected_text}; "
-                    f"available {available_text}; total selected {len(init_indices)}/{total_inits}"
-                )
-            elif (
-                init_months
-                or init_date_filter
-                or args.max_inits_per_year is not None
-                or int(args.init_stride) != 1
-            ):
-                month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
-                init_date_text = ",".join(sorted(init_date_filter)) if init_date_filter else "all"
-                print(
-                    f"Init filter for {year}: months={month_text}; "
-                    f"init_dates={init_date_text}; "
-                    f"stride={int(args.init_stride)} offset={int(args.init_stride_offset)}; "
-                    f"selected {len(init_indices)}/{total_inits} init dates"
-                )
-
-            for init_idx in init_indices:
-                for lead_idx, lead_value in lead_pairs:
-                    init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
-                    if init_date_filter and date_key(init_time) not in init_date_filter:
-                        continue
-                    if valid_date_filter and date_key(valid_time) not in valid_date_filter:
-                        continue
-                    init_month, init_season = valid_month_season(init_time)
-                    valid_month, valid_season = valid_month_season(valid_time)
-                    case_id = f"{year}_{init_idx:04d}_lead{lead_value}"
-                    for variable in variables:
-                        spec = VARIABLES[variable]
-                        obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
-                        model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
-                        geos = load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
-                        if args.spatial_reduction == "regional_mean":
-                            model_eval, geos_eval, obs_eval, case_weights, case_mask = regional_mean_metric_inputs(
-                                model, geos, obs, weights, eval_mask
-                            )
-                        else:
-                            model_eval, geos_eval, obs_eval = model, geos, obs
-                            case_weights, case_mask = metric_weights, metric_mask
-                        model_members = int(model.shape[0])
-                        geos_members = int(geos.shape[0])
-                        usable_sizes = [size for size in sample_sizes if size <= model_members]
-                        if not usable_sizes:
-                            usable_sizes = [model_members]
-
-                        geos_fields = metric_fields(geos_eval, obs_eval)
-                        model_full_fields = metric_fields(model_eval, obs_eval)
-                        common_full = case_mask & geos_fields["finite"] & model_full_fields["finite"]
-                        geos_reduced = reduce_fields(geos_fields, case_weights, common_full, "geos")
-                        model_full_reduced = reduce_fields(model_full_fields, case_weights, common_full, "model")
-                        update_dispersion_state(dispersion_state, "geos", variable, lead_value, geos_reduced, "geos")
-                        update_dispersion_state(
-                            dispersion_state, "model", variable, lead_value, model_full_reduced, "model"
+                if init_season_counts:
+                    init_indices, selected_by_season, available_by_season = filtered_init_indices_by_season_counts(
+                        ds, sample_var, init_season_counts
+                    )
+                    selected_init_season_counts_by_year[str(year)] = selected_by_season
+                    available_init_season_counts_by_year[str(year)] = available_by_season
+                else:
+                    init_indices = filtered_init_indices(ds, sample_var, init_months)
+                    init_indices = filter_init_indices_by_dates(ds, init_indices, init_date_filter)
+                    init_indices = apply_init_stride(
+                        init_indices, int(args.init_stride), int(args.init_stride_offset)
+                    )
+                    if args.max_inits_per_year is not None:
+                        init_indices = init_indices[: int(args.max_inits_per_year)]
+                    selected_by_season = {}
+                    available_by_season = {}
+                selected_init_counts_by_year[str(year)] = len(init_indices)
+                if init_season_counts:
+                    selected_text = ",".join(
+                        f"{season}={selected_by_season[season]}" for season in init_season_counts
+                    )
+                    available_text = ",".join(
+                        f"{season}={available_by_season[season]}" for season in init_season_counts
+                    )
+                    print(
+                        f"Init season-count filter for {year}: selected {selected_text}; "
+                        f"available {available_text}; total selected {len(init_indices)}/{total_inits}"
+                    )
+                elif (
+                    init_months
+                    or init_date_filter
+                    or args.max_inits_per_year is not None
+                    or int(args.init_stride) != 1
+                ):
+                    month_text = ",".join(str(month) for month in sorted(init_months)) if init_months else "all"
+                    init_date_text = ",".join(sorted(init_date_filter)) if init_date_filter else "all"
+                    print(
+                        f"Init filter for {year}: months={month_text}; "
+                        f"init_dates={init_date_text}; "
+                        f"stride={int(args.init_stride)} offset={int(args.init_stride_offset)}; "
+                        f"selected {len(init_indices)}/{total_inits} init dates"
+                    )
+                for init_idx in init_indices:
+                    for lead_idx, lead_value in lead_pairs:
+                        case_specs.append(
+                            {
+                                "year": int(year),
+                                "init_idx": int(init_idx),
+                                "lead_idx": int(lead_idx),
+                                "lead": int(lead_value),
+                                "region": active_region if use_static_region_mask else "",
+                                "region_name": region_bounds["name"] if use_static_region_mask else "",
+                                "event_rank": "",
+                                "event_score": np.nan,
+                                "event_score_variable": "",
+                            }
                         )
-                        if not args.skip_rank_histogram:
-                            update_rank_state(
-                                rank_state,
-                                "geos",
-                                variable,
-                                lead_value,
-                                geos_eval,
-                                obs_eval,
-                                case_weights,
-                                case_mask,
-                                rng,
-                                args.rank_bins,
-                            )
-                            update_rank_state(
-                                rank_state,
-                                "model",
-                                variable,
-                                lead_value,
-                                model_eval,
-                                obs_eval,
-                                case_weights,
-                                case_mask,
-                                rng,
-                                args.rank_bins,
-                            )
 
-                        for size in usable_sizes:
-                            repeats = 1 if size >= model_members else max(1, int(args.member_bootstrap_repeats))
-                            for member_repeat in range(repeats):
-                                if size >= model_members:
-                                    member_idx = np.arange(model_members)
-                                else:
-                                    member_idx = rng.choice(model_members, size=size, replace=False)
-                                sample = model_eval[member_idx, :, :]
-                                sample_fields = metric_fields(sample, obs_eval)
-                                common = case_mask & geos_fields["finite"] & sample_fields["finite"]
-                                model_reduced = reduce_fields(sample_fields, case_weights, common, "model")
-                                geos_for_sample = reduce_fields(geos_fields, case_weights, common, "geos")
-                                row = {
-                                    "case_id": case_id,
-                                    "year": year,
-                                    "init_index": init_idx,
-                                    "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
-                                    "init_month": init_month,
-                                    "init_season": init_season,
-                                    "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
-                                    "valid_month": valid_month,
-                                    "valid_season": valid_season,
-                                    "lead": int(lead_value),
-                                    "variable": variable,
-                                    "member_count": int(size),
-                                    "member_repeat": int(member_repeat),
-                                    "model_members_available": model_members,
-                                    "geos_members_available": geos_members,
-                                    "spatial_reduction": args.spatial_reduction,
-                                    "region": active_region if use_region_mask else "",
-                                }
-                                row.update(model_reduced)
-                                row.update(geos_for_sample)
-                                row.update(row_metrics_from_sums(row))
-                                case_rows.append(row)
-                    processed_cases += 1
-                    if processed_cases % 20 == 0:
-                        elapsed = (time.time() - start_time) / 60.0
-                        print(f"Processed {processed_cases} init/lead cases in {elapsed:.1f} min")
+            for case_spec in case_specs:
+                init_idx = int(case_spec["init_idx"])
+                lead_idx = int(case_spec["lead_idx"])
+                lead_value = int(case_spec["lead"])
+                init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                if init_date_filter and date_key(init_time) not in init_date_filter:
+                    continue
+                if valid_date_filter and date_key(valid_time) not in valid_date_filter:
+                    continue
+                init_month, init_season = valid_month_season(init_time)
+                valid_month, valid_season = valid_month_season(valid_time)
+                case_region = str(case_spec.get("region", ""))
+                case_region_name = str(case_spec.get("region_name", ""))
+                case_eval_mask = eval_mask
+                if use_event_regions:
+                    event_region_bounds = REGIONS[case_region]
+                    case_eval_mask = eval_mask & region_mask_from_bounds(lats, lons, event_region_bounds)
+                    if int(np.sum(case_eval_mask)) <= 0:
+                        raise ValueError(f"Event region {case_region!r} kept zero grid cells during evaluation.")
+                case_suffix = f"_{case_region}" if case_region else ""
+                case_id = f"{year}_{init_idx:04d}_lead{lead_value}{case_suffix}"
+                for variable in variables:
+                    spec = VARIABLES[variable]
+                    obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
+                    model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
+                    geos = load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
+                    if args.spatial_reduction == "regional_mean":
+                        model_eval, geos_eval, obs_eval, case_weights, case_mask = regional_mean_metric_inputs(
+                            model, geos, obs, weights, case_eval_mask
+                        )
+                    else:
+                        model_eval, geos_eval, obs_eval = model, geos, obs
+                        case_weights, case_mask = metric_weights, case_eval_mask
+                    model_members = int(model.shape[0])
+                    geos_members = int(geos.shape[0])
+                    usable_sizes = [size for size in sample_sizes if size <= model_members]
+                    if not usable_sizes:
+                        usable_sizes = [model_members]
+
+                    geos_fields = metric_fields(geos_eval, obs_eval)
+                    model_full_fields = metric_fields(model_eval, obs_eval)
+                    common_full = case_mask & geos_fields["finite"] & model_full_fields["finite"]
+                    geos_reduced = reduce_fields(geos_fields, case_weights, common_full, "geos")
+                    model_full_reduced = reduce_fields(model_full_fields, case_weights, common_full, "model")
+                    update_dispersion_state(dispersion_state, "geos", variable, lead_value, geos_reduced, "geos")
+                    update_dispersion_state(
+                        dispersion_state, "model", variable, lead_value, model_full_reduced, "model"
+                    )
+                    if not args.skip_rank_histogram:
+                        update_rank_state(
+                            rank_state,
+                            "geos",
+                            variable,
+                            lead_value,
+                            geos_eval,
+                            obs_eval,
+                            case_weights,
+                            case_mask,
+                            rng,
+                            args.rank_bins,
+                        )
+                        update_rank_state(
+                            rank_state,
+                            "model",
+                            variable,
+                            lead_value,
+                            model_eval,
+                            obs_eval,
+                            case_weights,
+                            case_mask,
+                            rng,
+                            args.rank_bins,
+                        )
+
+                    for size in usable_sizes:
+                        repeats = 1 if size >= model_members else max(1, int(args.member_bootstrap_repeats))
+                        for member_repeat in range(repeats):
+                            if size >= model_members:
+                                member_idx = np.arange(model_members)
+                            else:
+                                member_idx = rng.choice(model_members, size=size, replace=False)
+                            sample = model_eval[member_idx, :, :]
+                            sample_fields = metric_fields(sample, obs_eval)
+                            common = case_mask & geos_fields["finite"] & sample_fields["finite"]
+                            model_reduced = reduce_fields(sample_fields, case_weights, common, "model")
+                            geos_for_sample = reduce_fields(geos_fields, case_weights, common, "geos")
+                            row = {
+                                "case_id": case_id,
+                                "year": year,
+                                "init_index": init_idx,
+                                "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                "init_month": init_month,
+                                "init_season": init_season,
+                                "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
+                                "valid_month": valid_month,
+                                "valid_season": valid_season,
+                                "lead": int(lead_value),
+                                "variable": variable,
+                                "member_count": int(size),
+                                "member_repeat": int(member_repeat),
+                                "model_members_available": model_members,
+                                "geos_members_available": geos_members,
+                                "spatial_reduction": args.spatial_reduction,
+                                "region": case_region,
+                                "region_name": case_region_name,
+                                "event_rank": case_spec.get("event_rank", ""),
+                                "event_score": case_spec.get("event_score", np.nan),
+                                "event_score_variable": case_spec.get("event_score_variable", ""),
+                            }
+                            row.update(model_reduced)
+                            row.update(geos_for_sample)
+                            row.update(row_metrics_from_sums(row))
+                            case_rows.append(row)
+                processed_cases += 1
+                if processed_cases % 20 == 0:
+                    elapsed = (time.time() - start_time) / 60.0
+                    print(f"Processed {processed_cases} init/lead cases in {elapsed:.1f} min")
         finally:
             ds.close()
 
