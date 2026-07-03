@@ -227,6 +227,8 @@ REGION_SETS = {
         "south_america",
     ],
 }
+REGION_SETS["global_extremes"] = REGION_SETS["heatwave"]
+REGION_SETS["precip"] = REGION_SETS["heatwave"]
 
 SUM_COLUMNS = [
     "model_weight_sum",
@@ -314,9 +316,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--extreme_event_variable",
-        choices=tuple(VARIABLES),
         default="t2m",
-        help="Observed variable used to rank extreme events.",
+        help="Observed variable(s) used to rank extreme events, e.g. t2m or t2m,pr.",
     )
     parser.add_argument(
         "--extreme_event_regions",
@@ -1131,114 +1132,120 @@ def select_extreme_event_cases(
     init_date_filter: set[str],
     valid_date_filter: set[str],
     event_regions: list[str],
+    event_variables: list[str],
 ) -> list[dict[str, object]]:
     event_count = int(args.extreme_event_count)
     if event_count <= 0:
         return []
 
-    variable = str(args.extreme_event_variable)
-    obs_name = VARIABLES[variable]["obs"]
     max_per_region = int(args.extreme_event_max_per_region)
-    candidates_by_region: dict[str, list[dict[str, object]]] = {region: [] for region in event_regions}
-    region_cell_counts: dict[str, int] = {}
+    all_selected = []
 
-    for year in years:
-        path = store_path(args.forecast_dir, year)
-        ds = xr.open_zarr(path, consolidated=False, chunks=None)
-        try:
-            lats, lons = get_lat_lon(ds, VARIABLES[variable]["model"])
-            weights = area_weights_from_lats(lats, len(lons))
-            base_mask = load_eval_mask(args, (len(lats), len(lons)))
-            lead_pairs = lead_index_values(ds, VARIABLES[variable]["model"])
-            if lead_filter is not None:
-                lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
-            init_indices = filter_init_indices_by_dates(
-                ds,
-                filtered_init_indices(ds, VARIABLES[variable]["model"], init_months),
-                init_date_filter,
+    for variable in event_variables:
+        obs_name = VARIABLES[variable]["obs"]
+        candidates_by_region: dict[str, list[dict[str, object]]] = {region: [] for region in event_regions}
+        region_cell_counts: dict[str, int] = {}
+
+        for year in years:
+            path = store_path(args.forecast_dir, year)
+            ds = xr.open_zarr(path, consolidated=False, chunks=None)
+            try:
+                lats, lons = get_lat_lon(ds, VARIABLES[variable]["model"])
+                weights = area_weights_from_lats(lats, len(lons))
+                base_mask = load_eval_mask(args, (len(lats), len(lons)))
+                lead_pairs = lead_index_values(ds, VARIABLES[variable]["model"])
+                if lead_filter is not None:
+                    lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
+                init_indices = filter_init_indices_by_dates(
+                    ds,
+                    filtered_init_indices(ds, VARIABLES[variable]["model"], init_months),
+                    init_date_filter,
+                )
+
+                region_masks = {}
+                for region in event_regions:
+                    bounds = REGIONS[region]
+                    mask = base_mask & region_mask_from_bounds(lats, lons, bounds)
+                    kept = int(np.sum(mask))
+                    if kept <= 0:
+                        raise ValueError(f"Extreme-event region {region!r} kept zero grid cells.")
+                    region_masks[region] = mask
+                    region_cell_counts[region] = kept
+
+                for init_idx in init_indices:
+                    for lead_idx, lead_value in lead_pairs:
+                        init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
+                        if valid_date_filter and date_key(valid_time) not in valid_date_filter:
+                            continue
+                        obs = load_obs_array(ds, obs_name, init_idx, lead_idx)
+                        for region in event_regions:
+                            score = scalar_weighted_spatial_mean(obs, weights, region_masks[region])
+                            if not np.isfinite(score):
+                                continue
+                            candidates_by_region[region].append(
+                                {
+                                    "year": int(year),
+                                    "init_idx": int(init_idx),
+                                    "lead_idx": int(lead_idx),
+                                    "lead": int(lead_value),
+                                    "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                    "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
+                                    "region": region,
+                                    "region_name": str(REGIONS[region]["name"]),
+                                    "event_score": float(score),
+                                    "event_score_variable": variable,
+                                    "region_cell_count": int(region_cell_counts[region]),
+                                }
+                            )
+            finally:
+                ds.close()
+
+        for region in event_regions:
+            candidates_by_region[region].sort(key=lambda item: float(item["event_score"]), reverse=True)
+
+        selected = []
+        selected_counts = {region: 0 for region in event_regions}
+        rank_position = 0
+        while len(selected) < event_count:
+            progressed = False
+            for region in event_regions:
+                if max_per_region > 0 and selected_counts[region] >= max_per_region:
+                    continue
+                candidates = candidates_by_region[region]
+                if rank_position >= len(candidates):
+                    continue
+                selected.append(dict(candidates[rank_position]))
+                selected_counts[region] += 1
+                progressed = True
+                if len(selected) >= event_count:
+                    break
+            if not progressed:
+                break
+            rank_position += 1
+
+        if len(selected) < event_count:
+            available = {region: len(candidates_by_region[region]) for region in event_regions}
+            raise ValueError(
+                f"Requested {event_count} extreme {variable.upper()} events, but only selected {len(selected)}. "
+                f"Available candidates by region: {available}"
             )
 
-            region_masks = {}
-            for region in event_regions:
-                bounds = REGIONS[region]
-                mask = base_mask & region_mask_from_bounds(lats, lons, bounds)
-                kept = int(np.sum(mask))
-                if kept <= 0:
-                    raise ValueError(f"Extreme-event region {region!r} kept zero grid cells.")
-                region_masks[region] = mask
-                region_cell_counts[region] = kept
-
-            for init_idx in init_indices:
-                for lead_idx, lead_value in lead_pairs:
-                    init_time, valid_time = case_times(ds, init_idx, lead_idx, lead_value)
-                    if valid_date_filter and date_key(valid_time) not in valid_date_filter:
-                        continue
-                    obs = load_obs_array(ds, obs_name, init_idx, lead_idx)
-                    for region in event_regions:
-                        score = scalar_weighted_spatial_mean(obs, weights, region_masks[region])
-                        if not np.isfinite(score):
-                            continue
-                        candidates_by_region[region].append(
-                            {
-                                "year": int(year),
-                                "init_idx": int(init_idx),
-                                "lead_idx": int(lead_idx),
-                                "lead": int(lead_value),
-                                "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
-                                "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
-                                "region": region,
-                                "region_name": str(REGIONS[region]["name"]),
-                                "event_score": float(score),
-                                "event_score_variable": variable,
-                                "region_cell_count": int(region_cell_counts[region]),
-                            }
-                        )
-        finally:
-            ds.close()
-
-    for region in event_regions:
-        candidates_by_region[region].sort(key=lambda item: float(item["event_score"]), reverse=True)
-
-    selected = []
-    selected_counts = {region: 0 for region in event_regions}
-    rank_position = 0
-    while len(selected) < event_count:
-        progressed = False
-        for region in event_regions:
-            if max_per_region > 0 and selected_counts[region] >= max_per_region:
-                continue
-            candidates = candidates_by_region[region]
-            if rank_position >= len(candidates):
-                continue
-            selected.append(dict(candidates[rank_position]))
-            selected_counts[region] += 1
-            progressed = True
-            if len(selected) >= event_count:
-                break
-        if not progressed:
-            break
-        rank_position += 1
-
-    if len(selected) < event_count:
-        available = {region: len(candidates_by_region[region]) for region in event_regions}
-        raise ValueError(
-            f"Requested {event_count} extreme events, but only selected {len(selected)}. "
-            f"Available candidates by region: {available}"
-        )
-
-    selected.sort(key=lambda item: float(item["event_score"]), reverse=True)
-    for rank, item in enumerate(selected, start=1):
-        item["event_rank"] = rank
-    print(
-        f"Selected {len(selected)} extreme {variable.upper()} events across {len(event_regions)} regions "
-        f"using observed regional mean."
-    )
-    for item in selected[: min(10, len(selected))]:
+        selected.sort(key=lambda item: float(item["event_score"]), reverse=True)
+        for rank, item in enumerate(selected, start=1):
+            item["event_rank"] = rank
         print(
-            f"  #{item['event_rank']:02d} {item['region']} score={float(item['event_score']):.3f} "
-            f"init={item['init_time'][:10]} valid={item['valid_time'][:10]} lead={item['lead']}"
+            f"Selected {len(selected)} extreme {variable.upper()} events across {len(event_regions)} regions "
+            f"using observed regional mean."
         )
-    return selected
+        for item in selected[: min(10, len(selected))]:
+            print(
+                f"  {variable.upper()} #{item['event_rank']:02d} {item['region']} "
+                f"score={float(item['event_score']):.3f} "
+                f"init={item['init_time'][:10]} valid={item['valid_time'][:10]} lead={item['lead']}"
+            )
+        all_selected.extend(selected)
+
+    return all_selected
 
 
 def aggregate_case_rows(case_df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
@@ -1687,6 +1694,7 @@ def main() -> None:
     init_season_counts = parse_init_season_counts(args.init_season_counts)
     extreme_event_count = int(args.extreme_event_count)
     event_regions = parse_region_list(args.extreme_event_regions) if extreme_event_count > 0 else []
+    event_variables = parse_variables(args.extreme_event_variable) if extreme_event_count > 0 else []
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
         raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
     if int(args.init_stride) < 1:
@@ -1717,6 +1725,7 @@ def main() -> None:
         init_date_filter,
         valid_date_filter,
         event_regions,
+        event_variables,
     )
     selected_event_cases_by_year: dict[int, list[dict[str, object]]] = {}
     for event in selected_event_cases:
@@ -1751,7 +1760,7 @@ def main() -> None:
         "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
         "extreme_event_count_requested": extreme_event_count,
-        "extreme_event_variable": args.extreme_event_variable if use_event_regions else None,
+        "extreme_event_variables": event_variables,
         "extreme_event_regions": event_regions,
         "extreme_event_max_per_region": args.extreme_event_max_per_region if use_event_regions else None,
         "selected_extreme_events": selected_event_cases,
@@ -1891,9 +1900,17 @@ def main() -> None:
                     case_eval_mask = eval_mask & region_mask_from_bounds(lats, lons, event_region_bounds)
                     if int(np.sum(case_eval_mask)) <= 0:
                         raise ValueError(f"Event region {case_region!r} kept zero grid cells during evaluation.")
+                case_event_variable = str(case_spec.get("event_score_variable", ""))
+                case_variables = variables
+                if use_event_regions and case_event_variable:
+                    if case_event_variable not in variables:
+                        continue
+                    case_variables = [case_event_variable]
                 case_suffix = f"_{case_region}" if case_region else ""
+                if case_event_variable:
+                    case_suffix = f"{case_suffix}_{case_event_variable}"
                 case_id = f"{year}_{init_idx:04d}_lead{lead_value}{case_suffix}"
-                for variable in variables:
+                for variable in case_variables:
                     spec = VARIABLES[variable]
                     obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
                     model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
