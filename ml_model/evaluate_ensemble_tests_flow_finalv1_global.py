@@ -82,15 +82,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--forecast_dir",
-        default="dataprocess/gen_flow_finalv1_global_fullyear_2021_2025_e90_s50",
+        default="dataprocess/gen_flow_finalv1_global_fullyear_2021_2024_e90_s50",
         help="Directory containing YEAR.zarr stores.",
     )
     parser.add_argument("--start_year", type=int, default=2021)
-    parser.add_argument("--end_year", type=int, default=2025)
+    parser.add_argument("--end_year", type=int, default=2024)
     parser.add_argument("--skip_years", default="", help="Comma-separated years to skip.")
     parser.add_argument(
         "--out_dir",
-        default="ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2025_e90_s50",
+        default="ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
     )
     parser.add_argument("--variables", default="pr,t2m", help="Comma-separated subset of pr,t2m.")
     parser.add_argument(
@@ -173,6 +173,88 @@ def store_path(forecast_dir: str, year: int) -> Path:
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def timestamp_now_utc() -> str:
+    return pd.Timestamp.now(tz="UTC").isoformat()
+
+
+def forecast_store_candidates(forecast_dir: str, year: int) -> list[Path]:
+    base = Path(forecast_dir)
+    return [base / f"{year}.zarr", base / str(year)]
+
+
+def summarize_year_stores(directory: Path, years: list[int]) -> str:
+    present = []
+    for year in years:
+        if any(candidate.exists() for candidate in forecast_store_candidates(str(directory), year)):
+            present.append(year)
+    if not present:
+        return "no requested years"
+    if present == years:
+        return f"all requested years ({present[0]}-{present[-1]})"
+    return "years " + ",".join(str(year) for year in present)
+
+
+def nearby_forecast_dir_hints(forecast_dir: str, years: list[int], limit: int = 12) -> list[str]:
+    requested = Path(forecast_dir)
+    search_roots = []
+    for root in (requested.parent, Path("dataprocess")):
+        if root and root.exists() and root.is_dir() and root not in search_roots:
+            search_roots.append(root)
+
+    hints = []
+    for root in search_roots:
+        for candidate in sorted(root.iterdir()):
+            if not candidate.is_dir() or candidate == requested:
+                continue
+            name = candidate.name.lower()
+            if "gen_flow" not in name and "forecast" not in name:
+                continue
+            hints.append(f"  - {candidate} ({summarize_year_stores(candidate, years)})")
+            if len(hints) >= limit:
+                return hints
+    return hints
+
+
+def missing_forecast_message(forecast_dir: str, year: int, years: list[int]) -> str:
+    candidates = forecast_store_candidates(forecast_dir, year)
+    base = Path(forecast_dir)
+    lines = [
+        f"Missing forecast store for {year}.",
+        f"Forecast directory: {base}",
+        "Tried:",
+    ]
+    lines.extend(f"  - {candidate}" for candidate in candidates)
+    if not base.exists():
+        lines.append("The forecast directory itself does not exist.")
+    hints = nearby_forecast_dir_hints(forecast_dir, years)
+    if hints:
+        lines.append("Nearby forecast directories:")
+        lines.extend(hints)
+    lines.append(
+        "Use the directory that contains yearly stores named YYYY.zarr, or generate the missing years first."
+    )
+    return "\n".join(lines)
+
+
+def validate_forecast_stores(forecast_dir: str, years: list[int], allow_missing_years: bool) -> list[int]:
+    available = []
+    for year in years:
+        if store_path(forecast_dir, year).exists():
+            available.append(year)
+            continue
+        message = missing_forecast_message(forecast_dir, year, years)
+        if allow_missing_years:
+            print(f"Skipping: {message}")
+            continue
+        raise FileNotFoundError(message)
+    if not available:
+        raise FileNotFoundError(
+            "No requested forecast stores are available.\n"
+            + missing_forecast_message(forecast_dir, years[0], years)
+        )
+    return available
 
 
 def find_dim(dims: tuple[str, ...], candidates: tuple[str, ...], label: str) -> str:
@@ -674,6 +756,7 @@ def main() -> None:
     skip_years = parse_int_set(args.skip_years)
     lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
+    years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
     out_dir = Path(args.out_dir)
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
@@ -698,7 +781,7 @@ def main() -> None:
         "land_mask_file": os.path.abspath(args.land_mask_file) if args.land_mask_file else None,
         "rank_bins": args.rank_bins,
         "rank_histogram": not args.skip_rank_histogram,
-        "started_at": pd.Timestamp.utcnow().isoformat(),
+        "started_at": timestamp_now_utc(),
     }
 
     eval_mask = None
@@ -708,13 +791,6 @@ def main() -> None:
 
     for year in years:
         path = store_path(args.forecast_dir, year)
-        if not path.exists():
-            message = f"Missing forecast store for {year}: {path}"
-            if args.allow_missing_years:
-                print(f"Skipping: {message}")
-                continue
-            raise FileNotFoundError(message)
-
         print(f"Opening {path}")
         ds = xr.open_zarr(path, consolidated=False, chunks=None)
         try:
@@ -848,7 +924,7 @@ def main() -> None:
         {
             "processed_init_lead_cases": processed_cases,
             "case_member_rows": int(len(case_df)),
-            "completed_at": pd.Timestamp.utcnow().isoformat(),
+            "completed_at": timestamp_now_utc(),
             "elapsed_seconds": float(time.time() - start_time),
             "outputs": {
                 "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
@@ -870,4 +946,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        raise SystemExit(str(exc)) from None
