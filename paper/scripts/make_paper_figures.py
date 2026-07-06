@@ -74,6 +74,10 @@ DEFAULT_MATRIX_DIR_CANDIDATES = [
 DEFAULT_EVENT_DIR_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/event_catalog_eval_global_2021_2023",
 ]
+DEFAULT_ENSEMBLE_DIR_CANDIDATES = [
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_e90_s50",
+]
 NOISE_CSV_PATTERNS = [
     "ml_output_noise_compare_global_flow_finalv1/noise_comparison_global_*.csv",
     "ml_output_flow_finalv1_global_noisectx_t2mres/noise_comparison_global_*.csv",
@@ -159,6 +163,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="paper/figures")
     parser.add_argument("--matrix-dir", default=None, help="Directory containing matrix_summary_metrics.csv.")
     parser.add_argument("--event-dir", default=None, help="Directory containing event spatial NetCDF products.")
+    parser.add_argument("--ensemble-dir", default=None,
+                        help="Directory containing ensemble_size_summary.csv from the ensemble tests.")
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
     parser.add_argument("--format", choices=("pdf", "png", "both"), default="both")
     parser.add_argument("--dpi", type=int, default=300)
@@ -910,10 +916,73 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 
 
 # ===========================================================================
-# Figure 5 — Extreme-event subset skill (with all-case reference)
+# Figure 5 — Ensemble size, convergence, and dispersion
 # ===========================================================================
 
-def figure_5_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
+LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
+
+
+def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
+                                ensemble_dir: Path) -> list[Path]:
+    """Skill and dispersion versus number of generated ensemble members.
+
+    Reads ensemble_size_summary.csv written by
+    ml_model/evaluate_ensemble_tests_flow_finalv1_global.py (columns
+    {metric}_mean/_p05/_p95 grouped by variable, lead, member_count).
+    """
+    df = read_csv_or_none(ensemble_dir / "ensemble_size_summary.csv")
+    specs = [
+        ("crps_skill_pct", "CRPS skill (%)", 0.0),
+        ("rmse_skill_pct", "RMSE skill (%)", 0.0),
+        ("model_spread_rmse_ratio", "spread / RMSE", 1.0),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6), sharex=True)
+    letters = iter("abcdef")
+
+    for vi, variable in enumerate(("pr", "t2m")):
+        for mi, (metric, label, refline) in enumerate(specs):
+            ax = axes[vi, mi]
+            letter = next(letters)
+            title = f"({letter}) {VARIABLE_SHORT[variable]} {label}"
+            if df is None or df.empty or f"{metric}_mean" not in df.columns:
+                missing_panel(ax, title,
+                              "Missing ensemble_size_summary.csv; run "
+                              "ml_model/evaluate_ensemble_tests_flow_finalv1_global.py.")
+                continue
+            sub = df[df["variable"].astype(str).str.lower().eq(variable)]
+            if sub.empty:
+                missing_panel(ax, title, f"No rows for variable {variable}.")
+                continue
+            for lead in sorted(sub["lead"].astype(int).unique()):
+                grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
+                x = grp["member_count"].to_numpy(dtype=float)
+                mean = grp[f"{metric}_mean"].to_numpy(dtype=float)
+                color = LEAD_COLORS.get(int(lead), C_MODEL)
+                lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
+                if lo_col in grp and hi_col in grp:
+                    lo = grp[lo_col].to_numpy(dtype=float)
+                    hi = grp[hi_col].to_numpy(dtype=float)
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
+                ax.plot(x, mean, color=color, lw=1.7, marker="o", ms=3.6,
+                        label=f"W{int(lead)}")
+            ax.axhline(refline, color="#7a8794", lw=0.9, ls="--")
+            style_axis(ax)
+            panel_title(ax, title)
+            if vi == 1:
+                ax.set_xlabel("Generated members")
+            if mi == 0:
+                ax.set_ylabel(VARIABLE_LABELS[variable])
+            if vi == 0 and mi == 2:
+                ax.legend(loc="lower right", fontsize=7.5)
+    fig.tight_layout()
+    return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
+
+
+# ===========================================================================
+# Figure 6 — Extreme-event subset skill (with all-case reference)
+# ===========================================================================
+
+def figure_6_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
                            summary: pd.DataFrame | None) -> list[Path]:
     agg_ext = aggregate_matrix_by_lead(summary, subset="extreme_events")
     agg_all = aggregate_matrix_by_lead(summary, subset="all_data")
@@ -964,11 +1033,11 @@ def figure_5_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
         fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.06),
                    ncols=4, fontsize=8)
     fig.tight_layout()
-    return save_figure(fig, output_dir, "fig5_extreme_skill", formats, dpi)
+    return save_figure(fig, output_dir, "fig6_extreme_skill", formats, dpi)
 
 
 # ===========================================================================
-# Figures 6 & 7 — Event case studies (3x3 contoured NetCDF panels)
+# Figures 7 & 8 — Event case studies (3x3 contoured NetCDF panels)
 # ===========================================================================
 
 def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
@@ -1130,13 +1199,15 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     matrix_dir = first_existing_dir(args.matrix_dir, DEFAULT_MATRIX_DIR_CANDIDATES)
     event_dir = first_existing_dir(args.event_dir, DEFAULT_EVENT_DIR_CANDIDATES)
+    ensemble_dir = first_existing_dir(args.ensemble_dir, DEFAULT_ENSEMBLE_DIR_CANDIDATES)
     noise_csv = Path(args.noise_csv) if args.noise_csv else newest_matching(NOISE_CSV_PATTERNS)
 
     print("Figure input locations")
-    print(f"  matrix_dir : {matrix_dir}")
-    print(f"  event_dir  : {event_dir}")
-    print(f"  noise_csv  : {noise_csv}")
-    print(f"  output_dir : {output_dir}")
+    print(f"  matrix_dir   : {matrix_dir}")
+    print(f"  event_dir    : {event_dir}")
+    print(f"  ensemble_dir : {ensemble_dir}")
+    print(f"  noise_csv    : {noise_csv}")
+    print(f"  output_dir   : {output_dir}")
 
     summary = read_csv_or_none(matrix_dir / "matrix_summary_metrics.csv")
 
@@ -1151,11 +1222,12 @@ def main() -> None:
         variable="t2m", stem="fig3_t2m_skill",
         subset=args.matrix_subset, spatial_subset=args.spatial_subset))
     written.extend(figure_4_noise_ablation(output_dir, formats, args.dpi, noise_csv))
-    written.extend(figure_5_extreme_skill(output_dir, formats, args.dpi, summary))
+    written.extend(figure_5_member_convergence(output_dir, formats, args.dpi, ensemble_dir))
+    written.extend(figure_6_extreme_skill(output_dir, formats, args.dpi, summary))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
-                                     EVENT_PR_ID, "fig6_event_pr_california", is_t2m=False))
+                                     EVENT_PR_ID, "fig7_event_pr_california", is_t2m=False))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
-                                     EVENT_T2M_ID, "fig7_event_t2m_uk_heatwave", is_t2m=True))
+                                     EVENT_T2M_ID, "fig8_event_t2m_uk_heatwave", is_t2m=True))
 
     print(f"\nWrote {len(written)} figure files:")
     for path in written:
