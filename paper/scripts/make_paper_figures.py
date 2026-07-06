@@ -850,6 +850,16 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
     n = len(strategies)
     width = 0.34
     xs = np.arange(n)
+    panel_a_vals = [
+        data[s].get(variable, np.nan)
+        for s in strategies
+        for variable in ("pr", "t2m")
+    ]
+    panel_a_finite = [v for v in panel_a_vals if np.isfinite(v)]
+    panel_a_min = min(panel_a_finite or [0.0])
+    panel_a_max = max(panel_a_finite or [1.0])
+    panel_a_span = max(panel_a_max - min(0.0, panel_a_min), 1.0)
+    label_pad = max(0.45, 0.018 * panel_a_span)
     for vi, variable in enumerate(("pr", "t2m")):
         vals = [data[s].get(variable, np.nan) for s in strategies]
         offs = xs + (vi - 0.5) * width
@@ -859,14 +869,21 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
                         label=VARIABLE_SHORT[variable])
         for bar_obj, val in zip(bars, vals):
             if np.isfinite(val):
-                ax_a.text(bar_obj.get_x() + bar_obj.get_width() / 2, bar_obj.get_height() + 0.6,
-                          f"{val:.1f}", ha="center", va="bottom", fontsize=7.6,
+                text_y = bar_obj.get_height() + label_pad if val >= 0 else bar_obj.get_height() - label_pad
+                text_va = "bottom" if val >= 0 else "top"
+                ax_a.text(bar_obj.get_x() + bar_obj.get_width() / 2, text_y,
+                          f"{val:.1f}", ha="center", va=text_va, fontsize=7.6,
                           fontweight="bold", color=TEXT_DARK)
     ax_a.set_xticks(xs)
     ax_a.set_xticklabels(["\n".join(textwrap.wrap(s, 18)) for s in strategies], fontsize=8)
     ax_a.set_ylabel(f"CRPS skill vs raw {BASELINE} (%)")
     ax_a.axhline(0.0, color="#7a8794", lw=0.8)
-    ax_a.legend(loc="upper left", ncols=2)
+    ax_a.set_ylim(
+        min(0.0, panel_a_min - 0.08 * panel_a_span),
+        panel_a_max + max(6.0, 0.18 * panel_a_span),
+    )
+    ax_a.legend(loc="upper left", ncols=2, bbox_to_anchor=(0.01, 0.99),
+                borderaxespad=0.0, handlelength=1.7, columnspacing=1.5)
     style_axis(ax_a)
     panel_title(ax_a, "(a) CRPS skill by stochastic prior")
 
@@ -915,7 +932,7 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
                       "Only one sampling strategy found in the ablation CSV.")
 
     print(f"fig4 noise-ablation values: {provenance}")
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.07, right=0.985, bottom=0.18, top=0.90, wspace=0.32)
     return save_figure(fig, output_dir, "fig4_noise_ablation", formats, dpi)
 
 
