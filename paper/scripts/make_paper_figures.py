@@ -608,19 +608,20 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
                    label="EOF-LHS (MJO/NAO/ENSO)")
     ax.text(pr_x + pr_w / 2, pr_y + 10.7, "vs", ha="center", va="center",
             fontsize=8.5, color=TEXT_MUTED, fontstyle="italic")
-    ax.text(pr_x + pr_w / 2, pr_y + 4.2,
+    ax.text(pr_x + pr_w / 2, pr_y + 4.9,
             r"$x_0=\rho\,x_{\mathrm{EOF}}+\sqrt{1-\rho^{2}}\,x_{\mathrm{rand}}$",
-            ha="center", va="center", fontsize=8.4, color=TEXT_DARK)
-    ax.text(pr_x + pr_w / 2, pr_y + 1.9,
-            r"$\rho_{\mathrm{PR}}=0.25,\ \rho_{\mathrm{T2M}}=0.08$  (regime- and lead-conditioned)",
-            ha="center", va="center", fontsize=6.8, color=TEXT_MUTED)
+            ha="center", va="center", fontsize=8.0, color=TEXT_DARK)
+    ax.text(pr_x + pr_w / 2, pr_y + 2.5,
+            r"$\rho_{\mathrm{PR}}=0.25,\ \rho_{\mathrm{T2M}}=0.08$"
+            "\nregime- and lead-conditioned",
+            ha="center", va="center", fontsize=6.1, color=TEXT_MUTED, linespacing=1.05)
     _badge(ax, pr_x + 1.2, pr_y + pr_h + 1.4, "3", color=C_ACCENT)
 
     # ODE trajectory inset
     ode_x, ode_y, ode_w, ode_h = 55.5, 3.5, 19.0, 21.5
     _card(ax, (ode_x, ode_y), (ode_w, ode_h), "ODE sampling (50 Euler steps)", "#fdf8ee",
           edge="#b08a2e")
-    ins = ax.inset_axes([ode_x + 1.8, ode_y + 3.6, ode_w - 3.6, ode_h - 8.2],
+    ins = ax.inset_axes([ode_x + 1.8, ode_y + 4.8, ode_w - 3.6, ode_h - 9.2],
                         transform=ax.transData)
     rng = np.random.default_rng(3)
     t = np.linspace(0.0, 1.0, 51)
@@ -643,10 +644,11 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
     for side in ("top", "right", "left"):
         ins.spines[side].set_visible(False)
     ins.spines["bottom"].set_linewidth(0.6)
-    ax.text(ode_x + ode_w / 2, ode_y + 1.9,
-            r"$x_{t+\Delta t}=x_t+\Delta t\,v_\theta$;  spread tempering "
+    ax.text(ode_x + ode_w / 2, ode_y + 2.6,
+            r"$x_{t+\Delta t}=x_t+\Delta t\,v_\theta$"
+            "\n"
             r"$\sigma_{\mathrm{eff}}=1+\beta(\sigma_\theta-1)$",
-            ha="center", va="center", fontsize=6.6, color=TEXT_MUTED)
+            ha="center", va="center", fontsize=6.0, color=TEXT_MUTED, linespacing=1.08)
 
     _arrow(ax, (pr_x + pr_w + 0.6, pr_y + pr_h * 0.55), (ode_x - 0.6, ode_y + ode_h * 0.55),
            color=C_ACCENT, lw=1.5)
@@ -692,8 +694,8 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
     # Verification card
     ver_y, ver_h = 3.5, 21.5
     _card(ax, (out_x + 13.0, ver_y), (out_w - 13.0, ver_h), "Verification", "#f6f7f9")
-    chips = ["CRPS", "RMSE / bias / corr", "BSS + calibrated BSS",
-             "spread-skill", "season x lead", "event tails (q95/q99)"]
+    chips = ["CRPS", "RMSE / bias\n/ corr", "calibrated\nBSS",
+             "spread skill", "season x lead", "event tails\n(q95/q99)"]
     chip_y = ver_y + ver_h - 6.4
     for idx, chip in enumerate(chips):
         row, col = divmod(idx, 2)
@@ -702,8 +704,8 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
         ax.add_patch(FancyBboxPatch(
             (cx, cy), 8.0, 3.2, boxstyle="round,pad=0.25,rounding_size=0.7",
             facecolor="white", edgecolor="#9aa8b5", linewidth=0.8, mutation_aspect=0.6))
-        ax.text(cx + 4.0, cy + 1.6, chip, ha="center", va="center", fontsize=6.4,
-                color=TEXT_DARK)
+        ax.text(cx + 4.0, cy + 1.6, chip, ha="center", va="center", fontsize=5.9,
+                color=TEXT_DARK, linespacing=1.05)
 
     _arrow(ax, (ode_x + ode_w + 0.6, ode_y + ode_h * 0.62), (out_x - 0.6 + 1.0, 40.0),
            color="#2c7a4b", lw=1.6, rad=-0.15)
