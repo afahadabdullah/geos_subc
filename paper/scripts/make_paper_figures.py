@@ -917,7 +917,7 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 
 
 # ===========================================================================
-# Figure 5 — Ensemble size, convergence, and dispersion
+# Figure 5 — Ensemble size and skill convergence
 # ===========================================================================
 
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
@@ -927,7 +927,7 @@ FIG5_LEADS = (3, 4)
 
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                                 ensemble_dir: Path) -> list[Path]:
-    """Skill and dispersion versus number of generated ensemble members.
+    """Skill versus number of generated ensemble members.
 
     Reads ensemble_size_summary.csv written by
     ml_model/evaluate_ensemble_tests_flow_finalv1_global.py (columns
@@ -937,10 +937,9 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
     specs = [
         ("crps_skill_pct", "CRPS skill (%)", 0.0),
         ("rmse_skill_pct", "RMSE skill (%)", 0.0),
-        ("model_spread_rmse_ratio", "spread / RMSE", 1.0),
     ]
-    fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6), sharex=True)
-    letters = iter("abcdef")
+    fig, axes = plt.subplots(2, 2, figsize=(8.8, 6.4), sharex=True)
+    letters = iter("abcd")
 
     for vi, variable in enumerate(("pr", "t2m")):
         for mi, (metric, label, refline) in enumerate(specs):
@@ -978,7 +977,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 ax.set_xlabel("Generated members")
             if mi == 0:
                 ax.set_ylabel(VARIABLE_LABELS[variable])
-            if vi == 0 and mi == 2:
+            if vi == 0 and mi == len(specs) - 1:
                 ax.legend(loc="lower right", fontsize=7.5)
     fig.tight_layout()
     return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
