@@ -489,9 +489,26 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
     if lons is None or lats is None or field is None or not np.isfinite(field).any():
         missing_panel(ax, title, "Missing matrix_spatial_metrics.nc data for this map.")
         return ax, None
-    kwargs = {"norm": norm} if norm is not None else {"vmin": vmin, "vmax": vmax}
-    mesh = ax.pcolormesh(lons, lats, field, cmap=cmap, shading="auto",
-                         transform=ccrs.PlateCarree(), rasterized=True, **kwargs)
+    if norm is not None:
+        vmin, vmax = float(norm.vmin), float(norm.vmax)
+    else:
+        vmin = float(vmin)
+        vmax = float(vmax)
+    if vmin == vmax:
+        vmin, vmax = vmin - 0.1, vmax + 0.1
+    levels = np.linspace(vmin, vmax, 31)
+    kwargs = {"norm": norm} if norm is not None else {}
+    mesh = ax.contourf(
+        lons,
+        lats,
+        np.ma.masked_invalid(np.asarray(field, dtype=float)),
+        levels=levels,
+        cmap=cmap,
+        extend="both",
+        transform=ccrs.PlateCarree(),
+        antialiased=True,
+        **kwargs,
+    )
     ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=1.5)
     ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor="#333333", zorder=2)
     ax.set_global()
@@ -510,8 +527,33 @@ def slim_colorbar(fig: plt.Figure, mesh, ax, label: str, symmetric: bool = False
     kwargs = {"fraction": fraction} if fraction is not None else {}
     cbar = fig.colorbar(mesh, ax=ax, shrink=shrink, pad=pad, aspect=aspect,
                         orientation=orientation, **kwargs)
+    cbar.set_label(label, fontsize=8, labelpad=1 if orientation == "horizontal" else 3)
+    cbar.ax.tick_params(labelsize=7, pad=1)
+    cbar.outline.set_linewidth(0.6)
+    nbins = 7 if symmetric else 6
+    cbar.locator = ticker.MaxNLocator(nbins=nbins, symmetric=symmetric)
+    cbar.update_ticks()
+    return cbar
+
+
+def inset_horizontal_colorbar(fig: plt.Figure, mesh, ax, label: str,
+                              symmetric: bool = False):
+    if mesh is None:
+        return None
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+    cax = inset_axes(
+        ax,
+        width="82%",
+        height="4.6%",
+        loc="lower left",
+        bbox_to_anchor=(0.09, -0.20, 1.0, 1.0),
+        bbox_transform=ax.transAxes,
+        borderpad=0,
+    )
+    cbar = fig.colorbar(mesh, cax=cax, orientation="horizontal")
     cbar.set_label(label, fontsize=8)
-    cbar.ax.tick_params(labelsize=7)
+    cbar.ax.tick_params(labelsize=7, pad=1)
     cbar.outline.set_linewidth(0.6)
     nbins = 7 if symmetric else 6
     cbar.locator = ticker.MaxNLocator(nbins=nbins, symmetric=symmetric)
@@ -806,13 +848,13 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
     unit = "mm day$^{-1}$" if variable == "pr" else "K"
 
-    fig = plt.figure(figsize=(15.5, 8.4))
+    fig = plt.figure(figsize=(15.5, 7.8))
     outer = fig.add_gridspec(
-        2, 1, height_ratios=[0.58, 1.55], hspace=0.14,
-        left=0.035, right=0.985, bottom=0.075, top=0.96,
+        2, 1, height_ratios=[0.68, 1.30], hspace=0.16,
+        left=0.035, right=0.985, bottom=0.075, top=0.965,
     )
     heatmap_gs = outer[0].subgridspec(1, 4, wspace=0.14)
-    map_gs = outer[1].subgridspec(1, 4, wspace=0.055)
+    map_gs = outer[1].subgridspec(1, 4, wspace=0.035)
 
     # Row 1 — season x lead heatmaps
     geos_crps = season_lead_values(summary, variable, "geos_crps", subset)
@@ -828,18 +870,20 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     axes_hm = [fig.add_subplot(heatmap_gs[0, k]) for k in range(4)]
     im_a = annotated_heatmap(axes_hm[0], geos_crps, None, f"(a) {BASELINE} CRPS", CMAP_MAG)
     im_b = annotated_heatmap(axes_hm[1], crps_skill, model_crps,
-                             "(b) CRPS skill (%)", CMAP_SKILL,
+                             "(b) CRPS skill gain (%)", CMAP_SKILL,
                              norm=TwoSlopeNorm(vcenter=0.0, vmin=-hlim_c, vmax=hlim_c),
                              value_fmt="{:+.0f}%")
     im_c = annotated_heatmap(axes_hm[2], geos_rmse, None, f"(c) {BASELINE} RMSE", CMAP_MAG)
     im_d = annotated_heatmap(axes_hm[3], rmse_skill, model_rmse,
-                             "(d) RMSE skill (%)", CMAP_SKILL,
+                             "(d) RMSE skill gain (%)", CMAP_SKILL,
                              norm=TwoSlopeNorm(vcenter=0.0, vmin=-hlim_r, vmax=hlim_r),
                              value_fmt="{:+.0f}%")
-    slim_colorbar(fig, im_a, axes_hm[0], f"CRPS ({unit})")
-    slim_colorbar(fig, im_b, axes_hm[1], "skill (%)", symmetric=True)
-    slim_colorbar(fig, im_c, axes_hm[2], f"RMSE ({unit})")
-    slim_colorbar(fig, im_d, axes_hm[3], "skill (%)", symmetric=True)
+    heatmap_cbar = {"orientation": "horizontal", "shrink": 0.74, "pad": 0.095,
+                    "aspect": 24, "fraction": 0.07}
+    slim_colorbar(fig, im_a, axes_hm[0], f"CRPS ({unit})", **heatmap_cbar)
+    slim_colorbar(fig, im_b, axes_hm[1], "gain (%)", symmetric=True, **heatmap_cbar)
+    slim_colorbar(fig, im_c, axes_hm[2], f"RMSE ({unit})", **heatmap_cbar)
+    slim_colorbar(fig, im_d, axes_hm[3], "gain (%)", symmetric=True, **heatmap_cbar)
 
     # Row 2 — Robinson spatial maps
     ds = load_xarray_dataset(matrix_dir / "matrix_spatial_metrics.nc")
@@ -872,18 +916,16 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
 
     ax_e, im_e = robinson_map(fig, map_gs[0, 0], *map_gc, f"(e) {BASELINE} CRPS",
                               CMAP_MAG, vmin=gc_lo, vmax=gc_hi)
-    ax_f, im_f = robinson_map(fig, map_gs[0, 1], *map_cs, f"(f) {var_short} CRPS skill (%)",
+    ax_f, im_f = robinson_map(fig, map_gs[0, 1], *map_cs, f"(f) {var_short} CRPS skill gain (%)",
                               CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_cs, vmax=slim_cs))
     ax_g, im_g = robinson_map(fig, map_gs[0, 2], *map_gr, f"(g) {BASELINE} RMSE",
                               CMAP_MAG, vmin=gr_lo, vmax=gr_hi)
-    ax_h, im_h = robinson_map(fig, map_gs[0, 3], *map_rs, f"(h) {var_short} RMSE skill (%)",
+    ax_h, im_h = robinson_map(fig, map_gs[0, 3], *map_rs, f"(h) {var_short} RMSE skill gain (%)",
                               CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_rs, vmax=slim_rs))
-    map_cbar = {"orientation": "horizontal", "shrink": 0.82, "pad": 0.075,
-                "aspect": 30, "fraction": 0.052}
-    slim_colorbar(fig, im_e, ax_e, f"CRPS ({unit})", **map_cbar)
-    slim_colorbar(fig, im_f, ax_f, "skill (%)", symmetric=True, **map_cbar)
-    slim_colorbar(fig, im_g, ax_g, f"RMSE ({unit})", **map_cbar)
-    slim_colorbar(fig, im_h, ax_h, "skill (%)", symmetric=True, **map_cbar)
+    inset_horizontal_colorbar(fig, im_e, ax_e, f"CRPS ({unit})")
+    inset_horizontal_colorbar(fig, im_f, ax_f, "gain (%)", symmetric=True)
+    inset_horizontal_colorbar(fig, im_g, ax_g, f"RMSE ({unit})")
+    inset_horizontal_colorbar(fig, im_h, ax_h, "gain (%)", symmetric=True)
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
