@@ -368,6 +368,79 @@ def symmetric_limit(fields: list[np.ndarray | None], fallback: float = 30.0,
     return min(max(lim, lo), hi)
 
 
+def _set_gridliner_labels(gl, label_left: bool, label_bottom: bool) -> None:
+    """Consistent unobtrusive lat/lon labels for Cartopy map panels."""
+    for attr, value in [
+        ("top_labels", False),
+        ("right_labels", False),
+        ("bottom_labels", label_bottom),
+        ("left_labels", label_left),
+        ("xlabels_top", False),
+        ("ylabels_right", False),
+        ("xlabels_bottom", label_bottom),
+        ("ylabels_left", label_left),
+        ("x_inline", False),
+        ("y_inline", False),
+        ("rotate_labels", False),
+    ]:
+        if hasattr(gl, attr):
+            setattr(gl, attr, value)
+    gl.xlabel_style = {"fontsize": 6.1, "color": TEXT_MUTED}
+    gl.ylabel_style = {"fontsize": 6.1, "color": TEXT_MUTED}
+
+
+def _nice_geo_ticks(vmin: float, vmax: float, nbins: int = 4) -> list[float]:
+    values = ticker.MaxNLocator(nbins=nbins, steps=[1, 2, 2.5, 5, 10]).tick_values(vmin, vmax)
+    ticks = [float(v) for v in values if vmin - 1e-6 <= v <= vmax + 1e-6]
+    if len(ticks) >= 2:
+        return ticks
+    return [float(v) for v in np.linspace(vmin, vmax, min(nbins, 3))]
+
+
+def add_global_latlon_markers(ax, label_left: bool = True, label_bottom: bool = True) -> None:
+    import cartopy.crs as ccrs
+    from cartopy.mpl.gridliner import LATITUDE_FORMATTER, LONGITUDE_FORMATTER
+
+    gl = ax.gridlines(
+        crs=ccrs.PlateCarree(),
+        draw_labels=True,
+        xlocs=np.arange(-120, 181, 60),
+        ylocs=np.arange(-60, 61, 30),
+        color="#cfd8e3",
+        linewidth=0.35,
+        alpha=0.72,
+        linestyle="-",
+        zorder=2.1,
+    )
+    gl.xformatter = LONGITUDE_FORMATTER
+    gl.yformatter = LATITUDE_FORMATTER
+    _set_gridliner_labels(gl, label_left=label_left, label_bottom=label_bottom)
+
+
+def add_regional_latlon_markers(ax, lons, lats,
+                                label_left: bool = False,
+                                label_bottom: bool = False) -> None:
+    import cartopy.crs as ccrs
+    from cartopy.mpl.gridliner import LATITUDE_FORMATTER, LONGITUDE_FORMATTER
+
+    lon_min, lon_max = float(np.nanmin(lons)), float(np.nanmax(lons))
+    lat_min, lat_max = float(np.nanmin(lats)), float(np.nanmax(lats))
+    gl = ax.gridlines(
+        crs=ccrs.PlateCarree(),
+        draw_labels=True,
+        xlocs=_nice_geo_ticks(lon_min, lon_max, nbins=4),
+        ylocs=_nice_geo_ticks(lat_min, lat_max, nbins=4),
+        color="#d2d9e1",
+        linewidth=0.30,
+        alpha=0.78,
+        linestyle="-",
+        zorder=2.1,
+    )
+    gl.xformatter = LONGITUDE_FORMATTER
+    gl.yformatter = LATITUDE_FORMATTER
+    _set_gridliner_labels(gl, label_left=label_left, label_bottom=label_bottom)
+
+
 # ---------------------------------------------------------------------------
 # Shared plotting pieces
 # ---------------------------------------------------------------------------
@@ -422,6 +495,7 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
     ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=1.5)
     ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor="#333333", zorder=2)
     ax.set_global()
+    add_global_latlon_markers(ax)
     ax.spines["geo"].set_linewidth(0.6)
     panel_title(ax, title)
     return ax, mesh
@@ -729,8 +803,8 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     unit = "mm day$^{-1}$" if variable == "pr" else "K"
 
     fig = plt.figure(figsize=(15.5, 8.2))
-    gs = fig.add_gridspec(2, 4, height_ratios=[0.58, 1.55], hspace=0.20, wspace=0.14,
-                          left=0.025, right=0.975, bottom=0.02, top=0.96)
+    gs = fig.add_gridspec(2, 4, height_ratios=[0.58, 1.55], hspace=0.22, wspace=0.14,
+                          left=0.035, right=0.975, bottom=0.055, top=0.96)
 
     # Row 1 — season x lead heatmaps
     geos_crps = season_lead_values(summary, variable, "geos_crps", subset)
@@ -1107,7 +1181,8 @@ def _stipple_mask(significance: np.ndarray | None, gain: np.ndarray,
 
 
 def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
-                   vmin=None, vmax=None, levels=None):
+                   vmin=None, vmax=None, levels=None,
+                   label_left: bool = False, label_bottom: bool = False):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
@@ -1136,7 +1211,7 @@ def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
         ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor="#777777", linestyle=":", zorder=2)
     ax.set_extent([float(np.nanmin(lons)), float(np.nanmax(lons)),
                    float(np.nanmin(lats)), float(np.nanmax(lats))], crs=ccrs.PlateCarree())
-    gl = ax.gridlines(draw_labels=False, color="#d9dee3", linewidth=0.25, alpha=0.7)
+    add_regional_latlon_markers(ax, lons, lats, label_left=label_left, label_bottom=label_bottom)
     panel_title(ax, title)
     return mesh
 
@@ -1175,8 +1250,8 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
 
     nc_path = event_dir / "plots" / "spatial_maps" / f"{event_id}_lead4_spatial_data.nc"
     fig = plt.figure(figsize=(13.8, 9.8) if is_t2m else (13.2, 10.8))
-    gs = fig.add_gridspec(3, 3, hspace=0.22, wspace=0.18,
-                          left=0.02, right=0.98, bottom=0.02, top=0.97)
+    gs = fig.add_gridspec(3, 3, hspace=0.24, wspace=0.20,
+                          left=0.055, right=0.975, bottom=0.055, top=0.97)
 
     if not nc_path.exists():
         ax_big = fig.add_subplot(gs[:, :])
@@ -1269,7 +1344,8 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
     bss_sig_mask = _stipple_mask(bss_sig_field, bss_gain, fallback_threshold=5.0)
 
     axes_r1 = [fig.add_subplot(gs[0, k], projection=ccrs.PlateCarree()) for k in range(3)]
-    m1 = regional_panel(axes_r1[0], lons, lats, obs, "(a) Observed", field_cmap, vmin=f_lo, vmax=f_hi)
+    m1 = regional_panel(axes_r1[0], lons, lats, obs, "(a) Observed", field_cmap,
+                        vmin=f_lo, vmax=f_hi, label_left=True)
     m1b = regional_panel(axes_r1[1], lons, lats, fields["geos_q95"], f"(b) {BASELINE} q95",
                          field_cmap, vmin=f_lo, vmax=f_hi)
     m1c = regional_panel(axes_r1[2], lons, lats, fields["model_q95"], f"(c) {METHOD} q95",
@@ -1279,7 +1355,7 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
 
     axes_r2 = [fig.add_subplot(gs[1, k], projection=ccrs.PlateCarree()) for k in range(3)]
     m2 = regional_panel(axes_r2[0], lons, lats, fields["geos_crps"], f"(d) {BASELINE} CRPS",
-                        crps_cmap, vmin=0.0, vmax=c_hi)
+                        crps_cmap, vmin=0.0, vmax=c_hi, label_left=True)
     m2b = regional_panel(axes_r2[1], lons, lats, fields["model_crps"], f"(e) {METHOD} CRPS",
                          crps_cmap, vmin=0.0, vmax=c_hi)
     m2c = regional_panel(axes_r2[2], lons, lats, crps_gain, "(f) CRPS skill (%)",
@@ -1292,11 +1368,12 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
 
     axes_r3 = [fig.add_subplot(gs[2, k], projection=ccrs.PlateCarree()) for k in range(3)]
     m3 = regional_panel(axes_r3[0], lons, lats, fields["geos_bss"], f"(g) {BASELINE} BSS",
-                        "Blues", vmin=0.0, vmax=0.5)
+                        "Blues", vmin=0.0, vmax=0.5, label_left=True, label_bottom=True)
     m3b = regional_panel(axes_r3[1], lons, lats, fields["model_bss"], f"(h) {METHOD} BSS",
-                         "Blues", vmin=0.0, vmax=0.5)
+                         "Blues", vmin=0.0, vmax=0.5, label_bottom=True)
     m3c = regional_panel(axes_r3[2], lons, lats, bss_gain, "(i) BSS gain (x100)",
-                         CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-30.0, vmax=30.0))
+                         CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-30.0, vmax=30.0),
+                         label_bottom=True)
     panel_colorbar(fig, m3, axes_r3[0], "BSS", ticks=bss_ticks)
     panel_colorbar(fig, m3b, axes_r3[1], "BSS", ticks=bss_ticks)
     panel_colorbar(fig, m3c, axes_r3[2], "gain (x100)", ticks=bss_gain_ticks)

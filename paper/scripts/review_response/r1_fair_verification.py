@@ -3,10 +3,10 @@
 
 Default components (cheap, one pass over the Zarrs after a light obs pass):
 
-  matched : ensemble-size-matched headline scores (M2)
+  matched : headline scores using fixed ML subset size and native lagged FIMr1p1 (M2)
             - FIMr1p1 reference: 8-member lagged ensemble (4 members from each
               of the two initializations verifying the same target week)
-            - ML forecast: 8-member subsets of the 90-member generated
+            - ML forecast: 16-member subsets of the 90-member generated
               ensemble, averaged over repeated draws
   clim    : leave-one-year-out (LOYO) weekly climatological ensemble reference
             and CRPSS versus climatology for every system (M1)
@@ -24,7 +24,7 @@ Usage:
 
 Useful flags:
   --components matched,clim,debias,acc,boot,rank,fair,emos
-  --match_members 8      # matched-ensemble size
+  --model_members 16     # ML subset size; FIMr1p1 lagged ensemble remains native
   --eval_mask land --land_mask_file ml_model/land_ocean_mask_v6.pt
   --max_inits 6          # smoke test
   --threshold_file <nc>  # long-term observed q95 thresholds (else LOYO monthly)
@@ -59,7 +59,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--variables", default="pr,t2m")
     p.add_argument("--components", default="matched,clim,debias,acc,boot,rank",
                    help="Comma list from: matched,clim,debias,acc,boot,rank,fair,emos")
-    p.add_argument("--match_members", type=int, default=8)
+    p.add_argument("--model_members", "--match_members", dest="model_members",
+                   type=int, default=16,
+                   help="Number of generated ML members to sample; FIMr1p1 uses its native lagged ensemble.")
     p.add_argument("--eval_mask", choices=("all", "land"), default="all")
     p.add_argument("--land_mask_file", default="ml_model/land_ocean_mask_v6.pt")
     p.add_argument("--clim_window_weeks", type=int, default=2)
@@ -178,6 +180,11 @@ def main() -> None:
     comps = {c.strip() for c in args.components.split(",") if c.strip()}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if "matched" in comps:
+        print(
+            f"Matched protocol: ML samples up to {args.model_members} generated members; "
+            "FIMr1p1 uses native lagged ensemble members."
+        )
 
     need_pass1 = bool(comps & {"clim", "debias", "acc", "emos"})
 
@@ -317,10 +324,12 @@ def main() -> None:
                                 geos2 = ds[spec["geos"]].isel(
                                     init=pi, lead=leads.index(plead)).values
                                 geos_lag = np.concatenate([geos, geos2], axis=0)
+                                row["n_members_geos_lag"] = int(geos_lag.shape[0])
                                 fields["crps_geos_lag"], _ = crps_standard(geos_lag, obs)
                                 glmean = np.nanmean(geos_lag.astype(np.float64), axis=0)
                                 fields["mse_geos_lag"] = (glmean - obs) ** 2
-                            k = min(args.match_members, model.shape[0])
+                            k = min(args.model_members, model.shape[0])
+                            row["n_members_model_subsample"] = int(k)
                             acc_c = np.zeros_like(c_model)
                             acc_m = np.zeros_like(c_model)
                             for _ in range(args.subsample_repeats):
