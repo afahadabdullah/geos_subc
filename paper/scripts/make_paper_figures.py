@@ -495,6 +495,7 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
     ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=1.5)
     ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor="#333333", zorder=2)
     ax.set_global()
+    ax.set_anchor("N")
     add_global_latlon_markers(ax)
     ax.spines["geo"].set_linewidth(0.6)
     panel_title(ax, title)
@@ -502,10 +503,13 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
 
 
 def slim_colorbar(fig: plt.Figure, mesh, ax, label: str, symmetric: bool = False,
-                  shrink: float = 0.85, pad: float = 0.02, aspect: float = 22):
+                  shrink: float = 0.85, pad: float = 0.02, aspect: float = 22,
+                  orientation: str = "vertical", fraction: float | None = None):
     if mesh is None:
         return None
-    cbar = fig.colorbar(mesh, ax=ax, shrink=shrink, pad=pad, aspect=aspect)
+    kwargs = {"fraction": fraction} if fraction is not None else {}
+    cbar = fig.colorbar(mesh, ax=ax, shrink=shrink, pad=pad, aspect=aspect,
+                        orientation=orientation, **kwargs)
     cbar.set_label(label, fontsize=8)
     cbar.ax.tick_params(labelsize=7)
     cbar.outline.set_linewidth(0.6)
@@ -802,9 +806,13 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     var_short = VARIABLE_SHORT.get(variable, variable.upper())
     unit = "mm day$^{-1}$" if variable == "pr" else "K"
 
-    fig = plt.figure(figsize=(15.5, 8.2))
-    gs = fig.add_gridspec(2, 4, height_ratios=[0.58, 1.55], hspace=0.22, wspace=0.14,
-                          left=0.035, right=0.975, bottom=0.055, top=0.96)
+    fig = plt.figure(figsize=(15.5, 8.4))
+    outer = fig.add_gridspec(
+        2, 1, height_ratios=[0.58, 1.55], hspace=0.14,
+        left=0.035, right=0.985, bottom=0.075, top=0.96,
+    )
+    heatmap_gs = outer[0].subgridspec(1, 4, wspace=0.14)
+    map_gs = outer[1].subgridspec(1, 4, wspace=0.055)
 
     # Row 1 — season x lead heatmaps
     geos_crps = season_lead_values(summary, variable, "geos_crps", subset)
@@ -817,7 +825,7 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     hlim_c = symmetric_limit([crps_skill])
     hlim_r = symmetric_limit([rmse_skill])
 
-    axes_hm = [fig.add_subplot(gs[0, k]) for k in range(4)]
+    axes_hm = [fig.add_subplot(heatmap_gs[0, k]) for k in range(4)]
     im_a = annotated_heatmap(axes_hm[0], geos_crps, None, f"(a) {BASELINE} CRPS", CMAP_MAG)
     im_b = annotated_heatmap(axes_hm[1], crps_skill, model_crps,
                              "(b) CRPS skill (%)", CMAP_SKILL,
@@ -862,15 +870,16 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     slim_cs = symmetric_limit([map_cs[2]])
     slim_rs = symmetric_limit([map_rs[2]])
 
-    ax_e, im_e = robinson_map(fig, gs[1, 0], *map_gc, f"(e) {BASELINE} CRPS",
+    ax_e, im_e = robinson_map(fig, map_gs[0, 0], *map_gc, f"(e) {BASELINE} CRPS",
                               CMAP_MAG, vmin=gc_lo, vmax=gc_hi)
-    ax_f, im_f = robinson_map(fig, gs[1, 1], *map_cs, f"(f) {var_short} CRPS skill (%)",
+    ax_f, im_f = robinson_map(fig, map_gs[0, 1], *map_cs, f"(f) {var_short} CRPS skill (%)",
                               CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_cs, vmax=slim_cs))
-    ax_g, im_g = robinson_map(fig, gs[1, 2], *map_gr, f"(g) {BASELINE} RMSE",
+    ax_g, im_g = robinson_map(fig, map_gs[0, 2], *map_gr, f"(g) {BASELINE} RMSE",
                               CMAP_MAG, vmin=gr_lo, vmax=gr_hi)
-    ax_h, im_h = robinson_map(fig, gs[1, 3], *map_rs, f"(h) {var_short} RMSE skill (%)",
+    ax_h, im_h = robinson_map(fig, map_gs[0, 3], *map_rs, f"(h) {var_short} RMSE skill (%)",
                               CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_rs, vmax=slim_rs))
-    map_cbar = {"shrink": 0.62, "pad": 0.012, "aspect": 30}
+    map_cbar = {"orientation": "horizontal", "shrink": 0.82, "pad": 0.075,
+                "aspect": 30, "fraction": 0.052}
     slim_colorbar(fig, im_e, ax_e, f"CRPS ({unit})", **map_cbar)
     slim_colorbar(fig, im_f, ax_f, "skill (%)", symmetric=True, **map_cbar)
     slim_colorbar(fig, im_g, ax_g, f"RMSE ({unit})", **map_cbar)
