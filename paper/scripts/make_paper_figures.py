@@ -17,9 +17,10 @@ Figure set (see paper/FIGURE_PLAN.md):
   2  fig2_pr_skill             PR season-lead heatmaps + Robinson skill maps
   3  fig3_t2m_skill            T2M, same layout
   4  fig4_noise_ablation       Gaussian vs EOF-LHS stochastic-prior ablation
-  5  fig5_extreme_skill        Extreme-subset skill vs all-case skill by lead
-  6  fig6_event_pr_california  California AR precipitation case study (3x3)
-  7  fig7_event_t2m_uk_heatwave UK July 2022 heatwave T2M case study (3x3)
+  5  fig5_probabilistic_diagnostics Ensemble-size diagnostics
+  6  fig6_extreme_skill        Extreme-subset skill vs all-case skill by lead
+  7  fig7_event_pr_california  California AR precipitation case study (3x3)
+  8  fig8_event_t2m_uk_heatwave UK July 2022 heatwave T2M case study (3x3)
 
 Usage:
   python paper/scripts/make_paper_figures.py --format both
@@ -1047,8 +1048,49 @@ def figure_6_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
 # Figures 7 & 8 — Event case studies (3x3 contoured NetCDF panels)
 # ===========================================================================
 
+def _clipped_for_display(field: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+    """Clip finite values to the plotted color range so colorbars need no extensions."""
+    out = np.asarray(field, dtype=float).copy()
+    finite = np.isfinite(out)
+    out[finite] = np.clip(out[finite], vmin, vmax)
+    return out
+
+
+def _linear_ticks(vmin: float, vmax: float, n: int = 6) -> np.ndarray:
+    return np.linspace(float(vmin), float(vmax), int(n))
+
+
+def _optional_event_field(ds, names: list[str]) -> np.ndarray | None:
+    for name in names:
+        if name in ds:
+            return ds[name].values
+    return None
+
+
+def _stipple_mask(significance: np.ndarray | None, gain: np.ndarray,
+                  fallback_threshold: float) -> np.ndarray:
+    if significance is None:
+        return np.isfinite(gain) & (gain > fallback_threshold)
+
+    sig = np.asarray(significance)
+    finite = np.isfinite(sig)
+    if not np.any(finite):
+        return np.zeros_like(gain, dtype=bool)
+
+    sig_vals = sig[finite]
+    unique_vals = np.unique(sig_vals)
+    binary_like = np.all(np.isin(unique_vals, [0, 1]))
+    if sig.dtype == bool or binary_like:
+        mask = sig.astype(bool)
+    elif np.nanmin(sig_vals) >= 0.0 and np.nanmax(sig_vals) <= 1.0:
+        mask = sig <= 0.05
+    else:
+        mask = sig > 0.0
+    return mask & np.isfinite(gain) & (gain > 0.0)
+
+
 def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
-                   vmin=None, vmax=None, extend: str = "both"):
+                   vmin=None, vmax=None, levels=None):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
 
@@ -1061,13 +1103,16 @@ def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
     if vmax is None:
         vmax = float(np.nanpercentile(finite, 98))
     if norm is not None:
-        levels = np.linspace(norm.vmin, norm.vmax, 21)
+        vmin, vmax = float(norm.vmin), float(norm.vmax)
     else:
         if vmin == vmax:
             vmin, vmax = vmin - 0.1, vmax + 0.1
+        vmin, vmax = float(vmin), float(vmax)
+    if levels is None:
         levels = np.linspace(vmin, vmax, 21)
-    mesh = ax.contourf(lons, lats, field, levels=levels, cmap=cmap, norm=norm,
-                       extend=extend, transform=ccrs.PlateCarree())
+    mesh = ax.contourf(lons, lats, _clipped_for_display(field, vmin, vmax),
+                       levels=levels, cmap=cmap, norm=norm,
+                       extend="neither", transform=ccrs.PlateCarree())
     ax.add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="#222222", zorder=2)
     ax.add_feature(cfeature.BORDERS, linewidth=0.4, edgecolor="#555555", linestyle=":", zorder=2)
     if np.nanmin(lons) > -135 and np.nanmax(lons) < -105:
@@ -1079,16 +1124,32 @@ def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
     return mesh
 
 
-def row_colorbar(fig, mesh, axes, label: str, symmetric: bool = False, extend: str = "both"):
+def panel_colorbar(fig, mesh, ax, label: str, ticks=None):
     if mesh is None:
         return None
-    cbar = fig.colorbar(mesh, ax=axes, shrink=0.86, pad=0.015, aspect=26, extend=extend)
+    cbar = fig.colorbar(mesh, ax=ax, shrink=0.80, pad=0.015, aspect=22)
     cbar.set_label(label, fontsize=8)
     cbar.ax.tick_params(labelsize=7)
     cbar.outline.set_linewidth(0.6)
-    cbar.locator = ticker.MaxNLocator(nbins=7 if symmetric else 6, symmetric=symmetric)
-    cbar.update_ticks()
+    if ticks is not None:
+        cbar.set_ticks(ticks)
     return cbar
+
+
+def stipple_points(ax, lons, lats, mask, stride: int = 2) -> None:
+    """Legible, thinned stippling for robust positive-gain grid points."""
+    import cartopy.crs as ccrs
+
+    thin = np.zeros_like(mask, dtype=bool)
+    thin[::stride, ::stride] = True
+    sig = np.asarray(mask, dtype=bool) & thin
+    if not np.any(sig):
+        return
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    ax.scatter(lon2d[sig], lat2d[sig], color="white", s=8.0, alpha=0.80,
+               marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=6)
+    ax.scatter(lon2d[sig], lat2d[sig], color="#20262c", s=3.2, alpha=0.82,
+               marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=7)
 
 
 def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir: Path,
@@ -1096,9 +1157,9 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
     import cartopy.crs as ccrs
 
     nc_path = event_dir / "plots" / "spatial_maps" / f"{event_id}_lead4_spatial_data.nc"
-    fig = plt.figure(figsize=(13.4, 9.6) if is_t2m else (12.6, 10.8))
-    gs = fig.add_gridspec(3, 3, hspace=0.22, wspace=0.06,
-                          left=0.02, right=0.90, bottom=0.02, top=0.97)
+    fig = plt.figure(figsize=(13.8, 9.8) if is_t2m else (13.2, 10.8))
+    gs = fig.add_gridspec(3, 3, hspace=0.22, wspace=0.18,
+                          left=0.02, right=0.98, bottom=0.02, top=0.97)
 
     if not nc_path.exists():
         ax_big = fig.add_subplot(gs[:, :])
@@ -1119,6 +1180,32 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
         model_crps = ds["model_crps"].values
         geos_bss = ds["geos_bss"].values
         model_bss = ds["model_bss"].values
+        crps_sig_field = _optional_event_field(
+            ds,
+            [
+                "crps_skill_significant",
+                "crps_gain_significant",
+                "crps_skill_sig",
+                "crps_gain_sig",
+                "crps_skill_p_value",
+                "crps_skill_pvalue",
+                "crps_gain_p_value",
+                "crps_gain_pvalue",
+            ],
+        )
+        bss_sig_field = _optional_event_field(
+            ds,
+            [
+                "bss_gain_significant",
+                "bss_diff_significant",
+                "bss_gain_sig",
+                "bss_diff_sig",
+                "bss_gain_p_value",
+                "bss_gain_pvalue",
+                "bss_diff_p_value",
+                "bss_diff_pvalue",
+            ],
+        )
         ds.close()
     except Exception as exc:
         ax_big = fig.add_subplot(gs[:, :])
@@ -1135,62 +1222,68 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
 
     denom = np.where(fields["geos_crps"] == 0.0, 1e-5, fields["geos_crps"])
     crps_gain = np.where(ocean, np.nan, 100.0 * (1.0 - fields["model_crps"] / denom))
-    bss_gain = 100.0 * (fields["model_bss"] - fields["geos_bss"])
-    bss_gain = np.where((bss_gain >= -30.0) & (bss_gain <= 30.0), bss_gain, np.nan)
-    bss_gain = np.where(ocean, np.nan, bss_gain)
+    bss_gain = np.where(ocean, np.nan, 100.0 * (fields["model_bss"] - fields["geos_bss"]))
 
     # Shared row limits
     row1_vals = np.concatenate([obs.ravel(), fields["geos_q95"].ravel(), fields["model_q95"].ravel()])
     row1_finite = row1_vals[np.isfinite(row1_vals)]
     f_lo = float(np.nanpercentile(row1_finite, 2)) if row1_finite.size else 0.0
     f_hi = float(np.nanpercentile(row1_finite, 98)) if row1_finite.size else 1.0
+    f_lo = float(np.floor(f_lo))
+    f_hi = float(np.ceil(f_hi))
+    if not is_t2m:
+        f_lo = max(0.0, f_lo)
     crps_vals = np.concatenate([fields["geos_crps"].ravel(), fields["model_crps"].ravel()])
     crps_finite = crps_vals[np.isfinite(crps_vals)]
     c_hi = float(np.nanpercentile(crps_finite, 98)) if crps_finite.size else 1.0
+    c_hi = max(1.0, float(np.ceil(c_hi)))
     gain_lim = symmetric_limit([crps_gain], fallback=30.0, lo=10.0)
+    gain_lim = float(np.ceil(gain_lim / 10.0) * 10.0)
 
     field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
+    crps_cmap = "YlOrBr"
     phys_label = "temperature (K)" if is_t2m else "precipitation (mm day$^{-1}$)"
+    field_ticks = _linear_ticks(f_lo, f_hi, 6)
+    crps_ticks = _linear_ticks(0.0, c_hi, 7)
+    skill_ticks = _linear_ticks(-gain_lim, gain_lim, 7)
+    bss_ticks = _linear_ticks(0.0, 0.5, 6)
+    bss_gain_ticks = _linear_ticks(-30.0, 30.0, 7)
+    crps_sig_mask = _stipple_mask(crps_sig_field, crps_gain, fallback_threshold=10.0)
+    bss_sig_mask = _stipple_mask(bss_sig_field, bss_gain, fallback_threshold=5.0)
 
     axes_r1 = [fig.add_subplot(gs[0, k], projection=ccrs.PlateCarree()) for k in range(3)]
     m1 = regional_panel(axes_r1[0], lons, lats, obs, "(a) Observed", field_cmap, vmin=f_lo, vmax=f_hi)
-    regional_panel(axes_r1[1], lons, lats, fields["geos_q95"], f"(b) {BASELINE} q95",
-                   field_cmap, vmin=f_lo, vmax=f_hi)
-    regional_panel(axes_r1[2], lons, lats, fields["model_q95"], f"(c) {METHOD} q95",
-                   field_cmap, vmin=f_lo, vmax=f_hi)
-    row_colorbar(fig, m1, axes_r1, phys_label)
+    m1b = regional_panel(axes_r1[1], lons, lats, fields["geos_q95"], f"(b) {BASELINE} q95",
+                         field_cmap, vmin=f_lo, vmax=f_hi)
+    m1c = regional_panel(axes_r1[2], lons, lats, fields["model_q95"], f"(c) {METHOD} q95",
+                         field_cmap, vmin=f_lo, vmax=f_hi)
+    for mesh, ax in zip((m1, m1b, m1c), axes_r1):
+        panel_colorbar(fig, mesh, ax, phys_label, ticks=field_ticks)
 
     axes_r2 = [fig.add_subplot(gs[1, k], projection=ccrs.PlateCarree()) for k in range(3)]
     m2 = regional_panel(axes_r2[0], lons, lats, fields["geos_crps"], f"(d) {BASELINE} CRPS",
-                        "magma_r", vmin=0.0, vmax=c_hi, extend="max")
-    regional_panel(axes_r2[1], lons, lats, fields["model_crps"], f"(e) {METHOD} CRPS",
-                   "magma_r", vmin=0.0, vmax=c_hi, extend="max")
-    row_colorbar(fig, m2, axes_r2[:2], "CRPS", extend="max")
+                        crps_cmap, vmin=0.0, vmax=c_hi)
+    m2b = regional_panel(axes_r2[1], lons, lats, fields["model_crps"], f"(e) {METHOD} CRPS",
+                         crps_cmap, vmin=0.0, vmax=c_hi)
     m2c = regional_panel(axes_r2[2], lons, lats, crps_gain, "(f) CRPS skill (%)",
                          CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-gain_lim, vmax=gain_lim))
-    row_colorbar(fig, m2c, [axes_r2[2]], "skill (%)", symmetric=True)
-    # Stipple robust CRPS improvement (> 10%), thinned
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    thin = np.zeros_like(crps_gain, dtype=bool)
-    thin[::2, ::2] = True
-    sig = (crps_gain > 10.0) & thin
-    if sig.any():
-        axes_r2[2].scatter(lon2d[sig], lat2d[sig], color="black", s=2.6, alpha=0.65,
-                           marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+    panel_colorbar(fig, m2, axes_r2[0], "CRPS", ticks=crps_ticks)
+    panel_colorbar(fig, m2b, axes_r2[1], "CRPS", ticks=crps_ticks)
+    panel_colorbar(fig, m2c, axes_r2[2], "skill (%)", ticks=skill_ticks)
+    # Use formal masks/p-values if present; otherwise stipple robust positive gains.
+    stipple_points(axes_r2[2], lons, lats, crps_sig_mask, stride=2)
 
     axes_r3 = [fig.add_subplot(gs[2, k], projection=ccrs.PlateCarree()) for k in range(3)]
     m3 = regional_panel(axes_r3[0], lons, lats, fields["geos_bss"], f"(g) {BASELINE} BSS",
-                        "Blues", vmin=0.0, vmax=0.6)
-    regional_panel(axes_r3[1], lons, lats, fields["model_bss"], f"(h) {METHOD} BSS",
-                   "Blues", vmin=0.0, vmax=0.6)
-    row_colorbar(fig, m3, axes_r3[:2], "BSS")
+                        "Blues", vmin=0.0, vmax=0.5)
+    m3b = regional_panel(axes_r3[1], lons, lats, fields["model_bss"], f"(h) {METHOD} BSS",
+                         "Blues", vmin=0.0, vmax=0.5)
     m3c = regional_panel(axes_r3[2], lons, lats, bss_gain, "(i) BSS gain (x100)",
                          CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-30.0, vmax=30.0))
-    row_colorbar(fig, m3c, [axes_r3[2]], "gain (x100)", symmetric=True)
-    sig_b = (bss_gain > 5.0) & thin
-    if sig_b.any():
-        axes_r3[2].scatter(lon2d[sig_b], lat2d[sig_b], color="black", s=2.6, alpha=0.65,
-                           marker="o", edgecolors="none", transform=ccrs.PlateCarree())
+    panel_colorbar(fig, m3, axes_r3[0], "BSS", ticks=bss_ticks)
+    panel_colorbar(fig, m3b, axes_r3[1], "BSS", ticks=bss_ticks)
+    panel_colorbar(fig, m3c, axes_r3[2], "gain (x100)", ticks=bss_gain_ticks)
+    stipple_points(axes_r3[2], lons, lats, bss_sig_mask, stride=2)
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
