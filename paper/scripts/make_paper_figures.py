@@ -75,6 +75,7 @@ DEFAULT_EVENT_DIR_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/event_catalog_eval_global_2021_2023",
 ]
 DEFAULT_ENSEMBLE_DIR_CANDIDATES = [
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_extreme_t2m30_pr30_regions_2021_2023_wk3wk4_memberboot50_caseboot15_pub",
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_e90_s50",
 ]
@@ -920,6 +921,8 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 # ===========================================================================
 
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
+LEAD_LINESTYLES = {3: "--", 4: "-"}
+FIG5_LEADS = (3, 4)
 
 
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
@@ -953,7 +956,9 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
             if sub.empty:
                 missing_panel(ax, title, f"No rows for variable {variable}.")
                 continue
-            for lead in sorted(sub["lead"].astype(int).unique()):
+            available_leads = sorted(set(sub["lead"].astype(int).unique()))
+            plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
+            for lead in plot_leads:
                 grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
                 x = grp["member_count"].to_numpy(dtype=float)
                 mean = grp[f"{metric}_mean"].to_numpy(dtype=float)
@@ -963,7 +968,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                     lo = grp[lo_col].to_numpy(dtype=float)
                     hi = grp[hi_col].to_numpy(dtype=float)
                     ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
-                ax.plot(x, mean, color=color, lw=1.7, marker="o", ms=3.6,
+                ax.plot(x, mean, color=color, lw=1.7, ls=LEAD_LINESTYLES.get(int(lead), "-"),
+                        marker="o", ms=3.6,
                         label=f"W{int(lead)}")
             ax.axhline(refline, color="#7a8794", lw=0.9, ls="--")
             style_axis(ax)

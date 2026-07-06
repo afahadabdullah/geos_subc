@@ -293,14 +293,14 @@ Pure Gaussian sampling already improves substantially over raw \modelshort{} (pr
 \subsection{Ensemble size, convergence, and dispersion}
 \label{sec:results-ensemble}
 
-A stochastic generator must also be characterized as an ensemble system: how many members are needed, and how well does ensemble spread represent forecast uncertainty? Figure~\ref{fig:member-convergence} shows CRPS skill, RMSE skill, and the spread/RMSE ratio as functions of the number of generated members on the extreme-event subset at week-4 lead, with shading spanning the 5th--95th percentile over repeated random member subsets.
+A stochastic generator must also be characterized as an ensemble system: how many members are needed, and how well does ensemble spread represent forecast uncertainty? Figure~\ref{fig:member-convergence} shows CRPS skill, RMSE skill, and the spread/RMSE ratio as functions of the number of generated members on the extreme-event subset at weeks 3 and 4, with shading spanning the 5th--95th percentile over repeated random member subsets.
 
 Three features are relevant for practice. First, a single generated member scores worse than the raw \modelshort{} ensemble---as it must, since one sample cannot represent a distribution---so the probabilistic gains reported in this paper are genuinely ensemble properties rather than deterministic-map properties. Second, skill rises steeply with ensemble size and saturates by roughly 20--30 members, with the 90-member production configuration comfortably inside the plateau; member-sampling uncertainty at 90 members is small compared with the skill signal. Third, the spread/RMSE ratio saturates near 0.7 for both variables rather than at the ideal value of one, indicating that the generated ensemble remains moderately underdispersive on the extreme subset even with variance tempering. This residual spread deficit is an honest limitation of the current sampler and is consistent with the reliability-slope analysis of Sect.~\ref{sec:results-extremes}; we return to it in Sect.~\ref{sec:limitations}.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{fig5_member_convergence}
-\caption{Ensemble-size convergence and dispersion on the extreme-event subset at week-4 lead. (a,~d) CRPS skill and (b,~e) RMSE skill versus raw \modelshort{} as a function of the number of generated members, for precipitation (top) and 2\,m temperature (bottom); (c,~f) the \methodname{} spread/RMSE ratio (dashed line: perfect dispersion). Shading spans the 5th--95th percentile over repeated random member subsets. Skill saturates by roughly 20--30 members and the spread/RMSE ratio plateaus near 0.7, indicating moderate residual underdispersion.}
+\caption{Ensemble-size convergence and dispersion on the extreme-event subset at weeks 3 and 4. (a,~d) CRPS skill and (b,~e) RMSE skill versus raw \modelshort{} as a function of the number of generated members, for precipitation (top) and 2\,m temperature (bottom); (c,~f) the \methodname{} spread/RMSE ratio (dashed line: perfect dispersion). Shading spans the 5th--95th percentile over repeated random member subsets. Skill saturates by roughly 20--30 members and the spread/RMSE ratio plateaus near 0.7, indicating moderate residual underdispersion.}
 \label{fig:member-convergence}
 \end{figure}
 
