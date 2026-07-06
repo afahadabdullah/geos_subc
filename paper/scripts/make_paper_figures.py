@@ -88,7 +88,7 @@ NOISE_CSV_PATTERNS = [
 # Frozen 2021 full-year noise-ablation headline values (52 batches); used only
 # as a clearly annotated fallback when no noise_comparison CSV is found.
 NOISE_FALLBACK = {
-    "Gaussian $\\mathcal{N}(0,I)$": {"pr": 24.9, "t2m": 41.7},
+    "Gaussian $\\mathcal{N}(0,I)$": {"pr": 16.1, "t2m": 36.3},
     "EOF-LHS structured": {"pr": 28.4, "t2m": 43.2},
 }
 
@@ -934,38 +934,53 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
 # Figure 4 — Noise-prior ablation
 # ===========================================================================
 
-def load_noise_ablation(noise_csv: Path | None) -> tuple[dict[str, dict[str, float]], str]:
-    """Return {strategy_label: {variable: crps_skill_pct}} plus a provenance note."""
+def load_noise_ablation(noise_csv: Path | None, n_boot: int = 2000, seed: int = 0
+                        ) -> tuple[dict[str, dict[str, float]],
+                                   dict[str, dict[str, tuple[float, float]]], str]:
+    """Return ({strategy: {variable: skill}}, {strategy: {variable: (ci_lo, ci_hi)}},
+    provenance). CIs are bootstrap over per-row (batch/init) values when the CSV
+    provides enough rows; empty dict otherwise."""
     df = read_csv_or_none(noise_csv)
     if df is None or df.empty:
-        return NOISE_FALLBACK, "frozen 2021 full-year ablation (CSV not found at plot time)"
+        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (CSV not found at plot time)"
 
     strat_col = next((c for c in ("strategy", "noise_mode", "noise", "sampler", "mode",
                                   "label", "config") if c in df.columns), None)
     var_col = next((c for c in ("variable", "var", "target") if c in df.columns), None)
     if strat_col is None or var_col is None:
-        return NOISE_FALLBACK, "frozen 2021 full-year ablation (unrecognized CSV schema)"
+        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (unrecognized CSV schema)"
 
+    rng = np.random.default_rng(seed)
     result: dict[str, dict[str, float]] = {}
+    cis: dict[str, dict[str, tuple[float, float]]] = {}
     for (strategy, variable), group in df.groupby([strat_col, var_col]):
         variable = str(variable).lower()
         weights = group_weights(group)
         if "crps_skill_pct" in group:
+            values = pd.to_numeric(group["crps_skill_pct"], errors="coerce").to_numpy(dtype=float)
             value = weighted_average(group["crps_skill_pct"], weights)
         elif {"model_crps", "geos_crps"} <= set(group.columns):
+            values = 100.0 * (1.0 - pd.to_numeric(group["model_crps"], errors="coerce")
+                              / pd.to_numeric(group["geos_crps"], errors="coerce")).to_numpy(dtype=float)
             value = skill_pct(weighted_average(group["model_crps"], weights),
                               weighted_average(group["geos_crps"], weights))
         else:
             continue
         result.setdefault(str(strategy), {})[variable] = value
+        finite = values[np.isfinite(values)]
+        if finite.size >= 8:
+            boots = np.array([rng.choice(finite, finite.size, replace=True).mean()
+                              for _ in range(n_boot)])
+            cis.setdefault(str(strategy), {})[variable] = (
+                float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5)))
     if not result:
-        return NOISE_FALLBACK, "frozen 2021 full-year ablation (no usable rows in CSV)"
-    return result, f"from {noise_csv.name}"
+        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (no usable rows in CSV)"
+    return result, cis, f"from {noise_csv.name}"
 
 
 def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
                             noise_csv: Path | None) -> list[Path]:
-    data, provenance = load_noise_ablation(noise_csv)
+    data, cis, provenance = load_noise_ablation(noise_csv)
     strategies = list(data.keys())
 
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(10.6, 4.1),
@@ -988,13 +1003,25 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
     for vi, variable in enumerate(("pr", "t2m")):
         vals = [data[s].get(variable, np.nan) for s in strategies]
         offs = xs + (vi - 0.5) * width
+        # 95% bootstrap whiskers when per-row noise CSV data are available
+        yerr = None
+        if cis:
+            lo_hi = [cis.get(s, {}).get(variable) for s in strategies]
+            if any(pair is not None for pair in lo_hi):
+                lo = [v - pair[0] if pair else 0.0 for v, pair in zip(vals, lo_hi)]
+                hi = [pair[1] - v if pair else 0.0 for v, pair in zip(vals, lo_hi)]
+                yerr = np.vstack([lo, hi])
         bars = ax_a.bar(offs, vals, width * 0.92,
                         color=C_PR if variable == "pr" else C_T2M,
                         edgecolor="white", linewidth=0.8,
+                        yerr=yerr, capsize=3.0,
+                        error_kw={"elinewidth": 1.0, "ecolor": TEXT_DARK},
                         label=VARIABLE_SHORT[variable])
-        for bar_obj, val in zip(bars, vals):
+        for k, (bar_obj, val) in enumerate(zip(bars, vals)):
             if np.isfinite(val):
-                text_y = bar_obj.get_height() + label_pad if val >= 0 else bar_obj.get_height() - label_pad
+                whisker = float(yerr[1, k]) if yerr is not None else 0.0
+                text_y = (bar_obj.get_height() + label_pad + whisker if val >= 0
+                          else bar_obj.get_height() - label_pad - whisker)
                 text_va = "bottom" if val >= 0 else "top"
                 ax_a.text(bar_obj.get_x() + bar_obj.get_width() / 2, text_y,
                           f"{val:.1f}", ha="center", va=text_va, fontsize=7.6,
