@@ -1613,11 +1613,25 @@ def _overlay_raw_contours(ax, lons, lats, model_raw, baseline_raw,
               framealpha=0.72, facecolor="white", edgecolor="none")
 
 
+def _centered_norm_for_field(field: np.ndarray, fallback: float = 1.0) -> TwoSlopeNorm:
+    finite = np.asarray(field, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size:
+        lo, hi = np.nanpercentile(finite, [2, 98])
+        lim = max(abs(float(lo)), abs(float(hi)), 1e-6)
+    else:
+        lim = float(fallback)
+    return TwoSlopeNorm(vcenter=0.0, vmin=-lim, vmax=lim)
+
+
 def _skill_with_contours(fig, ax, lons, lats, skill_field, title: str,
                          raw_model: np.ndarray, raw_baseline: np.ndarray,
                          baseline_color: str, baseline_label: str,
-                         raw_label: str, vlim: float, cbar_label: str,
+                         raw_label: str, vlim: float | None, cbar_label: str,
                          label_left: bool = False, label_bottom: bool = False):
+    norm = _centered_norm_for_field(skill_field) if vlim is None else TwoSlopeNorm(
+        vcenter=0.0, vmin=-vlim, vmax=vlim
+    )
     mesh = regional_panel(
         ax,
         lons,
@@ -1625,13 +1639,14 @@ def _skill_with_contours(fig, ax, lons, lats, skill_field, title: str,
         skill_field,
         title,
         CMAP_SKILL,
-        norm=TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim),
+        norm=norm,
         label_left=label_left,
         label_bottom=label_bottom,
     )
     _overlay_raw_contours(ax, lons, lats, raw_model, raw_baseline,
                           baseline_color, baseline_label, raw_label)
-    panel_colorbar(fig, mesh, ax, cbar_label, ticks=_linear_ticks(-vlim, vlim, 7))
+    ticks = None if vlim is None else _linear_ticks(-vlim, vlim, 7)
+    panel_colorbar(fig, mesh, ax, cbar_label, ticks=ticks)
     return mesh
 
 
@@ -1709,28 +1724,6 @@ def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi
     bss_gain_geos = 100.0 * (fields["model_bss"] - fields["geos_bss"])
     bss_gain_ecmwf = 100.0 * (fields["model_bss"] - fields["ecmwf_bss"])
 
-    field_vals = np.concatenate([
-        obs.ravel(),
-        fields["model_q95"].ravel(),
-        fields["ecmwf_q95"].ravel(),
-    ])
-    field_finite = field_vals[np.isfinite(field_vals)]
-    f_lo = float(np.floor(np.nanpercentile(field_finite, 2))) if field_finite.size else 0.0
-    f_hi = float(np.ceil(np.nanpercentile(field_finite, 98))) if field_finite.size else 1.0
-    if not is_t2m:
-        f_lo = max(0.0, f_lo)
-    crps_vals = np.concatenate([
-        fields["model_crps"].ravel(),
-        fields["geos_crps"].ravel(),
-        fields["ecmwf_crps"].ravel(),
-    ])
-    crps_finite = crps_vals[np.isfinite(crps_vals)]
-    c_hi = max(1.0, float(np.ceil(np.nanpercentile(crps_finite, 98)))) if crps_finite.size else 1.0
-    crps_vlim = symmetric_limit([crps_skill_geos, crps_skill_ecmwf], fallback=30.0, lo=10.0)
-    crps_vlim = float(np.ceil(crps_vlim / 10.0) * 10.0)
-    bss_vlim = symmetric_limit([bss_gain_geos, bss_gain_ecmwf], fallback=30.0, lo=10.0)
-    bss_vlim = float(np.ceil(bss_vlim / 10.0) * 10.0)
-
     field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
     phys_label = "temperature (K)" if is_t2m else "precipitation (mm day$^{-1}$)"
     if is_t2m and ecmwf_units and ecmwf_units != "K":
@@ -1746,40 +1739,40 @@ def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi
     ]
     for idx, (title, field) in enumerate(top_panels):
         mesh = regional_panel(axes[0, idx], lons, lats, field, title, field_cmap,
-                              vmin=f_lo, vmax=f_hi, label_left=(idx == 0))
-        panel_colorbar(fig, mesh, axes[0, idx], phys_label, ticks=_linear_ticks(f_lo, f_hi, 6))
+                              label_left=(idx == 0))
+        panel_colorbar(fig, mesh, axes[0, idx], phys_label)
 
     _skill_with_contours(
         fig, axes[1, 0], lons, lats, crps_skill_geos,
         f"(d) CRPS skill vs {BASELINE}",
         fields["model_crps"], fields["geos_crps"], C_BASELINE, BASELINE,
-        "CRPS", crps_vlim, "skill (%)", label_left=True,
+        "CRPS", None, "skill (%)", label_left=True,
     )
     _skill_with_contours(
         fig, axes[1, 1], lons, lats, crps_skill_ecmwf,
         "(e) CRPS skill vs ECMWF",
         fields["model_crps"], fields["ecmwf_crps"], "#2b8a3e", "ECMWF",
-        "CRPS", crps_vlim, "skill (%)",
+        "CRPS", None, "skill (%)",
     )
     mesh = regional_panel(axes[1, 2], lons, lats, fields["ecmwf_crps"], "(f) ECMWF CRPS",
-                          "YlOrBr", vmin=0.0, vmax=c_hi)
-    panel_colorbar(fig, mesh, axes[1, 2], "CRPS", ticks=_linear_ticks(0.0, c_hi, 7))
+                          "YlOrBr")
+    panel_colorbar(fig, mesh, axes[1, 2], "CRPS")
 
     _skill_with_contours(
         fig, axes[2, 0], lons, lats, bss_gain_geos,
         f"(g) BSS gain vs {BASELINE}",
         fields["model_bss"], fields["geos_bss"], C_BASELINE, BASELINE,
-        "BSS", bss_vlim, "gain (x100)", label_left=True, label_bottom=True,
+        "BSS", None, "gain (x100)", label_left=True, label_bottom=True,
     )
     _skill_with_contours(
         fig, axes[2, 1], lons, lats, bss_gain_ecmwf,
         "(h) BSS gain vs ECMWF",
         fields["model_bss"], fields["ecmwf_bss"], "#2b8a3e", "ECMWF",
-        "BSS", bss_vlim, "gain (x100)", label_bottom=True,
+        "BSS", None, "gain (x100)", label_bottom=True,
     )
     mesh = regional_panel(axes[2, 2], lons, lats, fields["ecmwf_bss"], "(i) ECMWF BSS",
-                          "Blues", vmin=0.0, vmax=0.5, label_bottom=True)
-    panel_colorbar(fig, mesh, axes[2, 2], "BSS", ticks=_linear_ticks(0.0, 0.5, 6))
+                          "Blues", label_bottom=True)
+    panel_colorbar(fig, mesh, axes[2, 2], "BSS")
 
     return save_figure(fig, output_dir, stem, formats, dpi)
 
