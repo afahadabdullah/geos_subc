@@ -99,10 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--precip-mode",
         choices=("auto", "cumulative", "interval-accum", "rate", "raw"),
-        default="auto",
+        default="cumulative",
         help=(
-            "How to interpret precipitation values. auto tries to distinguish "
-            "cumulative total precipitation from interval accumulations."
+            "How to interpret precipitation values. Default assumes ECMWF total "
+            "precipitation is accumulated by lead hour; auto tries to distinguish "
+            "cumulative totals from interval accumulations."
         ),
     )
     parser.add_argument(
@@ -637,8 +638,10 @@ def convert_temperature(values: np.ndarray, selected: np.ndarray, attrs: dict[st
     units = str(attrs.get("units", "") or "")
     finite = week[np.isfinite(week)]
     if "K" in units or (finite.size and np.nanmedian(finite) > 150.0):
-        return week - 273.15, "degC", "Averaged selected valid times and converted K to degC."
-    return week, units or "unknown", "Averaged selected valid times without unit conversion."
+        return week, "K", "Averaged selected valid times; kept T2M in Kelvin."
+    if units.lower() in {"c", "degc", "degree celsius", "celsius"}:
+        return week + 273.15, "K", "Averaged selected valid times; converted Celsius to Kelvin."
+    return week, units or "unknown", "Averaged selected valid times without temperature unit conversion."
 
 
 def unit_multiplier_to_mm(values: np.ndarray, units: str, mode: str) -> tuple[np.ndarray, str]:
@@ -686,11 +689,25 @@ def convert_precipitation(
     if mode == "cumulative":
         increments = []
         missing_previous = []
+        lead = np.asarray(meta["lead_hours"], dtype=float)
+        init_times = pd.to_datetime(meta["init_times"])
         for idx in selected_idx:
-            if idx == 0:
+            previous_candidates = np.arange(idx)
+            if len(previous_candidates):
+                same_init = init_times[previous_candidates] == init_times[idx]
+                if pd.isna(init_times[idx]):
+                    same_init = np.ones_like(previous_candidates, dtype=bool)
+                if np.isfinite(lead[idx]):
+                    same_init &= np.isfinite(lead[previous_candidates]) & (lead[previous_candidates] < lead[idx])
+                previous_candidates = previous_candidates[same_init]
+            if len(previous_candidates) == 0:
                 missing_previous.append(int(idx))
                 continue
-            inc = values[:, idx, :, :] - values[:, idx - 1, :, :]
+            if np.isfinite(lead[idx]) and np.any(np.isfinite(lead[previous_candidates])):
+                prev_idx = int(previous_candidates[np.nanargmax(lead[previous_candidates])])
+            else:
+                prev_idx = int(previous_candidates[-1])
+            inc = values[:, idx, :, :] - values[:, prev_idx, :, :]
             increments.append(inc)
         if not increments:
             raise ValueError("Cumulative precipitation selected the first sample only; no previous step for differencing.")
@@ -701,7 +718,8 @@ def convert_precipitation(
             week = np.nansum(inc_arr, axis=1) / float(target_days)
         note = (
             f"{mode_note}. Treated as cumulative accumulation: differenced each selected step "
-            f"from the previous available step, summed target increments, divided by {target_days} days. {unit_note}"
+            f"from the previous lead hour for the same initialization, summed target increments, "
+            f"divided by {target_days} days. {unit_note}"
         )
         if missing_previous:
             note += f" Missing previous step for selected indices {missing_previous}; skipped those increments."
