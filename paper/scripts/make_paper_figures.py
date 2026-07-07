@@ -192,13 +192,13 @@ def _add_cached_base_features(ax, *, ocean: bool = False, states: bool = False) 
         _add_cached_natural_earth(ax, "physical", "ocean", ("110m", "50m"),
                                   facecolor="white", edgecolor="none", zorder=1.5)
     _add_cached_natural_earth(ax, "physical", "coastline", ("110m", "50m"),
-                              linewidth=0.55, edgecolor="#222222", zorder=2)
+                              facecolor="none", linewidth=0.55, edgecolor="#222222", zorder=2)
     _add_cached_natural_earth(ax, "cultural", "admin_0_boundary_lines_land", ("110m", "50m"),
-                              linewidth=0.35, edgecolor="#555555", linestyle=":", zorder=2)
+                              facecolor="none", linewidth=0.35, edgecolor="#555555", linestyle=":", zorder=2)
     if states:
         for name in ("admin_1_states_provinces_lines", "admin_1_states_provinces_lakes"):
             if _add_cached_natural_earth(ax, "cultural", name, ("50m", "110m"),
-                                         linewidth=0.28, edgecolor="#777777",
+                                         facecolor="none", linewidth=0.28, edgecolor="#777777",
                                          linestyle=":", zorder=2):
                 break
 
@@ -1683,7 +1683,14 @@ def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi
         with xr.open_dataset(event_path) as ds:
             lons = ds["lon"].values
             lats = ds["lat"].values
-            obs = ds["obs"].values if "obs" in ds else ds["obs_plot"].values + (273.15 if is_t2m else 0.0)
+            obs_candidates = []
+            if "obs" in ds:
+                obs_candidates.append(ds["obs"].values)
+            if "obs_plot" in ds:
+                obs_candidates.append(ds["obs_plot"].values + (273.15 if is_t2m else 0.0))
+            if not obs_candidates:
+                raise KeyError("event NetCDF is missing obs/obs_plot")
+            obs = max(obs_candidates, key=lambda arr: int(np.isfinite(arr).sum()))
             threshold = ds["threshold"].values
             fields = {
                 "model_q95": ds["model_upper_quantile"].values,
@@ -1700,23 +1707,20 @@ def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi
         missing_panel(ax_big, f"{stem} error", f"Could not load comparison data: {exc}")
         return save_figure(fig, output_dir, stem, formats, dpi)
 
-    ocean = ~np.isfinite(obs)
-    valid = np.isfinite(obs) & np.isfinite(threshold)
-    for key, value in list(fields.items()):
-        fields[key] = np.where(ocean, np.nan, value)
-    ecmwf_members = np.where(ocean[None, :, :], np.nan, ecmwf_members)
-
     ecmwf_q95 = np.nanpercentile(ecmwf_members, 95, axis=0)
     ecmwf_crps = _crps_map_np(ecmwf_members, obs)
-    obs_event = (obs >= threshold).astype(float)
+    valid_event = np.isfinite(obs) & np.isfinite(threshold)
+    obs_event = np.where(valid_event, (obs >= threshold).astype(float), np.nan)
     ref_brier = _reference_brier_from_existing(fields, obs_event)
-    ecmwf_prob = np.nanmean(ecmwf_members >= threshold[None, :, :], axis=0)
+    valid_prob = np.isfinite(ecmwf_members) & np.isfinite(threshold[None, :, :])
+    ecmwf_hits = np.where(valid_prob, (ecmwf_members >= threshold[None, :, :]).astype(float), np.nan)
+    ecmwf_prob = np.nanmean(ecmwf_hits, axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
         ecmwf_bss = np.where(ref_brier > 1e-12, 1.0 - ((ecmwf_prob - obs_event) ** 2) / ref_brier, np.nan)
 
-    fields["ecmwf_q95"] = np.where(valid, ecmwf_q95, np.nan)
-    fields["ecmwf_crps"] = np.where(valid, ecmwf_crps, np.nan)
-    fields["ecmwf_bss"] = np.where(valid, ecmwf_bss, np.nan)
+    fields["ecmwf_q95"] = ecmwf_q95
+    fields["ecmwf_crps"] = np.where(np.isfinite(obs), ecmwf_crps, np.nan)
+    fields["ecmwf_bss"] = np.where(valid_event, ecmwf_bss, np.nan)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         crps_skill_geos = 100.0 * (1.0 - fields["model_crps"] / fields["geos_crps"])
@@ -1731,6 +1735,9 @@ def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi
 
     axes = np.asarray([[fig.add_subplot(gs[r, c], projection=ccrs.PlateCarree())
                         for c in range(3)] for r in range(3)])
+    for ax in axes.ravel():
+        ax.set_facecolor("white")
+        ax.patch.set_facecolor("white")
 
     top_panels = [
         ("(a) Observed", obs),
