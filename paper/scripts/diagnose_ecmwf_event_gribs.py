@@ -113,6 +113,12 @@ def parse_args() -> argparse.Namespace:
             "for scratch diagnostics but can be slower for large GRIBs."
         ),
     )
+    parser.add_argument(
+        "--grib-reader",
+        choices=("auto", "cfgrib", "pygrib"),
+        default="auto",
+        help="GRIB reader backend. auto tries cfgrib first, then pygrib.",
+    )
     parser.add_argument("--dpi", type=int, default=170)
     parser.add_argument("--max-members-panel", type=int, default=12)
     return parser.parse_args()
@@ -130,23 +136,220 @@ def safe_attr(obj: Any, name: str, default: Any = None) -> Any:
         return default
 
 
-def open_grib_datasets(path: Path, indexpath: str) -> list[xr.Dataset]:
+def _message_attr(message: Any, names: tuple[str, ...], default: Any = None) -> Any:
+    for name in names:
+        try:
+            return getattr(message, name)
+        except Exception:
+            pass
+        try:
+            return message[name]
+        except Exception:
+            pass
+    return default
+
+
+def _step_hours_from_message(message: Any) -> float:
+    value = _message_attr(message, ("forecastTime", "endStep", "step"), None)
+    if value is not None:
+        try:
+            return float(value)
+        except Exception:
+            pass
+    step_range = str(_message_attr(message, ("stepRange",), "") or "")
+    if "-" in step_range:
+        step_range = step_range.split("-")[-1]
     try:
-        import cfgrib  # noqa: F401
+        return float(step_range)
+    except Exception:
+        return float("nan")
+
+
+def _message_time(message: Any) -> pd.Timestamp:
+    value = _message_attr(message, ("analDate", "validityDate", "dataDate"), None)
+    if value is not None:
+        try:
+            return pd.Timestamp(value)
+        except Exception:
+            pass
+    data_date = _message_attr(message, ("dataDate",), None)
+    data_time = int(_message_attr(message, ("dataTime",), 0) or 0)
+    if data_date is not None:
+        try:
+            hour = data_time // 100
+            minute = data_time % 100
+            return pd.Timestamp(str(int(data_date))) + pd.Timedelta(hours=hour, minutes=minute)
+        except Exception:
+            pass
+    return pd.NaT
+
+
+def _message_valid_time(message: Any) -> pd.Timestamp:
+    value = _message_attr(message, ("validDate",), None)
+    if value is not None:
+        try:
+            return pd.Timestamp(value)
+        except Exception:
+            pass
+    init_time = _message_time(message)
+    step_hours = _step_hours_from_message(message)
+    if pd.notna(init_time) and np.isfinite(step_hours):
+        return init_time + pd.Timedelta(hours=float(step_hours))
+    return pd.NaT
+
+
+def _message_member(message: Any) -> int:
+    for name in ("perturbationNumber", "number", "ensembleMember", "member"):
+        value = _message_attr(message, (name,), None)
+        if value is not None:
+            try:
+                return int(value)
+            except Exception:
+                pass
+    data_type = str(_message_attr(message, ("dataType",), "") or "").lower()
+    if data_type in {"cf", "controlforecast", "control"}:
+        return 0
+    return 0
+
+
+def _latlon_from_pygrib_message(message: Any) -> tuple[np.ndarray, np.ndarray]:
+    lats2d, lons2d = message.latlons()
+    lats2d = np.asarray(lats2d, dtype=np.float64)
+    lons2d = np.asarray(lons2d, dtype=np.float64)
+    if lats2d.ndim != 2 or lons2d.ndim != 2:
+        raise ValueError("pygrib returned non-2D latitude/longitude arrays.")
+    lat1d = lats2d[:, 0]
+    lon1d = lons2d[0, :]
+    return lat1d, lon1d
+
+
+def _open_with_pygrib(path: Path) -> list[xr.Dataset]:
+    try:
+        import pygrib
     except Exception as exc:  # pragma: no cover - depends on Vista env
-        raise RuntimeError(
-            "cfgrib is required to read GRIB files. On Vista, try loading the "
-            "environment that has cfgrib/eccodes installed, or install cfgrib "
-            "and eccodes in geossub_env."
-        ) from exc
+        raise RuntimeError("pygrib is not installed.") from exc
 
-    backend_kwargs = {"indexpath": indexpath}
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        import cfgrib
+    groups: dict[tuple[Any, ...], list[Any]] = {}
+    with pygrib.open(str(path)) as grbs:
+        for message in grbs:
+            key = (
+                str(_message_attr(message, ("shortName",), "unknown")),
+                int(_message_attr(message, ("paramId",), -1) or -1),
+                str(_message_attr(message, ("typeOfLevel",), "unknown")),
+                int(_message_attr(message, ("level",), 0) or 0),
+                str(_message_attr(message, ("stepType",), "unknown")),
+                str(_message_attr(message, ("units",), "")),
+            )
+            groups.setdefault(key, []).append(message)
 
-        return cfgrib.open_datasets(str(path), backend_kwargs=backend_kwargs)
+    datasets: list[xr.Dataset] = []
+    for group_idx, (key, messages) in enumerate(groups.items()):
+        short_name, param_id, type_of_level, level, step_type, units = key
+        lats, lons = _latlon_from_pygrib_message(messages[0])
+        times = sorted({str(_message_time(message)) for message in messages})
+        steps = sorted({_step_hours_from_message(message) for message in messages})
+        members = sorted({_message_member(message) for message in messages})
+        times_ts = pd.to_datetime(times)
+        steps_td = pd.to_timedelta(steps, unit="h")
 
+        time_lookup = {str(value): idx for idx, value in enumerate(times)}
+        step_lookup = {float(value): idx for idx, value in enumerate(steps)}
+        member_lookup = {int(value): idx for idx, value in enumerate(members)}
+
+        data = np.full(
+            (len(times), len(members), len(steps), len(lats), len(lons)),
+            np.nan,
+            dtype=np.float32,
+        )
+        valid_grid = np.empty((len(times), len(steps)), dtype="datetime64[ns]")
+        valid_grid[:] = np.datetime64("NaT")
+
+        for message in messages:
+            time_key = str(_message_time(message))
+            step_key = float(_step_hours_from_message(message))
+            member_key = int(_message_member(message))
+            ti = time_lookup[time_key]
+            si = step_lookup[step_key]
+            mi = member_lookup[member_key]
+            values = np.asarray(message.values, dtype=np.float32)
+            if values.shape != (len(lats), len(lons)):
+                raise ValueError(
+                    f"pygrib message shape {values.shape} does not match "
+                    f"lat/lon shape {(len(lats), len(lons))}"
+                )
+            data[ti, mi, si, :, :] = values
+            valid_grid[ti, si] = np.datetime64(_message_valid_time(message).to_datetime64())
+
+        var_name = short_name if short_name and short_name != "unknown" else f"param{param_id}"
+        ds = xr.Dataset(
+            {
+                var_name: (
+                    ("time", "number", "step", "latitude", "longitude"),
+                    data,
+                    {
+                        "GRIB_shortName": short_name,
+                        "GRIB_paramId": param_id,
+                        "GRIB_typeOfLevel": type_of_level,
+                        "GRIB_level": level,
+                        "GRIB_stepType": step_type,
+                        "units": units,
+                        "long_name": str(_message_attr(messages[0], ("name",), var_name)),
+                        "reader": "pygrib",
+                    },
+                )
+            },
+            coords={
+                "time": times_ts,
+                "number": np.asarray(members, dtype=int),
+                "step": steps_td,
+                "latitude": lats,
+                "longitude": lons,
+                "valid_time": (("time", "step"), valid_grid),
+            },
+            attrs={"reader": "pygrib", "pygrib_group_index": group_idx},
+        )
+        datasets.append(ds)
+    return datasets
+
+
+def open_grib_datasets(path: Path, indexpath: str, reader: str = "auto") -> list[xr.Dataset]:
+    errors: list[str] = []
+    if reader in {"auto", "cfgrib"}:
+        try:
+            import cfgrib  # noqa: F401
+        except Exception as exc:  # pragma: no cover - depends on Vista env
+            errors.append(f"cfgrib unavailable: {exc}")
+        else:
+            backend_kwargs = {"indexpath": indexpath}
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                import cfgrib
+
+                try:
+                    return cfgrib.open_datasets(str(path), backend_kwargs=backend_kwargs)
+                except Exception as exc:
+                    errors.append(f"cfgrib failed to open file: {exc}")
+                    if reader == "cfgrib":
+                        raise
+
+    if reader in {"auto", "pygrib"}:
+        try:
+            return _open_with_pygrib(path)
+        except Exception as exc:
+            errors.append(f"pygrib unavailable/failed: {exc}")
+            if reader == "pygrib":
+                raise
+
+    details = "\n  - ".join(errors) if errors else "no reader attempted"
+    raise RuntimeError(
+        "Could not read GRIB file. Install one supported backend in geossub_env, "
+        "then rerun the script.\n\n"
+        "Recommended conda-forge install:\n"
+        "  conda install -c conda-forge cfgrib eccodes\n\n"
+        "Alternative:\n"
+        "  conda install -c conda-forge pygrib\n\n"
+        f"Reader errors:\n  - {details}"
+    )
 
 def coord_summary(values: np.ndarray, max_items: int = 5) -> str:
     arr = np.asarray(values)
@@ -732,9 +935,10 @@ def summarize_case(
     output_root: Path,
     precip_mode: str,
     cfgrib_indexpath: str,
+    grib_reader: str,
     dpi: int,
     max_members_panel: int,
-) -> None:
+) -> bool:
     case_dir = output_root / case.key
     case_dir.mkdir(parents=True, exist_ok=True)
     report_lines: list[str] = []
@@ -746,10 +950,21 @@ def summarize_case(
     if not grib_path.exists():
         log(report_lines, f"ERROR: file does not exist: {grib_path}")
         (case_dir / "diagnostic_report.txt").write_text("\n".join(report_lines) + "\n")
-        return
+        return False
 
-    datasets = open_grib_datasets(grib_path, cfgrib_indexpath)
-    log(report_lines, f"cfgrib groups opened: {len(datasets)}")
+    try:
+        datasets = open_grib_datasets(grib_path, cfgrib_indexpath, reader=grib_reader)
+    except Exception as exc:
+        log(report_lines, "ERROR: could not read GRIB file.")
+        for line in str(exc).splitlines():
+            log(report_lines, f"  {line}" if line else "")
+        report_path = case_dir / "diagnostic_report.txt"
+        report_path.write_text("\n".join(report_lines) + "\n")
+        print(f"Report written: {report_path}")
+        return False
+
+    reader_used = datasets[0].attrs.get("reader", "cfgrib") if datasets else grib_reader
+    log(report_lines, f"GRIB groups opened: {len(datasets)} (reader={reader_used})")
     for group_idx, ds in enumerate(datasets):
         for row in describe_dataset(ds, group_idx):
             log(report_lines, row)
@@ -778,7 +993,7 @@ def summarize_case(
         report_path = case_dir / "diagnostic_report.txt"
         report_path.write_text("\n".join(report_lines) + "\n")
         print(f"Report written: {report_path}")
-        return
+        return False
     with pd.option_context("display.max_rows", 50, "display.width", 160):
         sample_text = selected_rows.to_string(index=False)
     log(report_lines, "Selected samples:")
@@ -832,6 +1047,7 @@ def summarize_case(
 
     for ds in datasets:
         ds.close()
+    return True
 
 
 def main() -> None:
@@ -851,20 +1067,27 @@ def main() -> None:
             ECMWF GRIB diagnostics
               output_dir      : {output_root}
               case(s)         : {', '.join(requested)}
+              grib reader     : {args.grib_reader}
               cfgrib indexpath: {args.cfgrib_indexpath!r}
             """
         ).strip()
     )
+    failures: list[str] = []
     for key in requested:
-        summarize_case(
+        ok = summarize_case(
             CASES[key],
             grib_paths[key],
             output_root,
             precip_mode=args.precip_mode,
             cfgrib_indexpath=args.cfgrib_indexpath,
+            grib_reader=args.grib_reader,
             dpi=args.dpi,
             max_members_panel=args.max_members_panel,
         )
+        if not ok:
+            failures.append(key)
+    if failures:
+        raise SystemExit(f"Failed case(s): {', '.join(failures)}. See diagnostic_report.txt in {output_root}.")
 
 
 if __name__ == "__main__":
