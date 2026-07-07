@@ -20,7 +20,9 @@ Figure set (see paper/FIGURE_PLAN.md):
   5  fig5_probabilistic_diagnostics Ensemble-size diagnostics
   6  fig6_extreme_skill        Extreme-subset skill vs all-case skill by lead
   7  fig7_event_pr_california  California AR precipitation case study (3x3)
+  7a fig7a_event_pr_california_ecmwf ECMWF comparison companion (3x3)
   8  fig8_event_t2m_uk_heatwave UK July 2022 heatwave T2M case study (3x3)
+  8a fig8a_event_t2m_uk_heatwave_ecmwf ECMWF comparison companion (3x3)
 
 Usage:
   python paper/scripts/make_paper_figures.py --format both
@@ -42,6 +44,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import ticker
 from matplotlib.colors import TwoSlopeNorm
+from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,10 @@ DEFAULT_MATRIX_DIR_CANDIDATES = [
 DEFAULT_EVENT_DIR_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/event_catalog_eval_global_2021_2023",
 ]
+DEFAULT_ECMWF_DIR_CANDIDATES = [
+    "dataprocess/ecmwf_event_grib_diagnostics",
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ecmwf_event_grib_diagnostics",
+]
 DEFAULT_ENSEMBLE_DIR_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_extreme_t2m30_pr30_regions_2021_2023_wk3wk4_memberboot50_caseboot15_pub",
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
@@ -94,6 +101,10 @@ NOISE_FALLBACK = {
 
 EVENT_PR_ID = "conus_pr_202301_california_atmospheric_rivers"
 EVENT_T2M_ID = "europe_t2m_202207_uk_heatwave"
+ECMWF_CASE_KEYS = {
+    EVENT_PR_ID: "california_pr",
+    EVENT_T2M_ID: "uk_heat",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +156,52 @@ def missing_panel(ax: plt.Axes, title: str, message: str) -> None:
             ha="center", va="center", fontsize=8.5, color=TEXT_MUTED)
 
 
+def _natural_earth_file_exists(category: str, name: str, scale: str) -> bool:
+    """Return True only when Cartopy's Natural Earth shapefile is already cached."""
+    try:
+        import cartopy
+    except Exception:
+        return False
+
+    for key in ("pre_existing_data_dir", "data_dir", "repo_data_dir"):
+        root = cartopy.config.get(key)
+        if not root:
+            continue
+        shp = (Path(root) / "shapefiles" / "natural_earth" / category /
+               f"ne_{scale}_{name}.shp")
+        if shp.exists():
+            return True
+    return False
+
+
+def _add_cached_natural_earth(ax, category: str, name: str, scales: tuple[str, ...],
+                              **kwargs) -> bool:
+    """Add a Cartopy Natural Earth feature without triggering a network download."""
+    import cartopy.feature as cfeature
+
+    for scale in scales:
+        if _natural_earth_file_exists(category, name, scale):
+            ax.add_feature(cfeature.NaturalEarthFeature(category, name, scale), **kwargs)
+            return True
+    return False
+
+
+def _add_cached_base_features(ax, *, ocean: bool = False, states: bool = False) -> None:
+    if ocean:
+        _add_cached_natural_earth(ax, "physical", "ocean", ("110m", "50m"),
+                                  facecolor="white", edgecolor="none", zorder=1.5)
+    _add_cached_natural_earth(ax, "physical", "coastline", ("110m", "50m"),
+                              linewidth=0.55, edgecolor="#222222", zorder=2)
+    _add_cached_natural_earth(ax, "cultural", "admin_0_boundary_lines_land", ("110m", "50m"),
+                              linewidth=0.35, edgecolor="#555555", linestyle=":", zorder=2)
+    if states:
+        for name in ("admin_1_states_provinces_lines", "admin_1_states_provinces_lakes"):
+            if _add_cached_natural_earth(ax, "cultural", name, ("50m", "110m"),
+                                         linewidth=0.28, edgecolor="#777777",
+                                         linestyle=":", zorder=2):
+                break
+
+
 def save_figure(fig: plt.Figure, output_dir: Path, stem: str, formats: list[str], dpi: int) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
@@ -165,6 +222,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="paper/figures")
     parser.add_argument("--matrix-dir", default=None, help="Directory containing matrix_summary_metrics.csv.")
     parser.add_argument("--event-dir", default=None, help="Directory containing event spatial NetCDF products.")
+    parser.add_argument("--ecmwf-dir", default=None,
+                        help="Directory containing processed ECMWF event NetCDFs from diagnose_ecmwf_event_gribs.py.")
     parser.add_argument("--ensemble-dir", default=None,
                         help="Directory containing ensemble_size_summary.csv from the ensemble tests.")
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
@@ -483,7 +542,6 @@ def annotated_heatmap(ax: plt.Axes, arr: np.ndarray | None, sub_arr: np.ndarray 
 def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
                  cmap: str, norm=None, vmin=None, vmax=None) -> tuple[plt.Axes, object]:
     import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
 
     ax = fig.add_subplot(gridspec_slot, projection=ccrs.Robinson(central_longitude=0))
     if lons is None or lats is None or field is None or not np.isfinite(field).any():
@@ -509,8 +567,7 @@ def robinson_map(fig: plt.Figure, gridspec_slot, lons, lats, field, title: str,
         antialiased=True,
         **kwargs,
     )
-    ax.add_feature(cfeature.OCEAN, facecolor="white", edgecolor="none", zorder=1.5)
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.4, edgecolor="#333333", zorder=2)
+    _add_cached_base_features(ax, ocean=True)
     ax.set_global()
     ax.set_anchor("N")
     add_global_latlon_markers(ax)
@@ -1262,7 +1319,6 @@ def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
                    vmin=None, vmax=None, levels=None,
                    label_left: bool = False, label_bottom: bool = False):
     import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
 
     finite = field[np.isfinite(field)]
     if not finite.size:
@@ -1283,10 +1339,10 @@ def regional_panel(ax, lons, lats, field, title: str, cmap: str, norm=None,
     mesh = ax.contourf(lons, lats, _clipped_for_display(field, vmin, vmax),
                        levels=levels, cmap=cmap, norm=norm,
                        extend="neither", transform=ccrs.PlateCarree())
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.6, edgecolor="#222222", zorder=2)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.4, edgecolor="#555555", linestyle=":", zorder=2)
-    if np.nanmin(lons) > -135 and np.nanmax(lons) < -105:
-        ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor="#777777", linestyle=":", zorder=2)
+    _add_cached_base_features(
+        ax,
+        states=bool(np.nanmin(lons) > -135 and np.nanmax(lons) < -105),
+    )
     ax.set_extent([float(np.nanmin(lons)), float(np.nanmax(lons)),
                    float(np.nanmin(lats)), float(np.nanmax(lats))], crs=ccrs.PlateCarree())
     add_regional_latlon_markers(ax, lons, lats, label_left=label_left, label_bottom=label_bottom)
@@ -1460,6 +1516,271 @@ def figure_event_case(output_dir: Path, formats: list[str], dpi: int, event_dir:
     return save_figure(fig, output_dir, stem, formats, dpi)
 
 
+def _crps_map_np(ensemble: np.ndarray, obs: np.ndarray) -> np.ndarray:
+    ensemble = np.asarray(ensemble, dtype=np.float64)
+    obs = np.asarray(obs, dtype=np.float64)
+    mae_term = np.nanmean(np.abs(ensemble - obs[None, :, :]), axis=0)
+    ens_sorted = np.sort(ensemble, axis=0)
+    e = ens_sorted.shape[0]
+    coeff = ((2.0 * np.arange(1, e + 1, dtype=np.float64)) - e - 1.0) / (e * e)
+    spread_term = np.sum(coeff[:, None, None] * ens_sorted, axis=0)
+    return mae_term - spread_term
+
+
+def _sort_lon_lat_dataset(ds):
+    lon = ds["lon"]
+    lat = ds["lat"]
+    if float(lon.max()) > 180.0:
+        ds = ds.assign_coords(lon=(((lon + 180.0) % 360.0) - 180.0))
+    if ds["lon"].ndim == 1:
+        ds = ds.sortby("lon")
+    if ds["lat"].ndim == 1:
+        ds = ds.sortby("lat")
+    return ds
+
+
+def _ecmwf_processed_path(ecmwf_dir: Path, case_key: str) -> Path:
+    return ecmwf_dir / case_key / f"{case_key}_ecmwf_week4_processed.nc"
+
+
+def _load_ecmwf_members(ecmwf_path: Path, target_lats: np.ndarray,
+                        target_lons: np.ndarray, is_t2m: bool) -> tuple[np.ndarray, str]:
+    import xarray as xr
+
+    with xr.open_dataset(ecmwf_path) as ds:
+        ds = _sort_lon_lat_dataset(ds)
+        member = ds["member_weekly_mean"].interp(
+            lat=np.asarray(target_lats, dtype=float),
+            lon=np.asarray(target_lons, dtype=float),
+            method="linear",
+        ).values.astype(np.float64)
+        units = str(ds["member_weekly_mean"].attrs.get("units") or ds.attrs.get("units") or "")
+    finite = member[np.isfinite(member)]
+    if is_t2m and finite.size and np.nanmedian(finite) < 150.0:
+        member = member + 273.15
+        units = "K"
+    return member, units
+
+
+def _reference_brier_from_existing(fields: dict[str, np.ndarray],
+                                   obs_event: np.ndarray) -> np.ndarray:
+    ref_candidates = []
+    for prefix in ("geos", "model"):
+        prob_name = f"{prefix}_prob"
+        bss_name = f"{prefix}_bss"
+        if prob_name not in fields or bss_name not in fields:
+            continue
+        prob = fields[prob_name]
+        bss = fields[bss_name]
+        brier = (prob - obs_event) ** 2
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ref = np.where(np.abs(1.0 - bss) > 1e-8, brier / (1.0 - bss), np.nan)
+        ref_candidates.append(ref)
+    if not ref_candidates:
+        return np.full_like(obs_event, np.nan, dtype=float)
+    ref_out = ref_candidates[0].copy()
+    for ref in ref_candidates[1:]:
+        ref_out = np.where(np.isfinite(ref_out), ref_out, ref)
+    return ref_out
+
+
+def _overlay_raw_contours(ax, lons, lats, model_raw, baseline_raw,
+                          baseline_color: str, baseline_label: str,
+                          raw_label: str) -> None:
+    import cartopy.crs as ccrs
+
+    finite = np.concatenate([
+        np.ravel(np.asarray(model_raw)[np.isfinite(model_raw)]),
+        np.ravel(np.asarray(baseline_raw)[np.isfinite(baseline_raw)]),
+    ])
+    if finite.size < 4:
+        return
+    vmin, vmax = np.nanpercentile(finite, [15, 85])
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or abs(vmax - vmin) < 1e-12:
+        return
+    levels = np.linspace(vmin, vmax, 4)
+    kwargs = {"transform": ccrs.PlateCarree(), "linewidths": 0.75, "alpha": 0.90}
+    ax.contour(lons, lats, model_raw, levels=levels, colors=C_MODEL, linestyles="solid", **kwargs)
+    ax.contour(lons, lats, baseline_raw, levels=levels, colors=baseline_color, linestyles="dashed", **kwargs)
+    handles = [
+        Line2D([0], [0], color=C_MODEL, lw=1.0, linestyle="solid", label=f"{METHOD} {raw_label}"),
+        Line2D([0], [0], color=baseline_color, lw=1.0, linestyle="dashed", label=f"{baseline_label} {raw_label}"),
+    ]
+    ax.legend(handles=handles, loc="lower left", fontsize=5.8, frameon=True,
+              framealpha=0.72, facecolor="white", edgecolor="none")
+
+
+def _skill_with_contours(fig, ax, lons, lats, skill_field, title: str,
+                         raw_model: np.ndarray, raw_baseline: np.ndarray,
+                         baseline_color: str, baseline_label: str,
+                         raw_label: str, vlim: float, cbar_label: str,
+                         label_left: bool = False, label_bottom: bool = False):
+    mesh = regional_panel(
+        ax,
+        lons,
+        lats,
+        skill_field,
+        title,
+        CMAP_SKILL,
+        norm=TwoSlopeNorm(vcenter=0.0, vmin=-vlim, vmax=vlim),
+        label_left=label_left,
+        label_bottom=label_bottom,
+    )
+    _overlay_raw_contours(ax, lons, lats, raw_model, raw_baseline,
+                          baseline_color, baseline_label, raw_label)
+    panel_colorbar(fig, mesh, ax, cbar_label, ticks=_linear_ticks(-vlim, vlim, 7))
+    return mesh
+
+
+def figure_event_case_ecmwf_comparison(output_dir: Path, formats: list[str], dpi: int,
+                                       event_dir: Path, ecmwf_dir: Path,
+                                       event_id: str, stem: str, is_t2m: bool) -> list[Path]:
+    import cartopy.crs as ccrs
+
+    case_key = ECMWF_CASE_KEYS[event_id]
+    event_path = event_dir / "plots" / "spatial_maps" / f"{event_id}_lead4_spatial_data.nc"
+    ecmwf_path = _ecmwf_processed_path(ecmwf_dir, case_key)
+    fig = plt.figure(figsize=(13.8, 10.2))
+    gs = fig.add_gridspec(3, 3, hspace=0.22, wspace=0.18,
+                          left=0.055, right=0.975, bottom=0.055, top=0.97)
+
+    if not event_path.exists() or not ecmwf_path.exists():
+        ax_big = fig.add_subplot(gs[:, :])
+        missing = []
+        if not event_path.exists():
+            missing.append(f"event NetCDF {event_path.name}")
+        if not ecmwf_path.exists():
+            missing.append(f"ECMWF NetCDF {ecmwf_path}")
+        missing_panel(
+            ax_big,
+            f"{stem} pending",
+            "Missing " + " and ".join(missing) + ". Run the event evaluator and "
+            "paper/scripts/diagnose_ecmwf_event_gribs.py first.",
+        )
+        return save_figure(fig, output_dir, stem, formats, dpi)
+
+    try:
+        import xarray as xr
+
+        with xr.open_dataset(event_path) as ds:
+            lons = ds["lon"].values
+            lats = ds["lat"].values
+            obs = ds["obs"].values if "obs" in ds else ds["obs_plot"].values + (273.15 if is_t2m else 0.0)
+            threshold = ds["threshold"].values
+            fields = {
+                "model_q95": ds["model_upper_quantile"].values,
+                "model_crps": ds["model_crps"].values,
+                "geos_crps": ds["geos_crps"].values,
+                "model_bss": ds["model_bss"].values,
+                "geos_bss": ds["geos_bss"].values,
+                "model_prob": ds["model_prob"].values,
+                "geos_prob": ds["geos_prob"].values,
+            }
+        ecmwf_members, ecmwf_units = _load_ecmwf_members(ecmwf_path, lats, lons, is_t2m)
+    except Exception as exc:
+        ax_big = fig.add_subplot(gs[:, :])
+        missing_panel(ax_big, f"{stem} error", f"Could not load comparison data: {exc}")
+        return save_figure(fig, output_dir, stem, formats, dpi)
+
+    ocean = ~np.isfinite(obs)
+    valid = np.isfinite(obs) & np.isfinite(threshold)
+    for key, value in list(fields.items()):
+        fields[key] = np.where(ocean, np.nan, value)
+    ecmwf_members = np.where(ocean[None, :, :], np.nan, ecmwf_members)
+
+    ecmwf_q95 = np.nanpercentile(ecmwf_members, 95, axis=0)
+    ecmwf_crps = _crps_map_np(ecmwf_members, obs)
+    obs_event = (obs >= threshold).astype(float)
+    ref_brier = _reference_brier_from_existing(fields, obs_event)
+    ecmwf_prob = np.nanmean(ecmwf_members >= threshold[None, :, :], axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ecmwf_bss = np.where(ref_brier > 1e-12, 1.0 - ((ecmwf_prob - obs_event) ** 2) / ref_brier, np.nan)
+
+    fields["ecmwf_q95"] = np.where(valid, ecmwf_q95, np.nan)
+    fields["ecmwf_crps"] = np.where(valid, ecmwf_crps, np.nan)
+    fields["ecmwf_bss"] = np.where(valid, ecmwf_bss, np.nan)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        crps_skill_geos = 100.0 * (1.0 - fields["model_crps"] / fields["geos_crps"])
+        crps_skill_ecmwf = 100.0 * (1.0 - fields["model_crps"] / fields["ecmwf_crps"])
+    bss_gain_geos = 100.0 * (fields["model_bss"] - fields["geos_bss"])
+    bss_gain_ecmwf = 100.0 * (fields["model_bss"] - fields["ecmwf_bss"])
+
+    field_vals = np.concatenate([
+        obs.ravel(),
+        fields["model_q95"].ravel(),
+        fields["ecmwf_q95"].ravel(),
+    ])
+    field_finite = field_vals[np.isfinite(field_vals)]
+    f_lo = float(np.floor(np.nanpercentile(field_finite, 2))) if field_finite.size else 0.0
+    f_hi = float(np.ceil(np.nanpercentile(field_finite, 98))) if field_finite.size else 1.0
+    if not is_t2m:
+        f_lo = max(0.0, f_lo)
+    crps_vals = np.concatenate([
+        fields["model_crps"].ravel(),
+        fields["geos_crps"].ravel(),
+        fields["ecmwf_crps"].ravel(),
+    ])
+    crps_finite = crps_vals[np.isfinite(crps_vals)]
+    c_hi = max(1.0, float(np.ceil(np.nanpercentile(crps_finite, 98)))) if crps_finite.size else 1.0
+    crps_vlim = symmetric_limit([crps_skill_geos, crps_skill_ecmwf], fallback=30.0, lo=10.0)
+    crps_vlim = float(np.ceil(crps_vlim / 10.0) * 10.0)
+    bss_vlim = symmetric_limit([bss_gain_geos, bss_gain_ecmwf], fallback=30.0, lo=10.0)
+    bss_vlim = float(np.ceil(bss_vlim / 10.0) * 10.0)
+
+    field_cmap = "RdYlBu_r" if is_t2m else "YlGnBu"
+    phys_label = "temperature (K)" if is_t2m else "precipitation (mm day$^{-1}$)"
+    if is_t2m and ecmwf_units and ecmwf_units != "K":
+        phys_label += f"; ECMWF source {ecmwf_units}"
+
+    axes = np.asarray([[fig.add_subplot(gs[r, c], projection=ccrs.PlateCarree())
+                        for c in range(3)] for r in range(3)])
+
+    top_panels = [
+        ("(a) Observed", obs),
+        (f"(b) {METHOD} q95", fields["model_q95"]),
+        ("(c) ECMWF q95", fields["ecmwf_q95"]),
+    ]
+    for idx, (title, field) in enumerate(top_panels):
+        mesh = regional_panel(axes[0, idx], lons, lats, field, title, field_cmap,
+                              vmin=f_lo, vmax=f_hi, label_left=(idx == 0))
+        panel_colorbar(fig, mesh, axes[0, idx], phys_label, ticks=_linear_ticks(f_lo, f_hi, 6))
+
+    _skill_with_contours(
+        fig, axes[1, 0], lons, lats, crps_skill_geos,
+        f"(d) CRPS skill vs {BASELINE}",
+        fields["model_crps"], fields["geos_crps"], C_BASELINE, BASELINE,
+        "CRPS", crps_vlim, "skill (%)", label_left=True,
+    )
+    _skill_with_contours(
+        fig, axes[1, 1], lons, lats, crps_skill_ecmwf,
+        "(e) CRPS skill vs ECMWF",
+        fields["model_crps"], fields["ecmwf_crps"], "#2b8a3e", "ECMWF",
+        "CRPS", crps_vlim, "skill (%)",
+    )
+    mesh = regional_panel(axes[1, 2], lons, lats, fields["ecmwf_crps"], "(f) ECMWF CRPS",
+                          "YlOrBr", vmin=0.0, vmax=c_hi)
+    panel_colorbar(fig, mesh, axes[1, 2], "CRPS", ticks=_linear_ticks(0.0, c_hi, 7))
+
+    _skill_with_contours(
+        fig, axes[2, 0], lons, lats, bss_gain_geos,
+        f"(g) BSS gain vs {BASELINE}",
+        fields["model_bss"], fields["geos_bss"], C_BASELINE, BASELINE,
+        "BSS", bss_vlim, "gain (x100)", label_left=True, label_bottom=True,
+    )
+    _skill_with_contours(
+        fig, axes[2, 1], lons, lats, bss_gain_ecmwf,
+        "(h) BSS gain vs ECMWF",
+        fields["model_bss"], fields["ecmwf_bss"], "#2b8a3e", "ECMWF",
+        "BSS", bss_vlim, "gain (x100)", label_bottom=True,
+    )
+    mesh = regional_panel(axes[2, 2], lons, lats, fields["ecmwf_bss"], "(i) ECMWF BSS",
+                          "Blues", vmin=0.0, vmax=0.5, label_bottom=True)
+    panel_colorbar(fig, mesh, axes[2, 2], "BSS", ticks=_linear_ticks(0.0, 0.5, 6))
+
+    return save_figure(fig, output_dir, stem, formats, dpi)
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -1471,12 +1792,14 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     matrix_dir = first_existing_dir(args.matrix_dir, DEFAULT_MATRIX_DIR_CANDIDATES)
     event_dir = first_existing_dir(args.event_dir, DEFAULT_EVENT_DIR_CANDIDATES)
+    ecmwf_dir = first_existing_dir(args.ecmwf_dir, DEFAULT_ECMWF_DIR_CANDIDATES)
     ensemble_dir = first_existing_dir(args.ensemble_dir, DEFAULT_ENSEMBLE_DIR_CANDIDATES)
     noise_csv = Path(args.noise_csv) if args.noise_csv else newest_matching(NOISE_CSV_PATTERNS)
 
     print("Figure input locations")
     print(f"  matrix_dir   : {matrix_dir}")
     print(f"  event_dir    : {event_dir}")
+    print(f"  ecmwf_dir    : {ecmwf_dir}")
     print(f"  ensemble_dir : {ensemble_dir}")
     print(f"  noise_csv    : {noise_csv}")
     print(f"  output_dir   : {output_dir}")
@@ -1498,8 +1821,14 @@ def main() -> None:
     written.extend(figure_6_extreme_skill(output_dir, formats, args.dpi, summary))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
                                      EVENT_PR_ID, "fig7_event_pr_california", is_t2m=False))
+    written.extend(figure_event_case_ecmwf_comparison(
+        output_dir, formats, args.dpi, event_dir, ecmwf_dir,
+        EVENT_PR_ID, "fig7a_event_pr_california_ecmwf", is_t2m=False))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
                                      EVENT_T2M_ID, "fig8_event_t2m_uk_heatwave", is_t2m=True))
+    written.extend(figure_event_case_ecmwf_comparison(
+        output_dir, formats, args.dpi, event_dir, ecmwf_dir,
+        EVENT_T2M_ID, "fig8a_event_t2m_uk_heatwave_ecmwf", is_t2m=True))
 
     print(f"\nWrote {len(written)} figure files:")
     for path in written:
