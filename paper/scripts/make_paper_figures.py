@@ -26,6 +26,7 @@ Figure set (see paper/FIGURE_PLAN.md):
 
 Usage:
   python paper/scripts/make_paper_figures.py --format both
+  python paper/scripts/make_paper_figures.py --format png --ecmwf-only
 """
 
 from __future__ import annotations
@@ -229,6 +230,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
     parser.add_argument("--format", choices=("pdf", "png", "both"), default="both")
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--ecmwf-only", action="store_true",
+                        help="Write only fig7a/fig8a ECMWF companion figures, leaving existing figures untouched.")
     parser.add_argument("--matrix-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
     return parser.parse_args()
@@ -1807,6 +1810,18 @@ def main() -> None:
     summary = read_csv_or_none(matrix_dir / "matrix_summary_metrics.csv")
 
     written: list[Path] = []
+    if args.ecmwf_only:
+        written.extend(figure_event_case_ecmwf_comparison(
+            output_dir, formats, args.dpi, event_dir, ecmwf_dir,
+            EVENT_PR_ID, "fig7a_event_pr_california_ecmwf", is_t2m=False))
+        written.extend(figure_event_case_ecmwf_comparison(
+            output_dir, formats, args.dpi, event_dir, ecmwf_dir,
+            EVENT_T2M_ID, "fig8a_event_t2m_uk_heatwave_ecmwf", is_t2m=True))
+        print(f"\nWrote {len(written)} figure files:")
+        for path in written:
+            print(f"  - {path}")
+        return
+
     written.extend(figure_1_framework_overview(output_dir, formats, args.dpi))
     written.extend(figure_variable_skill(
         output_dir, formats, args.dpi, summary, matrix_dir,
