@@ -1155,6 +1155,7 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
 LEAD_LINESTYLES = {3: "--", 4: "-"}
 FIG5_LEADS = (3, 4)
+FIG5_MEMBER_COUNTS = (0, 4, 8, 16, 32, 64, 90)
 
 
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
@@ -1191,13 +1192,20 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
             plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
             for lead in plot_leads:
                 grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
+                grp = grp[grp["member_count"].astype(int).isin(FIG5_MEMBER_COUNTS)]
                 x = grp["member_count"].to_numpy(dtype=float)
                 mean = grp[f"{metric}_mean"].to_numpy(dtype=float)
+                if 0 in FIG5_MEMBER_COUNTS and not np.any(np.isclose(x, 0.0)):
+                    x = np.concatenate([[0.0], x])
+                    mean = np.concatenate([[refline], mean])
                 color = LEAD_COLORS.get(int(lead), C_MODEL)
                 lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
                 if lo_col in grp and hi_col in grp:
                     lo = grp[lo_col].to_numpy(dtype=float)
                     hi = grp[hi_col].to_numpy(dtype=float)
+                    if 0 in FIG5_MEMBER_COUNTS and x.size == lo.size + 1:
+                        lo = np.concatenate([[refline], lo])
+                        hi = np.concatenate([[refline], hi])
                     ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
                 ax.plot(x, mean, color=color, lw=1.7, ls=LEAD_LINESTYLES.get(int(lead), "-"),
                         marker="o", ms=3.6,
@@ -1207,6 +1215,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
             panel_title(ax, title)
             if vi == 1:
                 ax.set_xlabel("Generated members")
+                ax.set_xticks(FIG5_MEMBER_COUNTS)
+            ax.set_xlim(min(FIG5_MEMBER_COUNTS), max(FIG5_MEMBER_COUNTS))
             if mi == 0:
                 ax.set_ylabel(VARIABLE_LABELS[variable])
             if vi == 0 and mi == len(specs) - 1:

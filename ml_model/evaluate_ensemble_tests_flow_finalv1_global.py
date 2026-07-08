@@ -347,6 +347,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--balanced_monthly_inits_per_year",
+        type=int,
+        default=0,
+        help=(
+            "If >0, randomly select this many init dates per year while covering all 12 calendar "
+            "months across the requested years. For 2021-2023 with value 4, this selects 12 total "
+            "dates: four per year and one date in each month Jan-Dec. Uses --seed."
+        ),
+    )
+    parser.add_argument(
         "--init_stride",
         type=int,
         default=1,
@@ -765,6 +775,69 @@ def filtered_init_indices_by_season_counts(
         selected.extend(available[season][:requested])
         selected_counts[season] = requested
     return sorted(selected), selected_counts, available_counts
+
+
+def assign_balanced_months_by_year(
+    years: list[int],
+    per_year: int,
+    rng: np.random.Generator,
+) -> dict[int, list[int]]:
+    if per_year <= 0:
+        return {}
+    if not years:
+        raise ValueError("--balanced_monthly_inits_per_year requires at least one selected year.")
+    total_requested = len(years) * per_year
+    if total_requested < 12:
+        raise ValueError(
+            "--balanced_monthly_inits_per_year selects too few dates to cover Jan-Dec once "
+            f"({len(years)} years x {per_year} per year = {total_requested})."
+        )
+
+    months = list(range(1, 13))
+    rng.shuffle(months)
+    if total_requested > 12:
+        extra_months = rng.choice(np.arange(1, 13), size=total_requested - 12, replace=True).tolist()
+        months.extend(int(month) for month in extra_months)
+        rng.shuffle(months)
+
+    assignments = {}
+    cursor = 0
+    for year in years:
+        year_months = sorted(int(month) for month in months[cursor : cursor + per_year])
+        assignments[int(year)] = year_months
+        cursor += per_year
+    return assignments
+
+
+def filtered_init_indices_by_months_random(
+    ds: xr.Dataset,
+    sample_var: str,
+    months: list[int],
+    rng: np.random.Generator,
+) -> tuple[list[int], dict[str, str], dict[str, int]]:
+    available: dict[int, list[tuple[int, str]]] = {int(month): [] for month in months}
+    for init_idx in range(init_count(ds, sample_var)):
+        init_time = dataset_time_value(ds, ("init_time", "init", "time"), init_idx)
+        if pd.isna(init_time):
+            continue
+        init_month = int(init_time.month)
+        if init_month in available:
+            available[init_month].append((init_idx, date_key(init_time)))
+
+    selected_indices = []
+    selected_dates = {}
+    available_counts = {}
+    for month in months:
+        month = int(month)
+        choices = available.get(month, [])
+        available_counts[str(month)] = len(choices)
+        if not choices:
+            raise ValueError(f"Requested a balanced monthly init for month {month}, but none were found.")
+        choice_idx = int(rng.integers(0, len(choices)))
+        init_idx, init_date = choices[choice_idx]
+        selected_indices.append(int(init_idx))
+        selected_dates[str(month)] = init_date
+    return sorted(selected_indices), selected_dates, available_counts
 
 
 def load_forecast_array(ds: xr.Dataset, var_name: str, init_idx: int, lead_idx: int) -> np.ndarray:
@@ -1675,11 +1748,27 @@ def main() -> None:
     valid_date_filter = parse_date_filter(args.valid_dates)
     init_months = parse_month_filter(args.init_months)
     init_season_counts = parse_init_season_counts(args.init_season_counts)
+    balanced_monthly_inits_per_year = int(args.balanced_monthly_inits_per_year)
     extreme_event_count = int(args.extreme_event_count)
     event_regions = parse_region_list(args.extreme_event_regions) if extreme_event_count > 0 else []
     event_variables = parse_variables(args.extreme_event_variable) if extreme_event_count > 0 else []
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
         raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
+    if balanced_monthly_inits_per_year < 0:
+        raise ValueError("--balanced_monthly_inits_per_year must be >= 0.")
+    if balanced_monthly_inits_per_year and (
+        init_months
+        or init_date_filter
+        or init_season_counts
+        or args.max_inits_per_year is not None
+        or int(args.init_stride) != 1
+        or extreme_event_count > 0
+    ):
+        raise ValueError(
+            "--balanced_monthly_inits_per_year cannot be combined with --init_months, "
+            "--init_dates, --init_season_counts, --max_inits_per_year, --init_stride, "
+            "or --extreme_event_count."
+        )
     if int(args.init_stride) < 1:
         raise ValueError("--init_stride must be >= 1.")
     if int(args.init_stride_offset) < 0 or int(args.init_stride_offset) >= int(args.init_stride):
@@ -1696,6 +1785,11 @@ def main() -> None:
     years = [year for year in range(args.start_year, args.end_year + 1) if year not in skip_years]
     years = validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
+    balanced_months_by_year = assign_balanced_months_by_year(
+        years,
+        balanced_monthly_inits_per_year,
+        rng,
+    )
     if out_dir.exists() and any(out_dir.iterdir()) and not args.overwrite:
         raise FileExistsError(f"{out_dir} already exists and is not empty. Use --overwrite to replace files.")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1739,6 +1833,10 @@ def main() -> None:
         "valid_dates": sorted(valid_date_filter),
         "init_months": sorted(init_months),
         "init_season_counts_requested": init_season_counts,
+        "balanced_monthly_inits_per_year": balanced_monthly_inits_per_year,
+        "balanced_monthly_months_by_year": {
+            str(year): months for year, months in sorted(balanced_months_by_year.items())
+        },
         "init_stride": int(args.init_stride),
         "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
@@ -1758,6 +1856,8 @@ def main() -> None:
     selected_init_counts_by_year: dict[str, int] = {}
     selected_init_season_counts_by_year: dict[str, dict[str, int]] = {}
     available_init_season_counts_by_year: dict[str, dict[str, int]] = {}
+    selected_balanced_monthly_dates_by_year: dict[str, dict[str, str]] = {}
+    available_balanced_monthly_counts_by_year: dict[str, dict[str, int]] = {}
     start_time = time.time()
 
     for year in years:
@@ -1806,7 +1906,19 @@ def main() -> None:
                     print(f"Extreme-event cases for {year}: {len(year_events)} region/init/lead cases")
                 case_specs = [dict(event) for event in year_events]
             else:
-                if init_season_counts:
+                if balanced_months_by_year:
+                    year_months = balanced_months_by_year[int(year)]
+                    init_indices, selected_dates, available_counts = filtered_init_indices_by_months_random(
+                        ds,
+                        sample_var,
+                        year_months,
+                        rng,
+                    )
+                    selected_balanced_monthly_dates_by_year[str(year)] = selected_dates
+                    available_balanced_monthly_counts_by_year[str(year)] = available_counts
+                    selected_by_season = {}
+                    available_by_season = {}
+                elif init_season_counts:
                     init_indices, selected_by_season, available_by_season = filtered_init_indices_by_season_counts(
                         ds, sample_var, init_season_counts
                     )
@@ -1823,7 +1935,16 @@ def main() -> None:
                     selected_by_season = {}
                     available_by_season = {}
                 selected_init_counts_by_year[str(year)] = len(init_indices)
-                if init_season_counts:
+                if balanced_months_by_year:
+                    selected_text = ",".join(
+                        f"{int(month):02d}={selected_balanced_monthly_dates_by_year[str(year)][str(month)]}"
+                        for month in balanced_months_by_year[int(year)]
+                    )
+                    print(
+                        f"Balanced monthly init filter for {year}: {selected_text}; "
+                        f"selected {len(init_indices)}/{total_inits} init dates"
+                    )
+                elif init_season_counts:
                     selected_text = ",".join(
                         f"{season}={selected_by_season[season]}" for season in init_season_counts
                     )
@@ -2024,6 +2145,8 @@ def main() -> None:
             "selected_init_counts_by_year": selected_init_counts_by_year,
             "selected_init_season_counts_by_year": selected_init_season_counts_by_year,
             "available_init_season_counts_by_year": available_init_season_counts_by_year,
+            "selected_balanced_monthly_dates_by_year": selected_balanced_monthly_dates_by_year,
+            "available_balanced_monthly_counts_by_year": available_balanced_monthly_counts_by_year,
             "case_member_rows": int(len(case_df)),
             "completed_at": timestamp_now_utc(),
             "elapsed_seconds": float(time.time() - start_time),
