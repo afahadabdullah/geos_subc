@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Build the supplement figures/tables promised in main.tex.
 
-  S1  figS1_member_convergence_allcase : all-case CRPS/RMSE skill vs generated
-      members, ALL leads (Sect. 5.3 "supplement" reference).
-      Input: ensemble_size_summary.csv from an all-case run of
-      ml_model/evaluate_ensemble_tests_flow_finalv1_global.py (--s1-dir).
+  S1a figS1a_member_convergence_allcase_allgrid : all-case CRPS/RMSE skill vs
+      generated members over all grid cells, ALL leads (Sect. 5.3
+      "supplement" reference). Input: ensemble_size_summary.csv from an
+      all-case run of ml_model/evaluate_ensemble_tests_flow_finalv1_global.py
+      (--s1-dir).
+  S1b figS1b_member_convergence_allcase_land : same convergence diagnostic over
+      land grid cells only (--s1-land-dir).
   S2  figS2_rank_histograms : rank histograms by variable and lead
       (Sect. 5.4 reference). Input: r1_rank_histogram.csv from
       paper/scripts/review_response/r1_fair_verification.py (--s2-csv).
@@ -38,8 +41,14 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 S1_DIR_CANDIDATES = [
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_monthly36_all_land_w1wk4_memberboot90_caseboot15/all",
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_allcase",
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50_allcase",
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_e90_s50",
+]
+S1_LAND_DIR_CANDIDATES = [
+    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_monthly36_all_land_w1wk4_memberboot90_caseboot15/land",
 ]
 S2_CSV_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/r1_fair_verification/r1_rank_histogram.csv",
@@ -53,7 +62,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output-dir", default="paper/figures/supplement")
     p.add_argument("--s1-dir", default=None,
-                   help="Dir with all-case ensemble_size_summary.csv (all leads).")
+                   help="Dir with all-case all-grid ensemble_size_summary.csv (all leads).")
+    p.add_argument("--s1-land-dir", default=None,
+                   help="Dir with all-case land-only ensemble_size_summary.csv (all leads).")
     p.add_argument("--s2-csv", default=None, help="r1_rank_histogram.csv path.")
     p.add_argument("--s3-csv", default=None, help="r1_event_catalog_summary.csv path.")
     p.add_argument("--event-dir",
@@ -78,7 +89,8 @@ def first_existing(explicit: str | None, candidates: list[str]) -> Path:
 # S1 — all-case, all-lead member convergence
 # ---------------------------------------------------------------------------
 
-def figure_s1(output_dir: Path, formats: list[str], dpi: int, s1_dir: Path) -> list[Path]:
+def figure_s1(output_dir: Path, formats: list[str], dpi: int, s1_dir: Path,
+              stem: str, context_label: str) -> list[Path]:
     df = mpf.read_csv_or_none(s1_dir / "ensemble_size_summary.csv")
     specs = [("crps_skill_pct", "CRPS skill (%)"), ("rmse_skill_pct", "RMSE skill (%)")]
     fig, axes = plt.subplots(2, 2, figsize=(10.8, 7.0), sharex=True)
@@ -120,8 +132,10 @@ def figure_s1(output_dir: Path, formats: list[str], dpi: int, s1_dir: Path) -> l
                 ax.set_ylabel(mpf.VARIABLE_LABELS[variable])
             if vi == 0 and mi == 1:
                 ax.legend(loc="lower right", fontsize=7.5)
-    fig.tight_layout()
-    return mpf.save_figure(fig, output_dir, "figS1_member_convergence_allcase", formats, dpi)
+    fig.suptitle(context_label, fontsize=10.5, fontweight="bold",
+                 color=mpf.TEXT_DARK, y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return mpf.save_figure(fig, output_dir, stem, formats, dpi)
 
 
 # ---------------------------------------------------------------------------
@@ -251,19 +265,28 @@ def main() -> None:
     output_dir = Path(args.output_dir)
 
     s1_dir = first_existing(args.s1_dir, S1_DIR_CANDIDATES)
+    s1_land_dir = first_existing(args.s1_land_dir, S1_LAND_DIR_CANDIDATES)
     s2_csv = first_existing(args.s2_csv, S2_CSV_CANDIDATES)
     s3_csv = first_existing(args.s3_csv, S3_CSV_CANDIDATES)
     event_dir = Path(args.event_dir)
     pak_id = find_pakistan_event_id(event_dir, args.pakistan_event_id)
 
     print("Supplement input locations")
-    print(f"  S1 ensemble dir : {s1_dir}")
+    print(f"  S1a all-grid dir: {s1_dir}")
+    print(f"  S1b land dir    : {s1_land_dir}")
     print(f"  S2 rank csv     : {s2_csv}")
     print(f"  S3 catalog csv  : {s3_csv}")
     print(f"  S4 event id     : {pak_id}")
 
     written: list[Path] = []
-    written.extend(figure_s1(output_dir, formats, args.dpi, s1_dir))
+    written.extend(figure_s1(
+        output_dir, formats, args.dpi, s1_dir,
+        "figS1a_member_convergence_allcase_allgrid",
+        "All-case ensemble convergence, all grid cells"))
+    written.extend(figure_s1(
+        output_dir, formats, args.dpi, s1_land_dir,
+        "figS1b_member_convergence_allcase_land",
+        "All-case ensemble convergence, land grid cells"))
     written.extend(figure_s2(output_dir, formats, args.dpi, s2_csv))
     s3 = table_s3(output_dir, s3_csv)
     if s3 is not None:

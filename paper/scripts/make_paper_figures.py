@@ -17,7 +17,7 @@ Figure set (see paper/FIGURE_PLAN.md):
   2  fig2_pr_skill             PR season-lead heatmaps + Robinson skill maps
   3  fig3_t2m_skill            T2M, same layout
   4  fig4_noise_ablation       Gaussian vs EOF-LHS stochastic-prior ablation
-  5  fig5_probabilistic_diagnostics Ensemble-size diagnostics
+  5  fig5_probabilistic_diagnostics Extreme-event ensemble-size diagnostics
   6  fig6_extreme_skill        Extreme-subset skill vs all-case skill by lead
   7  fig7_event_pr_california  California AR precipitation case study (3x3)
   7a fig7a_event_pr_california_ecmwf ECMWF comparison companion (3x3)
@@ -85,8 +85,6 @@ DEFAULT_ECMWF_DIR_CANDIDATES = [
 ]
 DEFAULT_ENSEMBLE_DIR_CANDIDATES = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_extreme_t2m30_pr30_regions_2021_2023_wk3wk4_memberboot50_caseboot15_pub",
-    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2024_e90_s50",
-    "ml_output_flow_finalv1_global_noisectx_t2mres/ensemble_tests_global_2021_2023_e90_s50",
 ]
 NOISE_CSV_PATTERNS = [
     "ml_output_noise_compare_global_flow_finalv1/noise_comparison_global_*.csv",
