@@ -1153,8 +1153,8 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 # ===========================================================================
 
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
-LEAD_LINESTYLES = {3: "--", 4: "-"}
-FIG5_LEADS = (3, 4)
+LEAD_LINESTYLES = {1: ":", 2: "-.", 3: "--", 4: "-"}
+FIG5_LEADS = (1, 2, 3, 4)
 FIG5_MEMBER_COUNTS = (0, 4, 8, 16, 32, 64, 90)
 
 
@@ -1173,6 +1173,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
     ]
     fig, axes = plt.subplots(2, 2, figsize=(8.8, 6.4), sharex=True)
     letters = iter("abcd")
+    y_values: list[float] = []
 
     for vi, variable in enumerate(("pr", "t2m")):
         for mi, (metric, label, refline) in enumerate(specs):
@@ -1198,6 +1199,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 if 0 in FIG5_MEMBER_COUNTS and not np.any(np.isclose(x, 0.0)):
                     x = np.concatenate([[0.0], x])
                     mean = np.concatenate([[refline], mean])
+                y_values.extend(mean[np.isfinite(mean)].tolist())
+                y_values.append(float(refline))
                 color = LEAD_COLORS.get(int(lead), C_MODEL)
                 lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
                 if lo_col in grp and hi_col in grp:
@@ -1206,6 +1209,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                     if 0 in FIG5_MEMBER_COUNTS and x.size == lo.size + 1:
                         lo = np.concatenate([[refline], lo])
                         hi = np.concatenate([[refline], hi])
+                    y_values.extend(lo[np.isfinite(lo)].tolist())
+                    y_values.extend(hi[np.isfinite(hi)].tolist())
                     ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
                 ax.plot(x, mean, color=color, lw=1.7, ls=LEAD_LINESTYLES.get(int(lead), "-"),
                         marker="o", ms=3.6,
@@ -1221,6 +1226,14 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 ax.set_ylabel(VARIABLE_LABELS[variable])
             if vi == 0 and mi == len(specs) - 1:
                 ax.legend(loc="lower right", fontsize=7.5)
+    finite_y = np.asarray(y_values, dtype=float)
+    finite_y = finite_y[np.isfinite(finite_y)]
+    if finite_y.size:
+        ymin = float(np.nanmin(finite_y))
+        ymax = float(np.nanmax(finite_y))
+        pad = max(1.0, 0.08 * (ymax - ymin)) if ymax > ymin else max(1.0, abs(ymax) * 0.1)
+        for ax in axes.ravel():
+            ax.set_ylim(ymin - pad, ymax + pad)
     fig.tight_layout()
     return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
 

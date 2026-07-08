@@ -331,6 +331,14 @@ def parse_args() -> argparse.Namespace:
         help="Maximum selected events per region; <=0 disables the cap.",
     )
     parser.add_argument(
+        "--extreme_event_count_per_lead",
+        action="store_true",
+        help=(
+            "Select --extreme_event_count cases separately for each lead week. "
+            "Useful when comparing ensemble-size diagnostics across W1-W4."
+        ),
+    )
+    parser.add_argument(
         "--init_months",
         default="",
         help=(
@@ -396,6 +404,15 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Write PNG diagnostic plots from the output CSVs.",
+    )
+    parser.add_argument(
+        "--report_member_count",
+        type=int,
+        default=8,
+        help=(
+            "After ensemble_size_summary.csv is written, also print and save a compact report "
+            "for this generated ensemble size. Use <=0 to disable."
+        ),
     )
     parser.add_argument(
         "--plot_only",
@@ -1276,47 +1293,71 @@ def select_extreme_event_cases(
         for region in event_regions:
             candidates_by_region[region].sort(key=lambda item: float(item["event_score"]), reverse=True)
 
-        selected = []
-        selected_counts = {region: 0 for region in event_regions}
-        rank_position = 0
-        while len(selected) < event_count:
-            progressed = False
+        if args.extreme_event_count_per_lead:
+            selection_leads: list[int | None] = sorted(
+                {
+                    int(item["lead"])
+                    for candidates in candidates_by_region.values()
+                    for item in candidates
+                }
+            )
+        else:
+            selection_leads = [None]
+
+        for selection_lead in selection_leads:
+            candidates_for_lead = {}
             for region in event_regions:
-                if max_per_region > 0 and selected_counts[region] >= max_per_region:
-                    continue
-                candidates = candidates_by_region[region]
-                if rank_position >= len(candidates):
-                    continue
-                selected.append(dict(candidates[rank_position]))
-                selected_counts[region] += 1
-                progressed = True
-                if len(selected) >= event_count:
+                if selection_lead is None:
+                    candidates_for_lead[region] = candidates_by_region[region]
+                else:
+                    candidates_for_lead[region] = [
+                        item for item in candidates_by_region[region] if int(item["lead"]) == int(selection_lead)
+                    ]
+
+            selected = []
+            selected_counts = {region: 0 for region in event_regions}
+            rank_position = 0
+            while len(selected) < event_count:
+                progressed = False
+                for region in event_regions:
+                    if max_per_region > 0 and selected_counts[region] >= max_per_region:
+                        continue
+                    candidates = candidates_for_lead[region]
+                    if rank_position >= len(candidates):
+                        continue
+                    selected.append(dict(candidates[rank_position]))
+                    selected_counts[region] += 1
+                    progressed = True
+                    if len(selected) >= event_count:
+                        break
+                if not progressed:
                     break
-            if not progressed:
-                break
-            rank_position += 1
+                rank_position += 1
 
-        if len(selected) < event_count:
-            available = {region: len(candidates_by_region[region]) for region in event_regions}
-            raise ValueError(
-                f"Requested {event_count} extreme {variable.upper()} events, but only selected {len(selected)}. "
-                f"Available candidates by region: {available}"
-            )
+            if len(selected) < event_count:
+                available = {region: len(candidates_for_lead[region]) for region in event_regions}
+                lead_text = "" if selection_lead is None else f" for lead {selection_lead}"
+                raise ValueError(
+                    f"Requested {event_count} extreme {variable.upper()} events{lead_text}, "
+                    f"but only selected {len(selected)}. Available candidates by region: {available}"
+                )
 
-        selected.sort(key=lambda item: float(item["event_score"]), reverse=True)
-        for rank, item in enumerate(selected, start=1):
-            item["event_rank"] = rank
-        print(
-            f"Selected {len(selected)} extreme {variable.upper()} events across {len(event_regions)} regions "
-            f"using observed regional mean."
-        )
-        for item in selected[: min(10, len(selected))]:
+            selected.sort(key=lambda item: float(item["event_score"]), reverse=True)
+            for rank, item in enumerate(selected, start=1):
+                item["event_rank"] = rank
+                item["event_selection_lead"] = "" if selection_lead is None else int(selection_lead)
+            lead_text = "" if selection_lead is None else f" for lead {selection_lead}"
             print(
-                f"  {variable.upper()} #{item['event_rank']:02d} {item['region']} "
-                f"score={float(item['event_score']):.3f} "
-                f"init={item['init_time'][:10]} valid={item['valid_time'][:10]} lead={item['lead']}"
+                f"Selected {len(selected)} extreme {variable.upper()} events{lead_text} "
+                f"across {len(event_regions)} regions using observed regional mean."
             )
-        all_selected.extend(selected)
+            for item in selected[: min(10, len(selected))]:
+                print(
+                    f"  {variable.upper()} #{item['event_rank']:02d} {item['region']} "
+                    f"score={float(item['event_score']):.3f} "
+                    f"init={item['init_time'][:10]} valid={item['valid_time'][:10]} lead={item['lead']}"
+                )
+            all_selected.extend(selected)
 
     return all_selected
 
@@ -1421,6 +1462,69 @@ def write_csv(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
     print(f"Wrote {path}")
+
+
+def write_member_count_report(summary: pd.DataFrame, out_dir: Path, member_count: int) -> str | None:
+    if member_count <= 0:
+        return None
+    needed = {"variable", "lead", "member_count"}
+    if summary.empty or not needed <= set(summary.columns):
+        print(f"No member-count report written for ensemble size {member_count}: summary is empty.")
+        return None
+
+    subset = summary[summary["member_count"].astype(int).eq(int(member_count))].copy()
+    if subset.empty:
+        print(f"No member-count report rows found for ensemble size {member_count}.")
+        return None
+
+    preferred_cols = [
+        "variable",
+        "lead",
+        "member_count",
+        "n_member_repeats",
+        "n_case_rows",
+        "crps_skill_pct_mean",
+        "crps_skill_pct_p05",
+        "crps_skill_pct_p50",
+        "crps_skill_pct_p95",
+        "rmse_skill_pct_mean",
+        "rmse_skill_pct_p05",
+        "rmse_skill_pct_p50",
+        "rmse_skill_pct_p95",
+        "model_crps_mean",
+        "geos_crps_mean",
+        "model_rmse_mean",
+        "geos_rmse_mean",
+        "model_spread_rmse_ratio_mean",
+    ]
+    report_cols = [col for col in preferred_cols if col in subset.columns]
+    report = subset[report_cols].sort_values(["variable", "lead"]).reset_index(drop=True)
+    path = out_dir / f"ensemble_size_member{int(member_count)}_report.csv"
+    write_csv(report, path)
+
+    display_cols = [
+        col
+        for col in [
+            "variable",
+            "lead",
+            "crps_skill_pct_mean",
+            "crps_skill_pct_p05",
+            "crps_skill_pct_p95",
+            "rmse_skill_pct_mean",
+            "rmse_skill_pct_p05",
+            "rmse_skill_pct_p95",
+            "model_spread_rmse_ratio_mean",
+        ]
+        if col in report.columns
+    ]
+    display = report[display_cols].copy()
+    for col in display.columns:
+        if col not in {"variable", "lead"}:
+            display[col] = display[col].astype(float).round(3)
+    print(f"\nEnsemble size {int(member_count)} report:")
+    print(display.to_string(index=False))
+    print()
+    return str(path)
 
 
 def _import_matplotlib():
@@ -1732,8 +1836,11 @@ def main() -> None:
     args = parse_args()
     out_dir = Path(args.out_dir)
     if args.plot_only:
+        summary = read_existing_csv(out_dir / "ensemble_size_summary.csv")
+        report_path = write_member_count_report(summary, out_dir, int(args.report_member_count))
         if not args.make_plots:
-            print("--plot_only requested with --no-make_plots; nothing to do.")
+            if report_path is None:
+                print("--plot_only requested with --no-make_plots; nothing to do.")
             return
         make_diagnostic_plots(out_dir)
         return
@@ -1841,6 +1948,7 @@ def main() -> None:
         "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
         "extreme_event_count_requested": extreme_event_count,
+        "extreme_event_count_per_lead": bool(args.extreme_event_count_per_lead),
         "extreme_event_variables": event_variables,
         "extreme_event_regions": event_regions,
         "extreme_event_max_per_region": args.extreme_event_max_per_region if use_event_regions else None,
@@ -1980,6 +2088,7 @@ def main() -> None:
                                 "region": active_region if use_static_region_mask else "",
                                 "region_name": region_bounds["name"] if use_static_region_mask else "",
                                 "event_rank": "",
+                                "event_selection_lead": "",
                                 "event_score": np.nan,
                                 "event_score_variable": "",
                             }
@@ -2099,6 +2208,7 @@ def main() -> None:
                                 "region": case_region,
                                 "region_name": case_region_name,
                                 "event_rank": case_spec.get("event_rank", ""),
+                                "event_selection_lead": case_spec.get("event_selection_lead", ""),
                                 "event_score": case_spec.get("event_score", np.nan),
                                 "event_score_variable": case_spec.get("event_score_variable", ""),
                             }
@@ -2125,6 +2235,7 @@ def main() -> None:
 
     ensemble_summary = summarize_member_repeats(repeat_summary)
     write_csv(ensemble_summary, out_dir / "ensemble_size_summary.csv")
+    member_report_path = write_member_count_report(ensemble_summary, out_dir, int(args.report_member_count))
 
     bootstrap_ci = bootstrap_case_intervals(case_df, int(args.case_bootstrap_repeats), rng)
     if not bootstrap_ci.empty:
@@ -2154,6 +2265,7 @@ def main() -> None:
                 "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
                 "ensemble_size_member_repeat_summary": str(out_dir / "ensemble_size_member_repeat_summary.csv"),
                 "ensemble_size_summary": str(out_dir / "ensemble_size_summary.csv"),
+                "ensemble_size_member_report": member_report_path,
                 "ensemble_size_bootstrap_ci": str(out_dir / "ensemble_size_bootstrap_ci.csv")
                 if not bootstrap_ci.empty
                 else None,
