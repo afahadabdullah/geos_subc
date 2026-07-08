@@ -301,6 +301,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--eval_mask", choices=("all", "land", "ocean"), default="all")
     parser.add_argument(
+        "--eval_masks",
+        default="",
+        help=(
+            "Optional comma-separated evaluation masks to compute in one pass, e.g. all,land. "
+            "When multiple masks are requested, outputs are written under --out_dir/MASK/."
+        ),
+    )
+    parser.add_argument(
         "--land_mask_file",
         default=None,
         help="Optional .pt land mask with is_land or land_mask. Required for land/ocean masks.",
@@ -362,6 +370,14 @@ def parse_args() -> argparse.Namespace:
             "If >0, randomly select this many init dates per year while covering all 12 calendar "
             "months across the requested years. For 2021-2023 with value 4, this selects 12 total "
             "dates: four per year and one date in each month Jan-Dec. Uses --seed."
+        ),
+    )
+    parser.add_argument(
+        "--one_init_per_month_per_year",
+        action="store_true",
+        help=(
+            "Randomly select one available initialization in each calendar month for each requested year. "
+            "For 2021-2023 this selects 36 total init dates. Uses --seed."
         ),
     )
     parser.add_argument(
@@ -432,6 +448,18 @@ def parse_int_list(text: str) -> list[int]:
     if not values:
         raise ValueError("Expected at least one integer value.")
     return sorted(dict.fromkeys(values))
+
+
+def parse_eval_mask_list(text: str, default: str) -> list[str]:
+    allowed = {"all", "land", "ocean"}
+    raw = str(text or "").strip()
+    masks = [item.strip().lower() for item in raw.split(",") if item.strip()] if raw else [default]
+    if not masks:
+        masks = [default]
+    unknown = sorted(set(masks) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown eval mask(s) {unknown}; valid options are {sorted(allowed)}.")
+    return list(dict.fromkeys(masks))
 
 
 def parse_date_filter(text: str) -> set[str]:
@@ -911,11 +939,12 @@ def region_mask_from_bounds(lats: np.ndarray, lons: np.ndarray, region_bounds: d
     return lat_mask[:, None] & lon_mask[None, :]
 
 
-def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int]) -> np.ndarray:
-    if args.eval_mask == "all":
+def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int], eval_mask_name: str | None = None) -> np.ndarray:
+    mask_name = eval_mask_name or args.eval_mask
+    if mask_name == "all":
         return np.ones(shape, dtype=bool)
     if not args.land_mask_file:
-        raise ValueError("--land_mask_file is required when --eval_mask is land or ocean.")
+        raise ValueError("--land_mask_file is required when evaluating land or ocean masks.")
 
     import torch
 
@@ -928,7 +957,7 @@ def load_eval_mask(args: argparse.Namespace, shape: tuple[int, int]) -> np.ndarr
         raise KeyError(f"{args.land_mask_file} is missing 'is_land' or 'land_mask'.")
     if land_mask.shape != shape:
         raise ValueError(f"Land mask shape {land_mask.shape} does not match forecast grid {shape}.")
-    return land_mask if args.eval_mask == "land" else ~land_mask
+    return land_mask if mask_name == "land" else ~land_mask
 
 
 def weighted_spatial_mean(field: np.ndarray, weights: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -1527,6 +1556,85 @@ def write_member_count_report(summary: pd.DataFrame, out_dir: Path, member_count
     return str(path)
 
 
+def write_evaluation_outputs(
+    case_rows: list[dict[str, object]],
+    dispersion_state: dict[tuple[str, str, int], dict[str, float]],
+    rank_state: dict[tuple[str, str, int, int], np.ndarray],
+    out_dir: Path,
+    args: argparse.Namespace,
+    rng: np.random.Generator,
+    metadata: dict[str, object],
+    start_time: float,
+    processed_cases: int,
+    selected_init_counts_by_year: dict[str, int],
+    selected_init_season_counts_by_year: dict[str, dict[str, int]],
+    available_init_season_counts_by_year: dict[str, dict[str, int]],
+    selected_balanced_monthly_dates_by_year: dict[str, dict[str, str]],
+    available_balanced_monthly_counts_by_year: dict[str, dict[str, int]],
+    plot_files: list[str] | None = None,
+) -> dict[str, object]:
+    if not case_rows:
+        raise RuntimeError("No forecast cases were processed. Check --forecast_dir, years, variables, and filters.")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    case_df = pd.DataFrame(case_rows)
+    if args.write_case_metrics:
+        write_csv(case_df, out_dir / "case_member_metrics.csv")
+
+    repeat_summary = aggregate_case_rows(case_df, ["variable", "lead", "member_count", "member_repeat"])
+    write_csv(repeat_summary, out_dir / "ensemble_size_member_repeat_summary.csv")
+
+    ensemble_summary = summarize_member_repeats(repeat_summary)
+    write_csv(ensemble_summary, out_dir / "ensemble_size_summary.csv")
+    member_report_path = write_member_count_report(ensemble_summary, out_dir, int(args.report_member_count))
+
+    bootstrap_ci = bootstrap_case_intervals(case_df, int(args.case_bootstrap_repeats), rng)
+    if not bootstrap_ci.empty:
+        write_csv(bootstrap_ci, out_dir / "ensemble_size_bootstrap_ci.csv")
+
+    dispersion_df = pd.DataFrame(dispersion_summary_rows(dispersion_state, rank_state))
+    write_csv(dispersion_df, out_dir / "dispersion_summary.csv")
+
+    rank_df = pd.DataFrame(rank_histogram_rows(rank_state))
+    if not rank_df.empty:
+        write_csv(rank_df, out_dir / "dispersion_rank_histogram.csv")
+
+    if plot_files is None:
+        plot_files = make_diagnostic_plots(out_dir) if args.make_plots else []
+
+    metadata.update(
+        {
+            "processed_init_lead_cases": processed_cases,
+            "selected_init_counts_by_year": selected_init_counts_by_year,
+            "selected_init_season_counts_by_year": selected_init_season_counts_by_year,
+            "available_init_season_counts_by_year": available_init_season_counts_by_year,
+            "selected_balanced_monthly_dates_by_year": selected_balanced_monthly_dates_by_year,
+            "available_balanced_monthly_counts_by_year": available_balanced_monthly_counts_by_year,
+            "case_member_rows": int(len(case_df)),
+            "completed_at": timestamp_now_utc(),
+            "elapsed_seconds": float(time.time() - start_time),
+            "outputs": {
+                "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
+                "ensemble_size_member_repeat_summary": str(out_dir / "ensemble_size_member_repeat_summary.csv"),
+                "ensemble_size_summary": str(out_dir / "ensemble_size_summary.csv"),
+                "ensemble_size_member_report": member_report_path,
+                "ensemble_size_bootstrap_ci": str(out_dir / "ensemble_size_bootstrap_ci.csv")
+                if not bootstrap_ci.empty
+                else None,
+                "dispersion_summary": str(out_dir / "dispersion_summary.csv"),
+                "dispersion_rank_histogram": str(out_dir / "dispersion_rank_histogram.csv")
+                if not rank_df.empty
+                else None,
+                "plots": plot_files,
+            },
+        }
+    )
+    with open(out_dir / "ensemble_test_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Wrote {out_dir / 'ensemble_test_metadata.json'}")
+    return metadata
+
+
 def _import_matplotlib():
     if not os.environ.get("MPLCONFIGDIR"):
         mpl_cache = Path(os.environ.get("TMPDIR") or "/tmp") / "geos_subc_matplotlib"
@@ -1850,17 +1958,33 @@ def main() -> None:
     variables = parse_variables(args.variables)
     sample_sizes = parse_int_list(args.sample_sizes)
     skip_years = parse_int_set(args.skip_years)
+    eval_mask_names = parse_eval_mask_list(args.eval_masks, args.eval_mask)
     lead_filter = parse_int_set(args.lead_values) if args.lead_values else None
     init_date_filter = parse_date_filter(args.init_dates)
     valid_date_filter = parse_date_filter(args.valid_dates)
     init_months = parse_month_filter(args.init_months)
     init_season_counts = parse_init_season_counts(args.init_season_counts)
     balanced_monthly_inits_per_year = int(args.balanced_monthly_inits_per_year)
+    one_init_per_month_per_year = bool(args.one_init_per_month_per_year)
     extreme_event_count = int(args.extreme_event_count)
     event_regions = parse_region_list(args.extreme_event_regions) if extreme_event_count > 0 else []
     event_variables = parse_variables(args.extreme_event_variable) if extreme_event_count > 0 else []
     if init_season_counts and (init_months or args.max_inits_per_year is not None):
         raise ValueError("--init_season_counts cannot be combined with --init_months or --max_inits_per_year.")
+    if one_init_per_month_per_year and balanced_monthly_inits_per_year:
+        raise ValueError("--one_init_per_month_per_year cannot be combined with --balanced_monthly_inits_per_year.")
+    if one_init_per_month_per_year and (
+        init_months
+        or init_date_filter
+        or init_season_counts
+        or args.max_inits_per_year is not None
+        or int(args.init_stride) != 1
+        or extreme_event_count > 0
+    ):
+        raise ValueError(
+            "--one_init_per_month_per_year cannot be combined with --init_months, --init_dates, "
+            "--init_season_counts, --max_inits_per_year, --init_stride, or --extreme_event_count."
+        )
     if balanced_monthly_inits_per_year < 0:
         raise ValueError("--balanced_monthly_inits_per_year must be >= 0.")
     if balanced_monthly_inits_per_year and (
@@ -1915,9 +2039,6 @@ def main() -> None:
     for event in selected_event_cases:
         selected_event_cases_by_year.setdefault(int(event["year"]), []).append(event)
 
-    case_rows: list[dict[str, object]] = []
-    dispersion_state: dict[tuple[str, str, int], dict[str, float]] = {}
-    rank_state: dict[tuple[str, str, int, int], np.ndarray] = {}
     metadata = {
         "forecast_dir": os.path.abspath(args.forecast_dir),
         "out_dir": os.path.abspath(args.out_dir),
@@ -1930,6 +2051,7 @@ def main() -> None:
         "case_bootstrap_repeats": args.case_bootstrap_repeats,
         "seed": args.seed,
         "eval_mask": args.eval_mask,
+        "eval_masks": eval_mask_names,
         "land_mask_file": os.path.abspath(args.land_mask_file) if args.land_mask_file else None,
         "rank_bins": args.rank_bins,
         "rank_histogram": not args.skip_rank_histogram,
@@ -1944,6 +2066,7 @@ def main() -> None:
         "balanced_monthly_months_by_year": {
             str(year): months for year, months in sorted(balanced_months_by_year.items())
         },
+        "one_init_per_month_per_year": one_init_per_month_per_year,
         "init_stride": int(args.init_stride),
         "init_stride_offset": int(args.init_stride_offset),
         "max_inits_per_year": args.max_inits_per_year,
@@ -1956,11 +2079,18 @@ def main() -> None:
         "started_at": timestamp_now_utc(),
     }
 
-    eval_mask = None
+    eval_masks_by_name: dict[str, np.ndarray] = {}
     weights = None
-    metric_mask = None
-    metric_weights = None
+    metric_masks_by_name: dict[str, np.ndarray] = {}
+    metric_weights_by_name: dict[str, np.ndarray] = {}
     processed_cases = 0
+    case_rows_by_mask: dict[str, list[dict[str, object]]] = {mask_name: [] for mask_name in eval_mask_names}
+    dispersion_state_by_mask: dict[str, dict[tuple[str, str, int], dict[str, float]]] = {
+        mask_name: {} for mask_name in eval_mask_names
+    }
+    rank_state_by_mask: dict[str, dict[tuple[str, str, int, int], np.ndarray]] = {
+        mask_name: {} for mask_name in eval_mask_names
+    }
     selected_init_counts_by_year: dict[str, int] = {}
     selected_init_season_counts_by_year: dict[str, dict[str, int]] = {}
     available_init_season_counts_by_year: dict[str, dict[str, int]] = {}
@@ -1974,33 +2104,37 @@ def main() -> None:
         ds = xr.open_zarr(path, consolidated=False, chunks=None)
         try:
             lats, lons = get_lat_lon(ds, VARIABLES[variables[0]]["model"])
-            if eval_mask is None:
-                eval_mask = load_eval_mask(args, (len(lats), len(lons)))
+            if not eval_masks_by_name:
                 weights = area_weights_from_lats(lats, len(lons))
-                if use_static_region_mask:
-                    region_mask = region_mask_from_bounds(lats, lons, region_bounds)
-                    eval_mask = eval_mask & region_mask
-                    kept = int(np.sum(eval_mask))
-                    if kept <= 0:
-                        raise ValueError(
-                            f"Region mask for {region_bounds['name']} kept zero grid cells. "
-                            f"Bounds={region_bounds}"
+                for eval_mask_name in eval_mask_names:
+                    eval_mask = load_eval_mask(args, (len(lats), len(lons)), eval_mask_name)
+                    if use_static_region_mask:
+                        region_mask = region_mask_from_bounds(lats, lons, region_bounds)
+                        eval_mask = eval_mask & region_mask
+                        kept = int(np.sum(eval_mask))
+                        if kept <= 0:
+                            raise ValueError(
+                                f"Region mask for {region_bounds['name']} kept zero grid cells. "
+                                f"Bounds={region_bounds}"
+                            )
+                        mask_label = "Regional mean" if args.spatial_reduction == "regional_mean" else "Region filter"
+                        print(
+                            f"{mask_label}: {region_bounds['name']} "
+                            f"lat={region_bounds['lat_min']}..{region_bounds['lat_max']} "
+                            f"lon={region_bounds['lon_min']}..{region_bounds['lon_max']}; "
+                            f"kept {kept}/{eval_mask.size} grid cells after eval_mask={eval_mask_name}"
                         )
-                    mask_label = "Regional mean" if args.spatial_reduction == "regional_mean" else "Region filter"
-                    print(
-                        f"{mask_label}: {region_bounds['name']} "
-                        f"lat={region_bounds['lat_min']}..{region_bounds['lat_max']} "
-                        f"lon={region_bounds['lon_min']}..{region_bounds['lon_max']}; "
-                        f"kept {kept}/{eval_mask.size} grid cells after eval_mask={args.eval_mask}"
-                    )
-                if args.spatial_reduction == "regional_mean":
-                    metric_weights = np.ones((1, 1), dtype=np.float64)
-                    metric_mask = np.ones((1, 1), dtype=bool)
-                else:
-                    metric_weights = weights
-                    metric_mask = eval_mask
-                kept = int(np.sum(eval_mask))
-                print(f"Evaluation mask: {args.eval_mask}; kept {kept}/{eval_mask.size} grid cells")
+                    if args.spatial_reduction == "regional_mean":
+                        metric_weights = np.ones((1, 1), dtype=np.float64)
+                        metric_mask = np.ones((1, 1), dtype=bool)
+                    else:
+                        metric_weights = weights
+                        metric_mask = eval_mask
+                    kept = int(np.sum(eval_mask))
+                    print(f"Evaluation mask: {eval_mask_name}; kept {kept}/{eval_mask.size} grid cells")
+                    eval_masks_by_name[eval_mask_name] = eval_mask
+                    metric_weights_by_name[eval_mask_name] = metric_weights
+                    metric_masks_by_name[eval_mask_name] = metric_mask
             lead_pairs = lead_index_values(ds, VARIABLES[variables[0]]["model"])
             if lead_filter is not None:
                 lead_pairs = [(idx, lead) for idx, lead in lead_pairs if lead in lead_filter]
@@ -2014,7 +2148,18 @@ def main() -> None:
                     print(f"Extreme-event cases for {year}: {len(year_events)} region/init/lead cases")
                 case_specs = [dict(event) for event in year_events]
             else:
-                if balanced_months_by_year:
+                if one_init_per_month_per_year:
+                    init_indices, selected_dates, available_counts = filtered_init_indices_by_months_random(
+                        ds,
+                        sample_var,
+                        list(range(1, 13)),
+                        rng,
+                    )
+                    selected_balanced_monthly_dates_by_year[str(year)] = selected_dates
+                    available_balanced_monthly_counts_by_year[str(year)] = available_counts
+                    selected_by_season = {}
+                    available_by_season = {}
+                elif balanced_months_by_year:
                     year_months = balanced_months_by_year[int(year)]
                     init_indices, selected_dates, available_counts = filtered_init_indices_by_months_random(
                         ds,
@@ -2043,7 +2188,16 @@ def main() -> None:
                     selected_by_season = {}
                     available_by_season = {}
                 selected_init_counts_by_year[str(year)] = len(init_indices)
-                if balanced_months_by_year:
+                if one_init_per_month_per_year:
+                    selected_text = ",".join(
+                        f"{month:02d}={selected_balanced_monthly_dates_by_year[str(year)][str(month)]}"
+                        for month in range(1, 13)
+                    )
+                    print(
+                        f"One-init-per-month filter for {year}: {selected_text}; "
+                        f"selected {len(init_indices)}/{total_inits} init dates"
+                    )
+                elif balanced_months_by_year:
                     selected_text = ",".join(
                         f"{int(month):02d}={selected_balanced_monthly_dates_by_year[str(year)][str(month)]}"
                         for month in balanced_months_by_year[int(year)]
@@ -2107,12 +2261,6 @@ def main() -> None:
                 valid_month, valid_season = valid_month_season(valid_time)
                 case_region = str(case_spec.get("region", ""))
                 case_region_name = str(case_spec.get("region_name", ""))
-                case_eval_mask = eval_mask
-                if use_event_regions:
-                    event_region_bounds = REGIONS[case_region]
-                    case_eval_mask = eval_mask & region_mask_from_bounds(lats, lons, event_region_bounds)
-                    if int(np.sum(case_eval_mask)) <= 0:
-                        raise ValueError(f"Event region {case_region!r} kept zero grid cells during evaluation.")
                 case_event_variable = str(case_spec.get("event_score_variable", ""))
                 case_variables = variables
                 if use_event_regions and case_event_variable:
@@ -2128,94 +2276,118 @@ def main() -> None:
                     obs = load_obs_array(ds, spec["obs"], init_idx, lead_idx)
                     model = load_forecast_array(ds, spec["model"], init_idx, lead_idx)
                     geos = load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
-                    if args.spatial_reduction == "regional_mean":
-                        model_eval, geos_eval, obs_eval, case_weights, case_mask = regional_mean_metric_inputs(
-                            model, geos, obs, weights, case_eval_mask
-                        )
-                    else:
-                        model_eval, geos_eval, obs_eval = model, geos, obs
-                        case_weights, case_mask = metric_weights, case_eval_mask
                     model_members = int(model.shape[0])
                     geos_members = int(geos.shape[0])
                     usable_sizes = [size for size in sample_sizes if size <= model_members]
                     if not usable_sizes:
                         usable_sizes = [model_members]
 
-                    geos_fields = metric_fields(geos_eval, obs_eval)
-                    model_full_fields = metric_fields(model_eval, obs_eval)
-                    common_full = case_mask & geos_fields["finite"] & model_full_fields["finite"]
-                    geos_reduced = reduce_fields(geos_fields, case_weights, common_full, "geos")
-                    model_full_reduced = reduce_fields(model_full_fields, case_weights, common_full, "model")
-                    update_dispersion_state(dispersion_state, "geos", variable, lead_value, geos_reduced, "geos")
-                    update_dispersion_state(
-                        dispersion_state, "model", variable, lead_value, model_full_reduced, "model"
-                    )
-                    if not args.skip_rank_histogram:
-                        update_rank_state(
-                            rank_state,
+                    for eval_mask_name in eval_mask_names:
+                        case_eval_mask = eval_masks_by_name[eval_mask_name]
+                        if use_event_regions:
+                            event_region_bounds = REGIONS[case_region]
+                            case_eval_mask = case_eval_mask & region_mask_from_bounds(lats, lons, event_region_bounds)
+                            if int(np.sum(case_eval_mask)) <= 0:
+                                raise ValueError(
+                                    f"Event region {case_region!r} kept zero grid cells during evaluation."
+                                )
+                        if args.spatial_reduction == "regional_mean":
+                            model_eval, geos_eval, obs_eval, case_weights, case_mask = regional_mean_metric_inputs(
+                                model, geos, obs, weights, case_eval_mask
+                            )
+                        else:
+                            model_eval, geos_eval, obs_eval = model, geos, obs
+                            case_weights = metric_weights_by_name[eval_mask_name]
+                            case_mask = case_eval_mask
+
+                        geos_fields = metric_fields(geos_eval, obs_eval)
+                        model_full_fields = metric_fields(model_eval, obs_eval)
+                        common_full = case_mask & geos_fields["finite"] & model_full_fields["finite"]
+                        geos_reduced = reduce_fields(geos_fields, case_weights, common_full, "geos")
+                        model_full_reduced = reduce_fields(model_full_fields, case_weights, common_full, "model")
+                        update_dispersion_state(
+                            dispersion_state_by_mask[eval_mask_name],
                             "geos",
                             variable,
                             lead_value,
-                            geos_eval,
-                            obs_eval,
-                            case_weights,
-                            case_mask,
-                            rng,
-                            args.rank_bins,
+                            geos_reduced,
+                            "geos",
                         )
-                        update_rank_state(
-                            rank_state,
+                        update_dispersion_state(
+                            dispersion_state_by_mask[eval_mask_name],
                             "model",
                             variable,
                             lead_value,
-                            model_eval,
-                            obs_eval,
-                            case_weights,
-                            case_mask,
-                            rng,
-                            args.rank_bins,
+                            model_full_reduced,
+                            "model",
                         )
+                        if not args.skip_rank_histogram:
+                            update_rank_state(
+                                rank_state_by_mask[eval_mask_name],
+                                "geos",
+                                variable,
+                                lead_value,
+                                geos_eval,
+                                obs_eval,
+                                case_weights,
+                                case_mask,
+                                rng,
+                                args.rank_bins,
+                            )
+                            update_rank_state(
+                                rank_state_by_mask[eval_mask_name],
+                                "model",
+                                variable,
+                                lead_value,
+                                model_eval,
+                                obs_eval,
+                                case_weights,
+                                case_mask,
+                                rng,
+                                args.rank_bins,
+                            )
 
-                    for size in usable_sizes:
-                        repeats = 1 if size >= model_members else max(1, int(args.member_bootstrap_repeats))
-                        for member_repeat in range(repeats):
-                            if size >= model_members:
-                                member_idx = np.arange(model_members)
-                            else:
-                                member_idx = rng.choice(model_members, size=size, replace=False)
-                            sample = model_eval[member_idx, :, :]
-                            sample_fields = metric_fields(sample, obs_eval)
-                            common = case_mask & geos_fields["finite"] & sample_fields["finite"]
-                            model_reduced = reduce_fields(sample_fields, case_weights, common, "model")
-                            geos_for_sample = reduce_fields(geos_fields, case_weights, common, "geos")
-                            row = {
-                                "case_id": case_id,
-                                "year": year,
-                                "init_index": init_idx,
-                                "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
-                                "init_month": init_month,
-                                "init_season": init_season,
-                                "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
-                                "valid_month": valid_month,
-                                "valid_season": valid_season,
-                                "lead": int(lead_value),
-                                "variable": variable,
-                                "member_count": int(size),
-                                "member_repeat": int(member_repeat),
-                                "model_members_available": model_members,
-                                "geos_members_available": geos_members,
-                                "spatial_reduction": args.spatial_reduction,
-                                "region": case_region,
-                                "region_name": case_region_name,
-                                "event_rank": case_spec.get("event_rank", ""),
-                                "event_selection_lead": case_spec.get("event_selection_lead", ""),
-                                "event_score": case_spec.get("event_score", np.nan),
-                                "event_score_variable": case_spec.get("event_score_variable", ""),
-                            }
-                            row.update(model_reduced)
-                            row.update(geos_for_sample)
-                            row.update(row_metrics_from_sums(row))
-                            case_rows.append(row)
+                        for size in usable_sizes:
+                            repeats = 1 if size >= model_members else max(1, int(args.member_bootstrap_repeats))
+                            for member_repeat in range(repeats):
+                                if size >= model_members:
+                                    member_idx = np.arange(model_members)
+                                else:
+                                    member_idx = rng.choice(model_members, size=size, replace=False)
+                                sample = model_eval[member_idx, :, :]
+                                sample_fields = metric_fields(sample, obs_eval)
+                                common = case_mask & geos_fields["finite"] & sample_fields["finite"]
+                                model_reduced = reduce_fields(sample_fields, case_weights, common, "model")
+                                geos_for_sample = reduce_fields(geos_fields, case_weights, common, "geos")
+                                row = {
+                                    "case_id": case_id,
+                                    "year": year,
+                                    "init_index": init_idx,
+                                    "init_time": "" if pd.isna(init_time) else init_time.isoformat(),
+                                    "init_month": init_month,
+                                    "init_season": init_season,
+                                    "valid_time": "" if pd.isna(valid_time) else valid_time.isoformat(),
+                                    "valid_month": valid_month,
+                                    "valid_season": valid_season,
+                                    "lead": int(lead_value),
+                                    "variable": variable,
+                                    "member_count": int(size),
+                                    "member_repeat": int(member_repeat),
+                                    "model_members_available": model_members,
+                                    "geos_members_available": geos_members,
+                                    "spatial_reduction": args.spatial_reduction,
+                                    "eval_mask": eval_mask_name,
+                                    "region": case_region,
+                                    "region_name": case_region_name,
+                                    "event_rank": case_spec.get("event_rank", ""),
+                                    "event_selection_lead": case_spec.get("event_selection_lead", ""),
+                                    "event_score": case_spec.get("event_score", np.nan),
+                                    "event_score_variable": case_spec.get("event_score_variable", ""),
+                                }
+                                row.update(model_reduced)
+                                row.update(geos_for_sample)
+                                row.update(row_metrics_from_sums(row))
+                                case_rows_by_mask[eval_mask_name].append(row)
                 processed_cases += 1
                 if processed_cases % 20 == 0:
                     elapsed = (time.time() - start_time) / 60.0
@@ -2223,63 +2395,51 @@ def main() -> None:
         finally:
             ds.close()
 
-    if not case_rows:
+    if not any(case_rows_by_mask.values()):
         raise RuntimeError("No forecast cases were processed. Check --forecast_dir, years, variables, and filters.")
 
-    case_df = pd.DataFrame(case_rows)
-    if args.write_case_metrics:
-        write_csv(case_df, out_dir / "case_member_metrics.csv")
+    written_by_mask = {}
+    for eval_mask_name in eval_mask_names:
+        mask_rows = case_rows_by_mask[eval_mask_name]
+        if not mask_rows:
+            print(f"No rows for eval mask {eval_mask_name}; skipping output.")
+            continue
+        mask_out_dir = out_dir if len(eval_mask_names) == 1 else out_dir / eval_mask_name
+        mask_metadata = dict(metadata)
+        mask_metadata["eval_mask"] = eval_mask_name
+        mask_metadata["out_dir"] = os.path.abspath(mask_out_dir)
+        written_by_mask[eval_mask_name] = write_evaluation_outputs(
+            mask_rows,
+            dispersion_state_by_mask[eval_mask_name],
+            rank_state_by_mask[eval_mask_name],
+            mask_out_dir,
+            args,
+            rng,
+            mask_metadata,
+            start_time,
+            processed_cases,
+            selected_init_counts_by_year,
+            selected_init_season_counts_by_year,
+            available_init_season_counts_by_year,
+            selected_balanced_monthly_dates_by_year,
+            available_balanced_monthly_counts_by_year,
+        )
 
-    repeat_summary = aggregate_case_rows(case_df, ["variable", "lead", "member_count", "member_repeat"])
-    write_csv(repeat_summary, out_dir / "ensemble_size_member_repeat_summary.csv")
-
-    ensemble_summary = summarize_member_repeats(repeat_summary)
-    write_csv(ensemble_summary, out_dir / "ensemble_size_summary.csv")
-    member_report_path = write_member_count_report(ensemble_summary, out_dir, int(args.report_member_count))
-
-    bootstrap_ci = bootstrap_case_intervals(case_df, int(args.case_bootstrap_repeats), rng)
-    if not bootstrap_ci.empty:
-        write_csv(bootstrap_ci, out_dir / "ensemble_size_bootstrap_ci.csv")
-
-    dispersion_df = pd.DataFrame(dispersion_summary_rows(dispersion_state, rank_state))
-    write_csv(dispersion_df, out_dir / "dispersion_summary.csv")
-
-    rank_df = pd.DataFrame(rank_histogram_rows(rank_state))
-    if not rank_df.empty:
-        write_csv(rank_df, out_dir / "dispersion_rank_histogram.csv")
-
-    plot_files = make_diagnostic_plots(out_dir) if args.make_plots else []
-
-    metadata.update(
-        {
-            "processed_init_lead_cases": processed_cases,
-            "selected_init_counts_by_year": selected_init_counts_by_year,
-            "selected_init_season_counts_by_year": selected_init_season_counts_by_year,
-            "available_init_season_counts_by_year": available_init_season_counts_by_year,
-            "selected_balanced_monthly_dates_by_year": selected_balanced_monthly_dates_by_year,
-            "available_balanced_monthly_counts_by_year": available_balanced_monthly_counts_by_year,
-            "case_member_rows": int(len(case_df)),
-            "completed_at": timestamp_now_utc(),
-            "elapsed_seconds": float(time.time() - start_time),
-            "outputs": {
-                "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
-                "ensemble_size_member_repeat_summary": str(out_dir / "ensemble_size_member_repeat_summary.csv"),
-                "ensemble_size_summary": str(out_dir / "ensemble_size_summary.csv"),
-                "ensemble_size_member_report": member_report_path,
-                "ensemble_size_bootstrap_ci": str(out_dir / "ensemble_size_bootstrap_ci.csv")
-                if not bootstrap_ci.empty
-                else None,
-                "dispersion_summary": str(out_dir / "dispersion_summary.csv"),
-                "dispersion_rank_histogram": str(out_dir / "dispersion_rank_histogram.csv")
-                if not rank_df.empty
-                else None,
-                "plots": plot_files,
+    if len(eval_mask_names) > 1:
+        manifest = {
+            "created_at": timestamp_now_utc(),
+            "forecast_dir": os.path.abspath(args.forecast_dir),
+            "out_dir": os.path.abspath(out_dir),
+            "eval_masks": eval_mask_names,
+            "mask_output_dirs": {
+                mask_name: str((out_dir / mask_name).resolve())
+                for mask_name in eval_mask_names
+                if mask_name in written_by_mask
             },
         }
-    )
-    with open(out_dir / "ensemble_test_metadata.json", "w") as f:
-        json.dump(metadata, f, indent=2)
-    print(f"Wrote {out_dir / 'ensemble_test_metadata.json'}")
+        with open(out_dir / "ensemble_test_metadata.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+        print(f"Wrote {out_dir / 'ensemble_test_metadata.json'}")
 
 
 if __name__ == "__main__":
