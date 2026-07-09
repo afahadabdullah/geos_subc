@@ -469,15 +469,15 @@ def sign_consistency_fraction(ds, variable: str, metric: str, subset: str) -> np
 
 
 def stipple_consistency(ax, lons, lats, frac: np.ndarray | None, stride: int = 3) -> None:
-    """Dot gridpoints where the improvement sign is consistent across at least 95% of
-    season-lead cells (fraction >= 0.95)."""
+    """Dot gridpoints where the improvement sign is consistent across at least 90% of
+    season-lead cells (fraction >= 0.90)."""
     if frac is None or lons is None or lats is None:
         return
     import cartopy.crs as ccrs
     lon2d, lat2d = np.meshgrid(lons, lats)
     mask = np.zeros_like(frac, dtype=bool)
     mask[::stride, ::stride] = True
-    sig = (frac >= 0.95) & mask
+    sig = (frac >= 0.90) & mask
     if sig.any():
         ax.scatter(lon2d[sig], lat2d[sig], color="black", s=1.2, alpha=0.55,
                    marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=3)
@@ -978,7 +978,7 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
 
     fig = plt.figure(figsize=(15.5, 7.8))
     outer = fig.add_gridspec(
-        2, 1, height_ratios=[0.68, 1.30], hspace=0.16,
+        2, 1, height_ratios=[0.68, 1.30], hspace=0.28,
         left=0.035, right=0.985, bottom=0.075, top=0.965,
     )
     heatmap_gs = outer[0].subgridspec(1, 4, wspace=0.14)
@@ -1006,7 +1006,7 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
                              "(d) RMSE skill gain (%)", CMAP_SKILL,
                              norm=TwoSlopeNorm(vcenter=0.0, vmin=-hlim_r, vmax=hlim_r),
                              value_fmt="{:+.0f}%")
-    heatmap_cbar = {"orientation": "horizontal", "shrink": 0.74, "pad": 0.095,
+    heatmap_cbar = {"orientation": "horizontal", "shrink": 0.74, "pad": 0.20,
                     "aspect": 24, "fraction": 0.07}
     slim_colorbar(fig, im_a, axes_hm[0], f"CRPS ({unit})", **heatmap_cbar)
     slim_colorbar(fig, im_b, axes_hm[1], "gain (%)", symmetric=True, **heatmap_cbar)
