@@ -469,15 +469,15 @@ def sign_consistency_fraction(ds, variable: str, metric: str, subset: str) -> np
 
 
 def stipple_consistency(ax, lons, lats, frac: np.ndarray | None, stride: int = 3) -> None:
-    """Dot gridpoints where the improvement sign is consistent across at least 90% of
-    season-lead cells (fraction >= 0.90)."""
+    """Dot gridpoints where the improvement sign is consistent across at least 85% of
+    season-lead cells (fraction >= 0.85)."""
     if frac is None or lons is None or lats is None:
         return
     import cartopy.crs as ccrs
     lon2d, lat2d = np.meshgrid(lons, lats)
     mask = np.zeros_like(frac, dtype=bool)
     mask[::stride, ::stride] = True
-    sig = (frac >= 0.90) & mask
+    sig = (frac >= 0.85) & mask
     if sig.any():
         ax.scatter(lon2d[sig], lat2d[sig], color="black", s=1.2, alpha=0.55,
                    marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=3)
@@ -1041,15 +1041,16 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     gr_lo, gr_hi = mag_limits(map_gr[2])
     slim_cs = symmetric_limit([map_cs[2]])
     slim_rs = symmetric_limit([map_rs[2]])
+    slim_gain = max(slim_cs, slim_rs)
 
     ax_e, im_e = robinson_map(fig, map_gs[0, 0], *map_gc, f"(e) {BASELINE} CRPS",
                               CMAP_MAG, vmin=gc_lo, vmax=gc_hi)
     ax_f, im_f = robinson_map(fig, map_gs[0, 1], *map_cs, f"(f) {var_short} CRPS skill gain (%)",
-                              CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_cs, vmax=slim_cs))
+                              CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_gain, vmax=slim_gain))
     ax_g, im_g = robinson_map(fig, map_gs[0, 2], *map_gr, f"(g) {BASELINE} RMSE",
                               CMAP_MAG, vmin=gr_lo, vmax=gr_hi)
     ax_h, im_h = robinson_map(fig, map_gs[0, 3], *map_rs, f"(h) {var_short} RMSE skill gain (%)",
-                              CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_rs, vmax=slim_rs))
+                              CMAP_SKILL, norm=TwoSlopeNorm(vcenter=0.0, vmin=-slim_gain, vmax=slim_gain))
     inset_horizontal_colorbar(fig, im_e, ax_e, f"CRPS ({unit})")
     inset_horizontal_colorbar(fig, im_f, ax_f, "gain (%)", symmetric=True)
     inset_horizontal_colorbar(fig, im_g, ax_g, f"RMSE ({unit})")
