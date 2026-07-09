@@ -1308,13 +1308,19 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                     if np.isfinite(raw_val):
                         raw_reference_vals.append((int(lead), raw_val))
             ax.axhline(refline, color="#7a8794", lw=0.9, ls="--")
-            # Second y-axis: raw lagged-FIMr1p1 reference values as dotted lines,
-            # so skill (%) and the underlying raw score can be read together.
+            # Second y-axis: raw lagged-FIMr1p1 reference values shown as short horizontal segments
+            # at the right edge capped by a left-pointing triangle on the spine, keeping the main plot area clean.
             if raw_reference_vals:
                 ax2 = ax.twinx()
+                x_max = float(max(FIG5_MEMBER_COUNTS))
+                x_min = float(min(FIG5_MEMBER_COUNTS))
+                x_segment_start = x_max - 0.07 * (x_max - x_min)
                 for lead, raw_val in raw_reference_vals:
-                    ax2.axhline(raw_val, color=LEAD_COLORS.get(lead, C_MODEL),
-                                ls=":", lw=1.2, alpha=0.85, zorder=1)
+                    color = LEAD_COLORS.get(lead, C_MODEL)
+                    ax2.plot([x_segment_start, x_max], [raw_val, raw_val],
+                             color=color, ls="-", lw=1.5, zorder=5)
+                    ax2.plot(x_max, raw_val, marker="<", color=color, ms=4.5,
+                             clip_on=False, zorder=10)
                 raws = [v for _, v in raw_reference_vals]
                 r_lo, r_hi = min(raws), max(raws)
                 r_pad = max(0.10 * (r_hi - r_lo), 0.10 * r_hi, 1e-6)
