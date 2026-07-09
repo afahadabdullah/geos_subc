@@ -1350,8 +1350,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
         pad = max(1.0, 0.08 * (ymax - ymin)) if ymax > ymin else max(1.0, abs(ymax) * 0.1)
         for ax in axes.ravel():
             ax.set_ylim(ymin - pad, ymax + pad)
-    fig.tight_layout(rect=(0, 0, 1, 0.965))
-    fig.text(0.99, 0.985, f"markers on right axes: {BASELINE} raw values",
+    fig.subplots_adjust(left=0.08, right=0.92, bottom=0.10, top=0.93, hspace=0.26, wspace=0.38)
+    fig.text(0.92, 0.965, f"markers on right axes: {BASELINE} raw values",
              ha="right", va="top", fontsize=8, color=TEXT_MUTED)
     return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
 
