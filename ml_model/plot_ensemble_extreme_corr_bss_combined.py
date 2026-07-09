@@ -6,9 +6,9 @@ This plot-only utility reads outputs already written by:
   * evaluate_ensemble_correlation_extremes_flow_finalv1_global.py
   * evaluate_ensemble_bss_extremes_flow_finalv1_global.py
 
-The default figure keeps the visual story compact: FlowMatch gain over GEOS
-for spatial correlation and q95-exceedance BSS as generated ensemble size
-increases.
+The default figure keeps the visual story compact: FIMr1p1-FlowMatch gain over
+FIMr1p1 for spatial correlation and q95-exceedance BSS as generated ensemble
+size increases. Right-hand axes report the raw FIMr1p1 metric values.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ DEFAULT_OUT_DIR = (
 
 VARIABLE_LABELS = {"pr": "PR", "t2m": "T2M"}
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
+MODEL_LABEL = "FIMr1p1-FlowMatch"
+BASELINE_LABEL = "FIMr1p1"
 CORR_SUM_COLUMNS = [
     "model_weight_sum",
     "model_x_sum",
@@ -404,6 +406,14 @@ def build_combined_table(
     table["variable"] = pd.Categorical(table["variable"], categories=variables, ordered=True)
     table = table.sort_values(["variable", "lead", "member_count"]).reset_index(drop=True)
     table["variable"] = table["variable"].astype(str)
+    table = table.rename(
+        columns={
+            "model_corr_mean": "fimr1p1_flowmatch_corr",
+            "geos_corr_mean": "fimr1p1_corr",
+            "model_bss_mean": "fimr1p1_flowmatch_bss",
+            "geos_bss_mean": "fimr1p1_bss",
+        }
+    )
     return table
 
 
@@ -421,21 +431,22 @@ def write_and_print_tables(table: pd.DataFrame, args: argparse.Namespace) -> lis
 
     print(
         "\nP-value convention: p_le0 is the one-sided bootstrap probability that "
-        "FlowMatch gain <= 0; p_two_sided = 2*min(P(gain>0), P(gain<=0))."
+        f"{MODEL_LABEL} gain over {BASELINE_LABEL} <= 0; "
+        "p_two_sided = 2*min(P(gain>0), P(gain<=0))."
     )
     display_cols = [
         "variable",
         "lead",
         "member_count",
-        "model_corr_mean",
-        "geos_corr_mean",
+        "fimr1p1_flowmatch_corr",
+        "fimr1p1_corr",
         "corr_gain_pct",
         "corr_gain_pct_ci_low",
         "corr_gain_pct_ci_high",
         "corr_gain_p_le0",
         "corr_gain_p_two_sided",
-        "model_bss_mean",
-        "geos_bss_mean",
+        "fimr1p1_flowmatch_bss",
+        "fimr1p1_bss",
         "bss_gain_x100",
         "bss_gain_x100_ci_low",
         "bss_gain_x100_ci_high",
@@ -487,6 +498,12 @@ def style_axis(ax, *, zero_line: bool = True) -> None:
         ax.axhline(0.0, color="#77838f", lw=0.85, ls="--", zorder=0)
 
 
+def style_twin_axis(ax) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.tick_params(axis="y", labelsize=8.0, colors="#6b7782")
+    ax.yaxis.label.set_color("#6b7782")
+
+
 def plot_combined(
     corr_summary: pd.DataFrame,
     corr_boot: pd.DataFrame,
@@ -522,11 +539,19 @@ def plot_combined(
     )
     axes = np.asarray(axes).reshape(2, len(variables))
     letters = "abcdefghijklmnopqrstuvwxyz"
+    corr_raw_axes = []
+    bss_raw_axes = []
+    all_corr_raw_values: list[float] = []
+    all_bss_raw_values: list[float] = []
 
     for vi, variable in enumerate(variables):
         label = VARIABLE_LABELS.get(variable, variable.upper())
         corr_ax = axes[0, vi]
         bss_ax = axes[1, vi]
+        corr_raw_ax = corr_ax.twinx()
+        bss_raw_ax = bss_ax.twinx()
+        corr_raw_axes.append(corr_raw_ax)
+        bss_raw_axes.append(bss_raw_ax)
         corr_values: list[float] = []
         bss_values: list[float] = []
         corr_ax.set_title(f"({letters[vi]}) {label} spatial correlation", loc="left", fontsize=10, fontweight="bold")
@@ -554,6 +579,17 @@ def plot_combined(
                         corr_values.extend(np.asarray(lo)[np.isfinite(lo)].tolist())
                         corr_values.extend(np.asarray(hi)[np.isfinite(hi)].tolist())
                 corr_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
+                raw = c_line["geos_corr_mean"].to_numpy(dtype=float)
+                all_corr_raw_values.extend(raw[np.isfinite(raw)].tolist())
+                corr_raw_ax.plot(
+                    x,
+                    raw,
+                    color=color,
+                    lw=0.95,
+                    ls=(0, (1.1, 2.2)),
+                    alpha=0.48,
+                    zorder=1,
+                )
 
             b_line = bss[
                 bss["variable"].astype(str).eq(variable)
@@ -570,17 +606,47 @@ def plot_combined(
                         bss_values.extend(np.asarray(lo)[np.isfinite(lo)].tolist())
                         bss_values.extend(np.asarray(hi)[np.isfinite(hi)].tolist())
                 bss_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
+                raw = b_line["geos_bss_mean"].to_numpy(dtype=float)
+                all_bss_raw_values.extend(raw[np.isfinite(raw)].tolist())
+                bss_raw_ax.plot(
+                    x,
+                    raw,
+                    color=color,
+                    lw=0.95,
+                    ls=(0, (1.1, 2.2)),
+                    alpha=0.48,
+                    zorder=1,
+                )
 
         style_axis(corr_ax)
         style_axis(bss_ax)
+        style_twin_axis(corr_raw_ax)
+        style_twin_axis(bss_raw_ax)
         if corr_ax.has_data():
             corr_ax.set_ylim(*robust_ylim(corr_values, floor_low=-2.0, floor_high=5.0))
         if bss_ax.has_data():
             bss_ax.set_ylim(*robust_ylim(bss_values, floor_low=-5.0, floor_high=5.0))
         bss_ax.set_xlabel("Generated members", fontsize=9.5)
         if vi == 0:
-            corr_ax.set_ylabel("FlowMatch gain (%)", fontsize=9.5)
-            bss_ax.set_ylabel("FlowMatch - GEOS (x100)", fontsize=9.5)
+            corr_ax.set_ylabel(f"{MODEL_LABEL} gain (%)", fontsize=9.5)
+            bss_ax.set_ylabel(f"{MODEL_LABEL} - {BASELINE_LABEL} (x100)", fontsize=9.5)
+        if vi == len(variables) - 1:
+            corr_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw correlation", fontsize=8.5)
+            bss_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw BSS", fontsize=8.5)
+        else:
+            corr_raw_ax.spines["right"].set_visible(False)
+            bss_raw_ax.spines["right"].set_visible(False)
+            corr_raw_ax.tick_params(right=False, labelright=False)
+            bss_raw_ax.tick_params(right=False, labelright=False)
+
+    if all_corr_raw_values:
+        corr_raw_ylim = robust_ylim(all_corr_raw_values, floor_low=0.0, floor_high=1.0)
+        for ax in corr_raw_axes:
+            ax.set_ylim(*corr_raw_ylim)
+    if all_bss_raw_values:
+        bss_raw_ylim = robust_ylim(all_bss_raw_values, floor_low=-0.2, floor_high=0.8)
+        for ax in bss_raw_axes:
+            ax.set_ylim(*bss_raw_ylim)
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if args.title:
@@ -601,6 +667,15 @@ def plot_combined(
             fontsize=8.8,
             handlelength=1.8,
             columnspacing=1.2,
+        )
+        fig.text(
+            0.985,
+            0.965 if not args.title else 0.925,
+            f"dotted lines: {BASELINE_LABEL} raw values",
+            ha="right",
+            va="center",
+            fontsize=8.1,
+            color="#5f6b76",
         )
     if args.title:
         fig.suptitle(str(args.title), fontsize=12.0, fontweight="bold", y=0.995)
