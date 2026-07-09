@@ -535,7 +535,7 @@ def plot_combined(
         len(variables),
         figsize=(3.75 * len(variables), 5.35),
         sharex="col",
-        gridspec_kw={"hspace": 0.28, "wspace": 0.20},
+        gridspec_kw={"hspace": 0.30, "wspace": 0.42},
     )
     axes = np.asarray(axes).reshape(2, len(variables))
     letters = "abcdefghijklmnopqrstuvwxyz"
@@ -697,7 +697,7 @@ def plot_combined(
         )
     if args.title:
         fig.suptitle(str(args.title), fontsize=12.0, fontweight="bold", y=0.995)
-    fig.subplots_adjust(left=0.085, right=0.985, bottom=0.105, top=rect_top, hspace=0.30, wspace=0.22)
+    fig.subplots_adjust(left=0.085, right=0.915, bottom=0.105, top=rect_top, hspace=0.30, wspace=0.42)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
