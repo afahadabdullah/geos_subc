@@ -328,9 +328,9 @@ def plot_correlation_dashboard(summary: pd.DataFrame, bootstrap: pd.DataFrame, o
         gridspec_kw={"height_ratios": [1.1, 0.9] * len(variables), "hspace": 0.22, "wspace": 0.18},
     )
     axes = np.asarray(axes).reshape(2 * len(variables), 2)
-    letters = iter("abcdefghijklmnopqrstuvwxyz")
-    corr_values: list[float] = []
-    gain_values: list[float] = []
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    corr_values_by_variable: dict[str, list[float]] = {variable: [] for variable in variables}
+    gain_values_by_variable: dict[str, list[float]] = {variable: [] for variable in variables}
 
     def style_axis(ax, zero_line: bool = False) -> None:
         ax.grid(True, axis="y", color="#dde3e8", linewidth=0.6, alpha=0.8)
@@ -339,23 +339,33 @@ def plot_correlation_dashboard(summary: pd.DataFrame, bootstrap: pd.DataFrame, o
         if zero_line:
             ax.axhline(0.0, color="#7a8794", lw=0.9, ls="--")
 
-    def robust_symmetric_limit(values: list[float], minimum: float, maximum: float | None = None) -> float:
+    def robust_range(values: list[float], *, lower_floor: float, upper_floor: float,
+                     lower_cap: float | None = None, upper_cap: float | None = None) -> tuple[float, float]:
         arr = np.asarray(values, dtype=float)
         arr = arr[np.isfinite(arr)]
         if arr.size == 0:
-            return minimum
-        limit = float(np.nanquantile(np.abs(arr), 0.98))
-        limit = max(minimum, 1.10 * limit)
-        if maximum is not None:
-            limit = min(maximum, limit)
-        return limit
+            return lower_floor, upper_floor
+        lo = float(np.nanquantile(arr, 0.02))
+        hi = float(np.nanquantile(arr, 0.98))
+        pad = max(0.03 * (hi - lo), 0.015 * max(abs(hi), abs(lo), 1.0))
+        lo = min(lower_floor, lo - pad)
+        hi = max(upper_floor, hi + pad)
+        if lower_cap is not None:
+            lo = max(lower_cap, lo)
+        if upper_cap is not None:
+            hi = min(upper_cap, hi)
+        if hi <= lo:
+            hi = lo + max(0.05, abs(lo) * 0.05)
+        return lo, hi
 
     for vi, variable in enumerate(variables):
         for ti, target in enumerate(TARGETS):
             ax_corr = axes[2 * vi, ti]
             ax_gain = axes[2 * vi + 1, ti]
-            title_corr = f"({next(letters)}) {variable.upper()} {TARGET_LABELS[target]} correlation"
-            title_gain = f"({next(letters)}) {variable.upper()} {TARGET_LABELS[target]} gain"
+            corr_letter = letters[(2 * vi) * 2 + ti]
+            gain_letter = letters[(2 * vi + 1) * 2 + ti]
+            title_corr = f"({corr_letter}) {variable.upper()} {TARGET_LABELS[target]} correlation"
+            title_gain = f"({gain_letter}) {variable.upper()} {TARGET_LABELS[target]} gain"
             sub = summary[
                 summary["variable"].astype(str).eq(variable)
                 & summary["target"].astype(str).eq(target)
@@ -373,35 +383,35 @@ def plot_correlation_dashboard(summary: pd.DataFrame, bootstrap: pd.DataFrame, o
 
                 geos_corr = line["geos_corr_mean"].to_numpy(dtype=float)
                 model_corr = line["model_corr_mean"].to_numpy(dtype=float)
-                corr_values.extend(geos_corr[np.isfinite(geos_corr)].tolist())
-                corr_values.extend(model_corr[np.isfinite(model_corr)].tolist())
+                corr_values_by_variable[variable].extend(geos_corr[np.isfinite(geos_corr)].tolist())
+                corr_values_by_variable[variable].extend(model_corr[np.isfinite(model_corr)].tolist())
                 ax_corr.plot(
                     x,
                     geos_corr,
                     color=color,
-                    lw=1.5,
-                    ls=LEAD_LINESTYLES.get(int(lead), "--"),
-                    alpha=0.78,
+                    lw=1.15,
+                    ls="--",
+                    alpha=0.46,
                     label=f"W{int(lead)} GEOS",
                 )
                 ax_corr.plot(
                     x,
                     model_corr,
                     color=color,
-                    lw=2.0,
+                    lw=1.85,
                     marker="o",
-                    ms=3.7,
+                    ms=3.4,
                     label=f"W{int(lead)} FlowMatch",
                 )
 
                 gain = line["corr_gain_pct_mean"].to_numpy(dtype=float)
-                gain_values.extend(gain[np.isfinite(gain)].tolist())
+                gain_values_by_variable[variable].extend(gain[np.isfinite(gain)].tolist())
                 lo = line["corr_gain_pct_p05"].to_numpy(dtype=float)
                 hi = line["corr_gain_pct_p95"].to_numpy(dtype=float)
                 if np.any(np.isfinite(lo)) and np.any(np.isfinite(hi)):
                     ax_gain.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
-                    gain_values.extend(lo[np.isfinite(lo)].tolist())
-                    gain_values.extend(hi[np.isfinite(hi)].tolist())
+                    gain_values_by_variable[variable].extend(lo[np.isfinite(lo)].tolist())
+                    gain_values_by_variable[variable].extend(hi[np.isfinite(hi)].tolist())
                 if not bootstrap.empty:
                     ci = bootstrap[
                         bootstrap["variable"].astype(str).eq(variable)
@@ -422,7 +432,7 @@ def plot_correlation_dashboard(summary: pd.DataFrame, bootstrap: pd.DataFrame, o
                     gain,
                     color=color,
                     lw=1.8,
-                    ls=LEAD_LINESTYLES.get(int(lead), "-"),
+                    ls="-",
                     marker="o",
                     ms=3.8,
                     label=f"W{int(lead)}",
@@ -437,43 +447,48 @@ def plot_correlation_dashboard(summary: pd.DataFrame, bootstrap: pd.DataFrame, o
             if ti == 0:
                 ax_corr.set_ylabel("Correlation")
                 ax_gain.set_ylabel("FlowMatch gain (%)")
-            if vi == 0 and ti == 1:
-                ax_corr.text(
-                    0.99,
-                    0.04,
-                    "solid: FlowMatch\nmatching dashed: GEOS",
-                    transform=ax_corr.transAxes,
-                    ha="right",
-                    va="bottom",
-                    fontsize=7.5,
-                    color="#40515f",
-                )
 
-    corr_arr = np.asarray(corr_values, dtype=float)
-    corr_arr = corr_arr[np.isfinite(corr_arr)]
-    if corr_arr.size:
-        ymin = max(-1.0, float(np.nanmin(corr_arr)) - 0.04)
-        ymax = min(1.0, float(np.nanmax(corr_arr)) + 0.04)
-        if ymax <= ymin:
-            ymin, ymax = -0.1, 1.0
-        for ax in axes[0::2, :].ravel():
+    for vi, variable in enumerate(variables):
+        corr_values = corr_values_by_variable.get(variable, [])
+        if variable == "t2m":
+            corr_ylim = robust_range(corr_values, lower_floor=0.90, upper_floor=1.00,
+                                     lower_cap=0.86, upper_cap=1.00)
+        else:
+            corr_ylim = robust_range(corr_values, lower_floor=0.35, upper_floor=0.82,
+                                     lower_cap=-1.0, upper_cap=1.0)
+        gain_values = gain_values_by_variable.get(variable, [])
+        if variable == "t2m":
+            gain_ylim = robust_range(gain_values, lower_floor=-1.0, upper_floor=6.0,
+                                     lower_cap=-8.0, upper_cap=12.0)
+        else:
+            gain_ylim = robust_range(gain_values, lower_floor=-10.0, upper_floor=65.0,
+                                     lower_cap=-35.0, upper_cap=95.0)
+        for ax in axes[2 * vi, :].ravel():
             if ax.has_data():
-                ax.set_ylim(ymin, ymax)
-    gain_limit = robust_symmetric_limit(gain_values, minimum=5.0)
-    for ax in axes[1::2, :].ravel():
-        if ax.has_data():
-            ax.set_ylim(-gain_limit, gain_limit)
+                ax.set_ylim(*corr_ylim)
+        for ax in axes[2 * vi + 1, :].ravel():
+            if ax.has_data():
+                ax.set_ylim(*gain_ylim)
 
     lead_handles = []
     for lead in sorted(set(summary["lead"].astype(int))):
         handle, = axes[0, 0].plot([], [], color=LEAD_COLORS.get(int(lead), "#2f6f9f"), lw=2.0,
                                   marker="o", ms=3.5, label=f"W{int(lead)}")
         lead_handles.append(handle)
+    from matplotlib.lines import Line2D
+
+    style_handles = [
+        Line2D([0], [0], color="#4d5b68", lw=1.9, marker="o", ms=3.4, label="FlowMatch"),
+        Line2D([0], [0], color="#4d5b68", lw=1.2, ls="--", alpha=0.55, label="GEOS"),
+    ]
     fig.legend(lead_handles, [handle.get_label() for handle in lead_handles],
                loc="upper center", ncol=min(4, len(lead_handles)), frameon=False,
-               bbox_to_anchor=(0.5, 0.965), fontsize=8.5)
-    fig.suptitle("Extreme-event correlation and FlowMatch gain as generated ensemble size increases", fontsize=13)
-    fig.tight_layout(rect=(0, 0, 1, 0.925))
+               bbox_to_anchor=(0.42, 0.965), fontsize=8.5)
+    fig.legend(style_handles, [handle.get_label() for handle in style_handles],
+               loc="upper center", ncol=2, frameon=False,
+               bbox_to_anchor=(0.70, 0.965), fontsize=8.5)
+    fig.suptitle("Extreme-event spatial correlation and FlowMatch gain", fontsize=11.5)
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
     plot_dir = out_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
     path = plot_dir / "ensemble_correlation_extreme_dashboard.png"
