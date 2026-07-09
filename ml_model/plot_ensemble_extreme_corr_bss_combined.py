@@ -689,7 +689,7 @@ def plot_combined(
         fig.text(
             0.985,
             0.965 if not args.title else 0.925,
-            f"dotted lines: {BASELINE_LABEL} raw values",
+            f"markers on right axes: {BASELINE_LABEL} raw values",
             ha="right",
             va="center",
             fontsize=8.1,

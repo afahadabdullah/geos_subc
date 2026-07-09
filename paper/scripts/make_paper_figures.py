@@ -1351,7 +1351,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
         for ax in axes.ravel():
             ax.set_ylim(ymin - pad, ymax + pad)
     fig.tight_layout(rect=(0, 0, 1, 0.965))
-    fig.text(0.99, 0.985, f"dotted lines: {BASELINE} raw values (right axes)",
+    fig.text(0.99, 0.985, f"markers on right axes: {BASELINE} raw values",
              ha="right", va="top", fontsize=8, color=TEXT_MUTED)
     return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
 
