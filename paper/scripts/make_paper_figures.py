@@ -469,15 +469,15 @@ def sign_consistency_fraction(ds, variable: str, metric: str, subset: str) -> np
 
 
 def stipple_consistency(ax, lons, lats, frac: np.ndarray | None, stride: int = 3) -> None:
-    """Dot gridpoints where the improvement sign is consistent across all
-    season-lead cells (fraction == 1)."""
+    """Dot gridpoints where the improvement sign is consistent across at least 95% of
+    season-lead cells (fraction >= 0.95)."""
     if frac is None or lons is None or lats is None:
         return
     import cartopy.crs as ccrs
     lon2d, lat2d = np.meshgrid(lons, lats)
     mask = np.zeros_like(frac, dtype=bool)
     mask[::stride, ::stride] = True
-    sig = (frac >= 1.0 - 1e-9) & mask
+    sig = (frac >= 0.95) & mask
     if sig.any():
         ax.scatter(lon2d[sig], lat2d[sig], color="black", s=1.2, alpha=0.55,
                    marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=3)
