@@ -654,14 +654,8 @@ def plot_combined(
         if vi == 0:
             corr_ax.set_ylabel(f"{MODEL_LABEL} gain (%)", fontsize=9.5)
             bss_ax.set_ylabel(f"{MODEL_LABEL} - {BASELINE_LABEL} (x100)", fontsize=9.5)
-        if vi == len(variables) - 1:
-            corr_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw correlation", fontsize=8.5)
-            bss_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw BSS", fontsize=8.5)
-        else:
-            corr_raw_ax.spines["right"].set_visible(False)
-            bss_raw_ax.spines["right"].set_visible(False)
-            corr_raw_ax.tick_params(right=False, labelright=False)
-            bss_raw_ax.tick_params(right=False, labelright=False)
+        corr_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw correlation", fontsize=8.5)
+        bss_raw_ax.set_ylabel(f"{BASELINE_LABEL} raw BSS", fontsize=8.5)
 
     if all_corr_raw_values:
         corr_raw_ylim = robust_ylim(all_corr_raw_values, floor_low=0.0, floor_high=1.0)
