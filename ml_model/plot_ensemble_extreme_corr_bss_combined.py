@@ -35,6 +35,29 @@ DEFAULT_OUT_DIR = (
 
 VARIABLE_LABELS = {"pr": "PR", "t2m": "T2M"}
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
+CORR_SUM_COLUMNS = [
+    "model_weight_sum",
+    "model_x_sum",
+    "model_y_sum",
+    "model_x2_sum",
+    "model_y2_sum",
+    "model_xy_sum",
+    "geos_weight_sum",
+    "geos_x_sum",
+    "geos_y_sum",
+    "geos_x2_sum",
+    "geos_y2_sum",
+    "geos_xy_sum",
+]
+BSS_SUM_COLUMNS = [
+    "model_bs_sum",
+    "geos_bs_sum",
+    "ref_bs_sum",
+    "weight_sum",
+    "obs_event_weight_sum",
+    "model_prob_weight_sum",
+    "geos_prob_weight_sum",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +73,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--show_ci", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--title", default="", help="Optional figure title.")
+    parser.add_argument("--table_member_count", type=int, default=8)
+    parser.add_argument("--table_bootstrap_repeats", type=int, default=1000)
+    parser.add_argument("--table_seed", type=int, default=202407)
+    parser.add_argument("--print_all_table", action="store_true")
     return parser.parse_args()
 
 
@@ -73,6 +100,12 @@ def read_required_csv(path: Path) -> pd.DataFrame:
 
 def read_optional_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def write_csv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    print(f"Wrote {path}")
 
 
 def filtered_summary(
@@ -125,6 +158,300 @@ def ci_for_line(
             summary_line[upper].to_numpy(dtype=float),
         )
     return None, None
+
+
+def corr_from_sums(row: dict[str, float] | pd.Series, prefix: str) -> float:
+    w = float(row.get(f"{prefix}_weight_sum", np.nan))
+    if not np.isfinite(w) or w <= 1e-12:
+        return np.nan
+    mx = float(row[f"{prefix}_x_sum"]) / w
+    my = float(row[f"{prefix}_y_sum"]) / w
+    cov = float(row[f"{prefix}_xy_sum"]) / w - mx * my
+    vx = float(row[f"{prefix}_x2_sum"]) / w - mx * mx
+    vy = float(row[f"{prefix}_y2_sum"]) / w - my * my
+    denom = np.sqrt(max(vx, 0.0) * max(vy, 0.0))
+    if denom <= 1e-12:
+        return np.nan
+    value = cov / denom
+    return float(value) if np.isfinite(value) else np.nan
+
+
+def corr_metrics_from_sums(row: dict[str, float] | pd.Series) -> dict[str, float]:
+    model_corr = corr_from_sums(row, "model")
+    geos_corr = corr_from_sums(row, "geos")
+    corr_diff = model_corr - geos_corr
+    corr_gain_pct = (
+        100.0 * corr_diff / abs(geos_corr)
+        if np.isfinite(geos_corr) and abs(geos_corr) > 1e-12
+        else np.nan
+    )
+    return {
+        "model_corr": model_corr,
+        "geos_corr": geos_corr,
+        "corr_diff": corr_diff,
+        "corr_gain_pct": corr_gain_pct,
+    }
+
+
+def bss_metrics_from_sums(row: dict[str, float] | pd.Series) -> dict[str, float]:
+    ref = float(row.get("ref_bs_sum", np.nan))
+    weight = float(row.get("weight_sum", np.nan))
+    model_bs = float(row.get("model_bs_sum", np.nan))
+    geos_bs = float(row.get("geos_bs_sum", np.nan))
+    model_bss = 1.0 - model_bs / ref if np.isfinite(ref) and ref > 1e-12 else np.nan
+    geos_bss = 1.0 - geos_bs / ref if np.isfinite(ref) and ref > 1e-12 else np.nan
+    bss_gain = model_bss - geos_bss
+    return {
+        "model_bs": model_bs / weight if np.isfinite(weight) and weight > 0.0 else np.nan,
+        "geos_bs": geos_bs / weight if np.isfinite(weight) and weight > 0.0 else np.nan,
+        "ref_bs": ref / weight if np.isfinite(weight) and weight > 0.0 else np.nan,
+        "model_bss": model_bss,
+        "geos_bss": geos_bss,
+        "bss_gain": bss_gain,
+        "bss_gain_x100": 100.0 * bss_gain if np.isfinite(bss_gain) else np.nan,
+    }
+
+
+def sign_p_values(values: list[float]) -> dict[str, float]:
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {"p_gt0": np.nan, "p_le0": np.nan, "p_two_sided": np.nan}
+    # Plus-one correction prevents a printed zero p-value from finite bootstrap samples.
+    p_gt0 = float((np.sum(arr > 0.0) + 1.0) / (arr.size + 1.0))
+    p_le0 = float((np.sum(arr <= 0.0) + 1.0) / (arr.size + 1.0))
+    return {
+        "p_gt0": p_gt0,
+        "p_le0": p_le0,
+        "p_two_sided": min(1.0, 2.0 * min(p_gt0, p_le0)),
+    }
+
+
+def bootstrap_gain_pvalues(
+    case_df: pd.DataFrame,
+    *,
+    group_cols: list[str],
+    sum_cols: list[str],
+    metric_func,
+    sign_metric: str,
+    repeats: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    if repeats <= 0 or case_df.empty or not {"case_id", *group_cols, *sum_cols} <= set(case_df.columns):
+        return pd.DataFrame()
+    rows = []
+    for key, group in case_df.groupby(group_cols, dropna=False):
+        cases = sorted(group["case_id"].astype(str).unique())
+        if not cases:
+            continue
+        rows_by_case = {
+            case: group[group["case_id"].astype(str).eq(case)].reset_index(drop=True)
+            for case in cases
+        }
+        boot_values: list[float] = []
+        for _ in range(int(repeats)):
+            sampled_cases = rng.choice(cases, size=len(cases), replace=True)
+            state = {col: 0.0 for col in sum_cols}
+            for case in sampled_cases:
+                case_rows = rows_by_case[str(case)]
+                picked = case_rows.iloc[int(rng.integers(0, len(case_rows)))]
+                for col in sum_cols:
+                    state[col] += float(picked[col])
+            value = metric_func(state).get(sign_metric, np.nan)
+            if np.isfinite(value):
+                boot_values.append(float(value))
+        row = dict(zip(group_cols, key if isinstance(key, tuple) else (key,)))
+        row["bootstrap_repeats_for_p"] = int(repeats)
+        pvals = sign_p_values(boot_values)
+        for name, value in pvals.items():
+            row[f"{sign_metric}_{name}"] = value
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def value_ci_table(
+    summary: pd.DataFrame,
+    boot: pd.DataFrame,
+    *,
+    metric: str,
+    group_cols: list[str],
+) -> pd.DataFrame:
+    cols = [*group_cols, f"{metric}_mean"]
+    for optional in (f"{metric}_p05", f"{metric}_p95"):
+        if optional in summary.columns:
+            cols.append(optional)
+    out = summary[[col for col in cols if col in summary.columns]].copy()
+    if f"{metric}_mean" in out.columns:
+        out = out.rename(columns={f"{metric}_mean": metric})
+    low_col = f"{metric}_p05"
+    high_col = f"{metric}_p95"
+    out[f"{metric}_ci_low"] = out[low_col] if low_col in out.columns else np.nan
+    out[f"{metric}_ci_high"] = out[high_col] if high_col in out.columns else np.nan
+
+    boot_low = f"{metric}_p025"
+    boot_high = f"{metric}_p975"
+    if not boot.empty and {boot_low, boot_high, *group_cols} <= set(boot.columns):
+        boot_sub = boot[[*group_cols, boot_low, boot_high]].copy()
+        boot_sub = boot_sub.rename(columns={boot_low: f"{metric}_boot_low", boot_high: f"{metric}_boot_high"})
+        out = out.merge(boot_sub, on=group_cols, how="left")
+        out[f"{metric}_ci_low"] = out[f"{metric}_boot_low"].combine_first(out[f"{metric}_ci_low"])
+        out[f"{metric}_ci_high"] = out[f"{metric}_boot_high"].combine_first(out[f"{metric}_ci_high"])
+        out = out.drop(columns=[f"{metric}_boot_low", f"{metric}_boot_high"])
+    drop_cols = [col for col in (low_col, high_col) if col in out.columns]
+    return out.drop(columns=drop_cols)
+
+
+def build_combined_table(
+    corr_summary: pd.DataFrame,
+    corr_boot: pd.DataFrame,
+    corr_case: pd.DataFrame,
+    bss_summary: pd.DataFrame,
+    bss_boot: pd.DataFrame,
+    bss_case: pd.DataFrame,
+    args: argparse.Namespace,
+) -> pd.DataFrame:
+    variables = parse_csv_list(args.variables, str)
+    leads = parse_csv_list(args.lead_values, int)
+    sample_sizes = parse_csv_list(args.sample_sizes, int)
+    rng = np.random.default_rng(int(args.table_seed))
+
+    corr = filtered_summary(corr_summary, variables, leads, sample_sizes)
+    corr_boot_f = filtered_summary(corr_boot, variables, leads, sample_sizes) if not corr_boot.empty else corr_boot
+    if "target" in corr.columns:
+        corr = corr[corr["target"].astype(str).eq(args.corr_target)]
+    if not corr_boot_f.empty and "target" in corr_boot_f.columns:
+        corr_boot_f = corr_boot_f[corr_boot_f["target"].astype(str).eq(args.corr_target)]
+
+    bss = filtered_summary(bss_summary, variables, leads, sample_sizes)
+    bss_boot_f = filtered_summary(bss_boot, variables, leads, sample_sizes) if not bss_boot.empty else bss_boot
+
+    corr_key = ["variable", "lead", "member_count"]
+    corr_value_cols = [
+        col for col in ("model_corr_mean", "geos_corr_mean", "corr_diff_mean")
+        if col in corr.columns
+    ]
+    corr_table = corr[[*corr_key, *corr_value_cols]].copy()
+    corr_gain = value_ci_table(corr, corr_boot_f, metric="corr_gain_pct", group_cols=["variable", "lead", "target", "member_count"])
+    if "target" in corr_gain.columns:
+        corr_gain = corr_gain.drop(columns=["target"])
+    corr_table = corr_table.merge(corr_gain, on=corr_key, how="left")
+
+    corr_p = pd.DataFrame()
+    if not corr_case.empty:
+        corr_case_f = filtered_summary(corr_case, variables, leads, sample_sizes)
+        if "target" in corr_case_f.columns:
+            corr_case_f = corr_case_f[corr_case_f["target"].astype(str).eq(args.corr_target)]
+        corr_p = bootstrap_gain_pvalues(
+            corr_case_f,
+            group_cols=["variable", "lead", "member_count"],
+            sum_cols=CORR_SUM_COLUMNS,
+            metric_func=corr_metrics_from_sums,
+            sign_metric="corr_diff",
+            repeats=int(args.table_bootstrap_repeats),
+            rng=rng,
+        )
+        if not corr_p.empty:
+            corr_p = corr_p.rename(
+                columns={
+                    "bootstrap_repeats_for_p": "corr_p_bootstrap_repeats",
+                    "corr_diff_p_gt0": "corr_gain_p_gt0",
+                    "corr_diff_p_le0": "corr_gain_p_le0",
+                    "corr_diff_p_two_sided": "corr_gain_p_two_sided",
+                }
+            )
+            corr_table = corr_table.merge(corr_p, on=corr_key, how="left")
+
+    bss_key = ["variable", "lead", "member_count"]
+    bss_value_cols = [
+        col for col in ("model_bss_mean", "geos_bss_mean", "bss_gain_mean")
+        if col in bss.columns
+    ]
+    bss_table = bss[[*bss_key, *bss_value_cols]].copy()
+    bss_gain = value_ci_table(bss, bss_boot_f, metric="bss_gain_x100", group_cols=bss_key)
+    bss_table = bss_table.merge(bss_gain, on=bss_key, how="left")
+
+    bss_p = pd.DataFrame()
+    if not bss_case.empty:
+        bss_case_f = filtered_summary(bss_case, variables, leads, sample_sizes)
+        bss_p = bootstrap_gain_pvalues(
+            bss_case_f,
+            group_cols=bss_key,
+            sum_cols=BSS_SUM_COLUMNS,
+            metric_func=bss_metrics_from_sums,
+            sign_metric="bss_gain",
+            repeats=int(args.table_bootstrap_repeats),
+            rng=rng,
+        )
+    elif not bss_boot_f.empty and {"bss_gain_p_gt0", "bss_gain_p_le0", *bss_key} <= set(bss_boot_f.columns):
+        bss_p = bss_boot_f[[*bss_key, "bss_gain_p_gt0", "bss_gain_p_le0"]].copy()
+        bss_p["bss_gain_p_two_sided"] = 2.0 * np.minimum(bss_p["bss_gain_p_gt0"], bss_p["bss_gain_p_le0"])
+        bss_p["bss_gain_p_two_sided"] = bss_p["bss_gain_p_two_sided"].clip(upper=1.0)
+    if not bss_p.empty:
+        bss_p = bss_p.rename(columns={"bootstrap_repeats_for_p": "bss_p_bootstrap_repeats"})
+        bss_table = bss_table.merge(bss_p, on=bss_key, how="left")
+
+    table = corr_table.merge(bss_table, on=["variable", "lead", "member_count"], how="outer")
+    for col in (
+        "corr_gain_p_gt0",
+        "corr_gain_p_le0",
+        "corr_gain_p_two_sided",
+        "bss_gain_p_gt0",
+        "bss_gain_p_le0",
+        "bss_gain_p_two_sided",
+    ):
+        if col not in table.columns:
+            table[col] = np.nan
+    table["variable"] = pd.Categorical(table["variable"], categories=variables, ordered=True)
+    table = table.sort_values(["variable", "lead", "member_count"]).reset_index(drop=True)
+    table["variable"] = table["variable"].astype(str)
+    return table
+
+
+def write_and_print_tables(table: pd.DataFrame, args: argparse.Namespace) -> list[Path]:
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"ensemble_extreme_spatial_corr_{args.corr_target}_bss_combined"
+    full_path = out_dir / f"{stem}_table.csv"
+    write_csv(table, full_path)
+
+    member = int(args.table_member_count)
+    member_table = table[table["member_count"].astype(int).eq(member)].copy()
+    member_path = out_dir / f"{stem}_member{member}_table.csv"
+    write_csv(member_table, member_path)
+
+    print(
+        "\nP-value convention: p_le0 is the one-sided bootstrap probability that "
+        "FlowMatch gain <= 0; p_two_sided = 2*min(P(gain>0), P(gain<=0))."
+    )
+    display_cols = [
+        "variable",
+        "lead",
+        "member_count",
+        "model_corr_mean",
+        "geos_corr_mean",
+        "corr_gain_pct",
+        "corr_gain_pct_ci_low",
+        "corr_gain_pct_ci_high",
+        "corr_gain_p_le0",
+        "corr_gain_p_two_sided",
+        "model_bss_mean",
+        "geos_bss_mean",
+        "bss_gain_x100",
+        "bss_gain_x100_ci_low",
+        "bss_gain_x100_ci_high",
+        "bss_gain_p_le0",
+        "bss_gain_p_two_sided",
+    ]
+    display_cols = [col for col in display_cols if col in table.columns]
+    to_print = table if args.print_all_table else member_table
+    label = "all member counts" if args.print_all_table else f"member count {member}"
+    print(f"\nCombined correlation/BSS gain table ({label}):")
+    if to_print.empty:
+        print("  No rows matched the table filter.")
+    else:
+        with pd.option_context("display.max_rows", None, "display.width", 220):
+            print(to_print[display_cols].to_string(index=False, float_format=lambda value: f"{value:8.3f}"))
+    return [full_path, member_path]
 
 
 def robust_ylim(values: list[float], *, floor_low: float, floor_high: float) -> tuple[float, float]:
@@ -303,7 +630,19 @@ def main() -> None:
     bss_summary = read_required_csv(bss_dir / "ensemble_bss_summary.csv")
     corr_boot = read_optional_csv(corr_dir / "ensemble_correlation_case_bootstrap_ci.csv")
     bss_boot = read_optional_csv(bss_dir / "ensemble_bss_case_bootstrap_ci.csv")
+    corr_case = read_optional_csv(corr_dir / "case_member_correlation_sums.csv")
+    bss_case = read_optional_csv(bss_dir / "case_member_bss_sums.csv")
     outputs = plot_combined(corr_summary, corr_boot, bss_summary, bss_boot, args)
+    table = build_combined_table(
+        corr_summary,
+        corr_boot,
+        corr_case,
+        bss_summary,
+        bss_boot,
+        bss_case,
+        args,
+    )
+    outputs.extend(write_and_print_tables(table, args))
     for path in outputs:
         print(f"Wrote {path}")
 
