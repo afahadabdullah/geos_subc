@@ -707,16 +707,19 @@ def plot_combined(
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    paper_dir = Path("paper/figures")
+    paper_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
-    stem = f"ensemble_extreme_spatial_corr_{args.corr_target}_bss_combined"
-    if args.format in ("png", "both"):
-        path = out_dir / f"{stem}.png"
-        fig.savefig(path, dpi=int(args.dpi), bbox_inches="tight")
-        outputs.append(path)
-    if args.format in ("pdf", "both"):
-        path = out_dir / f"{stem}.pdf"
-        fig.savefig(path, bbox_inches="tight")
-        outputs.append(path)
+    stem = "fig6_member_convergence_corr_bss"
+    for folder in (out_dir, paper_dir):
+        if args.format in ("png", "both"):
+            path = folder / f"{stem}.png"
+            fig.savefig(path, dpi=int(args.dpi), bbox_inches="tight")
+            outputs.append(path)
+        if args.format in ("pdf", "both"):
+            path = folder / f"{stem}.pdf"
+            fig.savefig(path, bbox_inches="tight")
+            outputs.append(path)
     plt.close(fig)
     return outputs
 
