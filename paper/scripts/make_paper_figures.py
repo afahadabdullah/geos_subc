@@ -1326,6 +1326,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 ax2.spines["right"].set_color("#aab5c0")
                 ax2.spines["top"].set_visible(False)
             style_axis(ax)
+            ax.grid(False)
             panel_title(ax, title)
             if vi == 1:
                 ax.set_xlabel("Generated members")
