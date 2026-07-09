@@ -581,14 +581,25 @@ def plot_combined(
                 corr_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
                 raw = c_line["geos_corr_mean"].to_numpy(dtype=float)
                 all_corr_raw_values.extend(raw[np.isfinite(raw)].tolist())
+                raw_val = float(raw[-1])
+                x_max = float(np.max(x))
+                x_min = float(np.min(x))
+                x_segment_start = x_max - 0.07 * (x_max - x_min)
                 corr_raw_ax.plot(
-                    x,
-                    raw,
+                    [x_segment_start, x_max],
+                    [raw_val, raw_val],
                     color=color,
-                    lw=0.95,
-                    ls=(0, (1.1, 2.2)),
-                    alpha=0.48,
-                    zorder=1,
+                    lw=1.5,
+                    zorder=5,
+                )
+                corr_raw_ax.plot(
+                    x_max,
+                    raw_val,
+                    marker="<",
+                    color=color,
+                    ms=4.5,
+                    clip_on=False,
+                    zorder=10,
                 )
 
             b_line = bss[
@@ -608,18 +619,31 @@ def plot_combined(
                 bss_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
                 raw = b_line["geos_bss_mean"].to_numpy(dtype=float)
                 all_bss_raw_values.extend(raw[np.isfinite(raw)].tolist())
+                raw_val = float(raw[-1])
+                x_max = float(np.max(x))
+                x_min = float(np.min(x))
+                x_segment_start = x_max - 0.07 * (x_max - x_min)
                 bss_raw_ax.plot(
-                    x,
-                    raw,
+                    [x_segment_start, x_max],
+                    [raw_val, raw_val],
                     color=color,
-                    lw=0.95,
-                    ls=(0, (1.1, 2.2)),
-                    alpha=0.48,
-                    zorder=1,
+                    lw=1.5,
+                    zorder=5,
+                )
+                bss_raw_ax.plot(
+                    x_max,
+                    raw_val,
+                    marker="<",
+                    color=color,
+                    ms=4.5,
+                    clip_on=False,
+                    zorder=10,
                 )
 
         style_axis(corr_ax)
+        corr_ax.grid(False)
         style_axis(bss_ax)
+        bss_ax.grid(False)
         style_twin_axis(corr_raw_ax)
         style_twin_axis(bss_raw_ax)
         if corr_ax.has_data():
