@@ -18,10 +18,10 @@ Figure set (see paper/FIGURE_PLAN.md):
   3  fig3_t2m_skill            T2M, same layout
   4  fig4_noise_ablation       Gaussian vs EOF-LHS stochastic-prior ablation
   5  fig5_probabilistic_diagnostics Extreme-event ensemble-size diagnostics
-  6  fig6_extreme_skill        Extreme-subset skill vs all-case skill by lead
-  7  fig7_event_pr_california  California AR precipitation case study (3x3)
+  7  fig7_extreme_skill        Extreme-subset skill vs all-case skill by lead
+  8  fig8_event_pr_california  California AR precipitation case study (3x3)
   7a fig7a_event_pr_california_ecmwf ECMWF comparison companion (3x3)
-  8  fig8_event_t2m_uk_heatwave UK July 2022 heatwave T2M case study (3x3)
+  9  fig9_event_t2m_uk_heatwave UK July 2022 heatwave T2M case study (3x3)
   8a fig8a_event_t2m_uk_heatwave_ecmwf ECMWF comparison companion (3x3)
 
 Usage:
@@ -96,6 +96,29 @@ NOISE_CSV_PATTERNS = [
 NOISE_FALLBACK = {
     "Gaussian $\\mathcal{N}(0,I)$": {"pr": 16.1, "t2m": 36.3},
     "EOF-LHS structured": {"pr": 28.4, "t2m": 43.2},
+}
+
+# Figure 6 is intentionally table-backed so the plotted fair-comparison values
+# match Table 2 (all-case, all-grid 8-vs-8) and Table 5 (60-event 8-vs-8).
+FIG6_TABLE2_ALLCASE_ALLGRID = {
+    "crps": {
+        "pr": [31.772, 23.493, 21.671, 21.048],
+        "t2m": [36.485, 27.225, 26.587, 20.920],
+    },
+    "rmse": {
+        "pr": [26.577, 19.882, 18.616, 17.187],
+        "t2m": [22.851, 16.901, 17.676, 17.875],
+    },
+}
+FIG6_TABLE5_EXTREME_EVENTS = {
+    "crps": {
+        "pr": [27.351, 19.174, 15.219, 20.955],
+        "t2m": [35.562, 32.782, 26.716, 30.619],
+    },
+    "rmse": {
+        "pr": [18.928, 12.526, 11.885, 16.326],
+        "t2m": [23.278, 22.212, 18.974, 24.467],
+    },
 }
 
 EVENT_PR_ID = "conus_pr_202301_california_atmospheric_rivers"
@@ -411,6 +434,53 @@ def spatial_metric_map(ds, variable: str, metric_name: str, subset: str):
         np.asarray(ds["lat"].values),
         np.asarray(field.values, dtype=float),
     )
+
+
+def sign_consistency_fraction(ds, variable: str, metric: str, subset: str) -> np.ndarray | None:
+    """Per-gridpoint fraction of season-lead cells in which the ML system improves
+    on the baseline (model < geos) for the given metric. Used for robustness
+    stippling: fraction == 1 means improvement in all 16 season-lead cells."""
+    if ds is None:
+        return None
+    needed = {"subset", "variable", "group_type", "group_value", "lead", "lat", "lon"}
+    if not needed <= set(ds.dims):
+        return None
+    sel = {
+        "subset": coord_values_for(ds, "subset", [subset]),
+        "variable": coord_values_for(ds, "variable", [variable]),
+        "group_type": coord_values_for(ds, "group_type", ["valid_season_lead"]),
+        "group_value": coord_values_for(ds, "group_value", SEASONS),
+        "lead": coord_values_for(ds, "lead", LEADS),
+    }
+    if any(not v for v in sel.values()):
+        return None
+    try:
+        model = ds[f"model_{metric}"].sel(sel).squeeze(drop=True) \
+            .transpose("group_value", "lead", "lat", "lon").values
+        geos = ds[f"geos_{metric}"].sel(sel).squeeze(drop=True) \
+            .transpose("group_value", "lead", "lat", "lon").values
+    except Exception:
+        return None
+    valid = np.isfinite(model) & np.isfinite(geos)
+    better = (geos > model) & valid
+    n_valid = valid.sum(axis=(0, 1))
+    frac = np.where(n_valid > 0, better.sum(axis=(0, 1)) / np.maximum(n_valid, 1), np.nan)
+    return frac
+
+
+def stipple_consistency(ax, lons, lats, frac: np.ndarray | None, stride: int = 3) -> None:
+    """Dot gridpoints where the improvement sign is consistent across all
+    season-lead cells (fraction == 1)."""
+    if frac is None or lons is None or lats is None:
+        return
+    import cartopy.crs as ccrs
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    mask = np.zeros_like(frac, dtype=bool)
+    mask[::stride, ::stride] = True
+    sig = (frac >= 1.0 - 1e-9) & mask
+    if sig.any():
+        ax.scatter(lon2d[sig], lat2d[sig], color="black", s=1.2, alpha=0.55,
+                   marker="o", edgecolors="none", transform=ccrs.PlateCarree(), zorder=3)
 
 
 def symmetric_limit(fields: list[np.ndarray | None], fallback: float = 30.0,
@@ -985,6 +1055,23 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
     inset_horizontal_colorbar(fig, im_g, ax_g, f"RMSE ({unit})")
     inset_horizontal_colorbar(fig, im_h, ax_h, "gain (%)", symmetric=True)
 
+    # Robustness stippling: dot gridpoints improved in every season-lead cell
+    ds_st = load_xarray_dataset(matrix_dir / "matrix_spatial_metrics.nc")
+    if ds_st is not None:
+        frac_c = sign_consistency_fraction(ds_st, variable, "crps", spatial_subset)
+        frac_r = sign_consistency_fraction(ds_st, variable, "rmse", spatial_subset)
+        ds_st.close()
+        if map_gc[2] is not None:
+            ocean_st = ~np.isfinite(map_gc[2])
+            if frac_c is not None:
+                frac_c = np.where(ocean_st, np.nan, frac_c)
+            if frac_r is not None:
+                frac_r = np.where(ocean_st, np.nan, frac_r)
+        if im_f is not None:
+            stipple_consistency(ax_f, map_cs[0], map_cs[1], frac_c)
+        if im_h is not None:
+            stipple_consistency(ax_h, map_rs[0], map_rs[1], frac_r)
+
     return save_figure(fig, output_dir, stem, formats, dpi)
 
 
@@ -1189,6 +1276,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 continue
             available_leads = sorted(set(sub["lead"].astype(int).unique()))
             plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
+            raw_reference_vals: list[tuple[int, float]] = []
             for lead in plot_leads:
                 grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
                 grp = grp[grp["member_count"].astype(int).isin(FIG5_MEMBER_COUNTS)]
@@ -1213,7 +1301,29 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                 ax.plot(x, mean, color=color, lw=1.7, ls=LEAD_LINESTYLES.get(int(lead), "-"),
                         marker="o", ms=3.6,
                         label=f"W{int(lead)}")
+                raw_col = f"geos_{metric.replace('_skill_pct', '')}_mean"
+                if raw_col in grp.columns:
+                    raw_val = float(np.nanmean(pd.to_numeric(grp[raw_col], errors="coerce")))
+                    if np.isfinite(raw_val):
+                        raw_reference_vals.append((int(lead), raw_val))
             ax.axhline(refline, color="#7a8794", lw=0.9, ls="--")
+            # Second y-axis: raw lagged-FIMr1p1 reference values as dotted lines,
+            # so skill (%) and the underlying raw score can be read together.
+            if raw_reference_vals:
+                ax2 = ax.twinx()
+                for lead, raw_val in raw_reference_vals:
+                    ax2.axhline(raw_val, color=LEAD_COLORS.get(lead, C_MODEL),
+                                ls=":", lw=1.2, alpha=0.85, zorder=1)
+                raws = [v for _, v in raw_reference_vals]
+                r_lo, r_hi = min(raws), max(raws)
+                r_pad = max(0.10 * (r_hi - r_lo), 0.10 * r_hi, 1e-6)
+                ax2.set_ylim(max(0.0, r_lo - r_pad), r_hi + r_pad)
+                base_name = metric.replace("_skill_pct", "").upper()
+                ax2.set_ylabel(f"{BASELINE} raw {base_name}", fontsize=8,
+                               color=TEXT_MUTED)
+                ax2.tick_params(labelsize=7, colors=TEXT_MUTED)
+                ax2.spines["right"].set_color("#aab5c0")
+                ax2.spines["top"].set_visible(False)
             style_axis(ax)
             panel_title(ax, title)
             if vi == 1:
@@ -1232,7 +1342,9 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
         pad = max(1.0, 0.08 * (ymax - ymin)) if ymax > ymin else max(1.0, abs(ymax) * 0.1)
         for ax in axes.ravel():
             ax.set_ylim(ymin - pad, ymax + pad)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.965))
+    fig.text(0.99, 0.985, f"dotted lines: {BASELINE} raw values (right axes)",
+             ha="right", va="top", fontsize=8, color=TEXT_MUTED)
     return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
 
 
@@ -1242,42 +1354,27 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
 
 def figure_6_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
                            summary: pd.DataFrame | None) -> list[Path]:
-    agg_ext = aggregate_matrix_by_lead(summary, subset="extreme_events")
-    agg_all = aggregate_matrix_by_lead(summary, subset="all_data")
-
     fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.0), sharex=True)
     metrics = [("crps", "(a) CRPS skill"), ("rmse", "(b) RMSE skill")]
     width = 0.34
 
     for ax, (metric, title) in zip(axes, metrics):
-        col = f"{metric}_skill_pct"
-        if agg_ext.empty or col not in agg_ext:
-            missing_panel(ax, title, "Missing extreme_events subset in matrix_summary_metrics.csv.")
-            continue
         for vi, variable in enumerate(("pr", "t2m")):
-            sub = agg_ext[agg_ext["variable"].eq(variable)].sort_values("lead")
-            if sub.empty:
-                continue
-            xs = sub["lead"].to_numpy(dtype=float) + (vi - 0.5) * width
-            vals = sub[col].to_numpy(dtype=float)
+            xs = np.asarray(LEADS, dtype=float) + (vi - 0.5) * width
+            vals = np.asarray(FIG6_TABLE5_EXTREME_EVENTS[metric][variable], dtype=float)
             color = C_PR if variable == "pr" else C_T2M
             bars = ax.bar(xs, vals, width * 0.92, color=color, edgecolor="white",
                           linewidth=0.8, label=f"{VARIABLE_SHORT[variable]} extremes")
             for bar_obj, val in zip(bars, vals):
                 if np.isfinite(val):
                     ax.text(bar_obj.get_x() + bar_obj.get_width() / 2,
-                            bar_obj.get_height() + 0.5, f"{val:.1f}",
-                            ha="center", va="bottom", fontsize=7.2,
-                            fontweight="bold", color=TEXT_DARK)
-            # All-case reference markers
-            if not agg_all.empty and col in agg_all:
-                ref = agg_all[agg_all["variable"].eq(variable)].sort_values("lead")
-                if not ref.empty:
-                    ax.scatter(ref["lead"].to_numpy(dtype=float) + (vi - 0.5) * width,
-                               ref[col].to_numpy(dtype=float),
-                               facecolor="white", edgecolor=color, s=26, zorder=5,
-                               linewidth=1.3,
-                               label=f"{VARIABLE_SHORT[variable]} all-case" if metric == "crps" else None)
+                            max(bar_obj.get_height() - 1.8, 0.8), f"{val:.1f}",
+                            ha="center", va="top", fontsize=7.2,
+                            fontweight="bold", color="white")
+            ax.scatter(xs, np.asarray(FIG6_TABLE2_ALLCASE_ALLGRID[metric][variable], dtype=float),
+                       facecolor="white", edgecolor=color, s=30, zorder=5,
+                       linewidth=1.4,
+                       label=f"{VARIABLE_SHORT[variable]} all-case" if metric == "crps" else None)
         ax.axhline(0.0, color="#7a8794", lw=0.8)
         ax.set_xticks(LEADS)
         ax.set_xticklabels([f"W{l}" for l in LEADS])
@@ -1291,7 +1388,7 @@ def figure_6_extreme_skill(output_dir: Path, formats: list[str], dpi: int,
         fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.06),
                    ncols=4, fontsize=8)
     fig.tight_layout()
-    return save_figure(fig, output_dir, "fig6_extreme_skill", formats, dpi)
+    return save_figure(fig, output_dir, "fig7_extreme_skill", formats, dpi)
 
 
 # ===========================================================================
@@ -1856,12 +1953,13 @@ def main() -> None:
     written.extend(figure_5_member_convergence(output_dir, formats, args.dpi, ensemble_dir))
     written.extend(figure_6_extreme_skill(output_dir, formats, args.dpi, summary))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
-                                     EVENT_PR_ID, "fig7_event_pr_california", is_t2m=False))
+                                     EVENT_PR_ID, "fig8_event_pr_california", is_t2m=False))
     written.extend(figure_event_case_ecmwf_comparison(
         output_dir, formats, args.dpi, event_dir, ecmwf_dir,
         EVENT_PR_ID, "fig7a_event_pr_california_ecmwf", is_t2m=False))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
-                                     EVENT_T2M_ID, "fig8_event_t2m_uk_heatwave", is_t2m=True))
+                                     EVENT_T2M_ID, "fig9_event_t2m_uk_heatwave", is_t2m=True))
+
     written.extend(figure_event_case_ecmwf_comparison(
         output_dir, formats, args.dpi, event_dir, ecmwf_dir,
         EVENT_T2M_ID, "fig8a_event_t2m_uk_heatwave_ecmwf", is_t2m=True))
