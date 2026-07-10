@@ -943,7 +943,7 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
     # Verification card
     ver_y, ver_h = 3.5, 21.5
     _card(ax, (out_x + 13.0, ver_y), (out_w - 13.0, ver_h), "Verification", "#f6f7f9")
-    chips = ["CRPS", "RMSE / bias\n/ corr", "calibrated\nBSS",
+    chips = ["CRPS", "RMSE / bias\n/ corr", "BSS",
              "spread skill", "season x lead", "event tails\n(q95/q99)"]
     chip_y = ver_y + ver_h - 6.4
     for idx, chip in enumerate(chips):
