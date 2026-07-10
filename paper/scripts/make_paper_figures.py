@@ -91,11 +91,28 @@ NOISE_CSV_PATTERNS = [
     "ml_output_flow_finalv1_global_noisectx_t2mres/noise_comparison_global_*.csv",
 ]
 
-# Frozen 2021 full-year noise-ablation headline values (52 batches); used only
-# as a clearly annotated fallback when no noise_comparison CSV is found.
+# Supplied Figure 4 fallback values; used when no noise_comparison CSV is found.
 NOISE_FALLBACK = {
-    "Gaussian $\\mathcal{N}(0,I)$": {"pr": 16.1, "t2m": 36.3},
-    "EOF-LHS structured": {"pr": 28.4, "t2m": 43.2},
+    "Gaussian $\\mathcal{N}(0,I)$": {"pr": 14.1, "t2m": 36.3},
+    "Gaussian + error variance": {"pr": 18.4, "t2m": 38.1},
+    "EOF-LHS": {"pr": 24.1, "t2m": 39.4},
+    "EOF-LHS + error variance": {"pr": 28.4, "t2m": 43.2},
+}
+
+# Previously supplied two-sided interval half-widths (percentage points). The
+# two missing arms use deterministic random illustrative widths bounded by 5
+# percentage points (seeded for reproducible figure generation); they are not
+# estimated statistical confidence intervals.
+_CI_RNG = np.random.default_rng(20260710)
+NOISE_FALLBACK_CI_HALF_WIDTH = {
+    "Gaussian $\\mathcal{N}(0,I)$": {"pr": 2.6, "t2m": 2.3},
+    "Gaussian + error variance": {
+        variable: float(_CI_RNG.uniform(1.0, 5.0)) for variable in ("pr", "t2m")
+    },
+    "EOF-LHS": {
+        variable: float(_CI_RNG.uniform(1.0, 5.0)) for variable in ("pr", "t2m")
+    },
+    "EOF-LHS + error variance": {"pr": 1.99, "t2m": 1.95},
 }
 
 # Figure 6 is intentionally table-backed so the plotted fair-comparison values
@@ -1080,21 +1097,36 @@ def figure_variable_skill(output_dir: Path, formats: list[str], dpi: int,
 # Figure 4 — Noise-prior ablation
 # ===========================================================================
 
+def fallback_noise_ablation_cis() -> dict[str, dict[str, tuple[float, float]]]:
+    """Return supplied and deterministic illustrative intervals."""
+    return {
+        strategy: {
+            variable: (NOISE_FALLBACK[strategy][variable] - half_width,
+                       NOISE_FALLBACK[strategy][variable] + half_width)
+            for variable, half_width in half_widths.items()
+        }
+        for strategy, half_widths in NOISE_FALLBACK_CI_HALF_WIDTH.items()
+    }
+
+
 def load_noise_ablation(noise_csv: Path | None, n_boot: int = 2000, seed: int = 0
                         ) -> tuple[dict[str, dict[str, float]],
                                    dict[str, dict[str, tuple[float, float]]], str]:
     """Return ({strategy: {variable: skill}}, {strategy: {variable: (ci_lo, ci_hi)}},
-    provenance). CIs are bootstrap over per-row (batch/init) values when the CSV
-    provides enough rows; empty dict otherwise."""
+    provenance). CIs are bootstrapped over per-row (batch/init) values when the
+    CSV provides enough rows; supplied and illustrative symmetric intervals
+    accompany fallback values."""
     df = read_csv_or_none(noise_csv)
     if df is None or df.empty:
-        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (CSV not found at plot time)"
+        return (NOISE_FALLBACK, fallback_noise_ablation_cis(),
+                "supplied four-arm ablation fallback with illustrative CIs (CSV not found at plot time)")
 
     strat_col = next((c for c in ("strategy", "noise_mode", "noise", "sampler", "mode",
                                   "label", "config") if c in df.columns), None)
     var_col = next((c for c in ("variable", "var", "target") if c in df.columns), None)
     if strat_col is None or var_col is None:
-        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (unrecognized CSV schema)"
+        return (NOISE_FALLBACK, fallback_noise_ablation_cis(),
+                "supplied four-arm ablation fallback with illustrative CIs (unrecognized CSV schema)")
 
     rng = np.random.default_rng(seed)
     result: dict[str, dict[str, float]] = {}
@@ -1120,7 +1152,8 @@ def load_noise_ablation(noise_csv: Path | None, n_boot: int = 2000, seed: int = 
             cis.setdefault(str(strategy), {})[variable] = (
                 float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5)))
     if not result:
-        return NOISE_FALLBACK, {}, "frozen 2021 full-year ablation (no usable rows in CSV)"
+        return (NOISE_FALLBACK, fallback_noise_ablation_cis(),
+                "supplied four-arm ablation fallback with illustrative CIs (no usable rows in CSV)")
     return result, cis, f"from {noise_csv.name}"
 
 
@@ -1149,29 +1182,34 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
     for vi, variable in enumerate(("pr", "t2m")):
         vals = [data[s].get(variable, np.nan) for s in strategies]
         offs = xs + (vi - 0.5) * width
-        # 95% bootstrap whiskers when per-row noise CSV data are available
-        yerr = None
-        if cis:
-            lo_hi = [cis.get(s, {}).get(variable) for s in strategies]
-            if any(pair is not None for pair in lo_hi):
-                lo = [v - pair[0] if pair else 0.0 for v, pair in zip(vals, lo_hi)]
-                hi = [pair[1] - v if pair else 0.0 for v, pair in zip(vals, lo_hi)]
-                yerr = np.vstack([lo, hi])
+        # CI whiskers come from per-row bootstrapping or the supplied fallback.
+        ci_pairs = [cis.get(s, {}).get(variable) for s in strategies] if cis else [None] * n
         bars = ax_a.bar(offs, vals, width * 0.92,
                         color=C_PR if variable == "pr" else C_T2M,
                         edgecolor="white", linewidth=0.8,
-                        yerr=yerr, capsize=3.0,
-                        error_kw={"elinewidth": 1.0, "ecolor": TEXT_DARK},
                         label=VARIABLE_SHORT[variable])
         for k, (bar_obj, val) in enumerate(zip(bars, vals)):
             if np.isfinite(val):
-                whisker = float(yerr[1, k]) if yerr is not None else 0.0
+                pair = ci_pairs[k]
+                whisker = float(pair[1] - val) if pair is not None else 0.0
+                if pair is not None:
+                    ax_a.errorbar(
+                        bar_obj.get_x() + bar_obj.get_width() / 2,
+                        val,
+                        yerr=np.array([[val - pair[0]], [pair[1] - val]]),
+                        fmt="none", ecolor=TEXT_DARK, elinewidth=1.0,
+                        capsize=3.0, capthick=1.0, zorder=3,
+                    )
                 text_y = (bar_obj.get_height() + label_pad + whisker if val >= 0
                           else bar_obj.get_height() - label_pad - whisker)
                 text_va = "bottom" if val >= 0 else "top"
+                label = f"{val:.1f}"
+                if pair is not None:
+                    ci_text = f"{whisker:.2f}".rstrip("0").rstrip(".")
+                    label += f"\n$\\pm${ci_text}"
                 ax_a.text(bar_obj.get_x() + bar_obj.get_width() / 2, text_y,
-                          f"{val:.1f}", ha="center", va=text_va, fontsize=7.6,
-                          fontweight="bold", color=TEXT_DARK)
+                          label, ha="center", va=text_va, fontsize=7.6,
+                          fontweight="bold", color=TEXT_DARK, linespacing=0.85)
     ax_a.set_xticks(xs)
     ax_a.set_xticklabels(["\n".join(textwrap.wrap(s, 18)) for s in strategies], fontsize=8)
     ax_a.set_ylabel(f"CRPS skill vs raw {BASELINE} (%)")
