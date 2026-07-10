@@ -918,7 +918,7 @@ def figure_1_framework_overview(output_dir: Path, formats: list[str], dpi: int) 
                        _correlated_field((36, 54), length_scale=6.0, seed=20 + k), "BrBG")
     ax.text(base_x + 6.6, 32.4, "90-member PR + T2M\nensembles, weeks 1-4",
             ha="center", va="center", fontsize=7.0, color=TEXT_MUTED, linespacing=1.3)
-    ax.text(out_x + out_w - 8.6, 46.5, "calibrated\ntail risk", ha="center", va="center",
+    ax.text(out_x + out_w - 8.6, 46.5, "dense tail\nsampling", ha="center", va="center",
             fontsize=7.0, color=TEXT_MUTED, linespacing=1.3)
     # Simple pdf sketch: baseline vs refined
     pdf_ins = ax.inset_axes([out_x + out_w - 14.4, 34.0, 12.0, 11.0], transform=ax.transData)
