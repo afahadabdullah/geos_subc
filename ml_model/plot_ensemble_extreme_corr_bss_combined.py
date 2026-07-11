@@ -37,6 +37,8 @@ VARIABLE_LABELS = {"pr": "PR", "t2m": "T2M"}
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
 MODEL_LABEL = "FIMr1p1-FlowMatch"
 BASELINE_LABEL = "FIMr1p1"
+MEMBER_BAND_ALPHA = 0.22
+CASE_BOOTSTRAP_ALPHA = 0.10
 CORR_SUM_COLUMNS = [
     "model_weight_sum",
     "model_x_sum",
@@ -75,7 +77,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--show_ci", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--title", default="", help="Optional figure title.")
-    parser.add_argument("--table_member_count", type=int, default=8)
+    parser.add_argument(
+        "--table_member_counts",
+        "--table_member_count",
+        dest="table_member_counts",
+        default="4,6",
+        help="Comma-separated member counts to print/save as compact tables.",
+    )
     parser.add_argument("--table_bootstrap_repeats", type=int, default=1000)
     parser.add_argument("--table_seed", type=int, default=202407)
     parser.add_argument("--print_all_table", action="store_true")
@@ -152,6 +160,10 @@ def ci_for_line(
                 boot[upper].to_numpy(dtype=float),
             )
 
+    return None, None
+
+
+def member_spread_for_line(summary_line: pd.DataFrame, metric: str) -> tuple[np.ndarray | None, np.ndarray | None]:
     lower = f"{metric}_p05"
     upper = f"{metric}_p95"
     if {lower, upper} <= set(summary_line.columns):
@@ -424,10 +436,15 @@ def write_and_print_tables(table: pd.DataFrame, args: argparse.Namespace) -> lis
     full_path = out_dir / f"{stem}_table.csv"
     write_csv(table, full_path)
 
-    member = int(args.table_member_count)
-    member_table = table[table["member_count"].astype(int).eq(member)].copy()
-    member_path = out_dir / f"{stem}_member{member}_table.csv"
-    write_csv(member_table, member_path)
+    member_counts = parse_csv_list(args.table_member_counts, int)
+    member_paths: list[Path] = []
+    member_tables: list[tuple[int, pd.DataFrame]] = []
+    for member in member_counts:
+        member_table = table[table["member_count"].astype(int).eq(int(member))].copy()
+        member_path = out_dir / f"{stem}_member{int(member)}_table.csv"
+        write_csv(member_table, member_path)
+        member_paths.append(member_path)
+        member_tables.append((int(member), member_table))
 
     print(
         "\nP-value convention: p_le0 is the one-sided bootstrap probability that "
@@ -454,15 +471,25 @@ def write_and_print_tables(table: pd.DataFrame, args: argparse.Namespace) -> lis
         "bss_gain_p_two_sided",
     ]
     display_cols = [col for col in display_cols if col in table.columns]
-    to_print = table if args.print_all_table else member_table
-    label = "all member counts" if args.print_all_table else f"member count {member}"
-    print(f"\nCombined correlation/BSS gain table ({label}):")
-    if to_print.empty:
-        print("  No rows matched the table filter.")
+    if args.print_all_table:
+        print("\nCombined correlation/BSS gain table (all member counts):")
+        if table.empty:
+            print("  No rows matched the table filter.")
+        else:
+            with pd.option_context("display.max_rows", None, "display.width", 220):
+                print(table[display_cols].to_string(index=False, float_format=lambda value: f"{value:8.3f}"))
     else:
-        with pd.option_context("display.max_rows", None, "display.width", 220):
-            print(to_print[display_cols].to_string(index=False, float_format=lambda value: f"{value:8.3f}"))
-    return [full_path, member_path]
+        for member, member_table in member_tables:
+            print(f"\nCombined correlation/BSS gain table (member count {member}):")
+            if member_table.empty:
+                print(
+                    "  No rows matched this member count. If this is unexpected, rerun the "
+                    f"correlation and BSS evaluators with --sample_sizes including {member}."
+                )
+            else:
+                with pd.option_context("display.max_rows", None, "display.width", 220):
+                    print(member_table[display_cols].to_string(index=False, float_format=lambda value: f"{value:8.3f}"))
+    return [full_path, *member_paths]
 
 
 def robust_ylim(values: list[float], *, floor_low: float, floor_high: float) -> tuple[float, float]:
@@ -573,12 +600,25 @@ def plot_combined(
                 y = c_line["corr_gain_pct_mean"].to_numpy(dtype=float)
                 corr_values.extend(y[np.isfinite(y)].tolist())
                 if args.show_ci:
+                    member_lo, member_hi = member_spread_for_line(c_line, "corr_gain_pct")
+                    if member_lo is not None and member_hi is not None and len(member_lo) == len(x):
+                        corr_ax.fill_between(
+                            x,
+                            member_lo,
+                            member_hi,
+                            color=color,
+                            alpha=MEMBER_BAND_ALPHA,
+                            lw=0,
+                            zorder=1,
+                        )
+                        corr_values.extend(np.asarray(member_lo)[np.isfinite(member_lo)].tolist())
+                        corr_values.extend(np.asarray(member_hi)[np.isfinite(member_hi)].tolist())
                     lo, hi = ci_for_line(c_line, corr_boot, variable, lead, "corr_gain_pct", args.corr_target)
                     if lo is not None and hi is not None and len(lo) == len(x):
-                        corr_ax.fill_between(x, lo, hi, color=color, alpha=0.12, lw=0)
+                        corr_ax.fill_between(x, lo, hi, color=color, alpha=CASE_BOOTSTRAP_ALPHA, lw=0, zorder=0)
                         corr_values.extend(np.asarray(lo)[np.isfinite(lo)].tolist())
                         corr_values.extend(np.asarray(hi)[np.isfinite(hi)].tolist())
-                corr_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
+                corr_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}", zorder=3)
                 raw = c_line["geos_corr_mean"].to_numpy(dtype=float)
                 all_corr_raw_values.extend(raw[np.isfinite(raw)].tolist())
                 raw_val = float(raw[-1])
@@ -611,12 +651,25 @@ def plot_combined(
                 y = b_line["bss_gain_x100_mean"].to_numpy(dtype=float)
                 bss_values.extend(y[np.isfinite(y)].tolist())
                 if args.show_ci:
+                    member_lo, member_hi = member_spread_for_line(b_line, "bss_gain_x100")
+                    if member_lo is not None and member_hi is not None and len(member_lo) == len(x):
+                        bss_ax.fill_between(
+                            x,
+                            member_lo,
+                            member_hi,
+                            color=color,
+                            alpha=MEMBER_BAND_ALPHA,
+                            lw=0,
+                            zorder=1,
+                        )
+                        bss_values.extend(np.asarray(member_lo)[np.isfinite(member_lo)].tolist())
+                        bss_values.extend(np.asarray(member_hi)[np.isfinite(member_hi)].tolist())
                     lo, hi = ci_for_line(b_line, bss_boot, variable, lead, "bss_gain_x100")
                     if lo is not None and hi is not None and len(lo) == len(x):
-                        bss_ax.fill_between(x, lo, hi, color=color, alpha=0.12, lw=0)
+                        bss_ax.fill_between(x, lo, hi, color=color, alpha=CASE_BOOTSTRAP_ALPHA, lw=0, zorder=0)
                         bss_values.extend(np.asarray(lo)[np.isfinite(lo)].tolist())
                         bss_values.extend(np.asarray(hi)[np.isfinite(hi)].tolist())
-                bss_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}")
+                bss_ax.plot(x, y, color=color, lw=1.85, marker="o", ms=3.5, label=f"W{lead}", zorder=3)
                 raw = b_line["geos_bss_mean"].to_numpy(dtype=float)
                 all_bss_raw_values.extend(raw[np.isfinite(raw)].tolist())
                 raw_val = float(raw[-1])
@@ -685,15 +738,6 @@ def plot_combined(
             fontsize=8.8,
             handlelength=1.8,
             columnspacing=1.2,
-        )
-        fig.text(
-            0.985,
-            0.965 if not args.title else 0.925,
-            f"markers on right axes: {BASELINE_LABEL} raw values",
-            ha="right",
-            va="center",
-            fontsize=8.1,
-            color="#5f6b76",
         )
     if args.title:
         fig.suptitle(str(args.title), fontsize=12.0, fontweight="bold", y=0.995)
