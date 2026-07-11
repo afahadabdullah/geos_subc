@@ -124,11 +124,18 @@ def figure_s1(output_dir: Path, formats: list[str], dpi: int, s1_dir: Path,
                 color = lead_cmap(0.10 + 0.75 * li / max(len(leads) - 1, 1))
                 lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
                 if lo_col in grp and hi_col in grp:
-                    ax.fill_between(x, grp[lo_col].to_numpy(dtype=float),
-                                    grp[hi_col].to_numpy(dtype=float),
-                                    color=color, alpha=0.14, lw=0)
+                    lo = grp[lo_col].to_numpy(dtype=float)
+                    hi = grp[hi_col].to_numpy(dtype=float)
+                    yerr = np.vstack([
+                        np.maximum(mean - lo, 0.0),
+                        np.maximum(hi - mean, 0.0),
+                    ])
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.22, lw=0, zorder=1)
+                    ax.errorbar(x, mean, yerr=yerr, fmt="none", ecolor=color,
+                                elinewidth=0.85, capsize=2.3, capthick=0.85,
+                                alpha=0.62, zorder=2)
                 ax.plot(x, mean, color=color, lw=1.7, marker="o", ms=3.4,
-                        label=f"Week {lead}")
+                        label=f"Week {lead}", zorder=3)
             ax.axhline(0.0, color="#7a8794", lw=0.9, ls="--")
             mpf.style_axis(ax)
             mpf.panel_title(ax, title)
