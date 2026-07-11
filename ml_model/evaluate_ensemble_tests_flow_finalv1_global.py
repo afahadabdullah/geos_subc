@@ -431,6 +431,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--report_member_counts",
+        default=None,
+        help=(
+            "Comma-separated generated ensemble sizes to print/save compact reports for. "
+            "Overrides --report_member_count when provided; use empty or <=0 values to disable."
+        ),
+    )
+    parser.add_argument(
         "--plot_only",
         action="store_true",
         help="Skip evaluation and create plots from existing CSVs in --out_dir.",
@@ -448,6 +456,20 @@ def parse_int_list(text: str) -> list[int]:
     if not values:
         raise ValueError("Expected at least one integer value.")
     return sorted(dict.fromkeys(values))
+
+
+def parse_optional_positive_int_list(text: str | None) -> list[int]:
+    if text is None:
+        return []
+    values = [int(item.strip()) for item in str(text or "").split(",") if item.strip()]
+    return sorted({value for value in values if value > 0})
+
+
+def report_member_counts_from_args(args: argparse.Namespace) -> list[int]:
+    if args.report_member_counts is not None:
+        return parse_optional_positive_int_list(args.report_member_counts)
+    legacy_count = int(args.report_member_count)
+    return [legacy_count] if legacy_count > 0 else []
 
 
 def parse_eval_mask_list(text: str, default: str) -> list[str]:
@@ -1586,7 +1608,11 @@ def write_evaluation_outputs(
 
     ensemble_summary = summarize_member_repeats(repeat_summary)
     write_csv(ensemble_summary, out_dir / "ensemble_size_summary.csv")
-    member_report_path = write_member_count_report(ensemble_summary, out_dir, int(args.report_member_count))
+    member_report_paths: list[str] = []
+    for member_count in report_member_counts_from_args(args):
+        member_report_path = write_member_count_report(ensemble_summary, out_dir, int(member_count))
+        if member_report_path is not None:
+            member_report_paths.append(member_report_path)
 
     bootstrap_ci = bootstrap_case_intervals(case_df, int(args.case_bootstrap_repeats), rng)
     if not bootstrap_ci.empty:
@@ -1617,7 +1643,8 @@ def write_evaluation_outputs(
                 "case_member_metrics": str(out_dir / "case_member_metrics.csv") if args.write_case_metrics else None,
                 "ensemble_size_member_repeat_summary": str(out_dir / "ensemble_size_member_repeat_summary.csv"),
                 "ensemble_size_summary": str(out_dir / "ensemble_size_summary.csv"),
-                "ensemble_size_member_report": member_report_path,
+                "ensemble_size_member_report": member_report_paths[0] if member_report_paths else None,
+                "ensemble_size_member_reports": member_report_paths,
                 "ensemble_size_bootstrap_ci": str(out_dir / "ensemble_size_bootstrap_ci.csv")
                 if not bootstrap_ci.empty
                 else None,

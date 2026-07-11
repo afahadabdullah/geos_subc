@@ -14,7 +14,7 @@
   S3  suppS3_event_catalog_table.tex : LaTeX table of the full event catalog
       (Sect. 5.5 reference). Input: r1_event_catalog_summary.csv from
       r1_event_catalog_summary.py (--s3-csv).
-  S4  figS4_event_pr_pakistan : Pakistan Aug-2022 failure-case maps in the
+  S4  figS4_event_pr_pakistan : Pakistan Aug-2022 shared-miss maps in the
       Fig. 7/8 layout (Sect. 5.5 reference). Requires the Pakistan event to be
       added to the event catalog and processed by the event evaluator +
       make_contoured_event_plots.py first (--event-dir, --pakistan-event-id).
@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
                    help="Dir with all-case all-grid ensemble_size_summary.csv (all leads).")
     p.add_argument("--s1-land-dir", default=None,
                    help="Dir with all-case land-only ensemble_size_summary.csv (all leads).")
+    p.add_argument("--s1-member-counts", default="4,6",
+                   help="Comma-separated generated member counts to print/save S1 compact CSV reports.")
     p.add_argument("--s2-csv", default=None, help="r1_rank_histogram.csv path.")
     p.add_argument("--s3-csv", default=None, help="r1_event_catalog_summary.csv path.")
     p.add_argument("--event-dir",
@@ -83,6 +85,10 @@ def first_existing(explicit: str | None, candidates: list[str]) -> Path:
         if Path(item).exists():
             return Path(item)
     return Path(candidates[0])
+
+
+def parse_int_list(text: str) -> list[int]:
+    return sorted({int(item.strip()) for item in str(text or "").split(",") if item.strip()})
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +142,84 @@ def figure_s1(output_dir: Path, formats: list[str], dpi: int, s1_dir: Path,
                  color=mpf.TEXT_DARK, y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     return mpf.save_figure(fig, output_dir, stem, formats, dpi)
+
+
+def write_s1_member_reports(output_dir: Path, s1_dir: Path, stem: str,
+                            context_label: str, member_counts: list[int]) -> list[Path]:
+    """Print and save compact S1 convergence summaries for requested member counts."""
+    if not member_counts:
+        return []
+    df = mpf.read_csv_or_none(s1_dir / "ensemble_size_summary.csv")
+    if df is None or df.empty:
+        print(f"S1 report skipped for {context_label}: missing {s1_dir / 'ensemble_size_summary.csv'}")
+        return []
+
+    preferred_cols = [
+        "variable",
+        "lead",
+        "member_count",
+        "n_member_repeats",
+        "n_case_rows",
+        "crps_skill_pct_mean",
+        "crps_skill_pct_p05",
+        "crps_skill_pct_p50",
+        "crps_skill_pct_p95",
+        "rmse_skill_pct_mean",
+        "rmse_skill_pct_p05",
+        "rmse_skill_pct_p50",
+        "rmse_skill_pct_p95",
+        "model_crps_mean",
+        "geos_crps_mean",
+        "model_rmse_mean",
+        "geos_rmse_mean",
+        "model_spread_rmse_ratio_mean",
+    ]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    for member_count in member_counts:
+        subset = df[df["member_count"].astype(int).eq(int(member_count))].copy()
+        path = output_dir / f"{stem}_member{int(member_count)}_report.csv"
+        if subset.empty:
+            print(
+                f"\nS1 {context_label} ensemble size {int(member_count)} report: "
+                "no rows found. Rerun the evaluator with --sample_sizes including "
+                f"{int(member_count)}."
+            )
+            pd.DataFrame(columns=[col for col in preferred_cols if col in df.columns]).to_csv(path, index=False)
+            print(f"Wrote empty {path}")
+            written.append(path)
+            continue
+
+        report_cols = [col for col in preferred_cols if col in subset.columns]
+        report = subset[report_cols].sort_values(["variable", "lead"]).reset_index(drop=True)
+        report.to_csv(path, index=False)
+        written.append(path)
+
+        display_cols = [
+            col
+            for col in [
+                "variable",
+                "lead",
+                "crps_skill_pct_mean",
+                "crps_skill_pct_p05",
+                "crps_skill_pct_p95",
+                "rmse_skill_pct_mean",
+                "rmse_skill_pct_p05",
+                "rmse_skill_pct_p95",
+                "model_spread_rmse_ratio_mean",
+            ]
+            if col in report.columns
+        ]
+        display = report[display_cols].copy()
+        for col in display.columns:
+            if col not in {"variable", "lead"}:
+                display[col] = display[col].astype(float).round(3)
+        print(f"\nS1 {context_label} ensemble size {int(member_count)} report:")
+        print(display.to_string(index=False))
+        print(f"Wrote {path}")
+
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +314,7 @@ def table_s3(output_dir: Path, s3_csv: Path) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# S4 — Pakistan failure-case maps
+# S4 — Pakistan shared-miss maps
 # ---------------------------------------------------------------------------
 
 def find_pakistan_event_id(event_dir: Path, explicit: str | None) -> str | None:
@@ -251,7 +335,7 @@ def figure_s4(output_dir: Path, formats: list[str], dpi: int,
               "(or pass --pakistan-event-id).")
         fig = plt.figure(figsize=(10, 4))
         ax = fig.add_subplot(111)
-        mpf.missing_panel(ax, "Pakistan Aug-2022 failure case",
+        mpf.missing_panel(ax, "Pakistan Aug-2022 shared miss",
                           "Event products pending; see script message.")
         return mpf.save_figure(fig, output_dir, "figS4_event_pr_pakistan", formats, dpi)
     return mpf.figure_event_case(output_dir, formats, dpi, event_dir,
@@ -263,6 +347,7 @@ def main() -> None:
     args = parse_args()
     formats = mpf.output_formats(args.format)
     output_dir = Path(args.output_dir)
+    s1_member_counts = parse_int_list(args.s1_member_counts)
 
     s1_dir = first_existing(args.s1_dir, S1_DIR_CANDIDATES)
     s1_land_dir = first_existing(args.s1_land_dir, S1_LAND_DIR_CANDIDATES)
@@ -279,14 +364,22 @@ def main() -> None:
     print(f"  S4 event id     : {pak_id}")
 
     written: list[Path] = []
+    s1a_stem = "figS1a_member_convergence_allcase_allgrid"
+    s1b_stem = "figS1b_member_convergence_allcase_land"
     written.extend(figure_s1(
         output_dir, formats, args.dpi, s1_dir,
-        "figS1a_member_convergence_allcase_allgrid",
+        s1a_stem,
         "All-case ensemble convergence, all grid cells"))
+    written.extend(write_s1_member_reports(
+        output_dir, s1_dir, s1a_stem,
+        "all-grid", s1_member_counts))
     written.extend(figure_s1(
         output_dir, formats, args.dpi, s1_land_dir,
-        "figS1b_member_convergence_allcase_land",
+        s1b_stem,
         "All-case ensemble convergence, land grid cells"))
+    written.extend(write_s1_member_reports(
+        output_dir, s1_land_dir, s1b_stem,
+        "land-only", s1_member_counts))
     written.extend(figure_s2(output_dir, formats, args.dpi, s2_csv))
     s3 = table_s3(output_dir, s3_csv)
     if s3 is not None:
