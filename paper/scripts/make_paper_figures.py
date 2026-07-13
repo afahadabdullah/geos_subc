@@ -1291,6 +1291,21 @@ LEAD_LINESTYLES = {1: ":", 2: "-.", 3: "--", 4: "-"}
 FIG5_LEADS = (1, 2, 3, 4)
 FIG5_MEMBER_COUNTS = (0, 6, 10, 20, 30, 60, 90)
 FIG5_XTICKS = tuple(range(0, 91, 10))
+FIG5_REQUIRED_MEMBER_COUNTS = tuple(count for count in FIG5_MEMBER_COUNTS if count > 0)
+FIG5_SKILL_YMAX = {
+    "crps_skill_pct": 40.0,
+    "rmse_skill_pct": 30.0,
+}
+
+
+def fig5_missing_member_counts(group: pd.DataFrame) -> list[int]:
+    if group.empty or "member_count" not in group.columns:
+        return list(FIG5_REQUIRED_MEMBER_COUNTS)
+    available = {
+        int(value)
+        for value in pd.to_numeric(group["member_count"], errors="coerce").dropna().to_numpy()
+    }
+    return [count for count in FIG5_REQUIRED_MEMBER_COUNTS if count not in available]
 
 
 def write_fig5_member_report(df: pd.DataFrame | None, output_dir: Path,
@@ -1451,6 +1466,16 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
             if sub.empty:
                 missing_panel(ax, title, f"No rows for variable {variable}.")
                 continue
+            missing_members = fig5_missing_member_counts(sub)
+            if missing_members:
+                missing_panel(
+                    ax,
+                    title,
+                    "Missing Fig. 5 sample sizes "
+                    f"{','.join(str(count) for count in missing_members)}; rerun evaluator with "
+                    "--sample_sizes 6,10,20,30,60,90.",
+                )
+                continue
             available_leads = sorted(set(sub["lead"].astype(int).unique()))
             plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
             raw_reference_vals: list[tuple[int, float]] = []
@@ -1533,7 +1558,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
         ymax_crps = float(np.nanmax(crps_y))
         pad_crps = max(1.0, 0.08 * (ymax_crps - ymin_crps)) if ymax_crps > ymin_crps else max(1.0, abs(ymax_crps) * 0.1)
         for vi in range(2):
-            axes[vi, 0].set_ylim(ymin_crps - pad_crps, ymax_crps + pad_crps)
+            axes[vi, 0].set_ylim(ymin_crps - pad_crps, FIG5_SKILL_YMAX["crps_skill_pct"])
 
     rmse_y = np.asarray(rmse_y_vals, dtype=float)
     rmse_y = rmse_y[np.isfinite(rmse_y)]
@@ -1541,9 +1566,8 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
         ymin_rmse = float(np.nanmin(rmse_y))
         ymax_rmse = float(np.nanmax(rmse_y))
         pad_rmse = max(1.0, 0.08 * (ymax_rmse - ymin_rmse)) if ymax_rmse > ymin_rmse else max(1.0, abs(ymax_rmse) * 0.1)
-        ylim_max = min(30.0, ymax_rmse + pad_rmse)
         for vi in range(2):
-            axes[vi, 1].set_ylim(ymin_rmse - pad_rmse, ylim_max)
+            axes[vi, 1].set_ylim(ymin_rmse - pad_rmse, FIG5_SKILL_YMAX["rmse_skill_pct"])
     fig.subplots_adjust(left=0.08, right=0.92, bottom=0.10, top=0.93, hspace=0.26, wspace=0.38)
     fig.text(0.92, 0.965, f"markers on right axes: {BASELINE} raw values",
              ha="right", va="top", fontsize=8, color=TEXT_MUTED)
@@ -1742,7 +1766,7 @@ def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], d
 
     fig, axes = plt.subplots(2, 3, figsize=(12.6, 6.2), sharex=True)
     letters = iter("abcdef")
-    skill_values: list[float] = [0.0]
+    skill_values_by_column: list[list[float]] = [[0.0], [0.0], [0.0]]
 
     for vi, variable in enumerate(("pr", "t2m")):
         for mi, spec in enumerate(specs):
@@ -1759,6 +1783,16 @@ def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], d
             if sub.empty:
                 missing_panel(ax, title, f"No rows for variable {variable}.")
                 continue
+            missing_members = fig5_missing_member_counts(sub)
+            if missing_members:
+                missing_panel(
+                    ax,
+                    title,
+                    "Missing Fig. 5 sample sizes "
+                    f"{','.join(str(count) for count in missing_members)}; rerun evaluator with "
+                    "--sample_sizes 6,10,20,30,60,90.",
+                )
+                continue
 
             available_leads = sorted(set(sub["lead"].astype(int).unique()))
             plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
@@ -1773,7 +1807,7 @@ def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], d
                 if 0 in FIG5_MEMBER_COUNTS and not np.any(np.isclose(x, 0.0)):
                     x = np.concatenate([[0.0], x])
                     mean = np.concatenate([[0.0], mean])
-                skill_values.extend(mean[np.isfinite(mean)].tolist())
+                skill_values_by_column[mi].extend(mean[np.isfinite(mean)].tolist())
 
                 color = LEAD_COLORS.get(int(lead), C_MODEL)
                 lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
@@ -1783,8 +1817,8 @@ def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], d
                     if 0 in FIG5_MEMBER_COUNTS and x.size == lo.size + 1:
                         lo = np.concatenate([[0.0], lo])
                         hi = np.concatenate([[0.0], hi])
-                    skill_values.extend(lo[np.isfinite(lo)].tolist())
-                    skill_values.extend(hi[np.isfinite(hi)].tolist())
+                    skill_values_by_column[mi].extend(lo[np.isfinite(lo)].tolist())
+                    skill_values_by_column[mi].extend(hi[np.isfinite(hi)].tolist())
                     ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
 
                 ax.plot(
@@ -1836,20 +1870,26 @@ def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], d
                 ax2.spines["right"].set_color("#aab5c0")
                 ax2.spines["top"].set_visible(False)
 
-    values = np.asarray(skill_values, dtype=float)
-    values = values[np.isfinite(values)]
-    if values.size:
+    column_ymax = [
+        FIG5_SKILL_YMAX["crps_skill_pct"],
+        FIG5_SKILL_YMAX["rmse_skill_pct"],
+        None,
+    ]
+    for mi, values_raw in enumerate(skill_values_by_column):
+        values = np.asarray(values_raw, dtype=float)
+        values = values[np.isfinite(values)]
+        if not values.size:
+            continue
         ymin = min(0.0, float(np.nanmin(values)))
         ymax = max(0.0, float(np.nanmax(values)))
         pad = max(1.0, 0.08 * (ymax - ymin)) if ymax > ymin else max(1.0, abs(ymax) * 0.1)
-        for ax in axes.ravel():
-            if ax.axison:
-                ax.set_ylim(ymin - pad, ymax + pad)
+        upper = column_ymax[mi] if column_ymax[mi] is not None else ymax + pad
+        for vi in range(2):
+            if axes[vi, mi].axison:
+                axes[vi, mi].set_ylim(ymin - pad, upper)
 
     fig.subplots_adjust(left=0.065, right=0.94, bottom=0.10, top=0.93,
                         hspace=0.26, wspace=0.42)
-    fig.text(0.94, 0.035, f"right-axis markers: {BASELINE} raw values",
-             ha="right", va="bottom", fontsize=8, color=TEXT_MUTED)
     written = save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
     written.extend(path for path in report_paths if path is not None)
     return written
