@@ -1293,7 +1293,7 @@ FIG5_MEMBER_COUNTS = (0, 6, 10, 20, 30, 60, 90)
 FIG5_XTICKS = tuple(range(0, 91, 10))
 FIG5_REQUIRED_MEMBER_COUNTS = tuple(count for count in FIG5_MEMBER_COUNTS if count > 0)
 FIG5_SKILL_YMAX = {
-    "crps_skill_pct": 40.0,
+    "crps_skill_pct": 50.0,
     "rmse_skill_pct": 30.0,
 }
 
