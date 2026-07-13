@@ -1280,6 +1280,71 @@ LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
 LEAD_LINESTYLES = {1: ":", 2: "-.", 3: "--", 4: "-"}
 FIG5_LEADS = (1, 2, 3, 4)
 FIG5_MEMBER_COUNTS = (0, 6, 10, 20, 30, 60, 90)
+FIG5_XTICKS = tuple(range(0, 91, 10))
+
+
+def write_fig5_member_report(df: pd.DataFrame | None, output_dir: Path,
+                             member_count: int = 6) -> Path | None:
+    """Print and save the compact member-count summary used for Table/Fig. 5."""
+    if df is None or df.empty or "member_count" not in df.columns:
+        print(f"Fig. 5 member-{member_count} report skipped: missing ensemble summary.")
+        return None
+    subset = df[df["member_count"].astype(int).eq(int(member_count))].copy()
+    if subset.empty:
+        print(
+            f"Fig. 5 member-{member_count} report skipped: no rows found. "
+            f"Rerun the evaluator with --sample_sizes including {member_count}."
+        )
+        return None
+
+    preferred_cols = [
+        "variable",
+        "lead",
+        "member_count",
+        "n_member_repeats",
+        "n_case_rows",
+        "crps_skill_pct_mean",
+        "crps_skill_pct_p05",
+        "crps_skill_pct_p50",
+        "crps_skill_pct_p95",
+        "rmse_skill_pct_mean",
+        "rmse_skill_pct_p05",
+        "rmse_skill_pct_p50",
+        "rmse_skill_pct_p95",
+        "model_crps_mean",
+        "geos_crps_mean",
+        "model_rmse_mean",
+        "geos_rmse_mean",
+        "model_spread_rmse_ratio_mean",
+    ]
+    report_cols = [col for col in preferred_cols if col in subset.columns]
+    report = subset[report_cols].sort_values(["variable", "lead"]).reset_index(drop=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"table5_member{int(member_count)}_results.csv"
+    report.to_csv(path, index=False)
+
+    display_cols = [
+        col for col in [
+            "variable",
+            "lead",
+            "crps_skill_pct_mean",
+            "crps_skill_pct_p05",
+            "crps_skill_pct_p95",
+            "rmse_skill_pct_mean",
+            "rmse_skill_pct_p05",
+            "rmse_skill_pct_p95",
+            "model_spread_rmse_ratio_mean",
+        ]
+        if col in report.columns
+    ]
+    display = report[display_cols].copy()
+    for col in display.columns:
+        if col not in {"variable", "lead"}:
+            display[col] = display[col].astype(float).round(3)
+    print(f"\nFig. 5 / Table 5 ensemble size {int(member_count)} results:")
+    print(display.to_string(index=False))
+    print(f"Wrote {path}")
+    return path
 
 
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
@@ -1291,6 +1356,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
     {metric}_mean/_p05/_p95 grouped by variable, lead, member_count).
     """
     df = read_csv_or_none(ensemble_dir / "ensemble_size_summary.csv")
+    report_path = write_fig5_member_report(df, output_dir, member_count=6)
     specs = [
         ("crps_skill_pct", "CRPS skill (%)", 0.0),
         ("rmse_skill_pct", "RMSE skill (%)", 0.0),
@@ -1383,7 +1449,7 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
             panel_title(ax, title)
             if vi == 1:
                 ax.set_xlabel("Generated members")
-                ax.set_xticks(FIG5_MEMBER_COUNTS)
+                ax.set_xticks(FIG5_XTICKS)
             ax.set_xlim(min(FIG5_MEMBER_COUNTS), max(FIG5_MEMBER_COUNTS))
             if mi == 0:
                 ax.set_ylabel(VARIABLE_LABELS[variable])
@@ -1410,7 +1476,10 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
     fig.subplots_adjust(left=0.08, right=0.92, bottom=0.10, top=0.93, hspace=0.26, wspace=0.38)
     fig.text(0.92, 0.965, f"markers on right axes: {BASELINE} raw values",
              ha="right", va="top", fontsize=8, color=TEXT_MUTED)
-    return save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
+    written = save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
+    if report_path is not None:
+        written.append(report_path)
+    return written
 
 
 # ===========================================================================
