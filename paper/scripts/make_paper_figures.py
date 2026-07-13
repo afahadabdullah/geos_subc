@@ -268,15 +268,18 @@ def parse_args() -> argparse.Namespace:
                         help="Directory containing ensemble_size_summary.csv from the ensemble tests.")
     parser.add_argument("--ensemble-tail-dir", default=None,
                         help="Directory containing ensemble_quantile_size_summary.csv from the tail evaluator.")
-    parser.add_argument("--fig5-mode", choices=("mean", "q95", "q99"), default="mean",
-                        help="Use the original CRPS/ensemble-mean Fig. 5 or a q95/q99 tail version.")
+    parser.add_argument("--fig5-mode", choices=("combined", "mean", "q95", "q99"), default="combined",
+                        help=(
+                            "Use the combined CRPS/RMSE/q95 Fig. 5, the original "
+                            "CRPS/ensemble-mean Fig. 5, or a standalone q95/q99 tail version."
+                        ))
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
     parser.add_argument("--format", choices=("pdf", "png", "both"), default="both")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--ecmwf-only", action="store_true",
                         help="Write only fig7a/fig8a ECMWF companion figures, leaving existing figures untouched.")
     parser.add_argument("--fig5-only", action="store_true",
-                        help="Write only the selected mean/q95/q99 Fig. 5 and its member-6 table.")
+                        help="Write only the selected Fig. 5 and its member-6 table.")
     parser.add_argument("--matrix-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
     return parser.parse_args()
@@ -1354,6 +1357,67 @@ def write_fig5_member_report(df: pd.DataFrame | None, output_dir: Path,
     return path
 
 
+def write_fig5_quantile_member_report(df: pd.DataFrame | None, output_dir: Path,
+                                      quantile: float = 0.95,
+                                      member_count: int = 6) -> Path | None:
+    """Print and save the compact q95 member-count summary used by combined Fig. 5."""
+    qlabel = f"q{int(round(100.0 * quantile)):02d}"
+    if df is None or df.empty or "member_count" not in df.columns:
+        print(f"Fig. 5 {qlabel} member-{member_count} report skipped: missing tail summary.")
+        return None
+    subset = df.copy()
+    if "quantile" in subset.columns:
+        subset = subset[np.isclose(pd.to_numeric(subset["quantile"], errors="coerce"), quantile)].copy()
+    subset = subset[subset["member_count"].astype(int).eq(int(member_count))].copy()
+    if subset.empty:
+        print(
+            f"Fig. 5 {qlabel} member-{member_count} report skipped: no rows found. "
+            f"Rerun the tail evaluator with --sample_sizes including {member_count}."
+        )
+        return None
+
+    preferred_cols = [
+        "variable",
+        "lead",
+        "quantile",
+        "member_count",
+        "n_member_repeats",
+        "n_cases",
+        "quantile_skill_pct_mean",
+        "quantile_skill_pct_p05",
+        "quantile_skill_pct_p50",
+        "quantile_skill_pct_p95",
+        "model_quantile_score_mean",
+        "geos_quantile_score_mean",
+    ]
+    report_cols = [col for col in preferred_cols if col in subset.columns]
+    report = subset[report_cols].sort_values(["variable", "lead"]).reset_index(drop=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"table5_{qlabel}_member{int(member_count)}_results.csv"
+    report.to_csv(path, index=False)
+
+    display_cols = [
+        col for col in [
+            "variable",
+            "lead",
+            "quantile_skill_pct_mean",
+            "quantile_skill_pct_p05",
+            "quantile_skill_pct_p95",
+            "model_quantile_score_mean",
+            "geos_quantile_score_mean",
+        ]
+        if col in report.columns
+    ]
+    display = report[display_cols].copy()
+    for col in display.columns:
+        if col not in {"variable", "lead"}:
+            display[col] = display[col].astype(float).round(3)
+    print(f"\nFig. 5 {qlabel} ensemble size {int(member_count)} results:")
+    print(display.to_string(index=False))
+    print(f"Wrote {path}")
+    return path
+
+
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
                                 ensemble_dir: Path) -> list[Path]:
     """Skill versus number of generated ensemble members.
@@ -1624,9 +1688,179 @@ def figure_5_tail_member_convergence(output_dir: Path, formats: list[str], dpi: 
     return written
 
 
+def figure_5_combined_member_convergence(output_dir: Path, formats: list[str], dpi: int,
+                                         ensemble_dir: Path,
+                                         ensemble_tail_dir: Path | None) -> list[Path]:
+    """Combined Fig. 5: CRPS skill, ensemble-mean RMSE skill, and q95 skill."""
+    mean_df = read_csv_or_none(ensemble_dir / "ensemble_size_summary.csv")
+    tail_df = (
+        read_csv_or_none(ensemble_tail_dir / "ensemble_quantile_size_summary.csv")
+        if ensemble_tail_dir is not None else None
+    )
+    if tail_df is not None and not tail_df.empty and "quantile" in tail_df.columns:
+        tail_df = tail_df[np.isclose(pd.to_numeric(tail_df["quantile"], errors="coerce"), 0.95)].copy()
+
+    report_paths = [
+        write_fig5_member_report(mean_df, output_dir, member_count=6),
+        write_fig5_quantile_member_report(tail_df, output_dir, quantile=0.95, member_count=6),
+    ]
+    specs = [
+        {
+            "source": "mean",
+            "metric": "crps_skill_pct",
+            "label": "CRPS skill (%)",
+            "raw_col": "geos_crps_mean",
+            "raw_label": f"{BASELINE} raw CRPS",
+            "missing": (
+                "Missing ensemble_size_summary.csv; run "
+                "ml_model/evaluate_ensemble_tests_flow_finalv1_global.py."
+            ),
+        },
+        {
+            "source": "mean",
+            "metric": "rmse_skill_pct",
+            "label": "RMSE skill (%)",
+            "raw_col": "geos_rmse_mean",
+            "raw_label": f"{BASELINE} raw RMSE",
+            "missing": (
+                "Missing ensemble_size_summary.csv; run "
+                "ml_model/evaluate_ensemble_tests_flow_finalv1_global.py."
+            ),
+        },
+        {
+            "source": "tail",
+            "metric": "quantile_skill_pct",
+            "label": "q95 score skill (%)",
+            "raw_col": "geos_quantile_score_mean",
+            "raw_label": f"{BASELINE} raw q95 quantile score",
+            "missing": (
+                "Missing q95 ensemble_quantile_size_summary.csv; run "
+                "ml_model/evaluate_ensemble_quantile_extremes_flow_finalv1_global.py."
+            ),
+        },
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(12.6, 6.2), sharex=True)
+    letters = iter("abcdef")
+    skill_values: list[float] = [0.0]
+
+    for vi, variable in enumerate(("pr", "t2m")):
+        for mi, spec in enumerate(specs):
+            ax = axes[vi, mi]
+            title = f"({next(letters)}) {VARIABLE_SHORT[variable]} {spec['label']}"
+            df = mean_df if spec["source"] == "mean" else tail_df
+            metric = str(spec["metric"])
+            needed = {"variable", "lead", "member_count", f"{metric}_mean"}
+            if df is None or df.empty or not needed <= set(df.columns):
+                missing_panel(ax, title, str(spec["missing"]))
+                continue
+
+            sub = df[df["variable"].astype(str).str.lower().eq(variable)]
+            if sub.empty:
+                missing_panel(ax, title, f"No rows for variable {variable}.")
+                continue
+
+            available_leads = sorted(set(sub["lead"].astype(int).unique()))
+            plot_leads = [lead for lead in FIG5_LEADS if lead in available_leads] or available_leads
+            raw_reference_vals: list[tuple[int, float]] = []
+            for lead in plot_leads:
+                grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
+                grp = grp[grp["member_count"].astype(int).isin(FIG5_MEMBER_COUNTS)]
+                if grp.empty:
+                    continue
+                x = grp["member_count"].to_numpy(dtype=float)
+                mean = grp[f"{metric}_mean"].to_numpy(dtype=float)
+                if 0 in FIG5_MEMBER_COUNTS and not np.any(np.isclose(x, 0.0)):
+                    x = np.concatenate([[0.0], x])
+                    mean = np.concatenate([[0.0], mean])
+                skill_values.extend(mean[np.isfinite(mean)].tolist())
+
+                color = LEAD_COLORS.get(int(lead), C_MODEL)
+                lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
+                if lo_col in grp.columns and hi_col in grp.columns:
+                    lo = grp[lo_col].to_numpy(dtype=float)
+                    hi = grp[hi_col].to_numpy(dtype=float)
+                    if 0 in FIG5_MEMBER_COUNTS and x.size == lo.size + 1:
+                        lo = np.concatenate([[0.0], lo])
+                        hi = np.concatenate([[0.0], hi])
+                    skill_values.extend(lo[np.isfinite(lo)].tolist())
+                    skill_values.extend(hi[np.isfinite(hi)].tolist())
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
+
+                ax.plot(
+                    x,
+                    mean,
+                    color=color,
+                    lw=1.7,
+                    ls=LEAD_LINESTYLES.get(int(lead), "-"),
+                    marker="o",
+                    ms=3.6,
+                    label=f"W{int(lead)}",
+                )
+                raw_col = str(spec["raw_col"])
+                if raw_col in grp.columns:
+                    raw_val = float(np.nanmean(pd.to_numeric(grp[raw_col], errors="coerce")))
+                    if np.isfinite(raw_val):
+                        raw_reference_vals.append((int(lead), raw_val))
+
+            ax.axhline(0.0, color="#7a8794", lw=0.9, ls="--")
+            style_axis(ax)
+            ax.grid(False)
+            panel_title(ax, title)
+            ax.set_xlim(min(FIG5_MEMBER_COUNTS), max(FIG5_MEMBER_COUNTS))
+            if vi == 1:
+                ax.set_xlabel("Generated members")
+                ax.set_xticks(FIG5_XTICKS)
+            if mi == 0:
+                ax.set_ylabel(VARIABLE_LABELS[variable])
+            if vi == 0 and mi == len(specs) - 1:
+                ax.legend(loc="lower right", fontsize=7.2)
+
+            if raw_reference_vals:
+                ax2 = ax.twinx()
+                x_max = float(max(FIG5_MEMBER_COUNTS))
+                x_min = float(min(FIG5_MEMBER_COUNTS))
+                x_segment_start = x_max - 0.07 * (x_max - x_min)
+                for lead, raw_val in raw_reference_vals:
+                    color = LEAD_COLORS.get(lead, C_MODEL)
+                    ax2.plot([x_segment_start, x_max], [raw_val, raw_val],
+                             color=color, ls="-", lw=1.35, zorder=5)
+                    ax2.plot(x_max, raw_val, marker="<", color=color, ms=4.2,
+                             clip_on=False, zorder=10)
+                raws = [v for _, v in raw_reference_vals]
+                raw_lo, raw_hi = min(raws), max(raws)
+                raw_pad = max(0.10 * (raw_hi - raw_lo), 0.08 * max(abs(raw_hi), 1e-6))
+                ax2.set_ylim(max(0.0, raw_lo - raw_pad), raw_hi + raw_pad)
+                ax2.set_ylabel(str(spec["raw_label"]), fontsize=7.2, color=TEXT_MUTED)
+                ax2.tick_params(labelsize=6.6, colors=TEXT_MUTED)
+                ax2.spines["right"].set_color("#aab5c0")
+                ax2.spines["top"].set_visible(False)
+
+    values = np.asarray(skill_values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size:
+        ymin = min(0.0, float(np.nanmin(values)))
+        ymax = max(0.0, float(np.nanmax(values)))
+        pad = max(1.0, 0.08 * (ymax - ymin)) if ymax > ymin else max(1.0, abs(ymax) * 0.1)
+        for ax in axes.ravel():
+            if ax.axison:
+                ax.set_ylim(ymin - pad, ymax + pad)
+
+    fig.subplots_adjust(left=0.065, right=0.94, bottom=0.10, top=0.93,
+                        hspace=0.26, wspace=0.42)
+    fig.text(0.94, 0.035, f"right-axis markers: {BASELINE} raw values",
+             ha="right", va="bottom", fontsize=8, color=TEXT_MUTED)
+    written = save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
+    written.extend(path for path in report_paths if path is not None)
+    return written
+
+
 def figure_5_selected(output_dir: Path, formats: list[str], dpi: int,
                       ensemble_dir: Path, ensemble_tail_dir: Path | None,
                       mode: str) -> list[Path]:
+    if mode == "combined":
+        return figure_5_combined_member_convergence(
+            output_dir, formats, dpi, ensemble_dir, ensemble_tail_dir)
     if mode == "mean":
         return figure_5_member_convergence(output_dir, formats, dpi, ensemble_dir)
     if ensemble_tail_dir is None:
