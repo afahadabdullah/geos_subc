@@ -115,26 +115,27 @@ NOISE_FALLBACK_CI_HALF_WIDTH = {
     "EOF-LHS + error variance": {"pr": 1.99, "t2m": 1.95},
 }
 
-# Figure 6 is intentionally table-backed so the plotted fair-comparison values
-# match Table 2 (all-case, all-grid 8-vs-8) and Table 5 (60-event 8-vs-8).
+# Figure 7 is intentionally table-backed so the plotted fair-comparison values
+# match Table 2 (all-case, all-grid four-vs-four) and Table 5 (extreme-event
+# four-vs-four).
 FIG6_TABLE2_ALLCASE_ALLGRID = {
     "crps": {
-        "pr": [31.772, 23.493, 21.671, 21.048],
-        "t2m": [36.485, 27.225, 26.587, 20.920],
+        "pr": [29.6, 20.6, 19.4, 18.4],
+        "t2m": [33.4, 25.7, 24.6, 18.5],
     },
     "rmse": {
-        "pr": [26.577, 19.882, 18.616, 17.187],
-        "t2m": [22.851, 16.901, 17.676, 17.875],
+        "pr": [25.7, 18.3, 17.6, 15.5],
+        "t2m": [19.2, 16.2, 17.1, 15.9],
     },
 }
 FIG6_TABLE5_EXTREME_EVENTS = {
     "crps": {
-        "pr": [27.351, 19.174, 15.219, 20.955],
-        "t2m": [35.562, 32.782, 26.716, 30.619],
+        "pr": [24.6, 16.7, 12.9, 18.8],
+        "t2m": [34.1, 30.6, 25.4, 28.6],
     },
     "rmse": {
-        "pr": [18.928, 12.526, 11.885, 16.326],
-        "t2m": [23.278, 22.212, 18.974, 24.467],
+        "pr": [17.2, 10.9, 10.4, 15.1],
+        "t2m": [22.9, 21.1, 18.5, 23.6],
     },
 }
 
@@ -265,11 +266,17 @@ def parse_args() -> argparse.Namespace:
                         help="Directory containing processed ECMWF event NetCDFs from diagnose_ecmwf_event_gribs.py.")
     parser.add_argument("--ensemble-dir", default=None,
                         help="Directory containing ensemble_size_summary.csv from the ensemble tests.")
+    parser.add_argument("--ensemble-tail-dir", default=None,
+                        help="Directory containing ensemble_quantile_size_summary.csv from the tail evaluator.")
+    parser.add_argument("--fig5-mode", choices=("mean", "q95", "q99"), default="mean",
+                        help="Use the original CRPS/ensemble-mean Fig. 5 or a q95/q99 tail version.")
     parser.add_argument("--noise-csv", default=None, help="Optional explicit noise comparison CSV.")
     parser.add_argument("--format", choices=("pdf", "png", "both"), default="both")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--ecmwf-only", action="store_true",
                         help="Write only fig7a/fig8a ECMWF companion figures, leaving existing figures untouched.")
+    parser.add_argument("--fig5-only", action="store_true",
+                        help="Write only the selected mean/q95/q99 Fig. 5 and its member-6 table.")
     parser.add_argument("--matrix-subset", default="all_data", choices=("all_data", "extreme_events"))
     parser.add_argument("--spatial-subset", default="all_data", choices=("all_data", "extreme_events"))
     return parser.parse_args()
@@ -1482,6 +1489,153 @@ def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
     return written
 
 
+def figure_5_tail_member_convergence(output_dir: Path, formats: list[str], dpi: int,
+                                     ensemble_tail_dir: Path, quantile: float) -> list[Path]:
+    """Tail-focused Fig. 5 using proper quantile score and quantile RMSE."""
+    df = read_csv_or_none(ensemble_tail_dir / "ensemble_quantile_size_summary.csv")
+    qlabel = f"q{int(round(100.0 * quantile)):02d}"
+    specs = [
+        ("quantile_skill_pct", "quantile-score skill (%)"),
+        ("quantile_rmse_skill_pct", "quantile RMSE skill (%)"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(8.8, 6.4), sharex=True)
+    letters = iter("abcd")
+    values_by_metric: list[list[float]] = [[], []]
+
+    if df is not None and not df.empty and "quantile" in df.columns:
+        df = df[np.isclose(pd.to_numeric(df["quantile"], errors="coerce"), quantile)].copy()
+
+    for vi, variable in enumerate(("pr", "t2m")):
+        for mi, (metric, label) in enumerate(specs):
+            ax = axes[vi, mi]
+            title = f"({next(letters)}) {VARIABLE_SHORT[variable]} {qlabel} {label}"
+            needed = {"variable", "lead", "member_count", f"{metric}_mean"}
+            if df is None or df.empty or not needed <= set(df.columns):
+                missing_panel(
+                    ax,
+                    title,
+                    f"Missing {qlabel} ensemble_quantile_size_summary.csv; run the tail-quantile evaluator.",
+                )
+                continue
+            sub = df[df["variable"].astype(str).str.lower().eq(variable)]
+            if sub.empty:
+                missing_panel(ax, title, f"No {qlabel} rows for {variable}.")
+                continue
+
+            raw_reference_vals: list[tuple[int, float]] = []
+            for lead in sorted(set(sub["lead"].astype(int))):
+                grp = sub[sub["lead"].astype(int).eq(lead)].sort_values("member_count")
+                x = grp["member_count"].to_numpy(dtype=float)
+                mean = grp[f"{metric}_mean"].to_numpy(dtype=float)
+                color = LEAD_COLORS.get(int(lead), C_MODEL)
+                values_by_metric[mi].extend(mean[np.isfinite(mean)].tolist())
+                lo_col, hi_col = f"{metric}_p05", f"{metric}_p95"
+                if lo_col in grp.columns and hi_col in grp.columns:
+                    lo = grp[lo_col].to_numpy(dtype=float)
+                    hi = grp[hi_col].to_numpy(dtype=float)
+                    values_by_metric[mi].extend(lo[np.isfinite(lo)].tolist())
+                    values_by_metric[mi].extend(hi[np.isfinite(hi)].tolist())
+                    ax.fill_between(x, lo, hi, color=color, alpha=0.16, lw=0)
+                ax.plot(
+                    x,
+                    mean,
+                    color=color,
+                    lw=1.7,
+                    ls=LEAD_LINESTYLES.get(int(lead), "-"),
+                    marker="o",
+                    ms=3.6,
+                    label=f"W{int(lead)}",
+                )
+                raw_col = "geos_quantile_score_mean" if mi == 0 else "geos_quantile_rmse_mean"
+                if raw_col in grp.columns:
+                    raw_val = float(np.nanmean(pd.to_numeric(grp[raw_col], errors="coerce")))
+                    if np.isfinite(raw_val):
+                        raw_reference_vals.append((int(lead), raw_val))
+
+            ax.axhline(0.0, color="#7a8794", lw=0.9, ls="--")
+            style_axis(ax)
+            ax.grid(False)
+            panel_title(ax, title)
+            ax.set_xlim(0.0, 90.0)
+            if vi == 1:
+                ax.set_xlabel("Generated members")
+                ax.set_xticks(FIG5_XTICKS)
+            if mi == 0:
+                ax.set_ylabel(VARIABLE_LABELS[variable])
+            if vi == 0 and mi == 1:
+                ax.legend(loc="best", fontsize=7.5)
+
+            if raw_reference_vals:
+                ax2 = ax.twinx()
+                for lead, raw_val in raw_reference_vals:
+                    color = LEAD_COLORS.get(int(lead), C_MODEL)
+                    ax2.plot([84.0, 90.0], [raw_val, raw_val], color=color, lw=1.4)
+                    ax2.plot(90.0, raw_val, marker="<", color=color, ms=4.5,
+                             clip_on=False, zorder=10)
+                raw_values = [value for _, value in raw_reference_vals]
+                raw_lo, raw_hi = min(raw_values), max(raw_values)
+                raw_pad = max(0.10 * (raw_hi - raw_lo), 0.08 * max(abs(raw_hi), 1e-6))
+                ax2.set_ylim(max(0.0, raw_lo - raw_pad), raw_hi + raw_pad)
+                raw_metric = "quantile score" if mi == 0 else "quantile RMSE"
+                ax2.set_ylabel(f"{BASELINE} raw {qlabel} {raw_metric}", fontsize=8,
+                               color=TEXT_MUTED)
+                ax2.tick_params(labelsize=7, colors=TEXT_MUTED)
+                ax2.spines["right"].set_color("#aab5c0")
+                ax2.spines["top"].set_visible(False)
+
+    for mi in range(2):
+        values = np.asarray(values_by_metric[mi], dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size:
+            lo = min(0.0, float(np.nanmin(values)))
+            hi = max(0.0, float(np.nanmax(values)))
+            pad = max(1.0, 0.08 * (hi - lo))
+            for vi in range(2):
+                if axes[vi, mi].has_data():
+                    axes[vi, mi].set_ylim(lo - pad, hi + pad)
+
+    report_path = None
+    if df is not None and not df.empty and "member_count" in df.columns:
+        report = df[df["member_count"].astype(int).eq(6)].copy()
+        if not report.empty:
+            keep = [
+                "variable", "lead", "quantile", "member_count", "n_cases",
+                "quantile_skill_pct_mean", "quantile_skill_pct_p05", "quantile_skill_pct_p95",
+                "quantile_rmse_skill_pct_mean", "quantile_rmse_skill_pct_p05",
+                "quantile_rmse_skill_pct_p95", "model_quantile_score_mean",
+                "geos_quantile_score_mean", "model_quantile_rmse_mean", "geos_quantile_rmse_mean",
+            ]
+            report = report[[column for column in keep if column in report.columns]].sort_values(
+                ["variable", "lead"]
+            )
+            report_path = output_dir / f"table5_{qlabel}_member6_results.csv"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report.to_csv(report_path, index=False)
+            print(f"\nFig. 5 {qlabel} ensemble size 6 results:")
+            print(report.round(3).to_string(index=False))
+            print(f"Wrote {report_path}")
+
+    fig.subplots_adjust(left=0.08, right=0.91, bottom=0.10, top=0.90,
+                        hspace=0.28, wspace=0.40)
+    fig.suptitle(f"Extreme-event {qlabel} forecast convergence", fontsize=11.5)
+    written = save_figure(fig, output_dir, "fig5_member_convergence", formats, dpi)
+    if report_path is not None:
+        written.append(report_path)
+    return written
+
+
+def figure_5_selected(output_dir: Path, formats: list[str], dpi: int,
+                      ensemble_dir: Path, ensemble_tail_dir: Path | None,
+                      mode: str) -> list[Path]:
+    if mode == "mean":
+        return figure_5_member_convergence(output_dir, formats, dpi, ensemble_dir)
+    if ensemble_tail_dir is None:
+        raise ValueError("--ensemble-tail-dir is required when --fig5-mode is q95 or q99.")
+    quantile = 0.95 if mode == "q95" else 0.99
+    return figure_5_tail_member_convergence(
+        output_dir, formats, dpi, ensemble_tail_dir, quantile)
+
+
 # ===========================================================================
 # Figure 6 — Extreme-event subset skill (with all-case reference)
 # ===========================================================================
@@ -2049,6 +2203,7 @@ def main() -> None:
     event_dir = first_existing_dir(args.event_dir, DEFAULT_EVENT_DIR_CANDIDATES)
     ecmwf_dir = first_existing_dir(args.ecmwf_dir, DEFAULT_ECMWF_DIR_CANDIDATES)
     ensemble_dir = first_existing_dir(args.ensemble_dir, DEFAULT_ENSEMBLE_DIR_CANDIDATES)
+    ensemble_tail_dir = Path(args.ensemble_tail_dir) if args.ensemble_tail_dir else None
     noise_csv = Path(args.noise_csv) if args.noise_csv else newest_matching(NOISE_CSV_PATTERNS)
 
     print("Figure input locations")
@@ -2056,12 +2211,21 @@ def main() -> None:
     print(f"  event_dir    : {event_dir}")
     print(f"  ecmwf_dir    : {ecmwf_dir}")
     print(f"  ensemble_dir : {ensemble_dir}")
+    print(f"  fig5_mode    : {args.fig5_mode}")
+    print(f"  tail_dir     : {ensemble_tail_dir}")
     print(f"  noise_csv    : {noise_csv}")
     print(f"  output_dir   : {output_dir}")
 
     summary = read_csv_or_none(matrix_dir / "matrix_summary_metrics.csv")
 
     written: list[Path] = []
+    if args.fig5_only:
+        written.extend(figure_5_selected(
+            output_dir, formats, args.dpi, ensemble_dir, ensemble_tail_dir, args.fig5_mode))
+        print(f"\nWrote {len(written)} Fig. 5 files:")
+        for path in written:
+            print(f"  - {path}")
+        return
     if args.ecmwf_only:
         written.extend(figure_event_case_ecmwf_comparison(
             output_dir, formats, args.dpi, event_dir, ecmwf_dir,
@@ -2084,7 +2248,8 @@ def main() -> None:
         variable="t2m", stem="fig3_t2m_skill",
         subset=args.matrix_subset, spatial_subset=args.spatial_subset))
     written.extend(figure_4_noise_ablation(output_dir, formats, args.dpi, noise_csv))
-    written.extend(figure_5_member_convergence(output_dir, formats, args.dpi, ensemble_dir))
+    written.extend(figure_5_selected(
+        output_dir, formats, args.dpi, ensemble_dir, ensemble_tail_dir, args.fig5_mode))
     written.extend(figure_6_extreme_skill(output_dir, formats, args.dpi, summary))
     written.extend(figure_event_case(output_dir, formats, args.dpi, event_dir,
                                      EVENT_PR_ID, "fig8_event_pr_california", is_t2m=False))
