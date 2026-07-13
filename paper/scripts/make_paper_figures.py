@@ -1279,7 +1279,7 @@ def figure_4_noise_ablation(output_dir: Path, formats: list[str], dpi: int,
 LEAD_COLORS = {1: "#7fb3d5", 2: "#4a7fb5", 3: "#2e5f96", 4: "#3b2f7d"}
 LEAD_LINESTYLES = {1: ":", 2: "-.", 3: "--", 4: "-"}
 FIG5_LEADS = (1, 2, 3, 4)
-FIG5_MEMBER_COUNTS = (0, 4, 8, 16, 32, 64, 90)
+FIG5_MEMBER_COUNTS = (0, 6, 10, 20, 30, 60, 90)
 
 
 def figure_5_member_convergence(output_dir: Path, formats: list[str], dpi: int,
