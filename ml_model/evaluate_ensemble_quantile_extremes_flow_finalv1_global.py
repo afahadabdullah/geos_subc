@@ -468,6 +468,11 @@ def evaluate(args: argparse.Namespace) -> None:
     years = ens.validate_forecast_stores(args.forecast_dir, years, args.allow_missing_years)
     rng = np.random.default_rng(args.seed)
 
+    print(
+        "Selecting observed extreme-event cases; this scans observed fields before "
+        "forecast verification starts.",
+        flush=True,
+    )
     selected_events = ens.select_extreme_event_cases(
         args,
         years,
@@ -478,6 +483,7 @@ def evaluate(args: argparse.Namespace) -> None:
         event_regions,
         event_variables,
     )
+    print(f"Selected {len(selected_events)} total extreme-event cases.", flush=True)
     events_by_year: dict[int, list[dict[str, object]]] = {}
     for event in selected_events:
         events_by_year.setdefault(int(event["year"]), []).append(event)
@@ -520,7 +526,7 @@ def evaluate(args: argparse.Namespace) -> None:
         if not year_events:
             continue
         path = ens.store_path(args.forecast_dir, year)
-        print(f"Opening {path}")
+        print(f"Opening {path} for {len(year_events)} selected events", flush=True)
         ds = xr.open_zarr(path, consolidated=False, chunks=None)
         try:
             lats, lons = ens.get_lat_lon(ds, ens.VARIABLES[variables[0]]["model"])
@@ -547,9 +553,17 @@ def evaluate(args: argparse.Namespace) -> None:
                 if int(np.sum(case_mask)) <= 0:
                     raise ValueError(f"Event region {region!r} kept zero grid cells.")
 
-                obs = ens.load_obs_array(ds, spec["obs"], init_idx, lead_idx)
-                model = ens.load_forecast_array(ds, spec["model"], init_idx, lead_idx)
-                geos = ens.load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
+                # Restrict the quantile calculation to the verification cells.
+                # This is equivalent to full-grid quantiles followed by masking,
+                # but avoids doing q95/q99 work for unrelated grid cells.
+                obs_full = ens.load_obs_array(ds, spec["obs"], init_idx, lead_idx)
+                model_full = ens.load_forecast_array(ds, spec["model"], init_idx, lead_idx)
+                geos_full = ens.load_forecast_array(ds, spec["geos"], init_idx, lead_idx)
+                obs = np.asarray(obs_full[case_mask], dtype=np.float32)
+                model = np.asarray(model_full[:, case_mask], dtype=np.float32)
+                geos = np.asarray(geos_full[:, case_mask], dtype=np.float32)
+                case_weights = np.asarray(weights[case_mask], dtype=np.float64)
+                case_mask_vector = np.ones(obs.shape, dtype=bool)
                 model_members = int(model.shape[0])
                 usable_sizes = [size for size in sample_sizes if int(size) <= model_members]
                 if not usable_sizes:
@@ -564,7 +578,7 @@ def evaluate(args: argparse.Namespace) -> None:
                             member_idx = np.arange(model_members)
                         else:
                             member_idx = rng.choice(model_members, size=int(size), replace=False)
-                        model_sample = model[member_idx, :, :]
+                        model_sample = model[member_idx, ...]
                         model_quantile_fields = forecast_quantiles(model_sample, quantiles)
                         for quantile_index, quantile in enumerate(quantiles):
                             sums = paired_quantile_sums(
@@ -572,8 +586,8 @@ def evaluate(args: argparse.Namespace) -> None:
                                 geos_quantile_fields[quantile_index],
                                 obs,
                                 quantile,
-                                weights,
-                                case_mask,
+                                case_weights,
+                                case_mask_vector,
                             )
                             row = {
                                 "case_id": case_id,
@@ -600,9 +614,9 @@ def evaluate(args: argparse.Namespace) -> None:
                             row.update(row_metrics(row))
                             case_rows.append(row)
                 processed_cases += 1
-                if processed_cases % 20 == 0:
+                if processed_cases == 1 or processed_cases % 20 == 0:
                     elapsed = (time.time() - start_time) / 60.0
-                    print(f"Processed {processed_cases} extreme cases in {elapsed:.1f} min")
+                    print(f"Processed {processed_cases} extreme cases in {elapsed:.1f} min", flush=True)
         finally:
             ds.close()
 
