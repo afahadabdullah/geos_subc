@@ -14,6 +14,8 @@ Default components (cheap, one pass over the Zarrs after a light obs pass):
   acc     : anomaly correlation of ensemble means vs LOYO climatology (M5)
   boot    : moving-block bootstrap CIs over start dates (M3)
   rank    : rank-histogram counts + spread/RMSE by lead (M7)
+  qm      : frozen empirical quantile-mapped FIMr1p1 baseline; requires
+            --qm_dir from qm_fim_baseline.py
 
 Opt-in extras (slower): fair (Ferro fair CRPS), emos (T2M EMOS-lite baseline).
 
@@ -23,7 +25,7 @@ Usage:
       --years 2021,2022,2023
 
 Useful flags:
-  --components matched,clim,debias,acc,boot,rank,fair,emos
+  --components matched,clim,debias,acc,boot,rank,qm,fair,emos
   --model_members 16     # ML subset size; FIMr1p1 lagged ensemble remains native
   --eval_mask land --land_mask_file ml_model/land_ocean_mask_v6.pt
   --max_inits 6          # smoke test
@@ -53,12 +55,17 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--forecast_dir",
                    default="dataprocess/gen_flow_finalv1_global_fullyear_2021_2024_e90_s50")
+    p.add_argument(
+        "--qm_dir",
+        default=None,
+        help="Directory containing <year>.zarr stores with qm_pr/qm_t2m.",
+    )
     p.add_argument("--years", default="2021,2022,2023")
     p.add_argument("--out_dir",
                    default="ml_output_flow_finalv1_global_noisectx_t2mres/r1_fair_verification")
     p.add_argument("--variables", default="pr,t2m")
     p.add_argument("--components", default="matched,clim,debias,acc,boot,rank",
-                   help="Comma list from: matched,clim,debias,acc,boot,rank,fair,emos")
+                   help="Comma list from: matched,clim,debias,acc,boot,rank,qm,fair,emos")
     p.add_argument("--model_members", "--match_members", dest="model_members",
                    type=int, default=16,
                    help="Number of generated ML members to sample; FIMr1p1 uses its native lagged ensemble.")
@@ -178,6 +185,10 @@ def main() -> None:
     years = [int(y) for y in args.years.split(",") if y.strip()]
     variables = [v.strip() for v in args.variables.split(",") if v.strip()]
     comps = {c.strip() for c in args.components.split(",") if c.strip()}
+    if args.qm_dir:
+        comps.add("qm")
+    if "qm" in comps and not args.qm_dir:
+        raise ValueError("The qm component requires --qm_dir.")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if "matched" in comps:
@@ -287,6 +298,23 @@ def main() -> None:
     for year in years:
         ds = xr.open_zarr(Path(args.forecast_dir) / f"{year}.zarr",
                           consolidated=False, chunks=None)
+        qm_ds = None
+        if "qm" in comps:
+            qm_path = Path(args.qm_dir) / f"{year}.zarr"
+            if not qm_path.exists():
+                ds.close()
+                raise FileNotFoundError(f"QM forecast archive not found: {qm_path}")
+            qm_ds = xr.open_zarr(qm_path, consolidated=False, chunks=None)
+            source_inits = pd.to_datetime(ds["init"].values).normalize()
+            qm_inits = pd.to_datetime(qm_ds["init"].values).normalize()
+            if not np.array_equal(source_inits.values, qm_inits.values):
+                ds.close()
+                qm_ds.close()
+                raise ValueError(f"QM/source initialization dates differ for {year}.")
+            if not np.array_equal(ds["lead"].values, qm_ds["lead"].values):
+                ds.close()
+                qm_ds.close()
+                raise ValueError(f"QM/source lead coordinates differ for {year}.")
         try:
             if lats is None:
                 lats = np.asarray(ds["lat"].values, dtype=float)
@@ -304,6 +332,9 @@ def main() -> None:
                         obs = ds[spec["obs"]].isel(init=ii, lead=li).values.astype(np.float64)
                         model = ds[spec["model"]].isel(init=ii, lead=li).values
                         geos = ds[spec["geos"]].isel(init=ii, lead=li).values
+                        qm = None
+                        if qm_ds is not None:
+                            qm = qm_ds[f"qm_{var}"].isel(init=ii, lead=li).values
 
                         row = {"variable": var, "year": year, "lead": lead,
                                "init_time": inits[ii], "season": season,
@@ -315,6 +346,42 @@ def main() -> None:
                         c_geos, _ = crps_standard(geos, obs)
                         fields["crps_model"] = c_model
                         fields["crps_geos"] = c_geos
+
+                        if qm is not None:
+                            fields["crps_qm"], _ = crps_standard(qm, obs)
+                            qm_mean = np.nanmean(qm.astype(np.float64), axis=0)
+                            fields["mse_qm"] = (qm_mean - obs) ** 2
+                            fields["spread_qm"] = np.nanstd(
+                                qm.astype(np.float64), axis=0
+                            )
+                            row["n_members_qm"] = int(qm.shape[0])
+
+                            # This comparison is always ensemble-size matched,
+                            # independent of the lagged-reference configuration.
+                            qm_k = min(qm.shape[0], model.shape[0])
+                            row["n_members_model_qm_subsample"] = int(qm_k)
+                            qm_acc_crps = np.zeros_like(c_model)
+                            qm_acc_mse = np.zeros_like(c_model)
+                            for _ in range(args.subsample_repeats):
+                                idx = rng.choice(
+                                    model.shape[0], size=qm_k, replace=False
+                                )
+                                subset_crps, _ = crps_standard(model[idx], obs)
+                                qm_acc_crps = np.nansum(
+                                    [qm_acc_crps, subset_crps], axis=0
+                                )
+                                subset_mean = np.nanmean(
+                                    model[idx].astype(np.float64), axis=0
+                                )
+                                qm_acc_mse = np.nansum(
+                                    [qm_acc_mse, (subset_mean - obs) ** 2], axis=0
+                                )
+                            fields["crps_model_qm_m"] = (
+                                qm_acc_crps / args.subsample_repeats
+                            )
+                            fields["mse_model_qm_m"] = (
+                                qm_acc_mse / args.subsample_repeats
+                            )
 
                         # matched-ensemble protocol (M2)
                         if "matched" in comps:
@@ -395,6 +462,23 @@ def main() -> None:
                                 np.sqrt(np.sum(ww * a_m[ok] ** 2)) * den_o, 1e-9))
                             row["acc_geos"] = float(np.sum(ww * a_g[ok] * a_o[ok]) / max(
                                 np.sqrt(np.sum(ww * a_g[ok] ** 2)) * den_o, 1e-9))
+                            if qm is not None:
+                                a_q = qm_mean - clim_mean
+                                ok_q = (
+                                    np.isfinite(a_o)
+                                    & np.isfinite(a_q)
+                                    & (w2d > 0)
+                                )
+                                ww_q = w2d[ok_q]
+                                den_o_q = np.sqrt(np.sum(ww_q * a_o[ok_q] ** 2))
+                                row["acc_qm"] = float(
+                                    np.sum(ww_q * a_q[ok_q] * a_o[ok_q])
+                                    / max(
+                                        np.sqrt(np.sum(ww_q * a_q[ok_q] ** 2))
+                                        * den_o_q,
+                                        1e-9,
+                                    )
+                                )
 
                         for name, field in fields.items():
                             s, wt = wsum(field, w2d)
@@ -405,7 +489,8 @@ def main() -> None:
                         if thr is not None:
                             w_ext = np.where((obs >= thr) & np.isfinite(obs), w2d, 0.0)
                             for name in ("crps_model", "crps_geos", "crps_geos_lag",
-                                         "crps_model_m", "crps_clim"):
+                                         "crps_model_m", "crps_clim", "crps_qm",
+                                         "crps_model_qm_m"):
                                 if name in fields:
                                     s, wt = wsum(fields[name], w_ext)
                                     row[f"ext_{name}_wsum"] = s
@@ -430,6 +515,8 @@ def main() -> None:
                 print(f"  {year} init {ii + 1}/{n_init} done", flush=True)
         finally:
             ds.close()
+            if qm_ds is not None:
+                qm_ds.close()
 
     per_init = pd.DataFrame(rows)
     per_init.to_csv(out_dir / "r1_per_init_metrics.csv", index=False)
@@ -446,7 +533,14 @@ def main() -> None:
             return float("nan")
         return 100.0 * (1.0 - a / b)
 
+    def agg_rmse_ratio(df, num, den):
+        a, b = agg_mean(df, num), agg_mean(df, den)
+        if not (np.isfinite(a) and np.isfinite(b)) or b <= 1e-12:
+            return float("nan")
+        return 100.0 * (1.0 - math.sqrt(max(a, 0.0)) / math.sqrt(b))
+
     MEANS = ["crps_model", "crps_geos", "crps_model_m", "crps_geos_lag",
+             "crps_qm", "crps_model_qm_m",
              "crps_clim", "crps_geos_debias", "crps_emos",
              "faircrps_model", "faircrps_geos"]
     SKILLS = [
@@ -460,11 +554,18 @@ def main() -> None:
         ("crpss_clim_emos", "crps_emos", "crps_clim"),
         ("skill_vs_debias", "crps_model_m", "crps_geos_debias"),
         ("skill_vs_emos", "crps_model_m", "crps_emos"),
+        ("skill_qm_vs_raw", "crps_qm", "crps_geos"),
+        ("rmse_skill_qm_vs_raw", "mse_qm", "mse_geos"),
+        ("skill_model_vs_qm", "crps_model_qm_m", "crps_qm"),
+        ("rmse_skill_model_vs_qm", "mse_model_qm_m", "mse_qm"),
+        ("crpss_clim_qm", "crps_qm", "crps_clim"),
         ("ext_skill_matched", "ext_crps_model_m", "ext_crps_geos_lag"),
         ("ext_crpss_clim_model", "ext_crps_model_m", "ext_crps_clim"),
+        ("ext_skill_qm_vs_raw", "ext_crps_qm", "ext_crps_geos"),
+        ("ext_skill_model_vs_qm", "ext_crps_model_qm_m", "ext_crps_qm"),
     ]
 
-    def block_bootstrap_ci(df, num, den):
+    def block_bootstrap_ci(df, num, den, *, rmse=False):
         inits_sorted = sorted(df["init_time"].unique())
         n = len(inits_sorted)
         if n < 8:
@@ -478,7 +579,8 @@ def main() -> None:
                 s = rng.integers(0, n)
                 picked.extend(inits_sorted[s: s + L])
             sample = pd.concat([groups[t] for t in picked[:n]], ignore_index=True)
-            stats.append(agg_ratio(sample, num, den))
+            ratio_fn = agg_rmse_ratio if rmse else agg_ratio
+            stats.append(ratio_fn(sample, num, den))
         stats = np.asarray(stats)
         stats = stats[np.isfinite(stats)]
         if stats.size < 50:
@@ -501,16 +603,46 @@ def main() -> None:
                 for name in MEANS:
                     row[name] = agg_mean(ldf, name)
                 for sname, num, den in SKILLS:
-                    row[sname] = agg_ratio(ldf, num, den)
+                    ratio_fn = agg_rmse_ratio if sname.startswith("rmse_") else agg_ratio
+                    row[sname] = ratio_fn(ldf, num, den)
                 rmse_m = math.sqrt(max(agg_mean(ldf, "mse_model"), 0.0))
                 row["rmse_model_full"] = rmse_m
                 row["spread_rmse_model"] = agg_mean(ldf, "spread_model") / max(rmse_m, 1e-9)
+                if "mse_qm_wsum" in ldf:
+                    rmse_qm = math.sqrt(max(agg_mean(ldf, "mse_qm"), 0.0))
+                    row["rmse_qm"] = rmse_qm
+                    row["spread_rmse_qm"] = (
+                        agg_mean(ldf, "spread_qm") / max(rmse_qm, 1e-9)
+                    )
                 if "acc_model" in ldf:
                     row["acc_model"] = float(ldf["acc_model"].mean())
                     row["acc_geos"] = float(ldf["acc_geos"].mean())
+                    if "acc_qm" in ldf:
+                        row["acc_qm"] = float(ldf["acc_qm"].mean())
                 if "boot" in comps and year_label == "pooled" and lead_label == "all":
-                    for sname, num, den in SKILLS[:2] + SKILLS[4:6] + [SKILLS[10]]:
-                        lo, hi = block_bootstrap_ci(ldf, num, den)
+                    bootstrap_names = {
+                        "skill_matched",
+                        "rmse_skill_matched",
+                        "crpss_clim_model_m",
+                        "crpss_clim_geos_lag",
+                        "skill_qm_vs_raw",
+                        "rmse_skill_qm_vs_raw",
+                        "skill_model_vs_qm",
+                        "rmse_skill_model_vs_qm",
+                        "crpss_clim_qm",
+                        "ext_skill_matched",
+                        "ext_skill_qm_vs_raw",
+                        "ext_skill_model_vs_qm",
+                    }
+                    for sname, num, den in SKILLS:
+                        if sname not in bootstrap_names:
+                            continue
+                        lo, hi = block_bootstrap_ci(
+                            ldf,
+                            num,
+                            den,
+                            rmse=sname.startswith("rmse_"),
+                        )
                         row[f"{sname}_ci_lo"] = lo
                         row[f"{sname}_ci_hi"] = hi
                 agg_rows.append(row)
@@ -535,8 +667,12 @@ def main() -> None:
             "skill_full90_vs_raw4", "skill_fair",
             "crpss_clim_model_m", "crpss_clim_geos_lag", "crpss_clim_geos_debias",
             "crpss_clim_emos", "skill_vs_debias", "skill_vs_emos",
-            "ext_skill_matched", "ext_crpss_clim_model",
-            "acc_model", "acc_geos", "spread_rmse_model"]
+            "skill_qm_vs_raw", "rmse_skill_qm_vs_raw",
+            "skill_model_vs_qm", "rmse_skill_model_vs_qm",
+            "crpss_clim_qm", "ext_skill_matched", "ext_crpss_clim_model",
+            "ext_skill_qm_vs_raw", "ext_skill_model_vs_qm",
+            "acc_model", "acc_geos", "acc_qm",
+            "spread_rmse_model", "spread_rmse_qm"]
     avail = [c for c in show if c in agg.columns]
     print(agg[agg["lead"].eq("all")][avail].round(3).to_string(index=False))
     per_lead = agg[(agg["year"].eq("pooled")) & (~agg["lead"].eq("all"))]
