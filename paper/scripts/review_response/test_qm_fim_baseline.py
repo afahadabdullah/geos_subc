@@ -20,6 +20,7 @@ import xarray as xr
 import zarr
 
 from paper.scripts.review_response.qm_fim_baseline import (
+    RawYear,
     apply_all,
     apply_quantile_map,
     fit_all,
@@ -113,6 +114,79 @@ class QuantileMappingTests(unittest.TestCase):
         np.testing.assert_array_equal(
             standardized_forecast["lead"].values, np.arange(1, 5)
         )
+
+    def test_noncanonical_lazy_observation_is_tiled_before_transpose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "t2m_weekly_2000.zarr"
+            init = pd.date_range("2000-01-01", periods=5, freq="7D")
+            values = np.arange(5 * 2 * 3 * 4, dtype=np.float32).reshape(
+                5, 2, 3, 4
+            )
+            xr.Dataset(
+                {
+                    "t2m": (
+                        ("S", "Y", "X", "L"),
+                        values,
+                    )
+                },
+                coords={"S": init.values},
+            ).to_zarr(path, mode="w")
+
+            ds = xr.open_zarr(path, consolidated=False, chunks=None)
+            try:
+                standardized = standardize_observation(ds["t2m"])
+                self.assertEqual(
+                    standardized.dims,
+                    ("init", "lat", "lon", "lead"),
+                )
+                self.assertNotIn(
+                    "Vectorized",
+                    type(standardized.variable._data).__name__,
+                )
+                selected = (
+                    standardized.isel(
+                        init=np.asarray([1, 3]),
+                        lead=2,
+                        lat=slice(0, 1),
+                        lon=slice(1, 3),
+                    )
+                    .transpose("init", "lat", "lon")
+                    .values
+                )
+                expected = np.stack(
+                    [values[index, 0:1, 1:3, 2] for index in (1, 3)]
+                )
+                np.testing.assert_array_equal(selected, expected)
+            finally:
+                ds.close()
+
+            forecast = np.arange(
+                5 * 2 * 4 * 2 * 3, dtype=np.float32
+            ).reshape(5, 2, 4, 2, 3)
+            xr.Dataset(
+                {
+                    "tas": (
+                        ("S", "M", "L", "Y", "X"),
+                        forecast,
+                    )
+                },
+                coords={"S": init.values},
+            ).to_zarr(root / "geos_subc_2000.zarr", mode="w")
+            archive = RawYear(root, 2000, ("t2m",))
+            try:
+                forecast_tile, observation_tile = archive.training_samples(
+                    "t2m",
+                    lead_index=0,
+                    verifying_month=1,
+                    max_inits=2,
+                    lat_slice=slice(0, 1),
+                    lon_slice=slice(1, 3),
+                )
+                self.assertEqual(forecast_tile.shape, (4, 1, 2))
+                self.assertEqual(observation_tile.shape, (2, 1, 2))
+            finally:
+                archive.close()
 
 
 @unittest.skipUnless(

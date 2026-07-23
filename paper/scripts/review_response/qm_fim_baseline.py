@@ -254,11 +254,19 @@ def standardize_forecast(da: xr.DataArray) -> xr.DataArray:
     if member is not None:
         rename[member] = "member"
     da = da.rename(rename)
+    da = da.isel(lead=slice(0, 4))
+    if da.sizes["lead"] != 4:
+        raise ValueError(
+            f"Expected at least four forecast leads, found {da.sizes['lead']}."
+        )
     if member is None:
         da = da.expand_dims(member=[1], axis=1)
-    da = da.transpose("init", "member", "lead", "lat", "lon")
-    da = da.isel(lead=slice(0, 4)).assign_coords(lead=np.arange(1, 5, dtype=np.int32))
+    da = da.assign_coords(lead=np.arange(1, 5, dtype=np.int32))
     da = da.assign_coords(init=pd.to_datetime(da["init"].values).values)
+    # Keep the archive's native dimension order while it is lazy. Transposing a
+    # noncanonical Zarr array with chunks=None creates a vectorized xarray
+    # indexer that can allocate a full-grid int64 index array on the next isel.
+    # RawYear transposes only after selecting a small spatial tile.
     return da
 
 
@@ -268,9 +276,14 @@ def standardize_observation(da: xr.DataArray) -> xr.DataArray:
     lat = _dimension_name(da, "lat", excluded={init, lead})
     lon = _dimension_name(da, "lon", excluded={init, lead, lat})
     da = da.rename({init: "init", lead: "lead", lat: "lat", lon: "lon"})
-    da = da.transpose("init", "lead", "lat", "lon")
-    da = da.isel(lead=slice(0, 4)).assign_coords(lead=np.arange(1, 5, dtype=np.int32))
+    da = da.isel(lead=slice(0, 4))
+    if da.sizes["lead"] != 4:
+        raise ValueError(
+            f"Expected at least four observation leads, found {da.sizes['lead']}."
+        )
+    da = da.assign_coords(lead=np.arange(1, 5, dtype=np.int32))
     da = da.assign_coords(init=pd.to_datetime(da["init"].values).values)
+    # Preserve native lazy storage order; see standardize_forecast.
     return da
 
 
@@ -392,13 +405,13 @@ class RawYear:
             init=indices,
             lead=lead_index,
             **spatial_indexers,
-        ).values
+        ).transpose("init", "member", "lat", "lon").values
         obs_indices = self.obs_index[variable][indices]
         observation = self.observation[variable].isel(
             init=obs_indices,
             lead=lead_index,
             **spatial_indexers,
-        ).values
+        ).transpose("init", "lat", "lon").values
         forecast = np.asarray(forecast, dtype=np.float32)
         observation = np.asarray(observation, dtype=np.float32)
         forecast = forecast.reshape(
@@ -414,13 +427,19 @@ class RawYear:
         init_index: int,
         lead_index: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        forecast = self.forecast[variable].isel(
-            init=init_index, lead=lead_index
-        ).values
+        forecast = (
+            self.forecast[variable]
+            .isel(init=init_index, lead=lead_index)
+            .transpose("member", "lat", "lon")
+            .values
+        )
         obs_index = int(self.obs_index[variable][init_index])
-        observation = self.observation[variable].isel(
-            init=obs_index, lead=lead_index
-        ).values
+        observation = (
+            self.observation[variable]
+            .isel(init=obs_index, lead=lead_index)
+            .transpose("lat", "lon")
+            .values
+        )
         return (
             np.asarray(forecast, dtype=np.float32),
             np.asarray(observation, dtype=np.float32),
