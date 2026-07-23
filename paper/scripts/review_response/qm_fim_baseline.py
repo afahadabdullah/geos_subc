@@ -707,18 +707,6 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def _parameter_names(variable: str) -> tuple[str, ...]:
-    names = ("forecast_quantile", "observation_quantile")
-    if variable == "pr":
-        names += (
-            "forecast_dry_threshold",
-            "observed_dry_probability",
-            "forecast_wet_count",
-            "observation_wet_count",
-        )
-    return names
-
-
 def _clear_parameter_state(path: Path) -> None:
     """Remove only the generated state for one variable/lead/month."""
     if path.exists():
@@ -759,7 +747,7 @@ def _store_layout_matches(
             name in group and tuple(group[name].shape) == shape
             for name, shape in expected_shapes.items()
         )
-    except (KeyError, OSError, ValueError, zarr.errors.MetadataError):
+    except Exception:
         return False
 
 
@@ -782,12 +770,55 @@ def _legacy_store_is_complete(
         return False
     try:
         group = zarr.open_group(str(path), mode="r")
-        return all(
-            group[name].nchunks_initialized == group[name].nchunks
-            for name in _parameter_names(variable)
-        )
-    except (KeyError, OSError, ValueError, zarr.errors.MetadataError):
+        # The original fitter did not create a store until every spatial tile
+        # had been calculated. Zarr may legitimately omit all-fill chunks, so
+        # nchunks_initialized is not a portable completeness test. A store with
+        # the new checkpoint attribute but no INITIALIZED marker is instead an
+        # interrupted new-format initialization and must be rebuilt.
+        return "checkpoint_format_version" not in group.attrs
+    except Exception:
         return False
+
+
+def _create_zarr_array(
+    group: object,
+    name: str,
+    *,
+    data: np.ndarray | None = None,
+    shape: tuple[int, ...] | None = None,
+    chunks: tuple[int, ...],
+    dtype: np.dtype | type | None = None,
+    fill_value: float | int | None = None,
+) -> object:
+    """Create an array with either the Zarr 2 or Zarr 3 group API."""
+    create_array = getattr(group, "create_array", None)
+    if create_array is not None:
+        kwargs: dict[str, object] = {
+            "chunks": chunks,
+            "overwrite": True,
+        }
+        if data is not None:
+            kwargs["data"] = data
+        else:
+            kwargs.update(
+                {
+                    "shape": shape,
+                    "dtype": dtype,
+                    "fill_value": fill_value,
+                }
+            )
+        return create_array(name, **kwargs)
+
+    create_dataset = getattr(group, "create_dataset")
+    return create_dataset(
+        name,
+        data=data,
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        fill_value=fill_value,
+        overwrite=True,
+    )
 
 
 def initialize_parameter_store(
@@ -806,7 +837,10 @@ def initialize_parameter_store(
 ) -> None:
     """Create an empty, chunk-aligned parameter store without global arrays."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    group = zarr.open_group(str(path), mode="w")
+    try:
+        group = zarr.open_group(str(path), mode="w", zarr_format=2)
+    except TypeError:
+        group = zarr.open_group(str(path), mode="w", zarr_version=2)
     group.attrs.update(
         {
             "method": "empirical_quantile_mapping",
@@ -829,11 +863,11 @@ def initialize_parameter_store(
         "lon": np.asarray(lons, dtype=np.float32),
     }
     for name, values in coordinate_values.items():
-        array = group.create_dataset(
+        array = _create_zarr_array(
+            group,
             name,
             data=values,
             chunks=(len(values),),
-            overwrite=True,
         )
         array.attrs["_ARRAY_DIMENSIONS"] = [name]
 
@@ -844,13 +878,13 @@ def initialize_parameter_store(
         min(lon_tile, len(lons)),
     )
     for name in ("forecast_quantile", "observation_quantile"):
-        array = group.create_dataset(
+        array = _create_zarr_array(
+            group,
             name,
             shape=quantile_shape,
             chunks=quantile_chunks,
             dtype=np.float32,
             fill_value=np.nan,
-            overwrite=True,
         )
         array.attrs["_ARRAY_DIMENSIONS"] = ["quantile", "lat", "lon"]
 
@@ -861,23 +895,23 @@ def initialize_parameter_store(
             min(lon_tile, len(lons)),
         )
         for name in ("forecast_dry_threshold", "observed_dry_probability"):
-            array = group.create_dataset(
+            array = _create_zarr_array(
+                group,
                 name,
                 shape=spatial_shape,
                 chunks=spatial_chunks,
                 dtype=np.float32,
                 fill_value=np.nan,
-                overwrite=True,
             )
             array.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
         for name in ("forecast_wet_count", "observation_wet_count"):
-            array = group.create_dataset(
+            array = _create_zarr_array(
+                group,
                 name,
                 shape=spatial_shape,
                 chunks=spatial_chunks,
                 dtype=np.int32,
                 fill_value=0,
-                overwrite=True,
             )
             array.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
 

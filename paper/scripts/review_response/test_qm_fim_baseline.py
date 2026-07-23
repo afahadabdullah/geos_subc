@@ -323,8 +323,11 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
             )
 
             # Stores written by the previous implementation have neither
-            # progress nor completion sidecars. They should be adopted rather
-            # than discarded and refit.
+            # checkpoint-format metadata nor progress/completion sidecars.
+            # They should be adopted rather than discarded and refit.
+            legacy_group = zarr.open_group(str(untouched_store), mode="a")
+            del legacy_group.attrs["checkpoint_format_version"]
+            del legacy_group
             shutil.rmtree(parameter_progress_dir(untouched_store))
             parameter_complete_marker(untouched_store).unlink()
             legacy_output = io.StringIO()
