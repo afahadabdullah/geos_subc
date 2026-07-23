@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,16 +17,21 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 
 from paper.scripts.review_response.qm_fim_baseline import (
     apply_all,
     apply_quantile_map,
     fit_all,
     fit_quantile_parameters,
+    parameter_complete_marker,
+    parameter_progress_dir,
+    parameter_store,
     parse_years,
     score_all,
     standardize_forecast,
     standardize_observation,
+    tile_progress_marker,
     validate_year_splits,
 )
 
@@ -197,6 +205,71 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
                 np.linspace(0.0, 1.0, 5),
                 args,
             )
+
+            # Simulate an abrupt kill after three of four spatial tiles were
+            # checkpointed. The rerun must repair only the unmarked tile.
+            resume_store = parameter_store(parameter_root, "pr", 1, 1)
+            missing_tile = tile_progress_marker(resume_store, 0, 1, 0, 2)
+            missing_tile.unlink()
+            parameter_complete_marker(resume_store).unlink()
+            resume_group = zarr.open_group(str(resume_store), mode="a")
+            resume_group["forecast_quantile"][:, 0:1, 0:2] = np.nan
+            del resume_group
+
+            untouched_store = parameter_store(parameter_root, "pr", 1, 2)
+            untouched_completion = parameter_complete_marker(
+                untouched_store
+            ).read_text()
+            fit_output = io.StringIO()
+            with contextlib.redirect_stdout(fit_output):
+                fit_all(
+                    data_root,
+                    parameter_root,
+                    train_years,
+                    variables,
+                    np.linspace(0.0, 1.0, 5),
+                    args,
+                )
+            self.assertIn("3/4 tiles already saved", fit_output.getvalue())
+            self.assertTrue(missing_tile.exists())
+            self.assertTrue(parameter_complete_marker(resume_store).exists())
+            self.assertEqual(
+                len(list(parameter_progress_dir(resume_store).glob("tile_*.done"))),
+                4,
+            )
+            repaired_group = zarr.open_group(str(resume_store), mode="r")
+            self.assertTrue(
+                np.isfinite(
+                    repaired_group["forecast_quantile"][:, 0:1, 0:2]
+                ).all()
+            )
+            self.assertEqual(
+                parameter_complete_marker(untouched_store).read_text(),
+                untouched_completion,
+            )
+
+            # Stores written by the previous implementation have neither
+            # progress nor completion sidecars. They should be adopted rather
+            # than discarded and refit.
+            shutil.rmtree(parameter_progress_dir(untouched_store))
+            parameter_complete_marker(untouched_store).unlink()
+            legacy_output = io.StringIO()
+            with contextlib.redirect_stdout(legacy_output):
+                fit_all(
+                    data_root,
+                    parameter_root,
+                    train_years,
+                    variables,
+                    np.linspace(0.0, 1.0, 5),
+                    args,
+                )
+            self.assertIn(
+                "Adopted existing completed store", legacy_output.getvalue()
+            )
+            self.assertTrue(
+                parameter_complete_marker(untouched_store).exists()
+            )
+
             apply_all(
                 data_root,
                 forecast_dir,

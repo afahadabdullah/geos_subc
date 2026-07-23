@@ -42,6 +42,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 
 
 VARIABLES = {
@@ -658,9 +659,120 @@ def parameter_store(parameter_root: Path, variable: str, lead: int, month: int) 
     return parameter_root / variable / f"lead{lead}_month{month:02d}.zarr"
 
 
-def write_parameter_store(
+def parameter_progress_dir(path: Path) -> Path:
+    return path.with_name(f"{path.name}.progress")
+
+
+def parameter_complete_marker(path: Path) -> Path:
+    return path.with_name(f"{path.name}.complete")
+
+
+def tile_progress_marker(
     path: Path,
-    parameters: dict[str, np.ndarray],
+    lat_start: int,
+    lat_stop: int,
+    lon_start: int,
+    lon_stop: int,
+) -> Path:
+    return parameter_progress_dir(path) / (
+        f"tile_lat{lat_start:04d}-{lat_stop:04d}_"
+        f"lon{lon_start:04d}-{lon_stop:04d}.done"
+    )
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    """Write a small restart marker atomically on the same filesystem."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _parameter_names(variable: str) -> tuple[str, ...]:
+    names = ("forecast_quantile", "observation_quantile")
+    if variable == "pr":
+        names += (
+            "forecast_dry_threshold",
+            "observed_dry_probability",
+            "forecast_wet_count",
+            "observation_wet_count",
+        )
+    return names
+
+
+def _clear_parameter_state(path: Path) -> None:
+    """Remove only the generated state for one variable/lead/month."""
+    if path.exists():
+        shutil.rmtree(path)
+    progress = parameter_progress_dir(path)
+    if progress.exists():
+        shutil.rmtree(progress)
+    complete = parameter_complete_marker(path)
+    if complete.exists():
+        complete.unlink()
+
+
+def _store_layout_matches(
+    path: Path,
+    *,
+    variable: str,
+    quantile_count: int,
+    height: int,
+    width: int,
+) -> bool:
+    """Check Zarr metadata without loading global parameter arrays."""
+    try:
+        group = zarr.open_group(str(path), mode="r")
+        expected_shapes = {
+            "forecast_quantile": (quantile_count, height, width),
+            "observation_quantile": (quantile_count, height, width),
+        }
+        if variable == "pr":
+            expected_shapes.update(
+                {
+                    "forecast_dry_threshold": (height, width),
+                    "observed_dry_probability": (height, width),
+                    "forecast_wet_count": (height, width),
+                    "observation_wet_count": (height, width),
+                }
+            )
+        return all(
+            name in group and tuple(group[name].shape) == shape
+            for name, shape in expected_shapes.items()
+        )
+    except (KeyError, OSError, ValueError, zarr.errors.MetadataError):
+        return False
+
+
+def _legacy_store_is_complete(
+    path: Path,
+    *,
+    variable: str,
+    quantile_count: int,
+    height: int,
+    width: int,
+) -> bool:
+    """Recognize complete stores produced before tile checkpoints existed."""
+    if not _store_layout_matches(
+        path,
+        variable=variable,
+        quantile_count=quantile_count,
+        height=height,
+        width=width,
+    ):
+        return False
+    try:
+        group = zarr.open_group(str(path), mode="r")
+        return all(
+            group[name].nchunks_initialized == group[name].nchunks
+            for name in _parameter_names(variable)
+        )
+    except (KeyError, OSError, ValueError, zarr.errors.MetadataError):
+        return False
+
+
+def initialize_parameter_store(
+    path: Path,
     quantiles: np.ndarray,
     lats: np.ndarray,
     lons: np.ndarray,
@@ -670,40 +782,14 @@ def write_parameter_store(
     month: int,
     train_years: tuple[int, ...],
     wet_threshold: float,
-    overwrite: bool,
+    lat_tile: int,
+    lon_tile: int,
 ) -> None:
-    if path.exists():
-        if not overwrite:
-            print(f"  Reusing existing {path}")
-            return
-        shutil.rmtree(path)
+    """Create an empty, chunk-aligned parameter store without global arrays."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    data_vars: dict[str, tuple[tuple[str, ...], np.ndarray]] = {
-        "forecast_quantile": (
-            ("quantile", "lat", "lon"),
-            parameters["forecast_quantile"],
-        ),
-        "observation_quantile": (
-            ("quantile", "lat", "lon"),
-            parameters["observation_quantile"],
-        ),
-    }
-    for name in (
-        "forecast_dry_threshold",
-        "observed_dry_probability",
-        "forecast_wet_count",
-        "observation_wet_count",
-    ):
-        if name in parameters:
-            data_vars[name] = (("lat", "lon"), parameters[name])
-    ds = xr.Dataset(
-        data_vars=data_vars,
-        coords={
-            "quantile": quantiles.astype(np.float32),
-            "lat": lats.astype(np.float32),
-            "lon": lons.astype(np.float32),
-        },
-        attrs={
+    group = zarr.open_group(str(path), mode="w")
+    group.attrs.update(
+        {
             "method": "empirical_quantile_mapping",
             "variable": variable,
             "lead_week": int(lead),
@@ -714,20 +800,95 @@ def write_parameter_store(
             else "none",
             "wet_threshold_mm_day": float(wet_threshold),
             "tail_extrapolation": "additive_correction_in_mapping_space",
+            "checkpoint_format_version": 1,
+        }
+    )
+
+    coordinate_values = {
+        "quantile": np.asarray(quantiles, dtype=np.float32),
+        "lat": np.asarray(lats, dtype=np.float32),
+        "lon": np.asarray(lons, dtype=np.float32),
+    }
+    for name, values in coordinate_values.items():
+        array = group.create_dataset(
+            name,
+            data=values,
+            chunks=(len(values),),
+            overwrite=True,
+        )
+        array.attrs["_ARRAY_DIMENSIONS"] = [name]
+
+    quantile_shape = (len(quantiles), len(lats), len(lons))
+    quantile_chunks = (
+        len(quantiles),
+        min(lat_tile, len(lats)),
+        min(lon_tile, len(lons)),
+    )
+    for name in ("forecast_quantile", "observation_quantile"):
+        array = group.create_dataset(
+            name,
+            shape=quantile_shape,
+            chunks=quantile_chunks,
+            dtype=np.float32,
+            fill_value=np.nan,
+            overwrite=True,
+        )
+        array.attrs["_ARRAY_DIMENSIONS"] = ["quantile", "lat", "lon"]
+
+    if variable == "pr":
+        spatial_shape = (len(lats), len(lons))
+        spatial_chunks = (
+            min(lat_tile, len(lats)),
+            min(lon_tile, len(lons)),
+        )
+        for name in ("forecast_dry_threshold", "observed_dry_probability"):
+            array = group.create_dataset(
+                name,
+                shape=spatial_shape,
+                chunks=spatial_chunks,
+                dtype=np.float32,
+                fill_value=np.nan,
+                overwrite=True,
+            )
+            array.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+        for name in ("forecast_wet_count", "observation_wet_count"):
+            array = group.create_dataset(
+                name,
+                shape=spatial_shape,
+                chunks=spatial_chunks,
+                dtype=np.int32,
+                fill_value=0,
+                overwrite=True,
+            )
+            array.attrs["_ARRAY_DIMENSIONS"] = ["lat", "lon"]
+
+    _atomic_write_json(
+        parameter_progress_dir(path) / "INITIALIZED",
+        {
+            "variable": variable,
+            "lead": int(lead),
+            "month": int(month),
+            "lat_tile": int(lat_tile),
+            "lon_tile": int(lon_tile),
         },
     )
-    encoding = {}
-    for name, da in ds.data_vars.items():
-        chunks = tuple(
-            min(size, chunk)
-            for size, chunk in zip(
-                da.shape,
-                (len(quantiles), 45, 90) if da.ndim == 3 else (45, 90),
-            )
-        )
-        encoding[name] = {"chunks": chunks}
-    ds.to_zarr(path, mode="w", encoding=encoding)
-    ds.close()
+
+
+def write_parameter_tile(
+    group: zarr.hierarchy.Group,
+    parameters: dict[str, np.ndarray],
+    *,
+    lat_slice: slice,
+    lon_slice: slice,
+) -> None:
+    """Persist all arrays for one spatial tile before its marker is created."""
+    for name, values in parameters.items():
+        if values.ndim == 3:
+            group[name][:, lat_slice, lon_slice] = values
+        elif values.ndim == 2:
+            group[name][lat_slice, lon_slice] = values
+        else:
+            raise ValueError(f"Unexpected parameter rank for {name}: {values.ndim}")
 
 
 def fit_all(
@@ -783,23 +944,112 @@ def fit_all(
             height, width = len(lats), len(lons)
             for lead_index in range(4):
                 for month in range(1, 13):
-                    path = parameter_store(
-                        parameter_root, variable, lead_index + 1, month
-                    )
-                    if path.exists() and not args.overwrite:
-                        print(f"  Reusing existing {path}")
-                        continue
-                    parameters: dict[str, np.ndarray] | None = None
+                    lead = lead_index + 1
+                    path = parameter_store(parameter_root, variable, lead, month)
+                    progress_dir = parameter_progress_dir(path)
+                    initialized_marker = progress_dir / "INITIALIZED"
+                    complete_marker = parameter_complete_marker(path)
+
+                    if args.overwrite:
+                        _clear_parameter_state(path)
+
+                    if complete_marker.exists() and not path.exists():
+                        complete_marker.unlink()
+
+                    if complete_marker.exists() and path.exists():
+                        if _store_layout_matches(
+                            path,
+                            variable=variable,
+                            quantile_count=len(quantiles),
+                            height=height,
+                            width=width,
+                        ):
+                            print(f"  Reusing completed {path}")
+                            continue
+                        print(f"  Rebuilding invalid completed store {path}")
+                        _clear_parameter_state(path)
+
+                    if (
+                        path.exists()
+                        and not complete_marker.exists()
+                        and not initialized_marker.exists()
+                    ):
+                        if _legacy_store_is_complete(
+                            path,
+                            variable=variable,
+                            quantile_count=len(quantiles),
+                            height=height,
+                            width=width,
+                        ):
+                            _atomic_write_json(
+                                complete_marker,
+                                {
+                                    "variable": variable,
+                                    "lead": lead,
+                                    "month": month,
+                                    "adopted_legacy_store": True,
+                                },
+                            )
+                            print(f"  Adopted existing completed store {path}")
+                            continue
+                        print(f"  Removing incomplete uncheckpointed store {path}")
+                        _clear_parameter_state(path)
+
+                    if (
+                        not path.exists()
+                        or not initialized_marker.exists()
+                        or not _store_layout_matches(
+                            path,
+                            variable=variable,
+                            quantile_count=len(quantiles),
+                            height=height,
+                            width=width,
+                        )
+                    ):
+                        if path.exists() or progress_dir.exists():
+                            print(f"  Reinitializing interrupted store {path}")
+                            _clear_parameter_state(path)
+                        initialize_parameter_store(
+                            path,
+                            quantiles,
+                            lats,
+                            lons,
+                            variable=variable,
+                            lead=lead,
+                            month=month,
+                            train_years=train_years,
+                            wet_threshold=args.wet_threshold,
+                            lat_tile=args.fit_lat_tile,
+                            lon_tile=args.fit_lon_tile,
+                        )
+
                     tile_number = 0
                     tile_total = (
                         math.ceil(height / args.fit_lat_tile)
                         * math.ceil(width / args.fit_lon_tile)
                     )
+                    completed_tiles = len(list(progress_dir.glob("tile_*.done")))
+                    if completed_tiles:
+                        print(
+                            f"  Resuming {variable} lead={lead} month={month:02d}: "
+                            f"{completed_tiles}/{tile_total} tiles already saved",
+                            flush=True,
+                        )
+                    group = zarr.open_group(str(path), mode="a")
                     for lat_start in range(0, height, args.fit_lat_tile):
                         lat_stop = min(lat_start + args.fit_lat_tile, height)
                         for lon_start in range(0, width, args.fit_lon_tile):
                             lon_stop = min(lon_start + args.fit_lon_tile, width)
                             tile_number += 1
+                            tile_marker = tile_progress_marker(
+                                path,
+                                lat_start,
+                                lat_stop,
+                                lon_start,
+                                lon_stop,
+                            )
+                            if tile_marker.exists():
+                                continue
                             lat_slice = slice(lat_start, lat_stop)
                             lon_slice = slice(lon_start, lon_stop)
                             forecast_parts, observation_parts = [], []
@@ -818,7 +1068,7 @@ def fit_all(
                             if not forecast_parts:
                                 raise ValueError(
                                     f"No training samples for {variable}, "
-                                    f"lead {lead_index + 1}, month {month}."
+                                    f"lead {lead}, month {month}."
                                 )
                             forecast = np.concatenate(forecast_parts, axis=0)
                             observation = np.concatenate(observation_parts, axis=0)
@@ -831,48 +1081,46 @@ def fit_all(
                                 min_wet_samples=args.min_wet_samples,
                                 block_size=args.spatial_block_size,
                             )
-                            if parameters is None:
-                                parameters = {}
-                                for name, tile_value in tile_parameters.items():
-                                    prefix = tile_value.shape[:-2]
-                                    fill = (
-                                        np.nan
-                                        if np.issubdtype(tile_value.dtype, np.floating)
-                                        else 0
-                                    )
-                                    parameters[name] = np.full(
-                                        prefix + (height, width),
-                                        fill,
-                                        dtype=tile_value.dtype,
-                                    )
-                            for name, tile_value in tile_parameters.items():
-                                parameters[name][..., lat_slice, lon_slice] = tile_value
+                            write_parameter_tile(
+                                group,
+                                tile_parameters,
+                                lat_slice=lat_slice,
+                                lon_slice=lon_slice,
+                            )
+                            _atomic_write_json(
+                                tile_marker,
+                                {
+                                    "lat_start": lat_start,
+                                    "lat_stop": lat_stop,
+                                    "lon_start": lon_start,
+                                    "lon_stop": lon_stop,
+                                },
+                            )
                             del forecast_parts, observation_parts
                             del forecast, observation, tile_parameters
                             print(
-                                f"  {variable} lead={lead_index + 1} month={month:02d} "
+                                f"  {variable} lead={lead} month={month:02d} "
                                 f"tile {tile_number}/{tile_total} "
                                 f"lat={lat_start}:{lat_stop} lon={lon_start}:{lon_stop}",
                                 flush=True,
                             )
-                    if parameters is None:
+                    del group
+                    completed_tiles = len(list(progress_dir.glob("tile_*.done")))
+                    if completed_tiles != tile_total:
                         raise RuntimeError(
-                            f"No parameters produced for {variable}, "
-                            f"lead {lead_index + 1}, month {month}."
+                            f"Only {completed_tiles}/{tile_total} tiles were saved for "
+                            f"{variable}, lead {lead}, month {month}."
                         )
-                    write_parameter_store(
-                        path,
-                        parameters,
-                        quantiles,
-                        lats,
-                        lons,
-                        variable=variable,
-                        lead=lead_index + 1,
-                        month=month,
-                        train_years=train_years,
-                        wet_threshold=args.wet_threshold,
-                        overwrite=args.overwrite,
+                    _atomic_write_json(
+                        complete_marker,
+                        {
+                            "variable": variable,
+                            "lead": lead,
+                            "month": month,
+                            "tiles": tile_total,
+                        },
                     )
+                    print(f"  Completed {path}", flush=True)
         finally:
             for archive in archives:
                 archive.close()

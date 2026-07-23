@@ -22,9 +22,14 @@ a tightly limited login node, use 15×30 and a mapping block of 2048 points.
 Application and scoring process one initialization and lead at a time. At most
 two parameter stores are cached.
 
-Each variable/lead/month parameter store is written independently. A stopped
-fit can be restarted with the same command; completed stores are reused.
-Do not add `--overwrite` when resuming.
+Each fitted spatial tile is written directly to its variable/lead/month Zarr
+store. A small atomic marker is created only after every array in that tile is
+on disk, and a separate completion marker is created after the final tile.
+A stopped fit can therefore be restarted with the exact same command:
+completed lead/month stores and completed tiles within the interrupted store
+are skipped. Stores completed by the older, non-tile-checkpointed version are
+recognized and adopted automatically. Do not add `--overwrite` when resuming;
+that option intentionally deletes the saved checkpoints for each store.
 
 Activate the project environment, then set paths appropriate for the cluster:
 
