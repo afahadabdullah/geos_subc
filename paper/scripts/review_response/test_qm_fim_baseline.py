@@ -222,7 +222,7 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
 
             eval_init = pd.date_range("2002-01-01", periods=24, freq="15D")
             month = np.arange(len(eval_init), dtype=np.float32)[:, None, None, None, None]
-            member = np.arange(2, dtype=np.float32)[None, :, None, None, None]
+            member = np.arange(4, dtype=np.float32)[None, :, None, None, None]
             lead = np.arange(4, dtype=np.float32)[None, None, :, None, None]
             spatial = np.arange(6, dtype=np.float32).reshape(1, 1, 1, 2, 3)
             eval_raw = 0.2 + month + member + lead + spatial
@@ -247,8 +247,8 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
                 },
                 coords={
                     "init": eval_init.values,
-                    "ensemble": [1, 2, 3, 4],
-                    "geos_member": [1, 2],
+                    "ensemble": np.arange(1, 9),
+                    "geos_member": np.arange(1, 5),
                     "lead": [1, 2, 3, 4],
                     "lat": [-1.0, 1.0],
                     "lon": [0.0, 1.0, 2.0],
@@ -387,9 +387,13 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
                     "--variables",
                     "pr",
                     "--components",
-                    "qm",
+                    "qm,boot",
+                    "--model_members",
+                    "8",
                     "--subsample_repeats",
                     "2",
+                    "--n_boot",
+                    "60",
                     "--out_dir",
                     str(comparison_dir),
                 ],
@@ -401,6 +405,27 @@ class QuantileMappingIntegrationTest(unittest.TestCase):
                 comparison_dir / "r1_aggregate_metrics.csv"
             )
             self.assertTrue(np.isfinite(comparison["skill_model_vs_qm"]).all())
+            self.assertTrue(
+                np.isfinite(comparison["skill_model_k_vs_raw"]).all()
+            )
+            self.assertTrue(
+                np.isfinite(comparison["skill_model_k_vs_qm"]).all()
+            )
+            self.assertTrue(
+                (comparison["n_members_model_subsample"] == 8).all()
+            )
+            self.assertTrue((comparison["n_members_geos"] == 4).all())
+            self.assertTrue((comparison["n_members_qm"] == 4).all())
+            self.assertTrue(
+                (comparison["n_members_model_qm_subsample"] == 4).all()
+            )
+            pooled = comparison[
+                comparison["year"].eq("pooled")
+                & comparison["lead"].eq("all")
+            ]
+            self.assertTrue(
+                np.isfinite(pooled["skill_model_k_vs_qm_ci_lo"]).all()
+            )
 
 
 if __name__ == "__main__":

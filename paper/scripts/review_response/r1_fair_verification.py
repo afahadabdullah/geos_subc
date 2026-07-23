@@ -347,6 +347,43 @@ def main() -> None:
                         fields["crps_model"] = c_model
                         fields["crps_geos"] = c_geos
 
+                        # Repeated fixed-K flow subsets. With
+                        # --model_members 8 these fields provide the requested
+                        # flow-8 versus native raw-4/QM-4 comparison. The
+                        # separate model_qm_m fields below remain the strict
+                        # equal-member flow-4 versus QM-4 control.
+                        if "matched" in comps or qm is not None:
+                            k = min(args.model_members, model.shape[0])
+                            row["n_members_model_subsample"] = int(k)
+                            acc_c = np.zeros_like(c_model)
+                            acc_m = np.zeros_like(c_model)
+                            acc_s = np.zeros_like(c_model)
+                            for _ in range(args.subsample_repeats):
+                                idx = rng.choice(
+                                    model.shape[0], size=k, replace=False
+                                )
+                                subset = model[idx]
+                                subset_crps, _ = crps_standard(subset, obs)
+                                acc_c = np.nansum([acc_c, subset_crps], axis=0)
+                                subset_float = subset.astype(np.float64)
+                                subset_mean = np.nanmean(subset_float, axis=0)
+                                acc_m = np.nansum(
+                                    [acc_m, (subset_mean - obs) ** 2], axis=0
+                                )
+                                acc_s = np.nansum(
+                                    [acc_s, np.nanstd(subset_float, axis=0)],
+                                    axis=0,
+                                )
+                            fields["crps_model_m"] = (
+                                acc_c / args.subsample_repeats
+                            )
+                            fields["mse_model_m"] = (
+                                acc_m / args.subsample_repeats
+                            )
+                            fields["spread_model_m"] = (
+                                acc_s / args.subsample_repeats
+                            )
+
                         if qm is not None:
                             fields["crps_qm"], _ = crps_standard(qm, obs)
                             qm_mean = np.nanmean(qm.astype(np.float64), axis=0)
@@ -395,18 +432,6 @@ def main() -> None:
                                 fields["crps_geos_lag"], _ = crps_standard(geos_lag, obs)
                                 glmean = np.nanmean(geos_lag.astype(np.float64), axis=0)
                                 fields["mse_geos_lag"] = (glmean - obs) ** 2
-                            k = min(args.model_members, model.shape[0])
-                            row["n_members_model_subsample"] = int(k)
-                            acc_c = np.zeros_like(c_model)
-                            acc_m = np.zeros_like(c_model)
-                            for _ in range(args.subsample_repeats):
-                                idx = rng.choice(model.shape[0], size=k, replace=False)
-                                cs, _ = crps_standard(model[idx], obs)
-                                acc_c = np.nansum([acc_c, cs], axis=0)
-                                smean = np.nanmean(model[idx].astype(np.float64), axis=0)
-                                acc_m = np.nansum([acc_m, (smean - obs) ** 2], axis=0)
-                            fields["crps_model_m"] = acc_c / args.subsample_repeats
-                            fields["mse_model_m"] = acc_m / args.subsample_repeats
 
                         if "fair" in comps:
                             fields["faircrps_model"], _ = crps_fair(model, obs)
@@ -556,12 +581,18 @@ def main() -> None:
         ("skill_vs_emos", "crps_model_m", "crps_emos"),
         ("skill_qm_vs_raw", "crps_qm", "crps_geos"),
         ("rmse_skill_qm_vs_raw", "mse_qm", "mse_geos"),
+        ("skill_model_k_vs_raw", "crps_model_m", "crps_geos"),
+        ("rmse_skill_model_k_vs_raw", "mse_model_m", "mse_geos"),
+        ("skill_model_k_vs_qm", "crps_model_m", "crps_qm"),
+        ("rmse_skill_model_k_vs_qm", "mse_model_m", "mse_qm"),
         ("skill_model_vs_qm", "crps_model_qm_m", "crps_qm"),
         ("rmse_skill_model_vs_qm", "mse_model_qm_m", "mse_qm"),
         ("crpss_clim_qm", "crps_qm", "crps_clim"),
         ("ext_skill_matched", "ext_crps_model_m", "ext_crps_geos_lag"),
         ("ext_crpss_clim_model", "ext_crps_model_m", "ext_crps_clim"),
         ("ext_skill_qm_vs_raw", "ext_crps_qm", "ext_crps_geos"),
+        ("ext_skill_model_k_vs_raw", "ext_crps_model_m", "ext_crps_geos"),
+        ("ext_skill_model_k_vs_qm", "ext_crps_model_m", "ext_crps_qm"),
         ("ext_skill_model_vs_qm", "ext_crps_model_qm_m", "ext_crps_qm"),
     ]
 
@@ -608,6 +639,15 @@ def main() -> None:
                 rmse_m = math.sqrt(max(agg_mean(ldf, "mse_model"), 0.0))
                 row["rmse_model_full"] = rmse_m
                 row["spread_rmse_model"] = agg_mean(ldf, "spread_model") / max(rmse_m, 1e-9)
+                if "mse_model_m_wsum" in ldf:
+                    rmse_model_k = math.sqrt(
+                        max(agg_mean(ldf, "mse_model_m"), 0.0)
+                    )
+                    row["rmse_model_k"] = rmse_model_k
+                    row["spread_rmse_model_k"] = (
+                        agg_mean(ldf, "spread_model_m")
+                        / max(rmse_model_k, 1e-9)
+                    )
                 if "mse_qm_wsum" in ldf:
                     rmse_qm = math.sqrt(max(agg_mean(ldf, "mse_qm"), 0.0))
                     row["rmse_qm"] = rmse_qm
@@ -627,11 +667,17 @@ def main() -> None:
                         "crpss_clim_geos_lag",
                         "skill_qm_vs_raw",
                         "rmse_skill_qm_vs_raw",
+                        "skill_model_k_vs_raw",
+                        "rmse_skill_model_k_vs_raw",
+                        "skill_model_k_vs_qm",
+                        "rmse_skill_model_k_vs_qm",
                         "skill_model_vs_qm",
                         "rmse_skill_model_vs_qm",
                         "crpss_clim_qm",
                         "ext_skill_matched",
                         "ext_skill_qm_vs_raw",
+                        "ext_skill_model_k_vs_raw",
+                        "ext_skill_model_k_vs_qm",
                         "ext_skill_model_vs_qm",
                     }
                     for sname, num, den in SKILLS:
@@ -645,6 +691,16 @@ def main() -> None:
                         )
                         row[f"{sname}_ci_lo"] = lo
                         row[f"{sname}_ci_hi"] = hi
+                for member_column in (
+                    "n_members_model_subsample",
+                    "n_members_geos",
+                    "n_members_qm",
+                    "n_members_model_qm_subsample",
+                ):
+                    if member_column in ldf:
+                        counts = ldf[member_column].dropna().unique()
+                        if len(counts) == 1:
+                            row[member_column] = int(counts[0])
                 agg_rows.append(row)
 
     agg = pd.DataFrame(agg_rows)
@@ -668,11 +724,15 @@ def main() -> None:
             "crpss_clim_model_m", "crpss_clim_geos_lag", "crpss_clim_geos_debias",
             "crpss_clim_emos", "skill_vs_debias", "skill_vs_emos",
             "skill_qm_vs_raw", "rmse_skill_qm_vs_raw",
+            "n_members_model_subsample", "n_members_geos", "n_members_qm",
+            "skill_model_k_vs_raw", "rmse_skill_model_k_vs_raw",
+            "skill_model_k_vs_qm", "rmse_skill_model_k_vs_qm",
             "skill_model_vs_qm", "rmse_skill_model_vs_qm",
             "crpss_clim_qm", "ext_skill_matched", "ext_crpss_clim_model",
-            "ext_skill_qm_vs_raw", "ext_skill_model_vs_qm",
+            "ext_skill_qm_vs_raw", "ext_skill_model_k_vs_raw",
+            "ext_skill_model_k_vs_qm", "ext_skill_model_vs_qm",
             "acc_model", "acc_geos", "acc_qm",
-            "spread_rmse_model", "spread_rmse_qm"]
+            "spread_rmse_model", "spread_rmse_model_k", "spread_rmse_qm"]
     avail = [c for c in show if c in agg.columns]
     print(agg[agg["lead"].eq("all")][avail].round(3).to_string(index=False))
     per_lead = agg[(agg["year"].eq("pooled")) & (~agg["lead"].eq("all"))]

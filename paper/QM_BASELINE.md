@@ -104,15 +104,22 @@ python3 paper/scripts/review_response/r1_fair_verification.py \
   --qm_dir "$QM_OUT_DIR/corrected" \
   --years 2021,2022,2023 \
   --components clim,acc,boot,qm \
-  --model_members 4 \
+  --model_members 8 \
   --out_dir "$QM_OUT_DIR/flow_comparison"
 ```
 
 The important output columns are:
 
 - `skill_qm_vs_raw`: four-member QM-FIM CRPS skill versus raw FIM;
+- `skill_model_k_vs_raw`: repeatedly sampled eight-member flow CRPS skill
+  versus the native four-member raw FIM;
+- `skill_model_k_vs_qm`: repeatedly sampled eight-member flow CRPS skill
+  versus the native four-member QM-FIM;
+- `rmse_skill_model_k_vs_raw` and `rmse_skill_model_k_vs_qm`: corresponding
+  ensemble-mean RMSE skills;
 - `skill_model_vs_qm`: CRPS skill of repeatedly sampled four-member flow
-  ensembles versus the four QM-FIM members;
+  ensembles versus the four QM-FIM members, retained as the strict
+  equal-ensemble-size control;
 - `rmse_skill_model_vs_qm`: the corresponding ensemble-mean RMSE skill;
 - `crpss_clim_qm`: QM-FIM CRPS skill versus climatology;
 - `ext_skill_model_vs_qm`: four-versus-four CRPS skill on the observed-extreme
