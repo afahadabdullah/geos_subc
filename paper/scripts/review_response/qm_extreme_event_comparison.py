@@ -1015,29 +1015,102 @@ def make_plot(
     return path
 
 
-def print_report(summary: pd.DataFrame) -> None:
-    keep = summary[
-        summary["comparison"].isin(
-            ["qm4_vs_raw4", "flow6_vs_raw4", "flow90_vs_raw4"]
-        )
-    ].copy()
-    columns = [
-        "variable",
-        "lead",
-        "comparison",
-        "n_cases",
-        "case_mean_crps_skill_pct_mean",
-        "case_mean_rmse_skill_pct_mean",
-        "case_mean_q95_skill_pct_mean",
-        "crps_skill_pct_mean",
-        "rmse_skill_pct_mean",
-        "q95_skill_pct_mean",
-    ]
-    print("\nExtreme-event comparison")
-    print("  case_mean_* = mean of per-event regional skill (manuscript definition)")
-    print("  final three columns = pooled regional skill (original Fig. 5 evaluator definition)")
-    with pd.option_context("display.max_rows", None, "display.width", 220):
-        print(keep[columns].round(3).to_string(index=False))
+def figure_data_table(
+    systems: pd.DataFrame,
+    summary: pd.DataFrame,
+    bootstrap: pd.DataFrame,
+) -> pd.DataFrame:
+    """Return only the values rendered in the eight figure panels."""
+    plotted_comparisons = (
+        ("qm4_vs_raw4", "QM-4"),
+        ("flow4_vs_raw4", "FlowMatch-4"),
+        ("flow90_vs_raw4", "FlowMatch-90"),
+    )
+    rows: list[dict[str, object]] = []
+    numeric_leads = pd.to_numeric(systems["lead"], errors="coerce")
+    leads = sorted({int(value) for value in numeric_leads.dropna().to_numpy()})
+    for variable in ("pr", "t2m"):
+        for lead in leads:
+            raw = systems[
+                systems["variable"].eq(variable)
+                & systems["system"].eq("raw4")
+                & pd.to_numeric(systems["lead"], errors="coerce").eq(lead)
+            ]
+            if not raw.empty:
+                rows.append(
+                    {
+                        "variable": variable,
+                        "lead": f"W{lead}",
+                        "series": "Raw FIM-4",
+                        "value_type": "absolute score",
+                        "crps": float(raw["case_mean_crps_mean"].iloc[0]),
+                        "crps_ci_low": np.nan,
+                        "crps_ci_high": np.nan,
+                        "rmse": float(raw["case_mean_rmse_mean"].iloc[0]),
+                        "rmse_ci_low": np.nan,
+                        "rmse_ci_high": np.nan,
+                        "q95_score": float(raw["case_mean_q95_score_mean"].iloc[0]),
+                        "q95_score_ci_low": np.nan,
+                        "q95_score_ci_high": np.nan,
+                    }
+                )
+            for comparison, label in plotted_comparisons:
+                cell = summary[
+                    summary["variable"].eq(variable)
+                    & summary["comparison"].eq(comparison)
+                    & pd.to_numeric(summary["lead"], errors="coerce").eq(lead)
+                ]
+                if cell.empty:
+                    continue
+                ci = bootstrap[
+                    bootstrap["variable"].eq(variable)
+                    & bootstrap["comparison"].eq(comparison)
+                    & pd.to_numeric(bootstrap["lead"], errors="coerce").eq(lead)
+                ]
+                row: dict[str, object] = {
+                    "variable": variable,
+                    "lead": f"W{lead}",
+                    "series": label,
+                    "value_type": "skill vs raw FIM-4 (%)",
+                }
+                for output_name, metric in (
+                    ("crps", "case_mean_crps_skill_pct"),
+                    ("rmse", "case_mean_rmse_skill_pct"),
+                    ("q95_score", "case_mean_q95_skill_pct"),
+                ):
+                    row[output_name] = float(cell[f"{metric}_mean"].iloc[0])
+                    row[f"{output_name}_ci_low"] = (
+                        float(ci[f"{metric}_p025"].iloc[0]) if not ci.empty else np.nan
+                    )
+                    row[f"{output_name}_ci_high"] = (
+                        float(ci[f"{metric}_p975"].iloc[0]) if not ci.empty else np.nan
+                    )
+                rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def print_figure_data_table(table: pd.DataFrame) -> None:
+    def formatted_value(row: pd.Series, metric: str) -> str:
+        value = float(row[metric])
+        low = float(row[f"{metric}_ci_low"])
+        high = float(row[f"{metric}_ci_high"])
+        if np.isfinite(low) and np.isfinite(high):
+            return f"{value:.3f} [{low:.3f}, {high:.3f}]"
+        return f"{value:.3f}"
+
+    display = table[["variable", "lead", "series", "value_type"]].copy()
+    display["CRPS (95% CI)"] = table.apply(
+        lambda row: formatted_value(row, "crps"), axis=1
+    )
+    display["RMSE (95% CI)"] = table.apply(
+        lambda row: formatted_value(row, "rmse"), axis=1
+    )
+    display["q95 score (95% CI)"] = table.apply(
+        lambda row: formatted_value(row, "q95_score"), axis=1
+    )
+    print("\nFigure data only")
+    with pd.option_context("display.max_rows", None, "display.width", 240):
+        print(display.to_string(index=False))
 
 
 def write_outputs(
@@ -1054,12 +1127,14 @@ def write_outputs(
     bootstrap = case_bootstrap(
         comparisons, int(args.case_bootstrap_repeats), int(args.seed) + 991
     )
+    figure_table = figure_data_table(systems, summary, bootstrap)
 
     atomic_write_csv(case_df, out_dir / "extreme_case_system_metrics.csv")
     atomic_write_csv(comparisons, out_dir / "extreme_case_comparisons.csv")
     atomic_write_csv(systems, out_dir / "extreme_system_summary.csv")
     atomic_write_csv(summary, out_dir / "extreme_comparison_summary.csv")
     atomic_write_csv(regions, out_dir / "extreme_regional_summary.csv")
+    atomic_write_csv(figure_table, out_dir / "figure_data_table.csv")
     if not bootstrap.empty:
         atomic_write_csv(bootstrap, out_dir / "extreme_comparison_case_bootstrap_ci.csv")
     plot = (
@@ -1092,6 +1167,7 @@ def write_outputs(
             "system_summary": str(out_dir / "extreme_system_summary.csv"),
             "comparison_summary": str(out_dir / "extreme_comparison_summary.csv"),
             "regional_summary": str(out_dir / "extreme_regional_summary.csv"),
+            "figure_data_table": str(out_dir / "figure_data_table.csv"),
             "case_bootstrap_ci": (
                 str(out_dir / "extreme_comparison_case_bootstrap_ci.csv")
                 if not bootstrap.empty
@@ -1101,7 +1177,7 @@ def write_outputs(
         },
     }
     atomic_write_json(metadata, out_dir / "metadata.json")
-    print_report(summary)
+    print_figure_data_table(figure_table)
     print(f"\nWrote completed metadata to {out_dir / 'metadata.json'}")
 
 

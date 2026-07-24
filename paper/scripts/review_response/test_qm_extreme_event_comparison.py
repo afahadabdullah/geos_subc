@@ -98,6 +98,21 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(counts["flow90_vs_raw4"], 2)
         self.assertEqual(counts["flow4_vs_qm4"], 4)
 
+    def test_figure_table_contains_only_plotted_rows(self):
+        case_df = self.synthetic_case_frame()
+        systems = qm.system_summary(case_df)
+        comparisons = qm.comparison_case_rows(case_df)
+        summary = qm.comparison_summary(comparisons)
+        bootstrap = qm.case_bootstrap(comparisons, 10, 7)
+        table = qm.figure_data_table(systems, summary, bootstrap)
+        self.assertEqual(len(table), 8)
+        self.assertEqual(
+            set(table["series"]),
+            {"Raw FIM-4", "QM-4", "FlowMatch-4", "FlowMatch-90"},
+        )
+        self.assertNotIn("FlowMatch-6", set(table["series"]))
+        self.assertNotIn("FlowMatch-8", set(table["series"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -151,6 +151,9 @@ completed events are skipped. Do not pass `--overwrite` when resuming.
 
 Primary outputs are:
 
+- `figure_data_table.csv`: only the raw-score and skill values displayed in
+  `qm_flow_weekly_values_and_improvement.png`, including the plotted 95%
+  intervals;
 - `extreme_comparison_summary.csv`: pooled regional skill and mean per-event
   skill for QM4/raw4, flow8/raw4, flow8/QM4, flow4/raw4, and flow4/QM4;
 - `extreme_comparison_case_bootstrap_ci.csv`: 95% event-resampling intervals;
