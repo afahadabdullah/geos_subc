@@ -129,8 +129,9 @@ The important output columns are:
 ## Figure 5 extreme-event comparison
 
 After corrected archives exist for 2021--2023, compare raw FIM-4, QM-FIM-4,
-FlowMatch-8, and the equal-member FlowMatch-4 control on the original Figure 5
-extreme subset:
+FlowMatch-6, and the full FlowMatch-90 ensemble on the original Figure 5
+extreme subset. FlowMatch-4 and FlowMatch-8 controls are retained in the CSV
+outputs:
 
 ```bash
 python3 paper/scripts/review_response/qm_extreme_event_comparison.py \
@@ -156,7 +157,10 @@ Primary outputs are:
 - `extreme_regional_summary.csv`: comparison skill split by region;
 - `extreme_case_system_metrics.csv`: absolute CRPS, RMSE, and q95 scores for
   every system and event; and
-- `qm_flow_extreme_comparison.png`: the compact comparison figure.
+- `qm_flow_weekly_values_and_improvement.png`: one figure containing
+  event-averaged observed/forecast regional values and weekly CRPS, RMSE, and
+  q95-score improvements versus raw FIM-4 for QM-4, FlowMatch-6, and
+  FlowMatch-90.
 
 Columns prefixed with `case_mean_` average the event-specific regional skills
 and match the extreme-event manuscript definition. Unprefixed skill columns

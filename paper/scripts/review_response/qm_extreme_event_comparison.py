@@ -14,8 +14,9 @@ Systems:
 
 * ``raw4``: the four native FIMr1p1/GEOS members;
 * ``qm4``: the same four members after frozen 1999--2019 quantile mapping;
-* ``flow8``: repeated random eight-member FlowMatch subsets; and
-* ``flow4``: repeated random four-member subsets (equal-member control).
+* ``flow6``: repeated random six-member FlowMatch subsets;
+* ``flow90``: the complete 90-member FlowMatch ensemble; and
+* ``flow4``/``flow8``: controls retained for the earlier comparison.
 
 CRPS, ensemble-mean RMSE, and q95 quantile score are written per event.
 Summaries include both the pooled regional score used by the Figure 5
@@ -50,12 +51,23 @@ if str(REPO_ROOT) not in sys.path:
 from ml_model import evaluate_ensemble_tests_flow_finalv1_global as ens  # noqa: E402
 
 
-SYSTEM_MEMBERS = {"raw4": 4, "qm4": 4, "flow4": 4, "flow8": 8}
-FIXED_SYSTEMS = {"raw4", "qm4"}
+SYSTEM_MEMBERS = {
+    "raw4": 4,
+    "qm4": 4,
+    "flow4": 4,
+    "flow6": 6,
+    "flow8": 8,
+    "flow90": 90,
+}
+FIXED_SYSTEMS = {"raw4", "qm4", "flow90"}
 COMPARISONS = (
     ("qm4_vs_raw4", "qm4", "raw4"),
+    ("flow6_vs_raw4", "flow6", "raw4"),
+    ("flow6_vs_qm4", "flow6", "qm4"),
     ("flow8_vs_raw4", "flow8", "raw4"),
     ("flow8_vs_qm4", "flow8", "qm4"),
+    ("flow90_vs_raw4", "flow90", "raw4"),
+    ("flow90_vs_qm4", "flow90", "qm4"),
     ("flow4_vs_raw4", "flow4", "raw4"),
     ("flow4_vs_qm4", "flow4", "qm4"),
 )
@@ -67,8 +79,19 @@ SUM_COLUMNS = (
     "spread_sum",
     "q95_score_sum",
     "q95_sse_sum",
+    "forecast_mean_sum",
+    "obs_sum",
 )
-SCORE_COLUMNS = ("crps", "rmse", "bias", "spread", "q95_score", "q95_rmse")
+SCORE_COLUMNS = (
+    "crps",
+    "rmse",
+    "bias",
+    "spread",
+    "q95_score",
+    "q95_rmse",
+    "forecast_mean",
+    "obs_mean",
+)
 SKILL_METRICS = {
     "crps_skill_pct": "crps",
     "rmse_skill_pct": "rmse",
@@ -167,6 +190,7 @@ def parse_variables(text: str) -> list[str]:
 
 def config_from_args(args: argparse.Namespace) -> dict[str, object]:
     return {
+        "schema_version": 2,
         "forecast_dir": str(Path(args.forecast_dir).resolve()),
         "qm_dir": str(Path(args.qm_dir).resolve()),
         "start_year": int(args.start_year),
@@ -319,6 +343,7 @@ def system_sums(
     if weight_sum <= 0.0:
         return {column: 0.0 for column in SUM_COLUMNS}
     mean_error = np.nanmean(np.asarray(forecast, dtype=np.float64), axis=0) - obs
+    forecast_mean = mean_error + obs
     return {
         "weight_sum": weight_sum,
         "crps_sum": float(np.sum(np.where(finite, fields["crps"], 0.0) * weighted)),
@@ -327,6 +352,10 @@ def system_sums(
         "spread_sum": float(np.sum(np.where(finite, fields["spread"], 0.0) * weighted)),
         "q95_score_sum": float(np.sum(np.where(finite, q95_score, 0.0) * weighted)),
         "q95_sse_sum": float(np.sum(np.where(finite, q95_sse, 0.0) * weighted)),
+        "forecast_mean_sum": float(
+            np.sum(np.where(finite, forecast_mean, 0.0) * weighted)
+        ),
+        "obs_sum": float(np.sum(np.where(finite, obs, 0.0) * weighted)),
     }
 
 
@@ -341,6 +370,8 @@ def scores_from_sums(sums: dict[str, float] | pd.Series) -> dict[str, float]:
         "spread": float(sums["spread_sum"] / weight),
         "q95_score": float(sums["q95_score_sum"] / weight),
         "q95_rmse": float(math.sqrt(max(float(sums["q95_sse_sum"]) / weight, 0.0))),
+        "forecast_mean": float(sums["forecast_mean_sum"] / weight),
+        "obs_mean": float(sums["obs_sum"] / weight),
     }
 
 
@@ -428,8 +459,11 @@ def evaluate_one_event(
             f"{event_case_id(event)} expected four raw/QM members, "
             f"found raw={raw.shape[0]}, qm={qm.shape[0]}."
         )
-    if flow.shape[0] < 8:
-        raise ValueError(f"{event_case_id(event)} has only {flow.shape[0]} FlowMatch members.")
+    if flow.shape[0] < 90:
+        raise ValueError(
+            f"{event_case_id(event)} has only {flow.shape[0]} FlowMatch members; "
+            "the requested plot requires the saved 90-member ensemble."
+        )
 
     # Discard non-event cells before the repeated member calculations. This
     # keeps every temporary score array regional rather than global.
@@ -445,12 +479,27 @@ def evaluate_one_event(
     rows = [
         metric_row(metadata, "raw4", 0, system_sums(raw, obs, event_weights, metric_mask)),
         metric_row(metadata, "qm4", 0, system_sums(qm, obs, event_weights, metric_mask)),
+        metric_row(
+            metadata,
+            "flow90",
+            0,
+            system_sums(flow[:90], obs, event_weights, metric_mask),
+        ),
     ]
     rng = np.random.default_rng(event_seed(int(args.seed), case_id))
     repeats = max(1, int(args.flow_repeats))
     for repeat in range(repeats):
         index8 = rng.choice(flow.shape[0], size=8, replace=False)
+        index6 = rng.choice(flow.shape[0], size=6, replace=False)
         index4 = rng.choice(flow.shape[0], size=4, replace=False)
+        rows.append(
+            metric_row(
+                metadata,
+                "flow6",
+                repeat,
+                system_sums(flow[index6], obs, event_weights, metric_mask),
+            )
+        )
         rows.append(
             metric_row(
                 metadata,
@@ -794,6 +843,7 @@ def case_bootstrap(
 
 
 def make_plot(
+    systems: pd.DataFrame,
     summary: pd.DataFrame,
     bootstrap: pd.DataFrame,
     out_dir: Path,
@@ -807,77 +857,165 @@ def make_plot(
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
-    selected_comparisons = ["qm4_vs_raw4", "flow8_vs_raw4", "flow8_vs_qm4", "flow4_vs_qm4"]
-    labels = ["QM4 / raw4", "Flow8 / raw4", "Flow8 / QM4", "Flow4 / QM4"]
-    metric_specs = [
-        ("case_mean_crps_skill_pct", "CRPS skill (%)"),
-        ("case_mean_rmse_skill_pct", "RMSE skill (%)"),
-        ("case_mean_q95_skill_pct", "q95-score skill (%)"),
-    ]
-    leads = [lead for lead in ("3", "4") if lead in set(summary["lead"].astype(str))]
-    colors = {"3": "#4a7fb5", "4": "#3b2f7d"}
-    fig, axes = plt.subplots(2, 3, figsize=(13.0, 7.0), sharex=True)
-    x = np.arange(len(selected_comparisons), dtype=float)
-    width = 0.36
+    system_specs = (
+        ("raw4", "Raw FIM (4)", "#4d5966", "o", "-"),
+        ("qm4", "QM (4)", "#c07a2b", "s", "--"),
+        ("flow6", "FlowMatch (6)", "#4a7fb5", "^", "-."),
+        ("flow90", "FlowMatch (90)", "#3b2f7d", "D", "-"),
+    )
+    improvement_specs = (
+        ("qm4_vs_raw4", "QM (4)", "#c07a2b", "s", "--"),
+        ("flow6_vs_raw4", "FlowMatch (6)", "#4a7fb5", "^", "-."),
+        ("flow90_vs_raw4", "FlowMatch (90)", "#3b2f7d", "D", "-"),
+    )
+    skill_specs = (
+        ("case_mean_crps_skill_pct", "CRPS skill (%)", "CRPS"),
+        ("case_mean_rmse_skill_pct", "RMSE skill (%)", "RMSE"),
+        ("case_mean_q95_skill_pct", "q95-score skill (%)", "q95 score"),
+    )
+    numeric_leads = pd.to_numeric(systems["lead"], errors="coerce")
+    leads = sorted({int(value) for value in numeric_leads.dropna().to_numpy()})
+    fig, axes = plt.subplots(2, 4, figsize=(17.2, 7.2), sharex="col")
+    value_units = {"pr": "mm day$^{-1}$", "t2m": "K"}
     for row_index, variable in enumerate(("pr", "t2m")):
-        for column_index, (metric, ylabel) in enumerate(metric_specs):
-            ax = axes[row_index, column_index]
-            for lead_index, lead in enumerate(leads):
+        value_ax = axes[row_index, 0]
+        variable_systems = systems[
+            systems["variable"].eq(variable)
+            & pd.to_numeric(systems["lead"], errors="coerce").notna()
+        ].copy()
+        raw_rows = variable_systems[variable_systems["system"].eq("raw4")]
+        observed = [
+            float(
+                raw_rows[pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)][
+                    "case_mean_obs_mean_mean"
+                ].iloc[0]
+            )
+            if not raw_rows[
+                pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)
+            ].empty
+            else np.nan
+            for lead in leads
+        ]
+        value_ax.plot(
+            leads,
+            observed,
+            color="#111111",
+            marker="*",
+            markersize=8,
+            linewidth=2.0,
+            label="Observed",
+            zorder=5,
+        )
+        for system, label, color, marker, linestyle in system_specs:
+            line = variable_systems[variable_systems["system"].eq(system)]
+            values = [
+                float(
+                    line[pd.to_numeric(line["lead"], errors="coerce").eq(lead)][
+                        "case_mean_forecast_mean_mean"
+                    ].iloc[0]
+                )
+                if not line[pd.to_numeric(line["lead"], errors="coerce").eq(lead)].empty
+                else np.nan
+                for lead in leads
+            ]
+            value_ax.plot(
+                leads,
+                values,
+                color=color,
+                marker=marker,
+                linestyle=linestyle,
+                linewidth=1.8,
+                markersize=5,
+                label=label,
+            )
+
+        variable_summary = summary[
+            summary["variable"].eq(variable)
+            & pd.to_numeric(summary["lead"], errors="coerce").notna()
+        ]
+        variable_label = "PR" if variable == "pr" else "T2M"
+        value_ax.set_title(
+            f"({chr(97 + row_index * 4)}) {variable_label} regional mean",
+            loc="left",
+            fontsize=10,
+            fontweight="bold",
+        )
+        value_ax.set_ylabel(f"Observed / forecast value ({value_units[variable]})")
+        value_ax.set_xticks(leads)
+        value_ax.set_xticklabels([f"W{lead}" for lead in leads])
+        value_ax.grid(axis="y", alpha=0.2, linewidth=0.7)
+        value_ax.legend(frameon=False, fontsize=7.5, ncol=2)
+
+        for skill_index, (metric, ylabel, short_label) in enumerate(skill_specs, start=1):
+            skill_ax = axes[row_index, skill_index]
+            for comparison, label, color, marker, linestyle in improvement_specs:
+                line = variable_summary[variable_summary["comparison"].eq(comparison)]
                 values = []
                 lower = []
                 upper = []
-                for comparison in selected_comparisons:
-                    cell = summary[
-                        summary["variable"].eq(variable)
-                        & summary["lead"].astype(str).eq(lead)
-                        & summary["comparison"].eq(comparison)
-                    ]
-                    value = float(cell[f"{metric}_mean"].iloc[0]) if not cell.empty else np.nan
+                for lead in leads:
+                    cell = line[pd.to_numeric(line["lead"], errors="coerce").eq(lead)]
+                    value = (
+                        float(cell[f"{metric}_mean"].iloc[0])
+                        if not cell.empty
+                        else np.nan
+                    )
                     values.append(value)
                     ci = bootstrap[
                         bootstrap["variable"].eq(variable)
-                        & bootstrap["lead"].astype(str).eq(lead)
+                        & pd.to_numeric(bootstrap["lead"], errors="coerce").eq(lead)
                         & bootstrap["comparison"].eq(comparison)
                     ]
-                    if ci.empty:
-                        lower.append(np.nan)
-                        upper.append(np.nan)
-                    else:
-                        lo = float(ci[f"{metric}_p025"].iloc[0])
-                        hi = float(ci[f"{metric}_p975"].iloc[0])
-                        lower.append(max(0.0, value - lo))
-                        upper.append(max(0.0, hi - value))
-                position = x + (lead_index - (len(leads) - 1) / 2.0) * width
-                errors = np.asarray([lower, upper], dtype=float)
-                ax.bar(
-                    position,
-                    values,
-                    width=width * 0.92,
-                    color=colors.get(lead, "#4a7fb5"),
-                    label=f"W{lead}",
-                    yerr=errors,
-                    capsize=2.5,
-                    error_kw={"linewidth": 0.8},
+                    lower.append(
+                        float(ci[f"{metric}_p025"].iloc[0])
+                        if not ci.empty
+                        else np.nan
+                    )
+                    upper.append(
+                        float(ci[f"{metric}_p975"].iloc[0])
+                        if not ci.empty
+                        else np.nan
+                    )
+                skill_ax.fill_between(
+                    leads,
+                    np.asarray(lower, dtype=float),
+                    np.asarray(upper, dtype=float),
+                    color=color,
+                    alpha=0.12,
+                    linewidth=0,
                 )
-            ax.axhline(0.0, color="0.35", linewidth=0.8)
-            ax.set_title(
-                f"({chr(97 + row_index * 3 + column_index)}) "
-                f"{'PR' if variable == 'pr' else 'T2M'} {ylabel}",
+                skill_ax.plot(
+                    leads,
+                    np.asarray(values, dtype=float),
+                    color=color,
+                    marker=marker,
+                    linestyle=linestyle,
+                    linewidth=1.8,
+                    markersize=5,
+                    label=label,
+                )
+            skill_ax.set_title(
+                f"({chr(97 + row_index * 4 + skill_index)}) "
+                f"{variable_label} {short_label} improvement",
                 loc="left",
                 fontsize=10,
                 fontweight="bold",
             )
-            ax.set_ylabel(ylabel)
-            ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=22, ha="right")
-            ax.grid(axis="y", alpha=0.2)
-    axes[0, 2].legend(frameon=False, fontsize=8)
+            skill_ax.set_ylabel(ylabel + " vs raw FIM-4")
+            skill_ax.axhline(0.0, color="0.35", linewidth=0.8)
+            skill_ax.set_xticks(leads)
+            skill_ax.set_xticklabels([f"W{lead}" for lead in leads])
+            skill_ax.grid(axis="y", alpha=0.2, linewidth=0.7)
+            if row_index == 0 and skill_index == 1:
+                skill_ax.legend(frameon=False, fontsize=7.5)
+    for ax in axes[1, :]:
+        ax.set_xlabel("Lead week")
     fig.suptitle(
-        "Observed regional extremes, 2021–2023 (30 PR + 30 T2M cases; mean per-event skill)",
+        "Observed regional extremes, 2021–2023: weekly values and forecast skill",
         fontsize=12,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-    path = out_dir / "qm_flow_extreme_comparison.png"
+    path = out_dir / "qm_flow_weekly_values_and_improvement.png"
     fig.savefig(path, dpi=250, bbox_inches="tight")
     plt.close(fig)
     print(f"Wrote {path}")
@@ -887,7 +1025,7 @@ def make_plot(
 def print_report(summary: pd.DataFrame) -> None:
     keep = summary[
         summary["comparison"].isin(
-            ["qm4_vs_raw4", "flow8_vs_raw4", "flow8_vs_qm4", "flow4_vs_qm4"]
+            ["qm4_vs_raw4", "flow6_vs_raw4", "flow90_vs_raw4"]
         )
     ].copy()
     columns = [
@@ -931,7 +1069,7 @@ def write_outputs(
     atomic_write_csv(regions, out_dir / "extreme_regional_summary.csv")
     if not bootstrap.empty:
         atomic_write_csv(bootstrap, out_dir / "extreme_comparison_case_bootstrap_ci.csv")
-    plot = make_plot(summary, bootstrap, out_dir) if args.make_plots else None
+    plot = make_plot(systems, summary, bootstrap, out_dir) if args.make_plots else None
     metadata = {
         "config_digest": config_digest(config),
         "config": config,

@@ -49,7 +49,9 @@ class SummaryTests(unittest.TestCase):
                 ("raw4", 1, 2.0),
                 ("qm4", 1, 1.5),
                 ("flow4", 2, 1.25),
+                ("flow6", 2, 1.10),
                 ("flow8", 2, 1.0),
+                ("flow90", 1, 0.90),
             ):
                 for repeat in range(repeat_count):
                     row = {
@@ -68,6 +70,8 @@ class SummaryTests(unittest.TestCase):
                         "spread_sum": 0.5,
                         "q95_score_sum": score,
                         "q95_sse_sum": score * score,
+                        "forecast_mean_sum": 10.0 - score,
+                        "obs_sum": 10.0,
                     }
                     row.update(qm.scores_from_sums(row))
                     rows.append(row)
@@ -89,7 +93,9 @@ class SummaryTests(unittest.TestCase):
         comparisons = qm.comparison_case_rows(self.synthetic_case_frame())
         counts = comparisons.groupby("comparison").size().to_dict()
         self.assertEqual(counts["qm4_vs_raw4"], 2)
+        self.assertEqual(counts["flow6_vs_raw4"], 4)
         self.assertEqual(counts["flow8_vs_raw4"], 4)
+        self.assertEqual(counts["flow90_vs_raw4"], 2)
         self.assertEqual(counts["flow4_vs_qm4"], 4)
 
 
