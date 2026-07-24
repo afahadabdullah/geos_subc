@@ -158,9 +158,10 @@ Primary outputs are:
 - `extreme_case_system_metrics.csv`: absolute CRPS, RMSE, and q95 scores for
   every system and event; and
 - `qm_flow_weekly_values_and_improvement.png`: one figure containing
-  event-averaged observed/forecast regional values and weekly CRPS, RMSE, and
-  q95-score improvements versus raw FIM-4 for QM-4, FlowMatch-6, and
-  FlowMatch-90.
+  event-averaged observed/forecast regional-value lines plus grouped weekly
+  bars for CRPS, RMSE, and q95-score improvements versus raw FIM-4. Each weekly
+  cluster contains QM-4, FlowMatch-6, and FlowMatch-90, with event-bootstrap
+  95% intervals.
 
 Columns prefixed with `case_mean_` average the event-specific regional skills
 and match the extreme-event manuscript definition. Unprefixed skill columns

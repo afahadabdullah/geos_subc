@@ -864,9 +864,9 @@ def make_plot(
         ("flow90", "FlowMatch (90)", "#3b2f7d", "D", "-"),
     )
     improvement_specs = (
-        ("qm4_vs_raw4", "QM (4)", "#c07a2b", "s", "--"),
-        ("flow6_vs_raw4", "FlowMatch (6)", "#4a7fb5", "^", "-."),
-        ("flow90_vs_raw4", "FlowMatch (90)", "#3b2f7d", "D", "-"),
+        ("qm4_vs_raw4", "QM (4)", "#c07a2b", "//"),
+        ("flow6_vs_raw4", "FlowMatch (6)", "#4a7fb5", ".."),
+        ("flow90_vs_raw4", "FlowMatch (90)", "#3b2f7d", ""),
     )
     skill_specs = (
         ("case_mean_crps_skill_pct", "CRPS skill (%)", "CRPS"),
@@ -948,7 +948,9 @@ def make_plot(
 
         for skill_index, (metric, ylabel, short_label) in enumerate(skill_specs, start=1):
             skill_ax = axes[row_index, skill_index]
-            for comparison, label, color, marker, linestyle in improvement_specs:
+            lead_positions = np.arange(len(leads), dtype=float)
+            bar_width = 0.24
+            for model_index, (comparison, label, color, hatch) in enumerate(improvement_specs):
                 line = variable_summary[variable_summary["comparison"].eq(comparison)]
                 values = []
                 lower = []
@@ -976,22 +978,26 @@ def make_plot(
                         if not ci.empty
                         else np.nan
                     )
-                skill_ax.fill_between(
-                    leads,
-                    np.asarray(lower, dtype=float),
-                    np.asarray(upper, dtype=float),
-                    color=color,
-                    alpha=0.12,
-                    linewidth=0,
+                values_array = np.asarray(values, dtype=float)
+                lower_array = np.asarray(lower, dtype=float)
+                upper_array = np.asarray(upper, dtype=float)
+                lower_error = np.maximum(0.0, values_array - lower_array)
+                upper_error = np.maximum(0.0, upper_array - values_array)
+                positions = (
+                    lead_positions
+                    + (model_index - (len(improvement_specs) - 1) / 2.0) * bar_width
                 )
-                skill_ax.plot(
-                    leads,
-                    np.asarray(values, dtype=float),
+                skill_ax.bar(
+                    positions,
+                    values_array,
+                    width=bar_width * 0.92,
                     color=color,
-                    marker=marker,
-                    linestyle=linestyle,
-                    linewidth=1.8,
-                    markersize=5,
+                    edgecolor="white",
+                    linewidth=0.6,
+                    hatch=hatch,
+                    yerr=np.asarray([lower_error, upper_error]),
+                    capsize=2.5,
+                    error_kw={"linewidth": 0.8},
                     label=label,
                 )
             skill_ax.set_title(
@@ -1003,7 +1009,7 @@ def make_plot(
             )
             skill_ax.set_ylabel(ylabel + " vs raw FIM-4")
             skill_ax.axhline(0.0, color="0.35", linewidth=0.8)
-            skill_ax.set_xticks(leads)
+            skill_ax.set_xticks(lead_positions)
             skill_ax.set_xticklabels([f"W{lead}" for lead in leads])
             skill_ax.grid(axis="y", alpha=0.2, linewidth=0.7)
             if row_index == 0 and skill_index == 1:
