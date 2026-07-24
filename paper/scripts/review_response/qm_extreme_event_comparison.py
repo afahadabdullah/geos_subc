@@ -847,6 +847,7 @@ def make_plot(
     summary: pd.DataFrame,
     bootstrap: pd.DataFrame,
     out_dir: Path,
+    year_label: str,
 ) -> Path:
     if not os.environ.get("MPLCONFIGDIR"):
         cache = Path(os.environ.get("TMPDIR") or "/tmp") / "geos_subc_matplotlib"
@@ -864,7 +865,7 @@ def make_plot(
     )
     improvement_specs = (
         ("qm4_vs_raw4", "QM (4)", "#c07a2b", "//"),
-        ("flow6_vs_raw4", "FlowMatch (6)", "#4a7fb5", ".."),
+        ("flow4_vs_raw4", "FlowMatch (4)", "#4a7fb5", ".."),
         ("flow90_vs_raw4", "FlowMatch (90)", "#3b2f7d", ""),
     )
     skill_specs = (
@@ -1002,8 +1003,9 @@ def make_plot(
     for ax in axes[1, :]:
         ax.set_xlabel("Lead week")
     fig.suptitle(
-        "Observed regional extremes, 2021–2023: raw FIM scores and forecast skill",
-        fontsize=12,
+        f"Observed regional extremes, {year_label}: raw FIM scores and forecast skill",
+        fontsize=16,
+        fontweight="bold",
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     path = out_dir / "qm_flow_weekly_values_and_improvement.png"
@@ -1060,7 +1062,17 @@ def write_outputs(
     atomic_write_csv(regions, out_dir / "extreme_regional_summary.csv")
     if not bootstrap.empty:
         atomic_write_csv(bootstrap, out_dir / "extreme_comparison_case_bootstrap_ci.csv")
-    plot = make_plot(systems, summary, bootstrap, out_dir) if args.make_plots else None
+    plot = (
+        make_plot(
+            systems,
+            summary,
+            bootstrap,
+            out_dir,
+            f"{int(args.start_year)}–{int(args.end_year)}",
+        )
+        if args.make_plots
+        else None
+    )
     metadata = {
         "config_digest": config_digest(config),
         "config": config,

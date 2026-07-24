@@ -160,7 +160,7 @@ Primary outputs are:
 - `qm_flow_weekly_values_and_improvement.png`: one figure containing
   grouped W3/W4 raw FIM-4 bars for the absolute CRPS, RMSE, and q95 score,
   followed by grouped weekly bars for each metric's improvement versus raw
-  FIM-4. Each improvement cluster contains QM-4, FlowMatch-6, and
+  FIM-4. Each improvement cluster contains QM-4, FlowMatch-4, and
   FlowMatch-90, with event-bootstrap 95% intervals.
 
 Columns prefixed with `case_mean_` average the event-specific regional skills
