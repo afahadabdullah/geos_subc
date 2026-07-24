@@ -108,9 +108,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(len(table), 8)
         self.assertEqual(
             set(table["series"]),
-            {"Raw FIM-4", "QM-4", "FlowMatch-4", "FlowMatch-90"},
+            {"Raw FIM-4", "QM-4", "FlowMatch-6", "FlowMatch-90"},
         )
-        self.assertNotIn("FlowMatch-6", set(table["series"]))
+        self.assertNotIn("FlowMatch-4", set(table["series"]))
         self.assertNotIn("FlowMatch-8", set(table["series"]))
 
 

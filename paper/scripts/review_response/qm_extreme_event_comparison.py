@@ -865,7 +865,7 @@ def make_plot(
     )
     improvement_specs = (
         ("qm4_vs_raw4", "QM (4)", "#c07a2b", "//"),
-        ("flow4_vs_raw4", "FlowMatch (4)", "#4a7fb5", ".."),
+        ("flow6_vs_raw4", "FlowMatch (6)", "#4a7fb5", ".."),
         ("flow90_vs_raw4", "FlowMatch (90)", "#3b2f7d", ""),
     )
     skill_specs = (
@@ -1023,7 +1023,7 @@ def figure_data_table(
     """Return only the values rendered in the eight figure panels."""
     plotted_comparisons = (
         ("qm4_vs_raw4", "QM-4"),
-        ("flow4_vs_raw4", "FlowMatch-4"),
+        ("flow6_vs_raw4", "FlowMatch-6"),
         ("flow90_vs_raw4", "FlowMatch-90"),
     )
     rows: list[dict[str, object]] = []
