@@ -857,11 +857,10 @@ def make_plot(
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
 
-    system_specs = (
-        ("raw4", "Raw FIM (4)", "#4d5966", "o", "-"),
-        ("qm4", "QM (4)", "#c07a2b", "s", "--"),
-        ("flow6", "FlowMatch (6)", "#4a7fb5", "^", "-."),
-        ("flow90", "FlowMatch (90)", "#3b2f7d", "D", "-"),
+    raw_metric_specs = (
+        ("case_mean_crps_mean", "CRPS", "#65717e", ""),
+        ("case_mean_rmse_mean", "RMSE", "#9aa3ad", ".."),
+        ("case_mean_q95_score_mean", "q95 score", "#303b46", "//"),
     )
     improvement_specs = (
         ("qm4_vs_raw4", "QM (4)", "#c07a2b", "//"),
@@ -876,75 +875,61 @@ def make_plot(
     numeric_leads = pd.to_numeric(systems["lead"], errors="coerce")
     leads = sorted({int(value) for value in numeric_leads.dropna().to_numpy()})
     fig, axes = plt.subplots(2, 4, figsize=(17.2, 7.2), sharex="col")
-    value_units = {"pr": "mm day$^{-1}$", "t2m": "K"}
+    score_units = {"pr": "mm day$^{-1}$", "t2m": "K"}
     for row_index, variable in enumerate(("pr", "t2m")):
-        value_ax = axes[row_index, 0]
-        variable_systems = systems[
+        raw_ax = axes[row_index, 0]
+        raw_rows = systems[
             systems["variable"].eq(variable)
+            & systems["system"].eq("raw4")
             & pd.to_numeric(systems["lead"], errors="coerce").notna()
         ].copy()
-        raw_rows = variable_systems[variable_systems["system"].eq("raw4")]
-        observed = [
-            float(
-                raw_rows[pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)][
-                    "case_mean_obs_mean_mean"
-                ].iloc[0]
-            )
-            if not raw_rows[
-                pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)
-            ].empty
-            else np.nan
-            for lead in leads
-        ]
-        value_ax.plot(
-            leads,
-            observed,
-            color="#111111",
-            marker="*",
-            markersize=8,
-            linewidth=2.0,
-            label="Observed",
-            zorder=5,
-        )
-        for system, label, color, marker, linestyle in system_specs:
-            line = variable_systems[variable_systems["system"].eq(system)]
+        lead_positions = np.arange(len(leads), dtype=float)
+        raw_bar_width = 0.24
+        for metric_index, (metric, label, color, hatch) in enumerate(raw_metric_specs):
             values = [
                 float(
-                    line[pd.to_numeric(line["lead"], errors="coerce").eq(lead)][
-                        "case_mean_forecast_mean_mean"
+                    raw_rows[pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)][
+                        metric
                     ].iloc[0]
                 )
-                if not line[pd.to_numeric(line["lead"], errors="coerce").eq(lead)].empty
+                if not raw_rows[
+                    pd.to_numeric(raw_rows["lead"], errors="coerce").eq(lead)
+                ].empty
                 else np.nan
                 for lead in leads
             ]
-            value_ax.plot(
-                leads,
+            positions = (
+                lead_positions
+                + (metric_index - (len(raw_metric_specs) - 1) / 2.0) * raw_bar_width
+            )
+            bars = raw_ax.bar(
+                positions,
                 values,
                 color=color,
-                marker=marker,
-                linestyle=linestyle,
-                linewidth=1.8,
-                markersize=5,
+                width=raw_bar_width * 0.92,
+                edgecolor="white",
+                linewidth=0.6,
+                hatch=hatch,
                 label=label,
             )
+            raw_ax.bar_label(bars, fmt="%.2f", padding=2, fontsize=6.5)
 
         variable_summary = summary[
             summary["variable"].eq(variable)
             & pd.to_numeric(summary["lead"], errors="coerce").notna()
         ]
         variable_label = "PR" if variable == "pr" else "T2M"
-        value_ax.set_title(
-            f"({chr(97 + row_index * 4)}) {variable_label} regional mean",
+        raw_ax.set_title(
+            f"({chr(97 + row_index * 4)}) {variable_label} raw FIM-4 scores",
             loc="left",
             fontsize=10,
             fontweight="bold",
         )
-        value_ax.set_ylabel(f"Observed / forecast value ({value_units[variable]})")
-        value_ax.set_xticks(leads)
-        value_ax.set_xticklabels([f"W{lead}" for lead in leads])
-        value_ax.grid(axis="y", alpha=0.2, linewidth=0.7)
-        value_ax.legend(frameon=False, fontsize=7.5, ncol=2)
+        raw_ax.set_ylabel(f"Absolute score ({score_units[variable]})")
+        raw_ax.set_xticks(lead_positions)
+        raw_ax.set_xticklabels([f"W{lead}" for lead in leads])
+        raw_ax.grid(axis="y", alpha=0.2, linewidth=0.7)
+        raw_ax.legend(frameon=False, fontsize=7.5)
 
         for skill_index, (metric, ylabel, short_label) in enumerate(skill_specs, start=1):
             skill_ax = axes[row_index, skill_index]
@@ -1017,7 +1002,7 @@ def make_plot(
     for ax in axes[1, :]:
         ax.set_xlabel("Lead week")
     fig.suptitle(
-        "Observed regional extremes, 2021–2023: weekly values and forecast skill",
+        "Observed regional extremes, 2021–2023: raw FIM scores and forecast skill",
         fontsize=12,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
