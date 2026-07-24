@@ -126,6 +126,43 @@ The important output columns are:
   subset;
 - `acc_qm` and `spread_rmse_qm`: anomaly and dispersion diagnostics.
 
+## Figure 5 extreme-event comparison
+
+After corrected archives exist for 2021--2023, compare raw FIM-4, QM-FIM-4,
+FlowMatch-8, and the equal-member FlowMatch-4 control on the original Figure 5
+extreme subset:
+
+```bash
+python3 paper/scripts/review_response/qm_extreme_event_comparison.py \
+  --forecast-dir "$QM_FORECAST_DIR" \
+  --qm-dir "$QM_OUT_DIR/corrected" \
+  --out-dir "$QM_OUT_DIR/extreme_fig5_comparison"
+```
+
+The defaults reproduce the 2021--2023 Figure 5 selection: 30 precipitation
+plus 30 temperature cases selected across weeks 3--4 and 15 regional boxes,
+with no more than two cases per region and variable. Scores are calculated at
+grid points and cosine-latitude averaged within each event's regional box.
+
+The job checkpoints `selected_extreme_events.json` and one CSV per completed
+event under `case_metrics/`. Rerun the identical command after interruption;
+completed events are skipped. Do not pass `--overwrite` when resuming.
+
+Primary outputs are:
+
+- `extreme_comparison_summary.csv`: pooled regional skill and mean per-event
+  skill for QM4/raw4, flow8/raw4, flow8/QM4, flow4/raw4, and flow4/QM4;
+- `extreme_comparison_case_bootstrap_ci.csv`: 95% event-resampling intervals;
+- `extreme_regional_summary.csv`: comparison skill split by region;
+- `extreme_case_system_metrics.csv`: absolute CRPS, RMSE, and q95 scores for
+  every system and event; and
+- `qm_flow_extreme_comparison.png`: the compact comparison figure.
+
+Columns prefixed with `case_mean_` average the event-specific regional skills
+and match the extreme-event manuscript definition. Unprefixed skill columns
+pool weighted score sums across regional grid cells and cases, matching the
+original Figure 5 evaluator's aggregation.
+
 For a quick end-to-end smoke test, use a separate output directory together
 with `--max-inits 2 --n-quantiles 11`. During fitting, `--max-inits` means at
 most two initialization dates per verifying month and year, so all 12 monthly
